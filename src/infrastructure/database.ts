@@ -1,7 +1,7 @@
 import Database from 'better-sqlite3';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { Umzug } from 'umzug';
 
 const root = process.env.LOOP_WORKSPACE_ROOT ? resolve(process.env.LOOP_WORKSPACE_ROOT) : process.cwd();
@@ -24,7 +24,15 @@ export async function migrateDatabase() {
   const migrator = new Umzug({
     migrations: {
       glob: ['*.sql', { cwd: join(root, 'migrations') }],
-      resolve: ({ name, path }) => ({ name, up: async () => database.exec(readFileSync(path!, 'utf8')) }),
+      resolve: ({ name, path }) => ({ name, up: async () => {
+        for (const statement of readFileSync(path!, 'utf8').split(';').map((item) => item.trim()).filter(Boolean)) {
+          try { database.exec(statement); }
+          catch (error) {
+            const message = error instanceof Error ? error.message : '';
+            if (!message.includes('duplicate column name') && !message.includes('already exists')) throw error;
+          }
+        }
+      } }),
     },
     context: database,
     storage: {
@@ -46,8 +54,8 @@ function seedDemo(database: Database.Database) {
   const count = (database.prepare('SELECT COUNT(*) AS count FROM tasks').get() as { count: number }).count;
   if (count) return;
   const taskId = 'TASK-project-filter';
-  database.prepare(`INSERT INTO tasks(task_id,title,item_type,priority,agile_status,current_subagent,analysis_index,dev_index,test_index,total_stories,next_step,work_dir,blocked_reason)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, '项目列表支持按 PIC 筛选', 'feature', 'P1', 'blocked', 'analyst-agent', 1, 1, 0, 3, '回答 story-2 的业务问题后解除阻塞', workDir, '等待用户确认 story-2 多选筛选语义');
+  database.prepare(`INSERT INTO tasks(task_id,title,item_type,priority,agile_status,current_subagent,analysis_index,dev_index,test_index,total_stories,analysis_approved_index,next_step,work_dir,blocked_reason)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(taskId, '项目列表支持按 PIC 筛选', 'feature', 'P1', 'blocked', 'analyst-agent', 1, 1, 0, 3, 1, '回答 story-2 的业务问题后解除阻塞', workDir, '等待用户确认 story-2 多选筛选语义');
   const stories = ['单个 PIC 筛选', '多个 PIC 筛选', '清除筛选条件'];
   stories.forEach((title, index) => database.prepare('INSERT INTO stories(task_id,story_index,title,directory) VALUES(?,?,?,?)').run(taskId, index + 1, title, `stories/story-${String(index + 1).padStart(3, '0')}`));
   database.prepare('INSERT INTO questions(question_id,task_id,story_index,kind,title,question,recommendation,relative_path) VALUES(?,?,?,?,?,?,?,?)').run('Q-multi-pic', taskId, 2, 'analysis', '多个 PIC 的筛选语义', '同时选择多个 PIC 时，列表展示任一 PIC 负责的项目，还是只展示所有 PIC 共同负责的项目？', '推荐 OR：符合常见筛选行为，也更容易得到有效结果。', questionPath);

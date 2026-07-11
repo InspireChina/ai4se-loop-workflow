@@ -140,7 +140,7 @@ classDiagram
 
 ## 4. Task 不变量
 
-这些规则已经由 `loopctl` 强制，V1 的领域层和 API 必须保持一致。
+这些规则来自旧 `loopctl`，V1 的领域层和 Server Action 必须保持一致。
 
 1. `0 <= test_index <= dev_index <= analysis_index <= total_stories`。
 2. `ready for dev` 必须存在至少一个 Story。
@@ -157,28 +157,28 @@ classDiagram
 
 | 命令 | 负责 context | 允许 actor / 来源 | 结果 |
 |---|---|---|---|
-| `task-ingest` / `task-add` | Task Management | source-agent / human | 创建 backlog Task。 |
-| `task-context-init` | Task Management + Artifact Management | backlog-agent / human | 创建工作目录和初始文件。 |
-| `task-update` | Task Management | 当前 CLI 角色权限 | 正向推进或记录 blocked。 |
-| `task-rewind` | Task Management | analyst/dev/test/review/human | 统一逆向游标与责任 agent。 |
-| `question-add` | Question and Approval | 当前责任 agent | 写文件并创建 Question 投影。 |
-| `block-release` | Question and Approval + Task Management | human | 读取 approval，恢复 Task 并设置 resume pending。 |
-| `run-begin` / `run-end` | Loop Orchestration | `/loop` | 管理 Run Lease。 |
-| `pipeline-all` | Loop Orchestration | `/loop` | 只计算 Delegation，不改变 Task。 |
+| `CreateTask` / `TaskIngest` | Task Management | source-agent / human | 创建 backlog Task。 |
+| `TaskContextInit` | Task Management + Artifact Management | backlog-agent / human | 创建工作目录和初始文件。 |
+| `TaskUpdate` | Task Management | 当前角色权限 | 正向推进或记录 blocked。 |
+| `TaskRewind` | Task Management | analyst/dev/test/review/human | 统一逆向游标与责任 agent。 |
+| `AddQuestion` | Question and Approval | 当前责任 agent / human | 写文件并创建 Question 投影。 |
+| `BlockRelease` | Question and Approval + Task Management | human | 读取 approval，恢复 Task 并设置 resume pending。 |
+| `RunBegin` / `RunEnd` | Loop Orchestration | `/loop` 或 UI | 管理 Run Lease。 |
+| `PipelineAll` | Loop Orchestration | `/loop` 或 UI | 只计算 Delegation，不改变 Task。 |
 
 ## 6. SQLite 表的职责
 
 | 表 | 职责 | V1 来源 |
 |---|---|---|
 | `tasks` | Task 当前事实与流程游标 | 保留现有表，必要时迁移扩展。 |
-| `meta` | schema version、inbox MD5、run lease | 保留现有表。 |
+| `loop_meta` | schema version、inbox MD5、run lease | V1 本地元数据表。 |
 | `stories` | Story 的结构化索引 | 从 `03_story_list.md` 同步。 |
 | `artifacts` | Artifact 当前索引 | 从本地目录扫描。 |
-| `artifact_revisions` | 文档 hash、快照元数据、同步时间 | 每次同步或 UI 写入产生。 |
+| `artifact_revisions` | 文档 hash、快照元数据、同步时间 | V1 后续增强；当前先以 `artifacts.content_hash` 记录当前版本。 |
 | `questions` | Question 可查询投影 | 解析 90/91 question 文件。 |
 | `approvals` | analysis/review 决策记录 | 解析 approval file。 |
 | `task_events` | 面向 UI 的审计时间线 | 由成功 command 追加；不是 Event Sourcing。 |
-| `sync_state` | 文件扫描 hash、解析错误与同步状态 | Artifact Management 使用。 |
+| `sync_state` | 文件扫描 hash、解析错误与同步状态 | V1 后续增强。 |
 
 数据库中的 `stories`、`artifacts`、`questions`、`approvals` 不是绕过文件协议的新工作流，而是让 UI 可以查询、筛选、关联和呈现的本地投影。
 
@@ -210,8 +210,8 @@ ArtifactSynced
 ## 8. 架构守则
 
 - UI 不直接访问 SQLite 或本地文件。
-- Fastify route 不写状态机判断；判断放在 application/domain 层。
-- domain 不 import Fastify、SQLite driver、React 或 `fs`。
-- infrastructure 只实现端口：SQLite repository、文件系统、`loopctl` adapter。
-- 每一个 UI 操作都映射到已有 CLI command 或一个只读查询，不能发明绕过既有规则的快捷入口。
-- 在 API 与 CLI 共存期间，以同一套领域测试验证两者行为一致。
+- Server Action 不写状态机判断；判断放在 application/domain 层。
+- domain 不 import Next、SQLite driver、React 或 `fs`。
+- infrastructure 只负责 SQLite migration、连接和本地文件根目录。
+- 每一个 UI 操作都映射到明确 application command 或一个只读查询，不能发明绕过既有规则的快捷入口。
+- 领域测试以旧 loopctl 行为作为回归基线。
