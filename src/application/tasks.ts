@@ -53,6 +53,32 @@ export type Question = {
 export type Artifact = { artifact_id: string; task_id: string; story_index: number | null; kind: string; relative_path: string; content_hash: string | null; updated_at: string };
 export type Approval = { approval_id: string; task_id: string; story_index: number | null; kind: string; decision: string; relative_path: string; updated_at: string };
 export type Event = { event_id: string; actor: string; event_type: string; summary: string; created_at: string };
+export type RunStatus = { leaseId: string; owner: string; startedAt: string; leaseUntil: string; active: boolean } | null;
+export type DelegationEnvelope = Delegation & {
+  title: string;
+  itemType: string;
+  priority: string;
+  link: string;
+  externalId: string;
+  externalStatus: string;
+  agileStatus: string;
+  currentSubagent: string;
+  resumePending: number;
+  analysisApprovedIndex: number;
+  reviewApproved: number;
+  approvalFile: string;
+  lastActor: string;
+  workDir: string;
+  analysisIndex: number;
+  devIndex: number;
+  testIndex: number;
+  totalStories: number;
+  nextStep: string;
+  blockedReason: string;
+  owner: string;
+  evidence: string;
+  risk: string;
+};
 
 const taskSelect = `
   SELECT task_id, title, link, external_id, external_status, item_type, priority,
@@ -69,6 +95,16 @@ function fetchTask(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: s
 
 function addEvent(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: string, actor: Actor | 'system', eventType: string, summary: string) {
   db.prepare('INSERT INTO task_events(event_id, task_id, actor, event_type, summary) VALUES(?, ?, ?, ?, ?)').run(randomUUID(), taskId, actor, eventType, summary);
+}
+
+function refreshPages(...pagePaths: string[]) {
+  for (const pagePath of pagePaths) {
+    try {
+      revalidatePath(pagePath);
+    } catch {
+      // CLI usage runs outside Next's request context; database/file writes are still complete.
+    }
+  }
 }
 
 function assertInsideWorkspace(fullPath: string) {
@@ -329,8 +365,7 @@ export async function createTask(input: unknown) {
     addEvent(db, task.task_id, value.actor, 'TaskCreated', `创建 Task：${task.title}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, task.task_id);
-    revalidatePath('/');
-    revalidatePath('/tasks');
+    refreshPages('/', '/tasks');
     return task.task_id;
   } catch (error) {
     db.exec('ROLLBACK');
@@ -424,8 +459,7 @@ export async function initializeTaskContext(input: unknown) {
     await persistArtifact(db, value.taskId, null, 'loop-state', `${workDir}/00_loop_state.md`);
     await persistArtifact(db, value.taskId, null, 'input', `${workDir}/01_init_input.md`);
     await persistArtifact(db, value.taskId, null, 'questions', `${workDir}/90_questions.md`);
-    revalidatePath('/');
-    revalidatePath(`/tasks/${value.taskId}`);
+    refreshPages('/', `/tasks/${value.taskId}`);
     return workDir;
   } catch (error) {
     db.exec('ROLLBACK');
@@ -452,7 +486,7 @@ export async function addStory(input: unknown) {
     db.exec('COMMIT');
     if (task.work_dir) await mkdir(fullPath(`${task.work_dir}/${directory}`), { recursive: true });
     await syncTaskFiles(db, value.taskId);
-    revalidatePath(`/tasks/${value.taskId}`);
+    refreshPages(`/tasks/${value.taskId}`);
   } catch (error) {
     db.exec('ROLLBACK');
     throw error;
@@ -479,8 +513,7 @@ export async function answerQuestion(input: unknown) {
     db.exec('ROLLBACK');
     throw error;
   }
-  revalidatePath(`/tasks/${taskId}`);
-  revalidatePath('/');
+  refreshPages(`/tasks/${taskId}`, '/');
 }
 
 const questionSchema = z.object({
@@ -558,8 +591,7 @@ export async function addQuestion(input: unknown) {
     db.exec('COMMIT');
     await persistArtifact(db, value.taskId, storyIndex || null, value.kind, relativePath);
     await syncTaskFiles(db, value.taskId);
-    revalidatePath('/');
-    revalidatePath(`/tasks/${value.taskId}`);
+    refreshPages('/', `/tasks/${value.taskId}`);
     return questionId;
   } catch (error) {
     db.exec('ROLLBACK');
@@ -626,8 +658,7 @@ export async function releaseBlock(taskId: string) {
     db.exec('ROLLBACK');
     throw error;
   }
-  revalidatePath(`/tasks/${taskId}`);
-  revalidatePath('/');
+  refreshPages(`/tasks/${taskId}`, '/');
 }
 
 export async function updateTask(taskId: string, actor: Actor, changes: Partial<TaskState> & {
@@ -641,6 +672,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
   const db = await databaseConnection();
   const before = fetchTask(db, taskId);
   if (!before) throw new Error('Task not found');
+  changes = Object.fromEntries(Object.entries(changes).filter(([, item]) => item !== undefined)) as typeof changes;
   const changed = Object.keys(changes);
   assertUpdate(before, actor, changes, changed);
   if (changes.agile_status === 'blocked' && before.agile_status !== 'blocked') changes.resume_status = before.agile_status;
@@ -684,8 +716,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
     db.exec('ROLLBACK');
     throw error;
   }
-  revalidatePath('/');
-  revalidatePath(`/tasks/${taskId}`);
+  refreshPages('/', `/tasks/${taskId}`);
 }
 
 const transitionSchema = z.object({
@@ -781,8 +812,7 @@ export async function rewindTask(input: unknown) {
     db.exec('ROLLBACK');
     throw error;
   }
-  revalidatePath('/');
-  revalidatePath(`/tasks/${value.taskId}`);
+  refreshPages('/', `/tasks/${value.taskId}`);
 }
 
 const cancelSchema = z.object({ taskId: z.string().min(1), reason: z.string().min(1).max(500), confirmCodeClean: z.coerce.boolean().default(false) });
@@ -812,8 +842,7 @@ export async function cancelTask(input: unknown) {
     db.exec('ROLLBACK');
     throw error;
   }
-  revalidatePath('/');
-  revalidatePath(`/tasks/${value.taskId}`);
+  refreshPages('/', `/tasks/${value.taskId}`);
 }
 
 export async function pipelineForTask(taskId: string): Promise<Delegation[]> {
@@ -845,20 +874,120 @@ export async function pipelineAll(): Promise<Delegation[]> {
   return lines;
 }
 
-export async function beginRun(owner = 'ui') {
+function toEnvelope(task: Task, delegation: Delegation): DelegationEnvelope {
+  return {
+    ...delegation,
+    title: task.title || '',
+    itemType: task.item_type || 'other',
+    priority: task.priority || '',
+    link: task.link || '',
+    externalId: task.external_id || '',
+    externalStatus: task.external_status || '',
+    agileStatus: task.agile_status,
+    currentSubagent: task.current_subagent || '',
+    resumePending: task.resume_pending,
+    analysisApprovedIndex: task.analysis_approved_index,
+    reviewApproved: task.review_approved,
+    approvalFile: task.approval_file || '',
+    lastActor: task.last_actor || '',
+    workDir: task.work_dir || '',
+    analysisIndex: task.analysis_index,
+    devIndex: task.dev_index,
+    testIndex: task.test_index,
+    totalStories: task.total_stories,
+    nextStep: task.next_step || '',
+    blockedReason: task.blocked_reason || '',
+    owner: task.owner || '',
+    evidence: task.evidence || '',
+    risk: task.risk || '',
+  };
+}
+
+function sourceEnvelope(): DelegationEnvelope {
+  return {
+    taskId: '',
+    pipeline: 'source',
+    agent: 'source-agent',
+    storyIndex: null,
+    resource: 'none',
+    description: 'process changed inbox.md',
+    title: 'Inbox changed',
+    itemType: 'source',
+    priority: '',
+    link: '',
+    externalId: '',
+    externalStatus: '',
+    agileStatus: '',
+    currentSubagent: '',
+    resumePending: 0,
+    analysisApprovedIndex: 0,
+    reviewApproved: 0,
+    approvalFile: '',
+    lastActor: 'loopctl',
+    workDir: '.project/_loop',
+    analysisIndex: 0,
+    devIndex: 0,
+    testIndex: 0,
+    totalStories: 0,
+    nextStep: 'process changed inbox.md',
+    blockedReason: '',
+    owner: '',
+    evidence: 'inbox.md md5 changed',
+    risk: 'new tasks will be routed on the next loop run after source-agent commits inbox md5',
+  };
+}
+
+export async function pipelineAllEnvelopes(options: { includeInbox?: boolean } = {}): Promise<DelegationEnvelope[]> {
   const db = await databaseConnection();
+  const tasks = db.prepare(`${taskSelect} WHERE agile_status NOT IN ('done', 'cancelled') ORDER BY
+    CASE agile_status
+      WHEN 'blocked' THEN 0 WHEN 'in dev' THEN 1 WHEN 'in review' THEN 2
+      WHEN 'in plan' THEN 4 WHEN 'in repro' THEN 5 WHEN 'backlog' THEN 6 ELSE 7
+    END,
+    CASE upper(COALESCE(priority, ''))
+      WHEN 'P0' THEN 0 WHEN 'S0' THEN 0 WHEN 'P1' THEN 1 WHEN 'S1' THEN 1
+      WHEN 'P2' THEN 2 WHEN 'S2' THEN 2 WHEN 'P3' THEN 3 WHEN 'S3' THEN 3 ELSE 9
+    END,
+    updated_at DESC`).all() as Task[];
+  let codeAvailable = !tasks.some(occupiesCodeSlot);
+  const readyDev = !codeAvailable ? null : tasks.find((task) => task.agile_status === 'ready for dev' && task.dev_index < task.analysis_index)?.task_id || null;
+  let browserUsed = false;
+  const lines: DelegationEnvelope[] = [];
+  if (options.includeInbox && await inboxHasChanges()) lines.push(sourceEnvelope());
+  for (const task of tasks) {
+    const taskCodeAvailable = codeAvailable && (!readyDev || task.task_id === readyDev);
+    const line = nextDelegation(task, taskCodeAvailable);
+    if (!line) continue;
+    if (line.resource === 'browser' && browserUsed) continue;
+    if (line.resource === 'browser') browserUsed = true;
+    if (line.pipeline === 'dev') codeAvailable = false;
+    lines.push(toEnvelope(task, line));
+  }
+  return lines;
+}
+
+export async function beginRun(owner = 'ui', leaseMinutes = 120) {
+  if (!Number.isInteger(leaseMinutes) || leaseMinutes < 1 || leaseMinutes > 1440) throw new Error('leaseMinutes must be between 1 and 1440');
+  const db = await databaseConnection();
+  const current = getRunStatusFromDb(db);
+  if (current?.active) {
+    const minutes = Math.max(1, Math.ceil((new Date(current.leaseUntil).getTime() - Date.now()) / 60000));
+    throw new Error(`busy: another loop run is active for about ${minutes} more minute(s)`);
+  }
   const leaseId = randomUUID();
+  const startedAt = new Date();
+  const leaseUntil = new Date(startedAt.getTime() + leaseMinutes * 60000);
   db.prepare(`
     INSERT INTO loop_meta(key, value) VALUES('run_lease', ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
-  `).run(JSON.stringify({ leaseId, owner, startedAt: new Date().toISOString() }));
+  `).run(JSON.stringify({ leaseId, owner, startedAt: startedAt.toISOString(), leaseUntil: leaseUntil.toISOString() }));
   return leaseId;
 }
 
-export async function endRun(leaseId: string) {
+export async function endRun(leaseId: string, force = false) {
   const db = await databaseConnection();
   const current = getRunStatusFromDb(db);
-  if (current?.leaseId && current.leaseId !== leaseId) throw new Error('运行租约不匹配');
+  if (current?.leaseId && current.leaseId !== leaseId && !force) throw new Error('运行租约不匹配');
   db.prepare("DELETE FROM loop_meta WHERE key = 'run_lease'").run();
 }
 
@@ -866,15 +995,134 @@ function getRunStatusFromDb(db: Awaited<ReturnType<typeof databaseConnection>>) 
   const row = db.prepare("SELECT value FROM loop_meta WHERE key = 'run_lease'").get() as { value: string } | undefined;
   if (!row) return null;
   try {
-    return JSON.parse(row.value) as { leaseId: string; owner: string; startedAt: string };
+    const parsed = JSON.parse(row.value) as { leaseId: string; owner: string; startedAt: string; leaseUntil?: string };
+    const leaseUntil = parsed.leaseUntil || parsed.startedAt;
+    return { ...parsed, leaseUntil, active: new Date(leaseUntil).getTime() > Date.now() } satisfies NonNullable<RunStatus>;
   } catch {
     return null;
   }
 }
 
-export async function getRunStatus() {
+export async function getRunStatus(): Promise<RunStatus> {
   const db = await databaseConnection();
   return getRunStatusFromDb(db);
+}
+
+export async function requireRunLease(leaseId: string) {
+  const run = await getRunStatus();
+  if (!run || run.leaseId !== leaseId) throw new Error('invalid or inactive run token; call run-begin first');
+  if (!run.active) throw new Error('run lease expired; start a new loop run');
+}
+
+function md5(value: Buffer | string) {
+  return createHash('md5').update(value).digest('hex');
+}
+
+async function fileHash(relativePath: string) {
+  try {
+    return md5(await readFile(fullPath(relativePath)));
+  } catch {
+    return '';
+  }
+}
+
+export async function ensureLoopRuntimeFiles() {
+  await mkdir(fullPath('.project/_loop'), { recursive: true });
+  await writeFileIfMissing('.project/_loop/inbox.md', [
+    '# Loop Inbox',
+    '',
+    '## 新输入',
+    '',
+    '把新卡片、Bug、临时需求或 URL 粘贴在这里。source-agent 处理后执行 inbox-commit。',
+    '',
+  ].join('\n'));
+  await writeFileIfMissing('.project/_loop/control.md', [
+    '# Loop Control',
+    '',
+    '本文件由 `/loop` 命令读取。实际状态以 SQLite 和 loopctl 输出为准。',
+    '',
+  ].join('\n'));
+}
+
+export async function inboxHasChanges(inboxPath = '.project/_loop/inbox.md') {
+  await ensureLoopRuntimeFiles();
+  const current = await fileHash(inboxPath);
+  if (!current) return false;
+  const db = await databaseConnection();
+  const row = db.prepare("SELECT value FROM loop_meta WHERE key = 'inbox_md5'").get() as { value: string } | undefined;
+  return !row?.value || row.value !== current;
+}
+
+export async function inboxCheck(inboxPath = '.project/_loop/inbox.md') {
+  return inboxHasChanges(inboxPath);
+}
+
+export async function inboxCommit(inboxPath = '.project/_loop/inbox.md') {
+  await ensureLoopRuntimeFiles();
+  const current = await fileHash(inboxPath);
+  if (!current) throw new Error(`inbox not found: ${inboxPath}`);
+  const db = await databaseConnection();
+  db.prepare(`
+    INSERT INTO loop_meta(key, value) VALUES('inbox_md5', ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+  `).run(current);
+  return current;
+}
+
+export async function createLoopDispatch(leaseId: string) {
+  await requireRunLease(leaseId);
+  const lines = await pipelineAllEnvelopes({ includeInbox: true });
+  const runDir = `.project/_loop/runs/${leaseId}`;
+  await mkdir(fullPath(runDir), { recursive: true });
+  await writeFile(fullPath(`${runDir}/delegations.jsonl`), lines.map(toJsonlEnvelope).join('\n') + (lines.length ? '\n' : ''), 'utf8');
+  await writeFile(fullPath(`${runDir}/summary.md`), [
+    '# Loop Run',
+    '',
+    `- Run Token: ${leaseId}`,
+    `- Delegations: ${lines.length}`,
+    '',
+    ...lines.map((line, index) => `## ${index + 1}. ${line.agent} / ${line.pipeline}\n\n- Task: ${line.title || line.taskId || 'Inbox'}\n- Work Dir: ${line.workDir}\n- Story: ${line.storyIndex ?? ''}\n- Resource: ${line.resource}\n- Description: ${line.description}\n`),
+  ].join('\n'), 'utf8');
+  return { runDir, delegations: lines };
+}
+
+export function toJsonlEnvelope(item: DelegationEnvelope) {
+  return JSON.stringify({
+    task_id: item.taskId,
+    title: item.title,
+    item_type: item.itemType,
+    priority: item.priority,
+    link: item.link,
+    external_id: item.externalId,
+    external_status: item.externalStatus,
+    agile_status: item.agileStatus,
+    pipeline: item.pipeline,
+    agent: item.agent,
+    resource: item.resource,
+    current_subagent: item.currentSubagent,
+    resume_pending: item.resumePending,
+    analysis_approved_index: item.analysisApprovedIndex,
+    review_approved: item.reviewApproved,
+    approval_file: item.approvalFile,
+    last_actor: item.lastActor,
+    work_dir: item.workDir,
+    story_index: item.storyIndex,
+    analysis_index: item.analysisIndex,
+    dev_index: item.devIndex,
+    test_index: item.testIndex,
+    total_stories: item.totalStories,
+    next_step: item.nextStep,
+    blocked_reason: item.blockedReason,
+    owner: item.owner,
+    evidence: item.evidence,
+    risk: item.risk,
+    description: item.description,
+  });
+}
+
+export function toPipeEnvelope(item: DelegationEnvelope) {
+  const clean = (value: unknown) => String(value ?? '').replaceAll('|', '／').replaceAll('\n', ' ').trim();
+  return [item.taskId, item.title, item.workDir, item.pipeline, item.agent, item.storyIndex ?? '', item.description].map(clean).join('|');
 }
 
 export async function readQuestionArtifact(relativePath: string) {

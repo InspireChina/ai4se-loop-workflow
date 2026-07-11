@@ -5,6 +5,7 @@ node_modules/
 # local runtime data
 .project/_loop/*.db
 .project/_loop/*.db-*
+.project/_loop/runs/
 
 # operating system files
 .DS_Store

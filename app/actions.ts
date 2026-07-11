@@ -5,7 +5,10 @@ import {
   addQuestion,
   addStory,
   answerQuestion,
+  beginRun,
   cancelTask,
+  createLoopDispatch,
+  endRun,
   createTask,
   initializeTaskContext,
   releaseBlock,
@@ -90,6 +93,17 @@ export async function cancelTaskAction(formData: FormData) {
     confirmCodeClean: formData.get('confirmCodeClean') === 'on',
   });
   redirect('/tasks');
+}
+
+export async function startLoopRunAction() {
+  const leaseId = await beginRun('ui', 120);
+  await createLoopDispatch(leaseId);
+  redirect('/');
+}
+
+export async function endLoopRunAction(formData: FormData) {
+  await endRun(String(formData.get('leaseId')), formData.get('force') === 'on');
+  redirect('/');
 }
 
 export async function answerQuestionAction(formData: FormData) {

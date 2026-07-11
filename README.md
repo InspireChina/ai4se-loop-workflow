@@ -17,9 +17,30 @@ npm run dev
 ```bash
 npm run db:migrate  # 执行 migrations/*.sql
 npm run build       # 类型与生产构建校验
+npm run loopctl -- status
 ```
 
 SQLite 数据库位于 `.project/_loop/loop-ui.db`。工作目录中的 Markdown 和附件继续保存在 `.project/` 下。
+
+## 跑一轮 Loop
+
+UI 工作台可以点击“开始 Loop”，会创建 run lease 并把本轮委派写到 `.project/_loop/runs/<token>/`。
+
+Cursor 中可以使用项目命令：
+
+```text
+/loop
+```
+
+命令行等价流程：
+
+```bash
+RUN_TOKEN=$(python scripts/loop/loopctl.py run-begin --lease-minutes 120)
+python scripts/loop/loopctl.py pipeline-all --run-token "$RUN_TOKEN" --format jsonl
+python scripts/loop/loopctl.py run-end "$RUN_TOKEN"
+```
+
+`pipeline-all` 输出的每一行都是一个 subagent 委派 envelope。Cursor `/loop` 会按 `agent` 字段把任务交给对应 agent。
 
 ## V1 已实现范围
 
@@ -30,6 +51,7 @@ SQLite 数据库位于 `.project/_loop/loop-ui.db`。工作目录中的 Markdown
 - blocked / block-release，保留 resume status 和 resume pending 规则。
 - rewind、cancel 和单代码槽保护。
 - pipeline 计算，包含浏览器资源限制和代码槽限制。
+- Cursor `/loop` 命令、`scripts/loop/loopctl.py` 兼容入口、run lease、inbox hash 和 dispatch 文件。
 - Umzug 管理的 SQL migration，行为接近 Flyway 的顺序迁移。
 
 ## 目录
@@ -39,6 +61,8 @@ app/                 Next.js 页面与 Server Actions
 src/application/     Task、Question、blocked 等用例
 src/infrastructure/  SQLite 与 migration runner
 migrations/          顺序 SQL migrations（Umzug 管理）
+scripts/             migration 与 loopctl 命令
+.cursor/commands/    Cursor /loop 入口
 .project/            本地数据库与工作文件
 reference/           旧 cursor-loop 和原型材料
 ```
