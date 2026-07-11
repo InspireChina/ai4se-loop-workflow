@@ -1,0 +1,14 @@
+# dependencies and build output
+node_modules/
+.next/
+
+# local runtime data
+.project/_loop/*.db
+.project/_loop/*.db-*
+
+# operating system files
+.DS_Store
+
+# local environment
+.env
+.env.local
