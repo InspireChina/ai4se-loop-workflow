@@ -95,15 +95,15 @@ export async function cancelTaskAction(formData: FormData) {
   redirect('/tasks');
 }
 
-export async function startLoopRunAction() {
+export async function startLoopRunAction(formData?: FormData) {
   const leaseId = await beginRun('ui', 120);
   await createLoopDispatch(leaseId);
-  redirect('/');
+  redirect(String(formData?.get('redirectTo') || '/'));
 }
 
 export async function endLoopRunAction(formData: FormData) {
   await endRun(String(formData.get('leaseId')), formData.get('force') === 'on');
-  redirect('/');
+  redirect(String(formData.get('redirectTo') || '/'));
 }
 
 export async function answerQuestionAction(formData: FormData) {

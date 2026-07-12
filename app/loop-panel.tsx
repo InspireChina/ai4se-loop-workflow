@@ -1,11 +1,10 @@
 import Link from 'next/link';
-import { Activity, LockKeyhole, Route, ScrollText } from 'lucide-react';
-import { getRunStatus, listRecentEvents } from '../src/application/tasks';
+import { LockKeyhole, Route, ScrollText } from 'lucide-react';
+import { getRunStatus } from '../src/application/tasks';
 import { endLoopRunAction, startLoopRunAction } from './actions';
-import LoopLogStream from './loop-log-stream';
 
 export default async function LoopPanel() {
-  const [run, events] = await Promise.all([getRunStatus(), listRecentEvents(12)]);
+  const run = await getRunStatus();
   return <aside className="loop-panel">
     <div className="loop-panel-head">
       <p className="eyebrow">LOOP</p>
@@ -15,21 +14,17 @@ export default async function LoopPanel() {
       <LockKeyhole size={17}/>
       <div><strong>本轮运行中</strong><small>{run.owner} · {run.leaseUntil}</small></div>
       <input type="hidden" name="leaseId" value={run.leaseId}/>
+      <input type="hidden" name="redirectTo" value="/runs"/>
       <button className="button secondary" type="submit">结束本轮</button>
     </form> : <form action={startLoopRunAction} className="loop-run">
       <Route size={17}/>
-      <div><strong>开始 Loop</strong><small>生成 dispatch，并实时显示运行日志</small></div>
+      <div><strong>开始 Loop</strong><small>日志将在运行面板中显示</small></div>
+      <input type="hidden" name="redirectTo" value="/runs"/>
       <button className="button" type="submit">开始运行</button>
     </form>}
 
-    <section className="side-section logs">
-      <h3><ScrollText size={14}/>{run?.active ? '运行日志' : '最近日志'}</h3>
-      {run?.active ? <LoopLogStream leaseId={run.leaseId}/> : <div className="side-list">
-        {events.length === 0 ? <p className="side-empty">暂无日志。</p> : events.map((event) => <Link href={`/tasks/${event.task_id}`} className="log-item" key={event.event_id}>
-          <Activity size={13}/>
-          <span><strong>{event.actor}</strong><small>{event.title}</small><em>{event.summary}</em></span>
-        </Link>)}
-      </div>}
+    <section className="side-section">
+      <Link href="/runs" className="button secondary side-panel-link"><ScrollText size={14}/>打开运行面板</Link>
     </section>
   </aside>;
 }
