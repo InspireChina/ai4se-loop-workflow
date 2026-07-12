@@ -302,6 +302,17 @@ export async function listPipeline() {
   return pipelineAll();
 }
 
+export async function listRecentEvents(limit = 20): Promise<(Event & { task_id: string; title: string })[]> {
+  const db = await databaseConnection();
+  return db.prepare(`
+    SELECT e.event_id, e.task_id, t.title, e.actor, e.event_type, e.summary, e.created_at
+    FROM task_events e
+    JOIN tasks t ON t.task_id = e.task_id
+    ORDER BY e.created_at DESC
+    LIMIT ?
+  `).all(limit) as (Event & { task_id: string; title: string })[];
+}
+
 export async function getTask(taskId: string) {
   const db = await databaseConnection();
   const task = fetchTask(db, taskId);
