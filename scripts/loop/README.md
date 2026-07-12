@@ -22,7 +22,7 @@ python scripts/loop/loopctl.py pipeline-all --run-token "$RUN_TOKEN" --format js
 python scripts/loop/loopctl.py run-end "$RUN_TOKEN"
 ```
 
-`pipeline-all` 输出 JSONL envelope。产品化运行路径中，App 的逐个执行 runner 会按 `agent` 字段为每行单独启动一次 Cursor CLI；不依赖 Cursor 内部 subagent 功能。
+`pipeline-all` 输出 JSONL envelope。产品化运行路径中，App 的逐个执行 runner 会按 `agent` 字段为每行单独启动一次 Cursor CLI；pipeline 调度不交给 Cursor 内部 subagent。单个 agent 仍可在当前 delegation 内使用辅助 subagent 收集上下文。
 
 ## 常用命令
 

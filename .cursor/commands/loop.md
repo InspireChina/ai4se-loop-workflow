@@ -9,7 +9,7 @@
 3. runner 按 delegation 逐个启动 Cursor CLI。
 4. 每次 Cursor CLI 只执行一个明确的 agent / task / story / pipeline。
 
-因此，手动使用 `/loop` 时也必须遵守同样边界：不要依赖 Cursor 内部 subagent，不要让一个总控 agent 自行分发多个 agent。
+因此，手动使用 `/loop` 时也必须遵守同样边界：不要让一个总控 agent 自行分发多个 pipeline agent。当前 agent 可以使用辅助 subagent 收集上下文或做局部分析，但辅助工作必须限制在当前 delegation 内。
 
 ## 单步执行原则
 
@@ -26,7 +26,13 @@ RUN_TOKEN=$(python scripts/loop/loopctl.py run-begin --lease-minutes 120)
 python scripts/loop/loopctl.py pipeline-all --run-token "$RUN_TOKEN" --format jsonl
 ```
 
-然后选择其中一行 JSONL，只执行这一行里的 `agent`、`task_id`、`story_index`、`pipeline` 和 `description`。不要处理其他行，不要启动子 agent。
+然后选择其中一行 JSONL，只执行这一行里的 `agent`、`task_id`、`story_index`、`pipeline` 和 `description`。不要处理其他行。
+
+允许当前 agent 使用辅助 subagent，但边界是：
+
+- 辅助 subagent 只能服务当前 delegation。
+- 辅助 subagent 不得处理其他 Task、其他 Story 或其他 pipeline agent 的职责。
+- 辅助 subagent 不得推进 Task 状态；最终 `document-upsert`、`question-add`、`task-update` 必须由当前 agent 负责。
 
 ## Agent 职责
 

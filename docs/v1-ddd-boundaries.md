@@ -39,7 +39,7 @@ V1 的产品术语沿用现有系统，不采用 prototype 的新术语替代已
 - 关键命令：`RunBegin`、`PipelineAll`、`RunEnd`、`RunLog`
 - 依赖：Task Management 的只读状态与 Resource Management 的可用性
 
-V1 的持续 loop 由 App runner 驱动。若本轮有委派，runner 按 delegation 逐个启动 Cursor CLI；每次 Cursor CLI 只执行一个明确 agent，不依赖 Cursor 内部 subagent。若没有委派，等待后继续重试。
+V1 的持续 loop 由 App runner 驱动。若本轮有委派，runner 按 delegation 逐个启动 Cursor CLI；每次 Cursor CLI 只执行一个明确 pipeline agent。当前 agent 可以在本 delegation 内使用辅助 subagent 做上下文收集，但辅助 subagent 不参与 pipeline 调度。若没有委派，等待后继续重试。
 
 ### 2.3 Question and Approval
 

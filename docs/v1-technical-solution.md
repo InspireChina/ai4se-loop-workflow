@@ -86,7 +86,9 @@ delegation-2 -> cursor agent(prompt for analyst-agent)
 delegation-3 -> cursor agent(prompt for dev-agent)
 ```
 
-每次 Cursor CLI 只收到当前 delegation 的 `task_id`、`agent`、`pipeline`、`story_index` 和目标描述。Prompt 明确禁止调用 `pipeline-all`、启动子 agent、模拟其他 agent 或释放 run lease。
+每次 Cursor CLI 只收到当前 delegation 的 `task_id`、`agent`、`pipeline`、`story_index` 和目标描述。Prompt 明确禁止调用 `pipeline-all`、模拟其他 pipeline agent 或释放 run lease。
+
+当前 agent 可以在本 delegation 内部使用辅助 subagent 做上下文收集或局部分析，但辅助 subagent 不能处理其他 delegation，不能推进 Task 状态；最终写库和状态更新仍由当前 agent 负责。
 
 ### 4.3 写入规则
 
@@ -168,7 +170,7 @@ python scripts/loop/loopctl.py question-add --json '{
 4. 将 Questions 线上化到 `questions` 表。
 5. 将业务文档线上化到 `documents` 表，并扩展 agent 命令替代读写文件。
 6. 将运行日志线上化到 `run_logs` 表。
-7. 更新 Cursor runner prompt，使每次 Cursor CLI 只执行单个 delegation，不依赖 Cursor 内部 subagent 能力。
+7. 更新 Cursor runner prompt，使每次 Cursor CLI 只执行单个 delegation；内部辅助 subagent 只作为当前 agent 的上下文工具，不参与 pipeline 调度。
 
 ## 8. V1 验收标准
 
