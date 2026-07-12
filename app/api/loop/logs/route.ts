@@ -1,5 +1,4 @@
-import { readFile } from 'node:fs/promises';
-import { getRunStatus, loopRunLogPath } from '../../../../src/application/tasks';
+import { getRunStatus, readLoopRunLogChunk } from '../../../../src/application/tasks';
 import { parseRunLog } from '../../../../src/application/run-log';
 
 export const dynamic = 'force-dynamic';
@@ -24,18 +23,17 @@ export async function GET(request: Request) {
   const leaseId = searchParams.get('leaseId') || '';
   const stream = new ReadableStream({
     async start(controller) {
-      let offset = 0;
+      let afterId = 0;
       const sendNewContent = async () => {
-        let content = '';
+        let chunk = { raw: '', lastId: afterId };
         try {
-          content = await readFile(loopRunLogPath(leaseId), 'utf8');
+          chunk = await readLoopRunLogChunk(leaseId, afterId);
         } catch {
           return;
         }
-        if (content.length <= offset) return;
-        const chunk = content.slice(offset);
-        controller.enqueue(eventData({ raw: chunk, events: parseRunLog(chunk) }));
-        offset = content.length;
+        if (!chunk.raw) return;
+        controller.enqueue(eventData({ raw: chunk.raw, events: parseRunLog(chunk.raw) }));
+        afterId = chunk.lastId;
       };
 
       while (!request.signal.aborted) {

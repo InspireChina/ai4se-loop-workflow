@@ -1,6 +1,4 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { databaseConnection, paths } from '../infrastructure/database';
@@ -65,6 +63,7 @@ export type Question = {
 export type Approval = { approval_id: string; task_id: string; story_index: number | null; kind: string; decision: string; relative_path: string | null; updated_at: string };
 export type Event = { event_id: string; actor: string; event_type: string; summary: string; created_at: string };
 export type RunStatus = { leaseId: string; owner: string; startedAt: string; leaseUntil: string; active: boolean } | null;
+export type RunLogChunk = { lastId: number; raw: string };
 export type DelegationEnvelope = Delegation & {
   title: string;
   itemType: string;
@@ -111,15 +110,24 @@ function loopLogLine(message: string) {
   return `${new Date().toISOString()} ${message}\n`;
 }
 
-export function loopRunLogPath(leaseId: string) {
+function appendRunLogInDb(db: Awaited<ReturnType<typeof databaseConnection>>, leaseId: string, message: string) {
   if (!/^[a-zA-Z0-9-]+$/.test(leaseId)) throw new Error('invalid run lease id');
-  return join(paths.runsDir, leaseId, 'app.log');
+  db.prepare('INSERT INTO run_logs(lease_id, line) VALUES(?, ?)').run(leaseId, loopLogLine(message));
 }
 
 export async function appendLoopRunLog(leaseId: string, message: string) {
-  const logPath = loopRunLogPath(leaseId);
-  await mkdir(dirname(logPath), { recursive: true });
-  await appendFile(logPath, loopLogLine(message), 'utf8');
+  const db = await databaseConnection();
+  appendRunLogInDb(db, leaseId, message);
+}
+
+export async function readLoopRunLogChunk(leaseId: string, afterId = 0): Promise<RunLogChunk> {
+  if (!/^[a-zA-Z0-9-]+$/.test(leaseId)) throw new Error('invalid run lease id');
+  const db = await databaseConnection();
+  const rows = db.prepare('SELECT log_id, line FROM run_logs WHERE lease_id = ? AND log_id > ? ORDER BY log_id').all(leaseId, afterId) as { log_id: number; line: string }[];
+  return {
+    lastId: rows.length ? rows[rows.length - 1].log_id : afterId,
+    raw: rows.map((row) => row.line).join(''),
+  };
 }
 
 export async function appendStructuredRunLog(input: {
@@ -152,10 +160,7 @@ export async function appendStructuredRunLog(input: {
 function appendActiveRunLog(db: Awaited<ReturnType<typeof databaseConnection>>, message: string) {
   const run = getRunStatusFromDb(db);
   if (!run?.active) return;
-  const logPath = loopRunLogPath(run.leaseId);
-  void mkdir(dirname(logPath), { recursive: true })
-    .then(() => appendFile(logPath, loopLogLine(message), 'utf8'))
-    .catch(() => undefined);
+  appendRunLogInDb(db, run.leaseId, message);
 }
 
 function refreshPages(...pagePaths: string[]) {
@@ -877,7 +882,7 @@ export async function requireRunLease(leaseId: string) {
 }
 
 export async function ensureLoopRuntimeFiles() {
-  await mkdir(paths.runsDir, { recursive: true });
+  await databaseConnection();
 }
 
 export async function createLoopDispatch(leaseId: string, options: { includeRunHeader?: boolean } = {}) {
@@ -888,24 +893,13 @@ export async function createLoopDispatch(leaseId: string, options: { includeRunH
     await appendLoopRunLog(leaseId, `[运行] 数据目录=${paths.dataDir}`);
   }
   const lines = await pipelineAllEnvelopes();
-  const runDir = join(paths.runsDir, leaseId);
-  await mkdir(runDir, { recursive: true });
-  await writeFile(join(runDir, 'delegations.jsonl'), lines.map(toJsonlEnvelope).join('\n') + (lines.length ? '\n' : ''), 'utf8');
-  await writeFile(join(runDir, 'summary.md'), [
-    '# Loop Run',
-    '',
-    `- Run Token: ${leaseId}`,
-    `- Delegations: ${lines.length}`,
-    '',
-    ...lines.map((line, index) => `## ${index + 1}. ${line.agent} / ${line.pipeline}\n\n- Task: ${line.title || line.taskId}\n- Story: ${line.storyIndex ?? ''}\n- Resource: ${line.resource}\n- Description: ${line.description}\n`),
-  ].join('\n'), 'utf8');
   await appendLoopRunLog(leaseId, `[派发] 本轮生成 ${lines.length} 个 agent`);
   for (const [index, line] of lines.entries()) {
     await appendLoopRunLog(leaseId, `[派发] #${index + 1} agent=${line.agent} pipeline=${line.pipeline} task=${line.taskId} story=${line.storyIndex ?? '-'} resource=${line.resource}`);
     await appendLoopRunLog(leaseId, `[派发]      ${line.description}`);
   }
   if (!lines.length) await appendLoopRunLog(leaseId, '[派发] 当前没有可执行委派，等待新 Task 或状态变化');
-  return { runDir, delegations: lines };
+  return { runDir: 'database', delegations: lines };
 }
 
 export function toJsonlEnvelope(item: DelegationEnvelope) {

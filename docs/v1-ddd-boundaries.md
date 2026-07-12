@@ -175,6 +175,7 @@ classDiagram
 | `documents` | 业务文档正文 | `document-upsert`。 |
 | `questions` | Question 事实来源 | `question-add` 和 UI 回答。 |
 | `approvals` | analysis/review 决策记录 | `question-add` / `block-release`。 |
+| `run_logs` | 持续 loop 的运行日志 | runner / agent 追加，运行面板增量读取。 |
 | `task_events` | 面向 UI 的审计时间线 | 成功 command 追加；不是 Event Sourcing。 |
 
 旧迁移中的兼容列可以保留为空值，但不参与 V1 运行语义。

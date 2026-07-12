@@ -72,7 +72,7 @@ prototype/              # 历史资料与 prototype，不参与运行
 | 分析、复现、测试、review、上下文文档 | SQLite `documents` | Agent 使用 `document-upsert` 写入，UI 可直接查看正文。 |
 | Questions 与用户答复 | SQLite `questions` | Agent 使用 `question-add --json` 创建结构化问题；用户在 UI 回答。 |
 | Approval | SQLite `approvals` | analysis/review 的人工门禁记录。 |
-| 运行日志 | App data 下的 run log 文件 | 这是运行观测日志，不是业务上下文；可后续迁移到表。 |
+| 运行日志 | SQLite `run_logs` | runner 逐行写入，运行面板通过 SSE 按 `log_id` 增量读取。 |
 | 代码变更 | Workspace repo | dev-agent 仍在用户选择的 repo 中修改代码。 |
 
 ### 4.2 写入规则
@@ -82,7 +82,8 @@ prototype/              # 历史资料与 prototype，不参与运行
 3. Agent 需要上下文时调用 `task-context` / `document-list` / `document-get`。
 4. Agent 产生业务文档时调用 `document-upsert`。
 5. Agent 需要人工确认时调用 `question-add --json`。
-6. 数据库按 workspace root 短 hash 隔离；短 hash、数据库路径和 app data 目录对普通用户不可见。
+6. Runner 和 Agent 的运行日志写入 `run_logs` 表；运行面板不读取 run log 文件。
+7. 数据库按 workspace root 短 hash 隔离；短 hash、数据库路径和 app data 目录对普通用户不可见。
 
 ## 5. Agent 命令边界
 
@@ -153,7 +154,8 @@ python scripts/loop/loopctl.py question-add --json '{
 3. 保留旧 schema 中必要兼容列为空值，但新逻辑不再读写旧工作文件。
 4. 将 Questions 线上化到 `questions` 表。
 5. 将业务文档线上化到 `documents` 表，并扩展 agent 命令替代读写文件。
-6. 更新 Cursor runner prompt，确保 agent 通过 `loopctl` 获取上下文和提交结果。
+6. 将运行日志线上化到 `run_logs` 表。
+7. 更新 Cursor runner prompt，确保 agent 通过 `loopctl` 获取上下文和提交结果。
 
 ## 8. V1 验收标准
 
@@ -161,5 +163,5 @@ python scripts/loop/loopctl.py question-add --json '{
 - 新建 Task 后可以进入持续 loop，并由 pipeline 派发 agent。
 - Agent 的问题写入 `questions` 表，Task 详情页可展示和回答。
 - Agent 的分析、复现、测试、review 文档写入 `documents` 表，Task 详情页可查看正文。
-- 运行面板显示 Cursor CLI 的用户友好日志，能观察 agent、tool call、子过程和错误。
+- 运行面板从 `run_logs` 表显示 Cursor CLI 的用户友好日志，能观察 agent、tool call、子过程和错误。
 - 任一 UI command 都不能绕过 actor 权限、游标、审批和代码槽约束。
