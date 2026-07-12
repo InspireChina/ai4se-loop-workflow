@@ -95,6 +95,31 @@ function fetchTask(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: s
 
 function addEvent(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: string, actor: Actor | 'system', eventType: string, summary: string) {
   db.prepare('INSERT INTO task_events(event_id, task_id, actor, event_type, summary) VALUES(?, ?, ?, ?, ?)').run(randomUUID(), taskId, actor, eventType, summary);
+  appendActiveRunLog(db, `[event] ${actor} ${eventType} ${taskId} - ${summary}`);
+}
+
+function loopLogLine(message: string) {
+  return `${new Date().toISOString()} ${message}\n`;
+}
+
+export function loopRunLogPath(leaseId: string) {
+  if (!/^[a-zA-Z0-9-]+$/.test(leaseId)) throw new Error('invalid run lease id');
+  return join(paths.runsDir, leaseId, 'app.log');
+}
+
+export async function appendLoopRunLog(leaseId: string, message: string) {
+  const logPath = loopRunLogPath(leaseId);
+  await mkdir(dirname(logPath), { recursive: true });
+  await appendFile(logPath, loopLogLine(message), 'utf8');
+}
+
+function appendActiveRunLog(db: Awaited<ReturnType<typeof databaseConnection>>, message: string) {
+  const run = getRunStatusFromDb(db);
+  if (!run?.active) return;
+  const logPath = loopRunLogPath(run.leaseId);
+  void mkdir(dirname(logPath), { recursive: true })
+    .then(() => appendFile(logPath, loopLogLine(message), 'utf8'))
+    .catch(() => undefined);
 }
 
 function refreshPages(...pagePaths: string[]) {
@@ -974,6 +999,7 @@ export async function endRun(leaseId: string, force = false) {
   const db = await databaseConnection();
   const current = getRunStatusFromDb(db);
   if (current?.leaseId && current.leaseId !== leaseId && !force) throw new Error('运行租约不匹配');
+  if (current?.leaseId) await appendLoopRunLog(current.leaseId, `[run] end owner=${current.owner} force=${force}`);
   db.prepare("DELETE FROM loop_meta WHERE key = 'run_lease'").run();
 }
 
@@ -1007,6 +1033,9 @@ export async function ensureLoopRuntimeFiles() {
 
 export async function createLoopDispatch(leaseId: string) {
   await requireRunLease(leaseId);
+  await appendLoopRunLog(leaseId, `[run] start lease=${leaseId}`);
+  await appendLoopRunLog(leaseId, `[run] workspace=${paths.root}`);
+  await appendLoopRunLog(leaseId, `[run] data_dir=${paths.dataDir}`);
   const lines = await pipelineAllEnvelopes();
   const runDir = join(paths.runsDir, leaseId);
   await mkdir(runDir, { recursive: true });
@@ -1019,6 +1048,12 @@ export async function createLoopDispatch(leaseId: string) {
     '',
     ...lines.map((line, index) => `## ${index + 1}. ${line.agent} / ${line.pipeline}\n\n- Task: ${line.title || line.taskId}\n- Work Dir: ${line.workDir}\n- Story: ${line.storyIndex ?? ''}\n- Resource: ${line.resource}\n- Description: ${line.description}\n`),
   ].join('\n'), 'utf8');
+  await appendLoopRunLog(leaseId, `[dispatch] generated ${lines.length} delegation(s)`);
+  for (const [index, line] of lines.entries()) {
+    await appendLoopRunLog(leaseId, `[dispatch] #${index + 1} ${line.agent}/${line.pipeline} task=${line.taskId} story=${line.storyIndex ?? '-'} resource=${line.resource}`);
+    await appendLoopRunLog(leaseId, `[dispatch]      ${line.description}`);
+  }
+  if (!lines.length) await appendLoopRunLog(leaseId, '[dispatch] no active delegation; waiting for new tasks or state changes');
   return { runDir, delegations: lines };
 }
 

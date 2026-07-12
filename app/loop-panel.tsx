@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { Activity, LockKeyhole, Route, ScrollText } from 'lucide-react';
 import { getRunStatus, listPipeline, listRecentEvents } from '../src/application/tasks';
 import { endLoopRunAction, startLoopRunAction } from './actions';
+import LoopLogStream from './loop-log-stream';
 
 export default async function LoopPanel() {
   const [run, pipeline, events] = await Promise.all([getRunStatus(), listPipeline(), listRecentEvents(12)]);
@@ -17,8 +18,8 @@ export default async function LoopPanel() {
       <button className="button secondary" type="submit">结束本轮</button>
     </form> : <form action={startLoopRunAction} className="loop-run">
       <Route size={17}/>
-      <div><strong>开始 Loop</strong><small>生成 run lease 和 dispatch</small></div>
-      <button className="button" type="submit">开始</button>
+      <div><strong>开始 Loop</strong><small>生成 dispatch，并实时显示运行日志</small></div>
+      <button className="button" type="submit">开始运行</button>
     </form>}
 
     <section className="side-section">
@@ -34,13 +35,13 @@ export default async function LoopPanel() {
     </section>
 
     <section className="side-section logs">
-      <h3><ScrollText size={14}/>日志</h3>
-      <div className="side-list">
+      <h3><ScrollText size={14}/>{run?.active ? '运行日志' : '最近日志'}</h3>
+      {run?.active ? <LoopLogStream leaseId={run.leaseId}/> : <div className="side-list">
         {events.length === 0 ? <p className="side-empty">暂无日志。</p> : events.map((event) => <Link href={`/tasks/${event.task_id}`} className="log-item" key={event.event_id}>
           <Activity size={13}/>
           <span><strong>{event.actor}</strong><small>{event.title}</small><em>{event.summary}</em></span>
         </Link>)}
-      </div>
+      </div>}
     </section>
   </aside>;
 }
