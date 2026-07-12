@@ -6,7 +6,13 @@
 python scripts/loop/loopctl.py <command>
 ```
 
-该 Python 文件是兼容 shim，实际实现位于 `scripts/loop/loopctl.ts`，读写当前 UI 使用的 `.project/_loop/loop-ui.db`。
+该 Python 文件是兼容 shim，实际实现位于 `scripts/loop/loopctl.ts`，读写当前 UI 使用的 `data/<repo-root-short-hash>/loop-ui.db`。
+
+查看当前 repo 对应路径：
+
+```bash
+python scripts/loop/loopctl.py paths
+```
 
 ## 一轮 loop
 

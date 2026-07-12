@@ -23,7 +23,7 @@ import {
   transitionTask,
   updateTask,
 } from '../../src/application/tasks';
-import { databaseConnection } from '../../src/infrastructure/database';
+import { databaseConnection, paths } from '../../src/infrastructure/database';
 import type { Actor, TaskStatus } from '../../src/domain/task';
 
 type Args = { _: string[]; [key: string]: string | boolean | string[] | undefined };
@@ -121,7 +121,7 @@ async function printBlockList(format: string) {
     console.log(`- ${task.title} (${task.task_id})`);
     console.log(`  - Agent: ${task.current_subagent || ''}`);
     console.log(`  - Work Dir: ${task.work_dir || ''}`);
-    console.log(`  - Block File: ${task.work_dir ? `${task.work_dir}/block.md` : `.project/_loop/blocks/${task.task_id}.md`}`);
+    console.log(`  - Block File: ${task.work_dir ? `${task.work_dir}/block.md` : `${paths.blocksDir}/${task.task_id}.md`}`);
     if (task.approval_file) console.log(`  - Approval File: ${task.approval_file}`);
     console.log(`  - Reason: ${task.blocked_reason || ''}`);
     console.log(`  - Next Step: ${task.next_step || ''}`);
@@ -182,7 +182,19 @@ async function main() {
     case 'init':
       await databaseConnection();
       await ensureLoopRuntimeFiles();
-      console.log('initialized .project/_loop/loop-ui.db');
+      console.log(`initialized ${paths.dbPath}`);
+      return;
+    case 'paths':
+      console.log(JSON.stringify({
+        app_root: paths.appRoot,
+        workspace_root: paths.root,
+        repo_hash: paths.repoHash,
+        data_dir: paths.dataDir,
+        db_path: paths.dbPath,
+        inbox_path: paths.inboxPath,
+        control_path: paths.controlPath,
+        runs_dir: paths.runsDir,
+      }, null, 2));
       return;
     case 'status':
       await printStatus();
@@ -202,13 +214,13 @@ async function main() {
       return;
     }
     case 'inbox-check': {
-      const changed = await inboxCheck(optional(args, 'inbox') || '.project/_loop/inbox.md');
+      const changed = await inboxCheck(optional(args, 'inbox'));
       console.log(changed ? 'changed' : 'unchanged');
       process.exitCode = changed ? 1 : 0;
       return;
     }
     case 'inbox-commit':
-      console.log(`committed ${await inboxCommit(optional(args, 'inbox') || '.project/_loop/inbox.md')}`);
+      console.log(`committed ${await inboxCommit(optional(args, 'inbox'))}`);
       return;
     case 'task-add':
     case 'task-ingest': {

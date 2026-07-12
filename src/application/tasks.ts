@@ -118,6 +118,22 @@ function fullPath(relativePath: string) {
   return assertInsideWorkspace(join(paths.root, relativePath));
 }
 
+function assertInsideData(fullPathValue: string) {
+  const root = resolve(paths.dataDir);
+  const full = resolve(fullPathValue);
+  if (full !== root && !full.startsWith(`${root}${sep}`)) throw new Error('Invalid app data path');
+  return full;
+}
+
+function dataFullPath(relativePath: string) {
+  return assertInsideData(join(paths.dataDir, relativePath));
+}
+
+function runtimePath(pathValue?: string) {
+  if (!pathValue) return paths.inboxPath;
+  return pathValue.startsWith(sep) ? pathValue : resolve(paths.root, pathValue);
+}
+
 function toRelativePath(pathValue: string) {
   const full = assertInsideWorkspace(resolve(paths.root, pathValue));
   return full.slice(resolve(paths.root).length + 1);
@@ -186,13 +202,13 @@ function todayCompact() {
 }
 
 function blockFileForTask(task: Task) {
-  return task.work_dir ? `${task.work_dir}/block.md` : `.project/_loop/blocks/${task.task_id}.md`;
+  return task.work_dir ? fullPath(`${task.work_dir}/block.md`) : dataFullPath(`blocks/${task.task_id}.md`);
 }
 
 async function writeBlockFile(task: Task) {
-  const relativePath = blockFileForTask(task);
-  await writeFileIfMissing(relativePath, '');
-  await writeFile(fullPath(relativePath), [
+  const path = blockFileForTask(task);
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, [
     '# Blocked',
     '',
     `- Task ID: ${task.task_id}`,
@@ -209,8 +225,7 @@ async function writeBlockFile(task: Task) {
 }
 
 async function clearBlockFile(task: Task, create = false) {
-  const relativePath = blockFileForTask(task);
-  const path = fullPath(relativePath);
+  const path = blockFileForTask(task);
   if (create || existsSync(path)) {
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, '', 'utf8');
@@ -935,7 +950,7 @@ function sourceEnvelope(): DelegationEnvelope {
     reviewApproved: 0,
     approvalFile: '',
     lastActor: 'loopctl',
-    workDir: '.project/_loop',
+    workDir: paths.dataDir,
     analysisIndex: 0,
     devIndex: 0,
     testIndex: 0,
@@ -1029,49 +1044,52 @@ function md5(value: Buffer | string) {
   return createHash('md5').update(value).digest('hex');
 }
 
-async function fileHash(relativePath: string) {
+async function fileHashByPath(path: string) {
   try {
-    return md5(await readFile(fullPath(relativePath)));
+    return md5(await readFile(path));
   } catch {
     return '';
   }
 }
 
 export async function ensureLoopRuntimeFiles() {
-  await mkdir(fullPath('.project/_loop'), { recursive: true });
-  await writeFileIfMissing('.project/_loop/inbox.md', [
+  await mkdir(paths.dataDir, { recursive: true });
+  await mkdir(paths.runsDir, { recursive: true });
+  await mkdir(paths.blocksDir, { recursive: true });
+  if (!existsSync(paths.inboxPath)) await writeFile(paths.inboxPath, [
     '# Loop Inbox',
     '',
     '## 新输入',
     '',
     '把新卡片、Bug、临时需求或 URL 粘贴在这里。source-agent 处理后执行 inbox-commit。',
     '',
-  ].join('\n'));
-  await writeFileIfMissing('.project/_loop/control.md', [
+  ].join('\n'), 'utf8');
+  if (!existsSync(paths.controlPath)) await writeFile(paths.controlPath, [
     '# Loop Control',
     '',
     '本文件由 `/loop` 命令读取。实际状态以 SQLite 和 loopctl 输出为准。',
     '',
-  ].join('\n'));
+  ].join('\n'), 'utf8');
 }
 
-export async function inboxHasChanges(inboxPath = '.project/_loop/inbox.md') {
+export async function inboxHasChanges(inboxPath?: string) {
   await ensureLoopRuntimeFiles();
-  const current = await fileHash(inboxPath);
+  const current = await fileHashByPath(runtimePath(inboxPath));
   if (!current) return false;
   const db = await databaseConnection();
   const row = db.prepare("SELECT value FROM loop_meta WHERE key = 'inbox_md5'").get() as { value: string } | undefined;
   return !row?.value || row.value !== current;
 }
 
-export async function inboxCheck(inboxPath = '.project/_loop/inbox.md') {
+export async function inboxCheck(inboxPath?: string) {
   return inboxHasChanges(inboxPath);
 }
 
-export async function inboxCommit(inboxPath = '.project/_loop/inbox.md') {
+export async function inboxCommit(inboxPath?: string) {
   await ensureLoopRuntimeFiles();
-  const current = await fileHash(inboxPath);
-  if (!current) throw new Error(`inbox not found: ${inboxPath}`);
+  const path = runtimePath(inboxPath);
+  const current = await fileHashByPath(path);
+  if (!current) throw new Error(`inbox not found: ${path}`);
   const db = await databaseConnection();
   db.prepare(`
     INSERT INTO loop_meta(key, value) VALUES('inbox_md5', ?)
@@ -1083,10 +1101,10 @@ export async function inboxCommit(inboxPath = '.project/_loop/inbox.md') {
 export async function createLoopDispatch(leaseId: string) {
   await requireRunLease(leaseId);
   const lines = await pipelineAllEnvelopes({ includeInbox: true });
-  const runDir = `.project/_loop/runs/${leaseId}`;
-  await mkdir(fullPath(runDir), { recursive: true });
-  await writeFile(fullPath(`${runDir}/delegations.jsonl`), lines.map(toJsonlEnvelope).join('\n') + (lines.length ? '\n' : ''), 'utf8');
-  await writeFile(fullPath(`${runDir}/summary.md`), [
+  const runDir = join(paths.runsDir, leaseId);
+  await mkdir(runDir, { recursive: true });
+  await writeFile(join(runDir, 'delegations.jsonl'), lines.map(toJsonlEnvelope).join('\n') + (lines.length ? '\n' : ''), 'utf8');
+  await writeFile(join(runDir, 'summary.md'), [
     '# Loop Run',
     '',
     `- Run Token: ${leaseId}`,

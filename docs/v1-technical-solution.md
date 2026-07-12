@@ -40,7 +40,7 @@ flowchart LR
 | UI 组件 | lucide 图标 + 自定义组件 | 以新的产品界面为基础，不再依赖原型生成物。 |
 | 服务端入口 | Next.js Server Action / Route Handler + Zod | 不部署独立 API；仍由服务端入口校验输入、调用领域用例。 |
 | 领域代码 | 纯 TypeScript | 不依赖 React、Next、SQLite 或文件路径，便于测试。 |
-| 数据库 | SQLite | V1 使用 `.project/_loop/loop-ui.db`；使用版本化 SQL migration 管理表和索引。 |
+| 数据库 | SQLite | V1 使用应用本地 `data/<repo-root-short-hash>/loop-ui.db`；使用版本化 SQL migration 管理表和索引。 |
 | SQLite 访问 | `better-sqlite3` | 以同步事务边界匹配本地单机模型，并可被 Next server runtime 正确加载。 |
 | 数据库迁移 | Umzug + 版本化 SQL 文件 | 以 `schema_migrations` 记录已执行版本，提供类 Flyway 的顺序迁移。 |
 | 文件访问 | Node `fs/promises` | 所有路径必须限制在当前项目根目录内，禁止 API 读取任意主机路径。 |
@@ -56,7 +56,8 @@ src/application/        # 用例与输入校验
 src/infrastructure/     # SQLite、migrations、文件系统
 migrations/             # 顺序 SQL migrations
 scripts/                # 本地 migration 命令
-.project/               # SQLite 数据库与本地工作文件
+data/                   # 应用本地运行数据，按 repo 根路径短 hash 分目录
+.project/               # 目标 repo 内的业务工作文件，不存应用数据库
 ```
 
 ## 4. 数据与文件的边界
@@ -115,7 +116,7 @@ RunBegin / RunEnd / RunStatus
 
 ## 7. 迁移与实施顺序
 
-1. 使用 `.project/_loop/loop-ui.db` 作为 V1 数据库，旧资料保存在 `reference/`。
+1. 使用 `data/<repo-root-short-hash>/loop-ui.db` 作为 V1 数据库；不读取或复制旧 `.project/_loop` 数据。
 2. 新增 SQL migration：`tasks` 扩展列、`stories`、`artifacts`、`questions`、`approvals`、`task_events`、`loop_meta`。
 3. 实现 application command 和领域规则，先覆盖现有 loopctl 核心流程。
 4. 实现 Task / Question / Approval 的 UI 操作，并以旧规则验收。

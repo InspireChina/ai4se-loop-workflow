@@ -3,9 +3,11 @@ node_modules/
 .next/
 
 # local runtime data
+.project/
 .project/_loop/*.db
 .project/_loop/*.db-*
 .project/_loop/runs/
+data/
 
 # operating system files
 .DS_Store
