@@ -128,22 +128,22 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
   if (task.resume_pending) {
     const agent = task.current_subagent!;
     const storyIndex = agent === 'analyst-agent' && a < total ? a + 1 : agent === 'dev-agent' && d < a ? d + 1 : agent === 'test-agent' && t < d ? t + 1 : null;
-    return line('resume', agent, storyIndex, 'consume human input and resume safely');
+    return line('resume', agent, storyIndex, '读取人工输入，并安全恢复任务');
   }
-  if (status === 'backlog') return line('backlog', 'backlog-agent', null, 'collect context and classify');
-  if (status === 'in repro') return line('repro', 'repro-agent', null, 'reproduce bug and root cause');
-  if (status === 'in plan') return line('split', 'story-splitter-agent', null, 'decompose into stories');
+  if (status === 'backlog') return line('backlog', 'backlog-agent', null, '收集上下文并完成分类');
+  if (status === 'in repro') return line('repro', 'repro-agent', null, '复现 Bug 并定位根因');
+  if (status === 'in plan') return line('split', 'story-splitter-agent', null, '拆分为可推进的 Story');
   if (status === 'ready for dev') {
-    if (d < a && codeSlotAvailable) return line('dev', 'dev-agent', d + 1, `story-${d + 1} development; claim code slot`);
-    if (a < total) return line('analysis', 'analyst-agent', a + 1, `story-${a + 1} requirements + plan`);
-    if (total === 0) return line('split', 'story-splitter-agent', null, 'decompose into stories');
+    if (d < a && codeSlotAvailable) return line('dev', 'dev-agent', d + 1, `开发 Story-${d + 1}，并占用代码槽`);
+    if (a < total) return line('analysis', 'analyst-agent', a + 1, `分析 Story-${a + 1} 的需求和方案`);
+    if (total === 0) return line('split', 'story-splitter-agent', null, '拆分为可推进的 Story');
     return null;
   }
-  if (status === 'in review') return line('review', 'review-agent', null, 'aggregate all stories for delivery');
-  if (t === d && d === a && a === total && total > 0) return line('review', 'review-agent', null, 'all stories done, ready for review');
-  if (t < d) return line('test', 'test-agent', t + 1, `story-${t + 1} black-box testing`);
-  if (d < a) return line('dev', 'dev-agent', d + 1, `story-${d + 1} development`);
-  if (a < total) return line('analysis', 'analyst-agent', a + 1, `story-${a + 1} requirements + plan`);
-  if (total === 0) return line('split', 'story-splitter-agent', null, 'decompose into stories');
+  if (status === 'in review') return line('review', 'review-agent', null, '汇总全部 Story 并准备交付审查');
+  if (t === d && d === a && a === total && total > 0) return line('review', 'review-agent', null, '全部 Story 已完成，进入最终审查');
+  if (t < d) return line('test', 'test-agent', t + 1, `对 Story-${t + 1} 做黑盒测试`);
+  if (d < a) return line('dev', 'dev-agent', d + 1, `开发 Story-${d + 1}`);
+  if (a < total) return line('analysis', 'analyst-agent', a + 1, `分析 Story-${a + 1} 的需求和方案`);
+  if (total === 0) return line('split', 'story-splitter-agent', null, '拆分为可推进的 Story');
   return null;
 }
