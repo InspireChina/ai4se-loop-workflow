@@ -1,11 +1,11 @@
 import Link from 'next/link';
 import { Activity, LockKeyhole, Route, ScrollText } from 'lucide-react';
-import { getRunStatus, listPipeline, listRecentEvents } from '../src/application/tasks';
+import { getRunStatus, listRecentEvents } from '../src/application/tasks';
 import { endLoopRunAction, startLoopRunAction } from './actions';
 import LoopLogStream from './loop-log-stream';
 
 export default async function LoopPanel() {
-  const [run, pipeline, events] = await Promise.all([getRunStatus(), listPipeline(), listRecentEvents(12)]);
+  const [run, events] = await Promise.all([getRunStatus(), listRecentEvents(12)]);
   return <aside className="loop-panel">
     <div className="loop-panel-head">
       <p className="eyebrow">LOOP</p>
@@ -21,18 +21,6 @@ export default async function LoopPanel() {
       <div><strong>开始 Loop</strong><small>生成 dispatch，并实时显示运行日志</small></div>
       <button className="button" type="submit">开始运行</button>
     </form>}
-
-    <section className="side-section">
-      <h3><Route size={14}/>Pipeline</h3>
-      <div className="side-list">
-        {pipeline.length === 0 ? <p className="side-empty">当前没有可派发步骤。</p> : pipeline.map((item) => <Link href={item.taskId ? `/tasks/${item.taskId}` : '/'} className="side-item" key={`${item.taskId}-${item.pipeline}-${item.storyIndex || 0}`}>
-          <span className="badge blue">{item.pipeline}</span>
-          <strong>{item.agent}</strong>
-          <small>{item.taskId || 'System'}{item.storyIndex ? ` · Story-${item.storyIndex}` : ''}</small>
-          <em>{item.description}</em>
-        </Link>)}
-      </div>
-    </section>
 
     <section className="side-section logs">
       <h3><ScrollText size={14}/>{run?.active ? '运行日志' : '最近日志'}</h3>
