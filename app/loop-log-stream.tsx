@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { ParsedRunLog } from '../src/application/run-log';
 
 type LogTreeNode = {
@@ -14,21 +14,13 @@ type LogTreeNode = {
   children: LogTreeNode[];
 };
 
-function eventTime(event: ParsedRunLog) {
-  const time = Date.parse(event.timestamp);
-  return Number.isFinite(time) ? time : 0;
-}
-
 function shouldMergeEvent(previous: ParsedRunLog, next: ParsedRunLog) {
   if (previous.kind !== 'cursor' || next.kind !== 'cursor') return false;
   if (previous.status !== 'info' || next.status !== 'info') return false;
   if (previous.title !== next.title) return false;
   if (previous.title !== 'Agent 思考' && previous.title !== 'Agent 输出') return false;
   if (Object.keys(previous.meta).length > 0 || Object.keys(next.meta).length > 0) return false;
-  const previousTime = eventTime(previous);
-  const nextTime = eventTime(next);
-  if (!previousTime || !nextTime) return false;
-  return Math.abs(nextTime - previousTime) <= 1500 && previous.detail.length + next.detail.length <= 1400;
+  return previous.detail.length + next.detail.length <= 5000;
 }
 
 function joinDetail(previous: string, next: string) {
@@ -72,6 +64,29 @@ function makeNode(event: ParsedRunLog, index: number): LogTreeNode {
     meta: event.meta,
     children: [],
   };
+}
+
+function shouldMergeNode(previous: LogTreeNode, next: LogTreeNode) {
+  if (previous.children.length || next.children.length) return false;
+  if (previous.kind !== 'cursor' || next.kind !== 'cursor') return false;
+  if (previous.status !== 'info' || next.status !== 'info') return false;
+  if (previous.title !== next.title) return false;
+  if (previous.title !== 'Agent 思考' && previous.title !== 'Agent 输出') return false;
+  if (Object.keys(previous.meta).length > 0 || Object.keys(next.meta).length > 0) return false;
+  return previous.detail.length + next.detail.length <= 5000;
+}
+
+function appendChild(parent: LogTreeNode, child: LogTreeNode) {
+  const previous = parent.children[parent.children.length - 1];
+  if (previous && shouldMergeNode(previous, child)) {
+    parent.children[parent.children.length - 1] = {
+      ...previous,
+      timestamp: child.timestamp || previous.timestamp,
+      detail: joinDetail(previous.detail, child.detail),
+    };
+    return;
+  }
+  parent.children.push(child);
 }
 
 function agentNameFromEvent(event: ParsedRunLog) {
@@ -133,7 +148,7 @@ function buildLogTree(events: ParsedRunLog[]) {
       meta: seed?.meta || { agent },
       children: [],
     };
-    root.children.push(node);
+    appendChild(root, node);
     agentNodes.set(agent, node);
     return node;
   };
@@ -148,24 +163,26 @@ function buildLogTree(events: ParsedRunLog[]) {
       const agent = agentNameFromEvent(event) || currentAgent || 'Agent';
       currentAgent = agent;
       const agentNode = ensureAgent(agent, event, index);
-      agentNode.children.push(makeNode(event, index));
+      appendChild(agentNode, makeNode(event, index));
       return;
     }
 
     if (event.kind === 'tool') {
       const agent = event.meta.agent || currentAgent;
       const parent = agent ? ensureAgent(agent, undefined, index) : ensureCursorRoot();
-      parent.children.push(makeNode(event, index));
+      appendChild(parent, makeNode(event, index));
       parent.status = mergeStatus(parent.status, event.status);
       parent.timestamp = event.timestamp || parent.timestamp;
       return;
     }
 
     if (event.kind === 'cursor') {
-      const root = ensureCursorRoot();
-      root.children.push(makeNode(event, index));
-      root.status = mergeStatus(root.status, event.status);
-      root.timestamp = event.timestamp || root.timestamp;
+      const parent = currentAgent && (event.title === 'Agent 思考' || event.title === 'Agent 输出')
+        ? ensureAgent(currentAgent, undefined, index)
+        : ensureCursorRoot();
+      appendChild(parent, makeNode(event, index));
+      parent.status = mergeStatus(parent.status, event.status);
+      parent.timestamp = event.timestamp || parent.timestamp;
       return;
     }
 
@@ -218,8 +235,6 @@ export default function LoopLogStream({ leaseId }: { leaseId: string }) {
   const [events, setEvents] = useState<ParsedRunLog[]>([]);
   const [showRaw, setShowRaw] = useState(false);
   const [connected, setConnected] = useState(false);
-  const rawRef = useRef<HTMLPreElement>(null);
-  const friendlyRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setRawContent('');
@@ -245,18 +260,13 @@ export default function LoopLogStream({ leaseId }: { leaseId: string }) {
     return () => source.close();
   }, [leaseId]);
 
-  useEffect(() => {
-    if (showRaw && rawRef.current) rawRef.current.scrollTop = rawRef.current.scrollHeight;
-    if (!showRaw && friendlyRef.current) friendlyRef.current.scrollTop = friendlyRef.current.scrollHeight;
-  }, [rawContent, showRaw]);
-
   return <div className="run-log-box">
     <div className="run-log-status">
       <span className={connected ? 'live-dot' : 'live-dot idle'}/>
       <small>{connected ? '实时连接中' : '等待日志'}</small>
       <button type="button" className="text-toggle" onClick={() => setShowRaw((value) => !value)}>{showRaw ? '友好视图' : '原始日志'}</button>
     </div>
-    {showRaw ? <pre ref={rawRef}>{rawContent || 'waiting for app log...\n'}</pre> : <div className="friendly-log tree-log" ref={friendlyRef}>
+    {showRaw ? <pre>{rawContent || 'waiting for app log...\n'}</pre> : <div className="friendly-log tree-log">
       {events.length === 0 ? <p className="friendly-empty">等待 pipeline 进展...</p> : buildLogTree(events).map((node) => <LogNodeView node={node} key={node.id}/>)}
     </div>}
   </div>;
