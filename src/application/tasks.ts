@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { databaseConnection, paths } from '../infrastructure/database';
+import { verifyDevCommit } from '../infrastructure/git';
 import {
   assertActorCanCreate,
   assertState,
@@ -552,6 +553,10 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
   assertState(prospective);
   if (changes.analysis_index !== undefined && changes.analysis_index > before.analysis_index && before.analysis_approved_index < changes.analysis_index) {
     throw new Error(`story-${changes.analysis_index} analysis 尚未人工确认`);
+  }
+  if (changes.dev_index !== undefined && changes.dev_index > before.dev_index) {
+    const verification = verifyDevCommit(paths.root, taskId, changes.dev_index);
+    if (!verification.ok) throw new Error(`Story-${changes.dev_index} 代码尚未按要求提交：${verification.reason}`);
   }
   if (changes.agile_status === 'done' && !before.review_approved) throw new Error('review 尚未人工批准');
   if (['in dev', 'in review'].includes(prospective.agile_status)) {

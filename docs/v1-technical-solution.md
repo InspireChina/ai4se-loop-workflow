@@ -96,7 +96,7 @@ delegation-3 -> executor.run(prompt for dev-agent)
 
 Runner 会校验关键 delegation 的完成契约。analyst 首次完成 Story 分析后必须进入人工确认：若已写入 analysis 文档但未创建确认问题，Runner 自动补建 Question/Approval 并阻塞 Task；若没有写入分析文档，则结束当前 Run，避免一分钟后重复执行。人工解除阻塞后的 resume delegation 会在确认生效后推进 `analysis_index`。
 
-dev-agent 的完成顺序固定为：实现与测试、写入 dev_note、仅暂存当前 Story 相关文件、创建包含 Task/Story 标识的 Git commit，最后推进 `dev_index`。如果工作区既有改动与当前 Story 重叠而无法安全隔离，dev-agent 必须阻塞并请求人工处理，不能以未提交代码推进流程。
+dev-agent 的完成顺序固定为：实现与测试、写入 dev_note、仅暂存当前 Story 相关文件、创建包含 Task/Story 标识的 Git commit，最后推进 `dev_index`。Application 在 `dev_index` 前进时校验工作区已干净，且最新提交标题包含当前 Task ID 与 `Story-N`；不满足时拒绝推进。如果工作区既有改动与当前 Story 重叠而无法安全隔离，dev-agent 必须阻塞并请求人工处理。
 
 ### 4.3 写入规则
 

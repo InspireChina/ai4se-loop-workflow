@@ -50,7 +50,7 @@ function roleInstruction(delegation: DelegationEnvelope) {
         '目标：只实现当前 Story 所需代码变更。可以读取和修改 workspace repo 中的产品代码。',
         '关键实现说明通过 document-upsert 写入 documents 表，kind 建议为 dev_note。',
         '开始前检查 git status，识别并保护不属于当前 Story 的既有改动。',
-        '实现和测试完成后，只暂存当前 Story 相关文件并创建 Git commit；提交信息必须包含 Task ID 和 Story 编号。不得提交密钥、环境变量文件或其他任务的改动。',
+        `实现和测试完成后，只暂存当前 Story 相关文件并创建 Git commit；提交标题必须同时包含 ${delegation.taskId} 和 Story-${delegation.storyIndex ?? 'N'}，例如：feat(${delegation.taskId}): Story-${delegation.storyIndex ?? 'N'} 实现功能。不得提交密钥、环境变量文件或其他任务的改动。`,
         '只有 Git commit 成功后才能用 task-update 推进 dev_index。若现有脏改动与本 Story 重叠、无法安全隔离提交，必须使用 question-add 阻塞 Task，不得跳过提交直接推进游标。',
       ].join('\n');
     case 'test-agent':
