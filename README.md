@@ -20,7 +20,7 @@ npm run build       # 类型与生产构建校验
 npm run loopctl -- status
 ```
 
-SQLite 数据库位于应用本地 `data/<repo-root-short-hash>/loop-ui.db`。目标 repo 不再生成 `.project` 工作目录。
+当前工作区根目录由项目设置页维护在应用级 `data/loopwork.db`，切换后立即生效。每个项目的业务数据库位于 `data/<repo-root-short-hash>/loop-ui.db`，目标 repo 不再生成 `.project` 工作目录。
 
 查看当前 repo 对应的数据目录：
 
@@ -40,15 +40,7 @@ claude --print --output-format stream-json <prompt>
 
 执行器的 stdout、stderr 和 tool 事件会被标准化后写入 SQLite `run_logs`，并通过 SSE 在 `/runs` 页面实时展示。
 
-命令行等价流程：
-
-```bash
-RUN_TOKEN=$(python scripts/loop/loopctl.py run-begin --lease-minutes 120)
-python scripts/loop/loopctl.py pipeline-all --run-token "$RUN_TOKEN" --format jsonl
-python scripts/loop/loopctl.py run-end "$RUN_TOKEN"
-```
-
-`pipeline-all` 输出的每一行都是一个 delegation envelope。外部 runner 按 `agent` 字段逐条启动所选 CLI，并通过 `run-log` 把关键过程写入运行日志。单个 agent 可以使用辅助 subagent 收集当前 delegation 的上下文，但不能调度其他 pipeline agent。
+Run Lease 与 Pipeline 派发只由 Web App 和内部 Runner 管理，不提供等价的 Agent CLI 命令。外部 runner 按 delegation 的 `agent` 字段逐条启动所选 CLI，直接解析 stream-json / JSONL、工具事件、stderr 和退出码并写入运行日志。单个 agent 可以使用辅助 subagent 收集当前 delegation 的上下文，但不能调度其他 pipeline agent。
 
 ## V1 已实现范围
 
@@ -70,6 +62,7 @@ app/                 Next.js 页面与 Server Actions
 src/application/     Task、Question、blocked 等用例
 src/infrastructure/  SQLite、Agent Executor Adapter 与 runner 进程管理
 migrations/          顺序 SQL migrations（Umzug 管理）
+app-migrations/      应用级设置数据库 migrations
 scripts/             migration 与 loopctl 命令
 data/                应用本地运行数据（按 repo 根路径短 hash 分目录，gitignore）
 reference/           旧 cursor-loop 和原型材料

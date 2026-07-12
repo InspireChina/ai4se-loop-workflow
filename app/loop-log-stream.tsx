@@ -103,33 +103,12 @@ function mergeStatus(current: ParsedRunLog['status'], next: ParsedRunLog['status
   return 'info';
 }
 
-function buildLogTree(events: ParsedRunLog[]) {
+export function buildLogTree(events: ParsedRunLog[]) {
   const roots: LogTreeNode[] = [];
-  const executorRoot: LogTreeNode = {
-    id: 'agent-executor-root',
-    title: 'Agent 执行器',
-    detail: '逐个执行 Agent',
-    status: 'running',
-    kind: 'group',
-    timestamp: '',
-    meta: {},
-    children: [],
-  };
   const agentNodes = new Map<string, LogTreeNode>();
-  let hasExecutorRoot = false;
   let currentAgent = '';
 
-  const ensureExecutorRoot = (executor?: string) => {
-    if (!hasExecutorRoot) {
-      roots.push(executorRoot);
-      hasExecutorRoot = true;
-    }
-    if (executor) executorRoot.title = `${executor[0].toUpperCase()}${executor.slice(1)} CLI`;
-    return executorRoot;
-  };
-
   const ensureAgent = (agent: string, seed?: ParsedRunLog, index = 0) => {
-    const root = ensureExecutorRoot(seed?.meta.executor);
     const existing = agentNodes.get(agent);
     if (existing) {
       if (seed) {
@@ -149,13 +128,13 @@ function buildLogTree(events: ParsedRunLog[]) {
       meta: seed?.meta || { agent },
       children: [],
     };
-    appendChild(root, node);
+    roots.push(node);
     agentNodes.set(agent, node);
     return node;
   };
 
   events.forEach((event, index) => {
-    if (event.kind === 'run' || event.kind === 'dispatch' || event.kind === 'error') {
+    if (event.kind === 'run' || event.kind === 'dispatch') {
       roots.push(makeNode(event, index));
       return;
     }
@@ -163,34 +142,39 @@ function buildLogTree(events: ParsedRunLog[]) {
     if (event.kind === 'agent') {
       const agent = agentNameFromEvent(event) || currentAgent || 'Agent';
       currentAgent = agent;
-      const agentNode = ensureAgent(agent, event, index);
-      appendChild(agentNode, makeNode(event, index));
+      ensureAgent(agent, event, index);
       return;
     }
 
-    if (event.kind === 'tool') {
+    if (event.kind === 'tool' || event.kind === 'error') {
       const agent = event.meta.agent || currentAgent;
-      const parent = agent ? ensureAgent(agent, undefined, index) : ensureExecutorRoot(event.meta.executor);
-      appendChild(parent, makeNode(event, index));
-      parent.status = mergeStatus(parent.status, event.status);
-      parent.timestamp = event.timestamp || parent.timestamp;
+      if (!agent) {
+        roots.push(makeNode(event, index));
+        return;
+      }
+      const agentNode = ensureAgent(agent, undefined, index);
+      appendChild(agentNode, makeNode(event, index));
+      agentNode.status = mergeStatus(agentNode.status, event.status);
+      agentNode.timestamp = event.timestamp || agentNode.timestamp;
       return;
     }
 
     if (event.kind === 'executor') {
-      const parent = currentAgent && (event.title === 'Agent 思考' || event.title === 'Agent 输出')
-        ? ensureAgent(currentAgent, undefined, index)
-        : ensureExecutorRoot(event.meta.executor);
-      appendChild(parent, makeNode(event, index));
-      parent.status = mergeStatus(parent.status, event.status);
-      parent.timestamp = event.timestamp || parent.timestamp;
+      const eventAgent = event.meta.agent || currentAgent;
+      if (!eventAgent) {
+        roots.push(makeNode(event, index));
+        return;
+      }
+      const agentNode = ensureAgent(eventAgent, undefined, index);
+      appendChild(agentNode, makeNode(event, index));
+      agentNode.status = mergeStatus(agentNode.status, event.status);
+      agentNode.timestamp = event.timestamp || agentNode.timestamp;
       return;
     }
 
     roots.push(makeNode(event, index));
   });
 
-  if (hasExecutorRoot && executorRoot.children.every((child) => child.status === 'success')) executorRoot.status = 'success';
   return roots;
 }
 

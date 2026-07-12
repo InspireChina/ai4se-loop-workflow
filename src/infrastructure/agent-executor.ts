@@ -11,6 +11,7 @@ export type AgentExecutor = {
   id: AgentExecutorId;
   label: string;
   command: string;
+  promptMode: 'argument' | 'stdin';
   buildArgs(prompt: string, workspaceRoot: string): string[];
   formatCommand(workspaceRoot: string): string;
   parseStdout(line: string, context: AgentExecutionContext): string | null;
@@ -45,7 +46,6 @@ function toolNameFromCursor(event: Record<string, unknown>) {
 
 function summarizeCommand(command: string) {
   if (!command) return '';
-  if (command.includes(' run-log ')) return '写入 Agent 运行日志';
   if (command.includes(' task-context ')) return '读取数据库 Task 上下文';
   if (command.includes(' document-list ')) return '列出数据库文档';
   if (command.includes(' document-get ')) return '读取数据库文档';
@@ -171,27 +171,31 @@ function parseClaudeStdout(line: string, context: AgentExecutionContext) {
 
 function stderrLog(executor: AgentExecutorId, context: AgentExecutionContext, line: string) {
   const text = compact(line);
-  const diagnostic = executor === 'cursor' && /^cursor-retrieval:\s+tracing to\b/.test(text);
-  return `[${diagnostic ? '执行器诊断' : '执行器错误'}] ${meta(executor, context)} - ${text}`;
+  if (!text) return null;
+  if (executor === 'codex' && (/^Reading additional input from stdin\.\.\.$/.test(text) || /codex_core_skills::loader: ignoring interface\.icon_(?:small|large)/.test(text))) return null;
+  const isError = /(?:^|\s)(?:ERROR|FATAL|PANIC)(?:\s|:)/i.test(text) || /^Error:/i.test(text);
+  const isWarning = /(?:^|\s)WARN(?:ING)?(?:\s|:)/i.test(text);
+  const label = isError ? '执行器错误' : isWarning ? '执行器警告' : '执行器诊断';
+  return `[${label}] ${meta(executor, context)} - ${text}`;
 }
 
 const executors: Record<AgentExecutorId, AgentExecutor> = {
   cursor: {
-    id: 'cursor', label: 'Cursor', command: process.env.CURSOR_CLI || 'cursor',
+    id: 'cursor', label: 'Cursor', command: process.env.CURSOR_CLI || 'cursor', promptMode: 'argument',
     buildArgs: (prompt, workspace) => ['agent', '--print', '--output-format', 'stream-json', '--trust', '--force', '--workspace', workspace, prompt],
     formatCommand: (workspace) => `cursor agent --print --output-format stream-json --force --workspace ${workspace}`,
     parseStdout: parseCursorStdout,
     parseStderr: (line, context) => stderrLog('cursor', context, line),
   },
   codex: {
-    id: 'codex', label: 'Codex', command: process.env.CODEX_CLI || 'codex',
-    buildArgs: (prompt, workspace) => ['exec', '--json', '--dangerously-bypass-approvals-and-sandbox', '-C', workspace, prompt],
+    id: 'codex', label: 'Codex', command: process.env.CODEX_CLI || 'codex', promptMode: 'stdin',
+    buildArgs: (_prompt, workspace) => ['exec', '--json', '--dangerously-bypass-approvals-and-sandbox', '-C', workspace, '-'],
     formatCommand: (workspace) => `codex exec --json -C ${workspace}`,
     parseStdout: parseCodexStdout,
     parseStderr: (line, context) => stderrLog('codex', context, line),
   },
   claude: {
-    id: 'claude', label: 'Claude', command: process.env.CLAUDE_CLI || 'claude',
+    id: 'claude', label: 'Claude', command: process.env.CLAUDE_CLI || 'claude', promptMode: 'argument',
     buildArgs: (prompt) => ['--print', '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions', '--no-session-persistence', prompt],
     formatCommand: (workspace) => `claude --print --output-format stream-json (cwd=${workspace})`,
     parseStdout: parseClaudeStdout,

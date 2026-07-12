@@ -14,15 +14,7 @@ python scripts/loop/loopctl.py <command>
 python scripts/loop/loopctl.py paths
 ```
 
-## 一轮 loop
-
-```bash
-RUN_TOKEN=$(python scripts/loop/loopctl.py run-begin --lease-minutes 120)
-python scripts/loop/loopctl.py pipeline-all --run-token "$RUN_TOKEN" --format jsonl
-python scripts/loop/loopctl.py run-end "$RUN_TOKEN"
-```
-
-`pipeline-all` 输出 JSONL envelope。产品化运行路径中，App 的逐个执行 runner 会按 `agent` 字段为每行单独启动一次项目设置中选择的 CLI（Cursor、Codex 或 Claude）；pipeline 调度不交给 CLI 内部 subagent。单个 agent 仍可在当前 delegation 内使用辅助 subagent 收集上下文。
+Run Lease、全量 Pipeline 派发和结束运行只由 Web App 与内部 Runner 管理，不提供 Agent CLI 命令。Runner 会按 delegation 的 `agent` 字段逐个启动项目设置中选择的 CLI（Cursor、Codex 或 Claude）。单个 agent 仍可在当前 delegation 内使用辅助 subagent 收集上下文。
 
 ## 常用命令
 
@@ -34,7 +26,6 @@ python scripts/loop/loopctl.py block-list
 python scripts/loop/loopctl.py block-release TASK-id
 python scripts/loop/loopctl.py task-update TASK-id --actor analyst-agent --status blocked --blocked-reason "..."
 python scripts/loop/loopctl.py task-rewind TASK-id --actor human --to analysis --story 2
-python scripts/loop/loopctl.py run-log --run-token "$RUN_TOKEN" --agent dev-agent --task-id TASK-id --pipeline dev --event tool-call --tool shell --message "运行测试"
 ```
 
-不要直接改 SQLite。所有 Task 状态、游标、blocked、release 和 rewind 都通过 CLI 或 UI command。
+不要直接改 SQLite。所有 Task 状态、游标、blocked、release 和 rewind 都通过 CLI 或 UI command。Agent 的运行过程不需要主动上报；Runner 会直接解析所选 CLI 的 stream-json / JSONL。

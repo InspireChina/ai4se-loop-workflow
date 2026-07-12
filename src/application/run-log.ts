@@ -53,8 +53,6 @@ function toolNameLabel(tool: string) {
 
 function summarizeCommand(command: string) {
   if (!command) return '';
-  if (command.includes(' pipeline-all ')) return '获取本轮 pipeline 委派';
-  if (command.includes(' run-log ')) return '写入 Agent 运行日志';
   if (command.includes(' task-get ') || command.includes(' task-show ')) return '查询 Task 详情';
   if (command.includes(' task-context-init ')) return '初始化数据库上下文';
   if (command.includes(' task-update ')) return '更新 Task 状态';
@@ -138,12 +136,15 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
     return { ...base, kind: 'dispatch', status: 'info', title, detail: parsed.body };
   }
   if (parsed.label === 'Agent') {
-    const title = parsed.body.includes('完成') ? `${meta.agent || 'Agent'} 完成` : parsed.body.includes('开始') ? `${meta.agent || 'Agent'} 开始` : `${meta.agent || 'Agent'} 进展`;
-    const status = parsed.body.includes('完成') ? 'success' : parsed.body.includes('阻塞') ? 'error' : 'running';
-    return { ...base, kind: 'agent', status, title, detail: parsed.body.replace(/^[^-]+-\s*/, '') };
+    const isComplete = parsed.body.startsWith('完成 ');
+    const isStart = parsed.body.startsWith('开始 ');
+    const isBlocked = parsed.body.startsWith('阻塞 ');
+    const title = isComplete ? `${meta.agent || 'Agent'} 完成` : isStart ? `${meta.agent || 'Agent'} 开始` : `${meta.agent || 'Agent'} 进展`;
+    const status = isComplete ? 'success' : isBlocked ? 'error' : 'running';
+    return { ...base, kind: 'agent', status, title, detail: stripLogPrefix(parsed.body) };
   }
   if (parsed.label === '工具调用' || parsed.label === '工具结果') {
-    return { ...base, kind: 'tool', status: parsed.label === '工具结果' ? 'success' : 'running', title: `${meta.agent || 'Agent'} ${parsed.label}`, detail: parsed.body.replace(/^[^-]+-\s*/, '') };
+    return { ...base, kind: 'tool', status: parsed.label === '工具结果' ? 'success' : 'running', title: `${meta.agent || 'Agent'} ${parsed.label}`, detail: stripLogPrefix(parsed.body) };
   }
   if (parsed.label === '执行器工具' || parsed.label === 'Cursor工具') {
     const detailBody = stripLogPrefix(parsed.body).replace(/^(?:调用|完成)：/, '');
@@ -179,11 +180,18 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
   if (parsed.label === '执行器事件' || parsed.label === 'Cursor事件') {
     if (parsed.body.includes('"type":"system"') || parsed.body.includes('"subtype":"completed"')) return null;
   }
+  if (parsed.label === '执行器警告') {
+    return { ...base, kind: 'executor', status: 'info', title: `${meta.executor || 'Agent'} 警告`, detail: parsed.body };
+  }
   if (parsed.label === '执行器诊断' || parsed.label === 'Cursor诊断') {
     return { ...base, kind: 'executor', status: 'info', title: `${meta.executor || 'Cursor'} 诊断`, detail: friendlyCursorDiagnostic(parsed.body) };
   }
   if (parsed.label === 'Cursor错误' && isCursorDiagnostic(parsed.body)) {
     return { ...base, kind: 'executor', status: 'info', title: 'Cursor 诊断', detail: friendlyCursorDiagnostic(parsed.body) };
+  }
+  if (parsed.label === '执行器错误' && (/Reading additional input from stdin/.test(parsed.body) || /codex_core_skills::loader: ignoring interface\.icon_(?:small|large)/.test(parsed.body))) return null;
+  if (parsed.label === '执行器错误' && /(?:^|\s)WARN(?:ING)?(?:\s|:)/i.test(parsed.body)) {
+    return { ...base, kind: 'executor', status: 'info', title: `${meta.executor || 'Agent'} 警告`, detail: parsed.body };
   }
   if (parsed.label === '执行器错误' || parsed.label === 'Cursor错误' || parsed.label === '错误') {
     return { ...base, kind: 'error', status: 'error', title: '运行错误', detail: parsed.body };

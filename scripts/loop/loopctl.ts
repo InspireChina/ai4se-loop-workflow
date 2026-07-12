@@ -4,12 +4,9 @@ import { readFile } from 'node:fs/promises';
 import {
   addQuestion,
   addStory,
-  appendStructuredRunLog,
-  beginRun,
   cancelTask,
   createLoopDispatch,
   createTask,
-  endRun,
   ensureLoopRuntimeFiles,
   getRunStatus,
   getTask,
@@ -18,7 +15,6 @@ import {
   initializeTaskContext,
   listDocuments,
   listTasks,
-  pipelineAllEnvelopes,
   pipelineForTask,
   releaseBlock,
   requireRunLease,
@@ -141,14 +137,6 @@ async function printBlockList(format: string) {
   }
 }
 
-async function printPipelineAll(args: Args) {
-  const runToken = requireValue(args, 'runToken');
-  await requireRunLease(runToken);
-  const format = value(args, 'format', 'jsonl');
-  const lines = await pipelineAllEnvelopes();
-  for (const line of lines) console.log(format === 'pipe' ? toPipeEnvelope(line) : toJsonlEnvelope(line));
-}
-
 async function printTaskPipeline(taskId: string, args: Args) {
   const detail = await getTask(taskId);
   if (!detail) throw new Error(`task not found: ${taskId}`);
@@ -206,33 +194,11 @@ async function main() {
     case 'status':
       await printStatus();
       return;
-    case 'run-begin': {
-      const token = await beginRun('loopctl', Number(optional(args, 'leaseMinutes') || 120));
-      console.log(token);
-      return;
-    }
-    case 'run-end':
-      await endRun(args._[0] || '', boolArg(args, 'force'));
-      console.log('loop run released');
-      return;
     case 'run-status': {
       const run = await getRunStatus();
       console.log(run?.active ? `active until ${run.leaseUntil}` : run ? 'expired' : 'idle');
       return;
     }
-    case 'run-log':
-      await appendStructuredRunLog({
-        leaseId: requireValue(args, 'runToken'),
-        agent: optional(args, 'agent'),
-        taskId: optional(args, 'taskId'),
-        storyIndex: optional(args, 'story'),
-        pipeline: optional(args, 'pipeline'),
-        event: optional(args, 'event'),
-        tool: optional(args, 'tool'),
-        message: requireValue(args, 'message'),
-      });
-      console.log('logged');
-      return;
     case 'task-add':
       const taskId = await createTask({
         actor: requireValue(args, 'actor') as Actor,
@@ -259,9 +225,6 @@ async function main() {
       return;
     case 'task-pipeline':
       await printTaskPipeline(args._[0], args);
-      return;
-    case 'pipeline-all':
-      await printPipelineAll(args);
       return;
     case 'dispatch': {
       const result = await createLoopDispatch(requireValue(args, 'runToken'));

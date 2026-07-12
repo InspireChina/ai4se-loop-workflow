@@ -3,10 +3,11 @@ import '../load-env.js';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
 import { getAgentExecutorId } from '../../src/application/project-settings';
-import { appendLoopRunLog, createLoopDispatch, endRun, getRunStatus, type DelegationEnvelope } from '../../src/application/tasks';
+import { appendLoopRunLog, createLoopDispatch, endRun, ensureDelegationOutcome, getRunStatus, type DelegationEnvelope } from '../../src/application/tasks';
 import { getAgentExecutor, type AgentExecutionContext, type AgentExecutor } from '../../src/infrastructure/agent-executor';
 import { startAgentRun, startDispatchRetryRun } from '../../src/infrastructure/agent-runner';
 import { paths } from '../../src/infrastructure/database';
+import { getLangfuseTelemetry } from '../../src/infrastructure/langfuse';
 
 const leaseId = process.argv[2];
 if (!leaseId) throw new Error('missing lease id');
@@ -26,11 +27,16 @@ function roleInstruction(delegation: DelegationEnvelope) {
         '拆分完成后，用 task-update 推进状态；不要只更新 total_stories 而不创建 stories 记录。',
       ].join('\n');
     case 'analyst-agent':
-      return [
+      return delegation.pipeline === 'resume' ? [
+        '你是 analyst-agent，正在处理人工确认后的恢复委派。',
+        '先读取 task-context 中的用户答复和 analysis_approved_index；根据答复更新当前 Story 的 analysis 文档。',
+        '确认完成后，使用 task-update 将 analysis_index 推进到当前 story_index，并写明下一步。不要再次创建同一个确认问题。',
+      ].join('\n') : [
         '你是 analyst-agent。',
         '目标：只分析当前 Story 的需求、验收标准、约束和实现方案。',
         '结论必须通过 document-upsert 写入 documents 表，kind 建议为 analysis。',
-        '需要人工确认时，使用 question-add --json 创建结构化问题并阻塞 Task；不要猜测关键业务决策。',
+        '分析完成后必须使用 question-add --json 创建结构化确认问题并阻塞 Task，等待人工确认；即使没有业务歧义，也必须询问用户是否确认当前分析方案。',
+        '不得只写 analysis 文档后退出，也不得在人工确认前推进 analysis_index。',
       ].join('\n');
     case 'repro-agent':
       return [
@@ -43,7 +49,9 @@ function roleInstruction(delegation: DelegationEnvelope) {
         '你是 dev-agent。',
         '目标：只实现当前 Story 所需代码变更。可以读取和修改 workspace repo 中的产品代码。',
         '关键实现说明通过 document-upsert 写入 documents 表，kind 建议为 dev_note。',
-        '完成后用 task-update 推进 dev_index；遇到阻塞时用 question-add 或 task-update blocked。',
+        '开始前检查 git status，识别并保护不属于当前 Story 的既有改动。',
+        '实现和测试完成后，只暂存当前 Story 相关文件并创建 Git commit；提交信息必须包含 Task ID 和 Story 编号。不得提交密钥、环境变量文件或其他任务的改动。',
+        '只有 Git commit 成功后才能用 task-update 推进 dev_index。若现有脏改动与本 Story 重叠、无法安全隔离提交，必须使用 question-add 阻塞 Task，不得跳过提交直接推进游标。',
       ].join('\n');
     case 'test-agent':
       return [
@@ -89,9 +97,9 @@ function buildPrompt(delegation: DelegationEnvelope) {
     '你是 Loop Engineering 的单步 Agent 执行器。',
     '',
     '外部 App 已经完成 pipeline 派发。你只执行下面这一条 delegation。',
-    '禁止调用 pipeline-all、run-begin、run-end。禁止调度或模拟其他 pipeline agent。',
+    'Pipeline 派发与 Run Lease 完全由外部 App 管理。禁止调度或模拟其他 pipeline agent。',
     '可以在当前 delegation 范围内使用辅助 subagent 收集上下文或做局部分析；辅助 subagent 不得处理其他 Task/Story/delegation，不得推进状态，最终写库和状态更新必须由当前 agent 负责。',
-    '完成当前 delegation 后，记录必要日志并退出；外部 runner 会决定下一步。',
+    '完成当前 delegation 后直接退出；外部 runner 会自动采集 CLI stream 日志并决定下一步。',
     '',
     `Run Token: ${leaseId}`,
     `Loop App Root: ${paths.appRoot}`,
@@ -133,11 +141,7 @@ function buildPrompt(delegation: DelegationEnvelope) {
     `${loopctl} document-upsert --json '{"taskId":"${delegation.taskId}","actor":"${delegation.agent}","kind":"${documentKind}","storyIndex":${delegation.storyIndex ?? 'null'},"title":"结论标题","format":"markdown","content":"结论正文"}'`,
     '常用 kind：context、story_split、analysis、repro、dev_note、test_result、review。',
     '',
-    '关键动作必须写入运行日志：',
-    `${loopctl} run-log --run-token ${leaseId} --agent ${delegation.agent} --task-id ${delegation.taskId} --story ${delegation.storyIndex ?? '-'} --pipeline ${delegation.pipeline} --event start --message "开始处理"`,
-    `${loopctl} run-log --run-token ${leaseId} --agent ${delegation.agent} --task-id ${delegation.taskId} --story ${delegation.storyIndex ?? '-'} --pipeline ${delegation.pipeline} --event tool-call --tool TOOL --message "准备调用工具"`,
-    `${loopctl} run-log --run-token ${leaseId} --agent ${delegation.agent} --task-id ${delegation.taskId} --story ${delegation.storyIndex ?? '-'} --pipeline ${delegation.pipeline} --event tool-result --tool TOOL --message "工具结果摘要"`,
-    `${loopctl} run-log --run-token ${leaseId} --agent ${delegation.agent} --task-id ${delegation.taskId} --story ${delegation.storyIndex ?? '-'} --pipeline ${delegation.pipeline} --event complete --message "处理完成"`,
+    '不要主动调用命令写运行日志。Runner 会直接解析 CLI 的 stream-json / JSONL 输出、工具事件、stderr 和退出码。',
     '',
     '需要人工确认时，不要写 90_questions.md / 90_analysis_questions.md / 91_test_questions.md。必须提交结构化 JSON 到 questions 表：',
     `${loopctl} question-add --json '{"taskId":"${delegation.taskId}","actor":"${delegation.agent}","kind":"${questionKind}","storyIndex":${delegation.storyIndex ?? 'null'},"blockedReason":"等待用户确认","blockTask":true,"questions":[{"title":"问题标题","question":"需要用户回答的具体问题","why":"为什么必须确认","recommendation":"建议答案，可为空"}]}'`,
@@ -187,6 +191,9 @@ async function runDelegation(delegation: DelegationEnvelope, executor: AgentExec
     storyIndex: delegation.storyIndex,
     pipeline: delegation.pipeline,
   };
+  const telemetryContext = { ...context, runToken: leaseId };
+  const telemetry = getLangfuseTelemetry();
+  const trace = await telemetry.startDelegationTrace(telemetryContext, { executor: executor.id, prompt });
   let lastOutputAt = Date.now();
   let timedOut = false;
   let logQueue = Promise.resolve();
@@ -200,60 +207,71 @@ async function runDelegation(delegation: DelegationEnvelope, executor: AgentExec
     await logQueue;
   };
 
-  await appendLoopRunLog(leaseId, `[Agent] 开始 agent=${delegation.agent} task=${delegation.taskId} story=${delegation.storyIndex ?? '-'} pipeline=${delegation.pipeline} - ${delegation.description}`);
-  await appendLoopRunLog(leaseId, `[执行器] executor=${executor.id} agent=${delegation.agent} - 启动 ${executor.label} CLI：${executor.formatCommand(paths.root)}`);
+  let traceStatus: 'completed' | 'failed' = 'failed';
+  try {
+    await appendLoopRunLog(leaseId, `[Agent] 开始 agent=${delegation.agent} task=${delegation.taskId} story=${delegation.storyIndex ?? '-'} pipeline=${delegation.pipeline} - ${delegation.description}`);
+    await appendLoopRunLog(leaseId, `[执行器] executor=${executor.id} agent=${delegation.agent} - 启动 ${executor.label} CLI：${executor.formatCommand(paths.root)}`);
+    const child = spawn(executor.command, args, {
+      cwd: paths.root,
+      env: process.env,
+      stdio: [executor.promptMode === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+    });
+    if (executor.promptMode === 'stdin') child.stdin?.end(prompt);
 
-  const child = spawn(executor.command, args, {
-    cwd: paths.root,
-    env: process.env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
+    let stdoutBuffer = '';
+    let stderrBuffer = '';
+    child.stdout?.on('data', (chunk: Buffer) => {
+      lastOutputAt = Date.now();
+      stdoutBuffer += chunk.toString('utf8');
+      const lines = stdoutBuffer.split(/\r?\n/);
+      stdoutBuffer = lines.pop() || '';
+      for (const line of lines.filter(Boolean)) enqueueLog(executor.parseStdout(line, context));
+    });
+    child.stderr?.on('data', (chunk: Buffer) => {
+      lastOutputAt = Date.now();
+      stderrBuffer += chunk.toString('utf8');
+      const lines = stderrBuffer.split(/\r?\n/);
+      stderrBuffer = lines.pop() || '';
+      for (const line of lines.filter(Boolean)) enqueueLog(executor.parseStderr(line, context));
+    });
 
-  let stdoutBuffer = '';
-  let stderrBuffer = '';
-  child.stdout.on('data', (chunk: Buffer) => {
-    lastOutputAt = Date.now();
-    stdoutBuffer += chunk.toString('utf8');
-    const lines = stdoutBuffer.split(/\r?\n/);
-    stdoutBuffer = lines.pop() || '';
-    for (const line of lines.filter(Boolean)) enqueueLog(executor.parseStdout(line, context));
-  });
-  child.stderr.on('data', (chunk: Buffer) => {
-    lastOutputAt = Date.now();
-    stderrBuffer += chunk.toString('utf8');
-    const lines = stderrBuffer.split(/\r?\n/);
-    stderrBuffer = lines.pop() || '';
-    for (const line of lines.filter(Boolean)) enqueueLog(executor.parseStderr(line, context));
-  });
+    const terminate = async (reason: string) => {
+      if (timedOut) return;
+      timedOut = true;
+      await appendLoopRunLog(leaseId, `[执行器] executor=${executor.id} agent=${delegation.agent} - ${reason}，正在终止`);
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        if (!child.killed) child.kill('SIGKILL');
+      }, 5000).unref();
+    };
 
-  const terminate = async (reason: string) => {
-    if (timedOut) return;
-    timedOut = true;
-    await appendLoopRunLog(leaseId, `[执行器] executor=${executor.id} agent=${delegation.agent} - ${reason}，正在终止`);
-    child.kill('SIGTERM');
-    setTimeout(() => {
-      if (!child.killed) child.kill('SIGKILL');
-    }, 5000).unref();
-  };
+    const maxTimer = setTimeout(() => void terminate(`超过最大运行时间 ${Math.round(maxRuntimeMs / 1000)} 秒`), maxRuntimeMs);
+    const idleTimer = setInterval(() => {
+      if (Date.now() - lastOutputAt > idleTimeoutMs) void terminate(`超过空闲时间 ${Math.round(idleTimeoutMs / 1000)} 秒`);
+    }, Math.min(30000, idleTimeoutMs));
 
-  const maxTimer = setTimeout(() => void terminate(`超过最大运行时间 ${Math.round(maxRuntimeMs / 1000)} 秒`), maxRuntimeMs);
-  const idleTimer = setInterval(() => {
-    if (Date.now() - lastOutputAt > idleTimeoutMs) void terminate(`超过空闲时间 ${Math.round(idleTimeoutMs / 1000)} 秒`);
-  }, Math.min(30000, idleTimeoutMs));
-
-  const exitCode = await new Promise<number | null>((resolve, reject) => {
-    child.once('error', reject);
-    child.once('exit', resolve);
-  });
-  clearTimeout(maxTimer);
-  clearInterval(idleTimer);
-  if (stdoutBuffer.trim()) enqueueLog(executor.parseStdout(stdoutBuffer, context));
-  if (stderrBuffer.trim()) enqueueLog(executor.parseStderr(stderrBuffer, context));
-  await flushLogs();
-  await appendLoopRunLog(leaseId, `[执行器] executor=${executor.id} agent=${delegation.agent} - ${executor.label} CLI 已退出 code=${exitCode ?? 'signal'}`);
-  if (exitCode && exitCode !== 0) await appendLoopRunLog(leaseId, `[错误] ${delegation.agent} 执行失败 code=${exitCode}`);
-  else await appendLoopRunLog(leaseId, `[Agent] 完成 agent=${delegation.agent} task=${delegation.taskId} story=${delegation.storyIndex ?? '-'} pipeline=${delegation.pipeline} - 处理完成`);
-  return exitCode ?? 1;
+    let exitCode: number | null;
+    try {
+      exitCode = await new Promise<number | null>((resolve, reject) => {
+        child.once('error', reject);
+        child.once('exit', resolve);
+      });
+    } finally {
+      clearTimeout(maxTimer);
+      clearInterval(idleTimer);
+    }
+    if (stdoutBuffer.trim()) enqueueLog(executor.parseStdout(stdoutBuffer, context));
+    if (stderrBuffer.trim()) enqueueLog(executor.parseStderr(stderrBuffer, context));
+    await flushLogs();
+    await appendLoopRunLog(leaseId, `[执行器] executor=${executor.id} agent=${delegation.agent} - ${executor.label} CLI 已退出 code=${exitCode ?? 'signal'}`);
+    if (exitCode && exitCode !== 0) await appendLoopRunLog(leaseId, `[错误] ${delegation.agent} 执行失败 code=${exitCode}`);
+    else await appendLoopRunLog(leaseId, `[Agent] 完成 agent=${delegation.agent} task=${delegation.taskId} story=${delegation.storyIndex ?? '-'} pipeline=${delegation.pipeline} - 处理完成`);
+    traceStatus = exitCode === 0 ? 'completed' : 'failed';
+    return exitCode ?? 1;
+  } finally {
+    await trace.end({ status: traceStatus });
+    await telemetry.flush();
+  }
 }
 
 async function main() {
@@ -270,6 +288,18 @@ async function main() {
     await appendLoopRunLog(leaseId, `[运行] 执行第 ${index + 1}/${dispatch.delegations.length} 个 agent：${delegation.agent}`);
     const exitCode = await runDelegation(delegation, executor);
     if (exitCode !== 0) break;
+    const outcome = await ensureDelegationOutcome(delegation);
+    if (outcome === 'approval-created') {
+      await appendLoopRunLog(leaseId, `[运行] ${delegation.agent} 未创建分析确认门禁，Runner 已自动补充并阻塞 Task`);
+    }
+    if (outcome === 'analysis-advanced') {
+      await appendLoopRunLog(leaseId, `[运行] 人工确认已生效，Runner 已推进 Story-${delegation.storyIndex} analysis_index`);
+    }
+    if (outcome === 'missing-analysis') {
+      await appendLoopRunLog(leaseId, `[错误] ${delegation.agent} 未写入 Story-${delegation.storyIndex} 分析文档，停止本轮以避免重复执行`);
+      await endRun(leaseId, true, { stopRunner: false });
+      return;
+    }
   }
   await scheduleNextLoop();
 }

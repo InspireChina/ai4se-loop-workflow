@@ -1,7 +1,7 @@
 'use server';
 
 import { redirect } from 'next/navigation';
-import { setAgentExecutorId } from '../src/application/project-settings';
+import { normalizeWorkspaceRoot, setAgentExecutorId, setWorkspaceRoot } from '../src/application/project-settings';
 import {
   addQuestion,
   addStory,
@@ -11,12 +11,14 @@ import {
   createLoopDispatch,
   endRun,
   createTask,
+  getRunStatus,
   initializeTaskContext,
   releaseBlock,
   rewindTask,
   transitionTask,
 } from '../src/application/tasks';
 import { startAgentRun, startDispatchRetryRun } from '../src/infrastructure/agent-runner';
+import { paths } from '../src/infrastructure/database';
 
 export async function createTaskAction(formData: FormData) {
   const taskId = await createTask({
@@ -108,8 +110,16 @@ export async function startLoopRunAction(formData?: FormData) {
   redirect(String(formData?.get('redirectTo') || '/'));
 }
 
-export async function saveProjectSettingsAction(formData: FormData) {
+export async function saveAgentExecutorAction(formData: FormData) {
   await setAgentExecutorId(formData.get('agentExecutor'));
+  redirect('/settings');
+}
+
+export async function changeWorkspaceRootAction(formData: FormData) {
+  const nextRoot = normalizeWorkspaceRoot(formData.get('workspaceRoot'));
+  const currentRoot = paths.root;
+  if (nextRoot !== currentRoot && (await getRunStatus())?.active) throw new Error('请先结束当前运行，再切换工作区');
+  setWorkspaceRoot(nextRoot);
   redirect('/settings');
 }
 

@@ -18,7 +18,7 @@ async function startDetachedRunner(leaseId: string, scriptName: string) {
     env: {
       ...process.env,
       LOOP_APP_ROOT: paths.appRoot,
-      LOOP_WORKSPACE_ROOT: paths.root,
+      LOOP_WORKSPACE_ROOT_OVERRIDE: paths.root,
     },
   });
   child.unref();

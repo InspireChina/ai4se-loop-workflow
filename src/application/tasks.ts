@@ -130,33 +130,6 @@ export async function readLoopRunLogChunk(leaseId: string, afterId = 0): Promise
   };
 }
 
-export async function appendStructuredRunLog(input: {
-  leaseId: string;
-  agent?: string | null;
-  taskId?: string | null;
-  storyIndex?: string | number | null;
-  pipeline?: string | null;
-  event?: string | null;
-  tool?: string | null;
-  message: string;
-}) {
-  await requireRunLease(input.leaseId);
-  const event = input.event || 'message';
-  const agent = input.agent || '-';
-  const task = input.taskId || '-';
-  const story = input.storyIndex ?? '-';
-  const pipeline = input.pipeline || '-';
-  const prefix = event === 'tool-call' ? '[工具调用]'
-    : event === 'tool-result' ? '[工具结果]'
-      : event === 'error' ? '[错误]'
-        : event === 'complete' ? '[Agent] 完成'
-          : event === 'blocked' ? '[Agent] 阻塞'
-            : event === 'start' ? '[Agent] 开始'
-              : '[Agent] 进展';
-  const tool = input.tool ? ` tool=${input.tool}` : '';
-  await appendLoopRunLog(input.leaseId, `${prefix} agent=${agent} task=${task} story=${story} pipeline=${pipeline}${tool} - ${input.message}`);
-}
-
 function appendActiveRunLog(db: Awaited<ReturnType<typeof databaseConnection>>, message: string) {
   const run = getRunStatusFromDb(db);
   if (!run?.active) return;
@@ -754,6 +727,48 @@ export async function pipelineForTask(taskId: string): Promise<Delegation[]> {
   return line ? [line] : [];
 }
 
+export async function ensureDelegationOutcome(delegation: Pick<DelegationEnvelope, 'agent' | 'pipeline' | 'storyIndex' | 'taskId'>): Promise<'ok' | 'approval-created' | 'analysis-advanced' | 'missing-analysis'> {
+  if (delegation.agent !== 'analyst-agent' || !delegation.storyIndex) return 'ok';
+  const db = await databaseConnection();
+  const task = fetchTask(db, delegation.taskId);
+  if (!task) throw new Error(`task not found: ${delegation.taskId}`);
+  if (task.agile_status === 'blocked') return 'ok';
+  if (delegation.pipeline === 'resume') {
+    if (task.analysis_index >= delegation.storyIndex) return 'ok';
+    if (task.analysis_approved_index < delegation.storyIndex) return 'ok';
+    await updateTask(delegation.taskId, 'analyst-agent', {
+      analysis_index: delegation.storyIndex,
+      next_step: `Story-${delegation.storyIndex} 分析已确认，等待下一阶段`,
+    });
+    return 'analysis-advanced';
+  }
+  if (task.analysis_index >= delegation.storyIndex) return 'ok';
+  const analysis = db.prepare(`
+    SELECT document_id FROM documents
+    WHERE task_id = ? AND story_index = ? AND kind = 'analysis'
+  `).get(delegation.taskId, delegation.storyIndex) as { document_id: string } | undefined;
+  if (!analysis) return 'missing-analysis';
+  const existing = db.prepare(`
+    SELECT question_id FROM questions
+    WHERE task_id = ? AND story_index = ? AND kind = 'analysis' AND status = 'pending'
+    LIMIT 1
+  `).get(delegation.taskId, delegation.storyIndex) as { question_id: string } | undefined;
+  if (existing) return 'ok';
+  await addQuestion({
+    taskId: delegation.taskId,
+    actor: 'analyst-agent',
+    kind: 'analysis',
+    storyIndex: delegation.storyIndex,
+    title: `确认 Story-${delegation.storyIndex} 分析方案`,
+    question: `请确认 Story-${delegation.storyIndex} 的分析方案是否可以进入开发；如需调整，请在答复中说明。`,
+    why: 'Story 分析必须经过人工确认后才能推进 analysis_index。',
+    recommendation: '确认当前方案后继续。',
+    blockedReason: `等待确认 Story-${delegation.storyIndex} 分析方案`,
+    blockTask: true,
+  });
+  return 'approval-created';
+}
+
 export async function pipelineAll(): Promise<Delegation[]> {
   const db = await databaseConnection();
   const tasks = db.prepare(`${taskSelect} WHERE agile_status NOT IN ('done', 'cancelled') ORDER BY updated_at`).all() as Task[];
@@ -877,7 +892,7 @@ export async function getRunStatus(): Promise<RunStatus> {
 
 export async function requireRunLease(leaseId: string) {
   const run = await getRunStatus();
-  if (!run || run.leaseId !== leaseId) throw new Error('invalid or inactive run token; call run-begin first');
+  if (!run || run.leaseId !== leaseId) throw new Error('invalid or inactive run token; start the loop from the UI first');
   if (!run.active) throw new Error('run lease expired; start a new loop run');
 }
 

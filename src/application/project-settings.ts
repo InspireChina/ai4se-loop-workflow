@@ -1,7 +1,9 @@
 import { revalidatePath } from 'next/cache';
+import { realpathSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { z } from 'zod';
 import { AGENT_EXECUTORS, type AgentExecutorId } from '../domain/agent-executor';
-import { databaseConnection } from '../infrastructure/database';
+import { databaseConnection, setConfiguredWorkspaceRoot } from '../infrastructure/database';
 
 export const AGENT_EXECUTOR_OPTIONS: ReadonlyArray<{
   id: AgentExecutorId;
@@ -14,6 +16,23 @@ export const AGENT_EXECUTOR_OPTIONS: ReadonlyArray<{
 ];
 
 const executorSchema = z.enum(AGENT_EXECUTORS);
+const workspaceRootSchema = z.string().trim().min(1, '请输入工作区根目录');
+
+export function normalizeWorkspaceRoot(input: unknown) {
+  const requested = resolve(workspaceRootSchema.parse(input));
+  let root: string;
+  try { root = realpathSync(requested); }
+  catch { throw new Error(`工作区根目录不存在：${requested}`); }
+  if (!statSync(root).isDirectory()) throw new Error(`工作区根目录不是文件夹：${root}`);
+  return root;
+}
+
+export function setWorkspaceRoot(input: unknown) {
+  const root = normalizeWorkspaceRoot(input);
+  setConfiguredWorkspaceRoot(root);
+  try { revalidatePath('/', 'layout'); } catch { /* CLI usage has no request context. */ }
+  return root;
+}
 
 export async function getAgentExecutorId(): Promise<AgentExecutorId> {
   const db = await databaseConnection();
