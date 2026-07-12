@@ -214,6 +214,8 @@ main{padding:28px 20px}
 .question{margin-bottom:0}
 .question-list{display:grid;gap:12px}
 .question-title .badge{flex:none}
+.question form{display:grid;gap:12px;margin-top:14px}
+.question form .button{justify-self:start}
 .release-block{margin-top:12px}
 .timeline{padding:0 16px}
 .timeline>div{grid-template-columns:14px minmax(0,1fr) auto}

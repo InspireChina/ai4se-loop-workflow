@@ -39,7 +39,7 @@ V1 的产品术语沿用现有系统，不采用 prototype 的新术语替代已
 - 关键命令：`RunBegin`、`PipelineAll`、`RunEnd`、`RunLog`
 - 依赖：Task Management 的只读状态与 Resource Management 的可用性
 
-V1 的持续 loop 由 App runner 驱动。若本轮有委派，启动 Cursor CLI；若没有委派，等待后继续重试。
+V1 的持续 loop 由 App runner 驱动。若本轮有委派，runner 按 delegation 逐个启动 Cursor CLI；每次 Cursor CLI 只执行一个明确 agent，不依赖 Cursor 内部 subagent。若没有委派，等待后继续重试。
 
 ### 2.3 Question and Approval
 
@@ -164,6 +164,7 @@ classDiagram
 | `BlockRelease` | Question and Approval + Task Management | human | 确认全部问题已回答，恢复 Task 并设置 resume pending。 |
 | `RunBegin` / `RunEnd` | Loop Orchestration | UI / runner | 管理 Run Lease。 |
 | `PipelineAll` | Loop Orchestration | UI / runner | 只计算 Delegation，不改变 Task。 |
+| `RunDelegation` | Loop Orchestration | runner | 为单条 Delegation 启动一次 Cursor CLI。 |
 
 ## 6. SQLite 表的职责
 

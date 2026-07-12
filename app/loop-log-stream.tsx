@@ -107,8 +107,8 @@ function buildLogTree(events: ParsedRunLog[]) {
   const roots: LogTreeNode[] = [];
   const cursorRoot: LogTreeNode = {
     id: 'cursor-agent-root',
-    title: 'Cursor Agent',
-    detail: 'Cursor CLI 执行器',
+    title: 'Cursor CLI',
+    detail: '逐个执行 Agent',
     status: 'running',
     kind: 'group',
     timestamp: '',

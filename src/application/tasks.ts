@@ -885,7 +885,7 @@ export async function ensureLoopRuntimeFiles() {
   await databaseConnection();
 }
 
-export async function createLoopDispatch(leaseId: string, options: { includeRunHeader?: boolean } = {}) {
+export async function createLoopDispatch(leaseId: string, options: { includeRunHeader?: boolean; logDelegations?: boolean } = {}) {
   await requireRunLease(leaseId);
   if (options.includeRunHeader !== false) {
     await appendLoopRunLog(leaseId, `[运行] 开始本轮 lease=${leaseId}`);
@@ -893,12 +893,14 @@ export async function createLoopDispatch(leaseId: string, options: { includeRunH
     await appendLoopRunLog(leaseId, `[运行] 数据目录=${paths.dataDir}`);
   }
   const lines = await pipelineAllEnvelopes();
-  await appendLoopRunLog(leaseId, `[派发] 本轮生成 ${lines.length} 个 agent`);
-  for (const [index, line] of lines.entries()) {
-    await appendLoopRunLog(leaseId, `[派发] #${index + 1} agent=${line.agent} pipeline=${line.pipeline} task=${line.taskId} story=${line.storyIndex ?? '-'} resource=${line.resource}`);
-    await appendLoopRunLog(leaseId, `[派发]      ${line.description}`);
+  if (options.logDelegations !== false) {
+    await appendLoopRunLog(leaseId, `[派发] 本轮生成 ${lines.length} 个 agent`);
+    for (const [index, line] of lines.entries()) {
+      await appendLoopRunLog(leaseId, `[派发] #${index + 1} agent=${line.agent} pipeline=${line.pipeline} task=${line.taskId} story=${line.storyIndex ?? '-'} resource=${line.resource}`);
+      await appendLoopRunLog(leaseId, `[派发]      ${line.description}`);
+    }
+    if (!lines.length) await appendLoopRunLog(leaseId, '[派发] 当前没有可执行委派，等待新 Task 或状态变化');
   }
-  if (!lines.length) await appendLoopRunLog(leaseId, '[派发] 当前没有可执行委派，等待新 Task 或状态变化');
   return { runDir: 'database', delegations: lines };
 }
 

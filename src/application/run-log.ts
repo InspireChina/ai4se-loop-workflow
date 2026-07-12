@@ -25,6 +25,12 @@ function compact(value: string, limit = 220) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
+function stripLogPrefix(body: string) {
+  const dashIndex = body.indexOf(' - ');
+  if (dashIndex >= 0) return body.slice(dashIndex + 3);
+  return body.replace(/^.*?\s-\s*/, '').replace(/^.*?：/, '');
+}
+
 function isCursorDiagnostic(text: string) {
   return /^cursor-retrieval:\s+tracing to\b/.test(text.trim());
 }
@@ -50,7 +56,7 @@ function summarizeCommand(command: string) {
   if (command.includes(' pipeline-all ')) return '获取本轮 pipeline 委派';
   if (command.includes(' run-log ')) return '写入 Agent 运行日志';
   if (command.includes(' task-get ') || command.includes(' task-show ')) return '查询 Task 详情';
-  if (command.includes(' task-context-init ')) return '初始化本地上下文';
+  if (command.includes(' task-context-init ')) return '初始化数据库上下文';
   if (command.includes(' task-update ')) return '更新 Task 状态';
   if (command.includes(' paths')) return '查看工作区路径配置';
   if (command.includes('--help')) return '查看 loopctl 可用命令';
@@ -139,7 +145,8 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
     return { ...base, kind: 'tool', status: parsed.label === '工具结果' ? 'success' : 'running', title: `${meta.agent || 'Agent'} ${parsed.label}`, detail: parsed.body.replace(/^[^-]+-\s*/, '') };
   }
   if (parsed.label === 'Cursor工具') {
-    const extracted = extractToolEventFromJson(parsed.body);
+    const detailBody = stripLogPrefix(parsed.body);
+    const extracted = extractToolEventFromJson(detailBody);
     if (extracted) {
       return {
         ...base,
@@ -152,11 +159,11 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
     }
     const isDone = parsed.body.includes('完成');
     const tool = meta.tool || '工具';
-    return { ...base, kind: 'tool', status: isDone ? 'success' : 'running', title: `${isDone ? '完成' : '调用'} ${tool}`, detail: parsed.body.replace(/^[^-]+-\s*/, '') };
+    return { ...base, kind: 'tool', status: isDone ? 'success' : 'running', title: `${isDone ? '完成' : '调用'} ${tool}`, detail: detailBody };
   }
   if (parsed.label === 'Cursor输出') {
     if (parsed.body.includes('type=user')) return null;
-    const detail = parsed.body.replace(/^type=\w+\s*-\s*/, '');
+    const detail = stripLogPrefix(parsed.body).replace(/^type=\w+\s*-\s*/, '');
     if (detail.trim().startsWith('{')) {
       try {
         const content = JSON.parse(detail).content as { text?: string }[] | undefined;
@@ -181,7 +188,7 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
     return { ...base, kind: 'error', status: 'error', title: '运行错误', detail: parsed.body };
   }
   if (parsed.label === 'Cursor') {
-    return { ...base, kind: 'cursor', status: parsed.body.includes('退出') ? 'success' : 'info', title: 'Cursor Agent', detail: parsed.body };
+    return { ...base, kind: 'cursor', status: parsed.body.includes('退出') ? 'success' : 'info', title: 'Cursor CLI', detail: parsed.body };
   }
   return { ...base, kind: 'raw', status: 'info', title: parsed.label, detail: parsed.body };
 }

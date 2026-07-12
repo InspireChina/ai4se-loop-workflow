@@ -1,40 +1,46 @@
 # /loop
 
-你是 Loop Engineering 的调度入口。不要直接改 SQLite；所有状态读取和写入都必须通过：
+这是手动调试入口，不是产品化 App 的主要运行路径。
+
+产品化运行路径由 App/runner 调度：
+
+1. App 创建 run lease。
+2. App 调用 `pipeline-all` / `createLoopDispatch` 得到本轮 delegation。
+3. runner 按 delegation 逐个启动 Cursor CLI。
+4. 每次 Cursor CLI 只执行一个明确的 agent / task / story / pipeline。
+
+因此，手动使用 `/loop` 时也必须遵守同样边界：不要依赖 Cursor 内部 subagent，不要让一个总控 agent 自行分发多个 agent。
+
+## 单步执行原则
+
+所有状态读取和写入都必须通过：
 
 ```bash
 python scripts/loop/loopctl.py ...
 ```
 
-## 固定流程
-
-1. 领取本轮租约：
+先获取本轮委派：
 
 ```bash
 RUN_TOKEN=$(python scripts/loop/loopctl.py run-begin --lease-minutes 120)
-```
-
-如果提示 busy，停止本轮并向用户说明已有 loop run 正在执行。
-
-2. 获取本轮委派：
-
-```bash
 python scripts/loop/loopctl.py pipeline-all --run-token "$RUN_TOKEN" --format jsonl
 ```
 
-3. 对每一行 JSONL：
+然后选择其中一行 JSONL，只执行这一行里的 `agent`、`task_id`、`story_index`、`pipeline` 和 `description`。不要处理其他行，不要启动子 agent。
 
-- `agent=backlog-agent`：通过 `task-context` 收集上下文，必要时执行 `task-context-init --actor backlog-agent`，再用 `task-update` 推进到 `in plan`、`in repro` 或 `blocked`。
-- `agent=story-splitter-agent`：拆分 Story，使用 `story-add --actor story-splitter-agent` 创建 Story；拆分完成后用 `task-update` 推进状态。
-- `agent=analyst-agent`：处理指定 Story 的 requirements/plan；结论必须用 `document-upsert` 写入数据库；需要人工确认时调用 `question-add --json` 创建结构化问题并进入 `blocked`。
-- `agent=repro-agent`：复现 Bug 并用 `document-upsert` 写入复现材料。
-- `agent=dev-agent`：实现指定 Story，完成后推进 `dev_index`。
-- `agent=test-agent`：黑盒测试指定 Story，把测试结果用 `document-upsert` 写入数据库，完成后推进 `test_index` 或回流。
-- `agent=review-agent`：审查完整 Task，把 review 结论用 `document-upsert` 写入数据库；需要人工批准时调用 `question-add --json` 创建 review 问题并进入 `blocked`。
+## Agent 职责
 
-每个 subagent 必须使用 JSONL envelope 中的 `task_id`、`story_index`、`pipeline` 和 `description`。不要依赖 `work_dir`、`.project` 或任何旧 Markdown 工作目录。
+- `backlog-agent`：通过 `task-context` 收集上下文，必要时执行 `task-context-init --actor backlog-agent`，再用 `task-update` 推进到 `in plan`、`in repro` 或 `blocked`。
+- `story-splitter-agent`：拆分 Story，使用 `story-add --actor story-splitter-agent` 创建 Story；拆分完成后用 `task-update` 推进状态。
+- `analyst-agent`：处理指定 Story 的需求和方案；结论用 `document-upsert` 写入数据库；需要人工确认时调用 `question-add --json`。
+- `repro-agent`：复现 Bug，并用 `document-upsert` 写入复现材料。
+- `dev-agent`：实现指定 Story，完成后推进 `dev_index`。
+- `test-agent`：黑盒测试指定 Story，把测试结果用 `document-upsert` 写入数据库，完成后推进 `test_index` 或回流。
+- `review-agent`：审查完整 Task，把 review 结论用 `document-upsert` 写入数据库；需要人工批准时调用 `question-add --json`。
 
-读取 Task 上下文必须通过：
+## 数据库上下文
+
+读取上下文：
 
 ```bash
 python scripts/loop/loopctl.py task-context --task-id TASK-id
@@ -42,27 +48,17 @@ python scripts/loop/loopctl.py document-list --task-id TASK-id
 python scripts/loop/loopctl.py document-get --task-id TASK-id --kind analysis --story 1
 ```
 
-写入业务文档必须通过 `document-upsert`。数据库文档格式：
-
-```json
-{
-  "taskId": "TASK-id",
-  "actor": "analyst-agent",
-  "kind": "analysis",
-  "storyIndex": 1,
-  "title": "Story-1 Analysis",
-  "format": "markdown",
-  "content": "Markdown 正文"
-}
-```
-
-调用示例：
+写入业务文档：
 
 ```bash
 python scripts/loop/loopctl.py document-upsert --json '{"taskId":"TASK-id","actor":"analyst-agent","kind":"analysis","storyIndex":1,"title":"Story-1 Analysis","format":"markdown","content":"结论正文"}'
 ```
 
-每个 subagent 还必须把关键过程写入运行日志。日志入口：
+不要读写 `.project`、`90_questions.md`、`90_analysis_questions.md`、`91_test_questions.md` 或 `06_review.md`。
+
+## 运行日志
+
+每个 agent 必须把关键过程写入运行日志：
 
 ```bash
 python scripts/loop/loopctl.py run-log --run-token "$RUN_TOKEN" --agent AGENT --task-id TASK-id --pipeline PIPELINE --event start --message "开始处理"
@@ -71,49 +67,12 @@ python scripts/loop/loopctl.py run-log --run-token "$RUN_TOKEN" --agent AGENT --
 python scripts/loop/loopctl.py run-log --run-token "$RUN_TOKEN" --agent AGENT --task-id TASK-id --pipeline PIPELINE --event complete --message "处理完成"
 ```
 
-至少记录：subagent 开始、重要工具调用、工具结果摘要、状态写入、完成、阻塞或失败。不要把大段正文写入日志，只写摘要和数据库 document kind / story。
-
 ## 人工确认问题
 
-不要写 `90_questions.md`、`90_analysis_questions.md` 或 `91_test_questions.md`。产品化版本的问题全部线上化，必须通过 CLI 提交结构化 JSON，系统会直接写入 `questions` 表，前端会在 Task 详情页展示。
-
-JSON 格式：
-
-```json
-{
-  "taskId": "TASK-id",
-  "actor": "analyst-agent",
-  "kind": "analysis",
-  "storyIndex": 1,
-  "blockedReason": "等待用户确认业务规则",
-  "blockTask": true,
-  "questions": [
-    {
-      "title": "问题标题",
-      "question": "需要用户回答的具体问题",
-      "why": "为什么必须确认",
-      "recommendation": "建议答案，可为空"
-    }
-  ]
-}
-```
-
-调用示例：
+问题必须线上化：
 
 ```bash
 python scripts/loop/loopctl.py question-add --json '{"taskId":"TASK-id","actor":"analyst-agent","kind":"analysis","storyIndex":1,"blockedReason":"等待用户确认业务规则","blockTask":true,"questions":[{"title":"问题标题","question":"需要用户回答的具体问题","why":"为什么必须确认","recommendation":"建议答案，可为空"}]}'
 ```
 
-4. 所有委派完成后，不要主动释放租约。
-
-Loop Engineering 产品化版本是持续 loop：App/runner 会在本轮 agent 完成后等待一段时间并继续下一轮派发。`run-end` 只用于用户在 UI 点击“结束本轮”或人工运维停止持续 loop。
-
-如果中途失败，不要强制释放；向用户报告失败点和当前 token。只有确认需要人工停止整个持续 loop，且没有 subagent 继续执行时，才允许人工运维执行：
-
-```bash
-python scripts/loop/loopctl.py run-end "$RUN_TOKEN" --force
-```
-
-## 汇报
-
-汇报时展示 Task 标题、pipeline、agent、Story 和结果。不要展示内部实现细节，除非用户要求。
+完成单条 delegation 后停止。持续 loop 和下一条 delegation 由外部 runner 处理。

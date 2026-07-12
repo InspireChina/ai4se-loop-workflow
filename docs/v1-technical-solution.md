@@ -26,8 +26,9 @@ flowchart LR
   Web --> App["Server Action / Route Handler\n应用层与权限校验"]
   App --> Domain["领域层\nTask / Story / Question / Document / Approval"]
   App --> DB[("SQLite\napp data / repo hash / loop-ui.db")]
-  Runner["Cursor CLI Runner"] --> App
-  Agent["Cursor Agent"] --> CLI["loopctl commands"]
+  Runner["逐个执行 Runner"] --> App
+  Runner --> Agent["单步 Cursor CLI Agent\n每次只处理一个 delegation"]
+  Agent --> CLI["loopctl commands"]
   CLI --> App
   Agent --> Repo["Workspace Repo\n只做代码读写"]
 ```
@@ -45,7 +46,7 @@ flowchart LR
 | 数据库 | SQLite | 每个 workspace root 独立数据库：`data/<repo-root-short-hash>/loop-ui.db`。 |
 | SQLite 访问 | `better-sqlite3` | 本地同步事务模型简单可控。 |
 | 数据库迁移 | Umzug + 顺序 SQL migration | `schema_migrations` 记录已执行 migration，提供类 Flyway 的顺序变更。 |
-| Agent 执行 | Cursor CLI `cursor agent --print --output-format stream-json` | App 启动 runner，runner 解析 stream-json 为用户友好的运行日志。 |
+| Agent 执行 | Cursor CLI `cursor agent --print --output-format stream-json` | App 启动逐个执行 runner；runner 对每个 delegation 单独启动一次 Cursor CLI，并解析 stream-json 为用户友好日志。 |
 | Agent 上下文 | `loopctl` 命令 | Agent 通过 `task-context`、`document-*`、`question-add` 获取和写入结构化上下文。 |
 
 代码仓库结构：
@@ -75,7 +76,19 @@ prototype/              # 历史资料与 prototype，不参与运行
 | 运行日志 | SQLite `run_logs` | runner 逐行写入，运行面板通过 SSE 按 `log_id` 增量读取。 |
 | 代码变更 | Workspace repo | dev-agent 仍在用户选择的 repo 中修改代码。 |
 
-### 4.2 写入规则
+### 4.2 Agent 执行边界
+
+App/runner 是唯一调度者。Runner 调用 `pipeline-all` / `createLoopDispatch` 得到本轮 delegation 后，按顺序逐条启动 Cursor CLI：
+
+```text
+delegation-1 -> cursor agent(prompt for backlog-agent)
+delegation-2 -> cursor agent(prompt for analyst-agent)
+delegation-3 -> cursor agent(prompt for dev-agent)
+```
+
+每次 Cursor CLI 只收到当前 delegation 的 `task_id`、`agent`、`pipeline`、`story_index` 和目标描述。Prompt 明确禁止调用 `pipeline-all`、启动子 agent、模拟其他 agent 或释放 run lease。
+
+### 4.3 写入规则
 
 1. UI、runner、agent 都不能直接改 SQLite；必须通过 application command 或 `loopctl`。
 2. Agent 不再写 `.project`、`90_questions.md`、`06_review.md` 或工作文档 Markdown。
@@ -155,12 +168,12 @@ python scripts/loop/loopctl.py question-add --json '{
 4. 将 Questions 线上化到 `questions` 表。
 5. 将业务文档线上化到 `documents` 表，并扩展 agent 命令替代读写文件。
 6. 将运行日志线上化到 `run_logs` 表。
-7. 更新 Cursor runner prompt，确保 agent 通过 `loopctl` 获取上下文和提交结果。
+7. 更新 Cursor runner prompt，使每次 Cursor CLI 只执行单个 delegation，不依赖 Cursor 内部 subagent 能力。
 
 ## 8. V1 验收标准
 
 - 切换 workspace root 后，使用独立 `data/<repo-hash>/loop-ui.db`。
-- 新建 Task 后可以进入持续 loop，并由 pipeline 派发 agent。
+- 新建 Task 后可以进入持续 loop，并由外部 runner 逐个执行 pipeline agent。
 - Agent 的问题写入 `questions` 表，Task 详情页可展示和回答。
 - Agent 的分析、复现、测试、review 文档写入 `documents` 表，Task 详情页可查看正文。
 - 运行面板从 `run_logs` 表显示 Cursor CLI 的用户友好日志，能观察 agent、tool call、子过程和错误。

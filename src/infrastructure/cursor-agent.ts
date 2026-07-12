@@ -30,7 +30,7 @@ async function startDetachedRunner(leaseId: string, scriptName: string) {
 
 export async function startCursorAgentRun(leaseId: string) {
   const pid = await startDetachedRunner(leaseId, 'cursor-runner.ts');
-  await appendLoopRunLog(leaseId, `[Cursor] 已启动后台 runner pid=${pid}`);
+  await appendLoopRunLog(leaseId, `[运行] 已启动逐个执行 runner pid=${pid}`);
 }
 
 export async function startDispatchRetryRun(leaseId: string) {
