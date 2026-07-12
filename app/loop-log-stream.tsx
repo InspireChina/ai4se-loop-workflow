@@ -3,6 +3,17 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ParsedRunLog } from '../src/application/run-log';
 
+type LogTreeNode = {
+  id: string;
+  title: string;
+  detail: string;
+  status: ParsedRunLog['status'];
+  kind: ParsedRunLog['kind'] | 'group';
+  timestamp: string;
+  meta: Record<string, string>;
+  children: LogTreeNode[];
+};
+
 function eventTime(event: ParsedRunLog) {
   const time = Date.parse(event.timestamp);
   return Number.isFinite(time) ? time : 0;
@@ -50,6 +61,158 @@ function appendMergedEvents(current: ParsedRunLog[], incoming: ParsedRunLog[]) {
   return next.slice(-200);
 }
 
+function makeNode(event: ParsedRunLog, index: number): LogTreeNode {
+  return {
+    id: `${event.timestamp}-${index}-${event.title}-${event.detail.slice(0, 24)}`,
+    title: event.title,
+    detail: event.detail,
+    status: event.status,
+    kind: event.kind,
+    timestamp: event.timestamp,
+    meta: event.meta,
+    children: [],
+  };
+}
+
+function agentNameFromEvent(event: ParsedRunLog) {
+  if (event.meta.agent) return event.meta.agent;
+  const titleAgent = event.title.match(/^(.+?)\s+(?:开始|完成|进展)$/)?.[1];
+  if (titleAgent && titleAgent !== 'Agent') return titleAgent;
+  return '';
+}
+
+function mergeStatus(current: ParsedRunLog['status'], next: ParsedRunLog['status']) {
+  if (next === 'error' || current === 'error') return 'error';
+  if (next === 'running' || current === 'running') return 'running';
+  if (next === 'success' || current === 'success') return 'success';
+  return 'info';
+}
+
+function buildLogTree(events: ParsedRunLog[]) {
+  const roots: LogTreeNode[] = [];
+  const cursorRoot: LogTreeNode = {
+    id: 'cursor-agent-root',
+    title: 'Cursor Agent',
+    detail: 'Cursor CLI 执行器',
+    status: 'running',
+    kind: 'group',
+    timestamp: '',
+    meta: {},
+    children: [],
+  };
+  const agentNodes = new Map<string, LogTreeNode>();
+  let hasCursorRoot = false;
+  let currentAgent = '';
+
+  const ensureCursorRoot = () => {
+    if (!hasCursorRoot) {
+      roots.push(cursorRoot);
+      hasCursorRoot = true;
+    }
+    return cursorRoot;
+  };
+
+  const ensureAgent = (agent: string, seed?: ParsedRunLog, index = 0) => {
+    const root = ensureCursorRoot();
+    const existing = agentNodes.get(agent);
+    if (existing) {
+      if (seed) {
+        existing.status = existing.status === 'error' ? 'error' : seed.status;
+        existing.timestamp = seed.timestamp || existing.timestamp;
+        existing.detail = seed.detail || existing.detail;
+      }
+      return existing;
+    }
+    const node: LogTreeNode = {
+      id: `agent-${agent}-${index}`,
+      title: agent,
+      detail: seed?.detail || 'Agent 运行中',
+      status: seed?.status || 'running',
+      kind: 'agent',
+      timestamp: seed?.timestamp || '',
+      meta: seed?.meta || { agent },
+      children: [],
+    };
+    root.children.push(node);
+    agentNodes.set(agent, node);
+    return node;
+  };
+
+  events.forEach((event, index) => {
+    if (event.kind === 'run' || event.kind === 'dispatch' || event.kind === 'error') {
+      roots.push(makeNode(event, index));
+      return;
+    }
+
+    if (event.kind === 'agent') {
+      const agent = agentNameFromEvent(event) || currentAgent || 'Agent';
+      currentAgent = agent;
+      const agentNode = ensureAgent(agent, event, index);
+      agentNode.children.push(makeNode(event, index));
+      return;
+    }
+
+    if (event.kind === 'tool') {
+      const agent = event.meta.agent || currentAgent;
+      const parent = agent ? ensureAgent(agent, undefined, index) : ensureCursorRoot();
+      parent.children.push(makeNode(event, index));
+      parent.status = mergeStatus(parent.status, event.status);
+      parent.timestamp = event.timestamp || parent.timestamp;
+      return;
+    }
+
+    if (event.kind === 'cursor') {
+      const root = ensureCursorRoot();
+      root.children.push(makeNode(event, index));
+      root.status = mergeStatus(root.status, event.status);
+      root.timestamp = event.timestamp || root.timestamp;
+      return;
+    }
+
+    roots.push(makeNode(event, index));
+  });
+
+  if (hasCursorRoot && cursorRoot.children.every((child) => child.status === 'success')) cursorRoot.status = 'success';
+  return roots;
+}
+
+function formatTime(timestamp: string) {
+  return timestamp ? new Date(timestamp).toLocaleTimeString() : '';
+}
+
+function metaText(meta: Record<string, string>) {
+  return [meta.agent, meta.task, meta.pipeline, meta.tool].filter(Boolean).join(' · ');
+}
+
+function LogLeaf({ node }: { node: LogTreeNode }) {
+  return <div className={`friendly-event tree-leaf ${node.kind} ${node.status}`}>
+    <span className="event-dot"/>
+    <div>
+      <div className="event-head"><strong>{node.title}</strong><time>{formatTime(node.timestamp)}</time></div>
+      {Object.keys(node.meta).length > 0 && <small>{metaText(node.meta)}</small>}
+      <p>{node.detail}</p>
+    </div>
+  </div>;
+}
+
+function LogNodeView({ node }: { node: LogTreeNode }) {
+  if (!node.children.length) return <LogLeaf node={node}/>;
+  return <details className={`log-tree-node ${node.kind} ${node.status}`} open>
+    <summary>
+      <span className="event-dot"/>
+      <span>
+        <strong>{node.title}</strong>
+        {node.detail && <em>{node.detail}</em>}
+      </span>
+      <small>{node.children.length} 项</small>
+      <time>{formatTime(node.timestamp)}</time>
+    </summary>
+    <div className="log-tree-children">
+      {node.children.map((child) => <LogNodeView node={child} key={child.id}/>)}
+    </div>
+  </details>;
+}
+
 export default function LoopLogStream({ leaseId }: { leaseId: string }) {
   const [rawContent, setRawContent] = useState('');
   const [events, setEvents] = useState<ParsedRunLog[]>([]);
@@ -93,15 +256,8 @@ export default function LoopLogStream({ leaseId }: { leaseId: string }) {
       <small>{connected ? '实时连接中' : '等待日志'}</small>
       <button type="button" className="text-toggle" onClick={() => setShowRaw((value) => !value)}>{showRaw ? '友好视图' : '原始日志'}</button>
     </div>
-    {showRaw ? <pre ref={rawRef}>{rawContent || 'waiting for app log...\n'}</pre> : <div className="friendly-log" ref={friendlyRef}>
-      {events.length === 0 ? <p className="friendly-empty">等待 pipeline 进展...</p> : events.map((item, index) => <div className={`friendly-event ${item.kind} ${item.status}`} key={`${item.timestamp}-${index}`}>
-        <span className="event-dot"/>
-        <div>
-          <div className="event-head"><strong>{item.title}</strong><time>{item.timestamp ? new Date(item.timestamp).toLocaleTimeString() : ''}</time></div>
-          {Object.keys(item.meta).length > 0 && <small>{[item.meta.agent, item.meta.task, item.meta.pipeline, item.meta.tool].filter(Boolean).join(' · ')}</small>}
-          <p>{item.detail}</p>
-        </div>
-      </div>)}
+    {showRaw ? <pre ref={rawRef}>{rawContent || 'waiting for app log...\n'}</pre> : <div className="friendly-log tree-log" ref={friendlyRef}>
+      {events.length === 0 ? <p className="friendly-empty">等待 pipeline 进展...</p> : buildLogTree(events).map((node) => <LogNodeView node={node} key={node.id}/>)}
     </div>}
   </div>;
 }

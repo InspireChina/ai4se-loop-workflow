@@ -43,6 +43,27 @@ main{min-width:0;padding:42px 42px}
 .event-head time{font-size:12px;color:var(--muted);white-space:nowrap}
 .friendly-event small{margin:3px 0 0;color:#7a8497}
 .friendly-event p{margin:6px 0 0;color:#364154;line-height:1.45;overflow-wrap:anywhere}
+.tree-log{padding:10px 12px}
+.log-tree-node{margin:0;border-bottom:1px solid var(--line);color:var(--ink)}
+.log-tree-node:last-child{border-bottom:0}
+.log-tree-node>summary{display:grid;grid-template-columns:16px 14px minmax(0,1fr) auto auto;gap:8px;align-items:start;list-style:none;cursor:pointer;padding:12px 0;color:var(--ink)}
+.log-tree-node>summary::-webkit-details-marker{display:none}
+.log-tree-node>summary:before{content:'▸';grid-column:1;color:#8a96aa;font-size:11px;line-height:19px;transform:translateX(-10px)}
+.log-tree-node[open]>summary:before{content:'▾'}
+.log-tree-node>summary>.event-dot{grid-column:2;grid-row:1;margin-left:0}
+.log-tree-node>summary>span{grid-column:3;min-width:0}
+.log-tree-node>summary strong{display:block;font-size:13px}
+.log-tree-node>summary em{display:block;margin-top:4px;color:#647086;font-style:normal;line-height:1.35;overflow-wrap:anywhere}
+.log-tree-node>summary small{grid-column:4;margin:1px 0 0;color:#7a8497;white-space:nowrap}
+.log-tree-node>summary time{grid-column:5;font-size:12px;color:var(--muted);white-space:nowrap}
+.log-tree-node.running>summary>.event-dot{background:var(--blue);box-shadow:0 0 0 3px rgba(39,104,216,.12)}
+.log-tree-node.success>summary>.event-dot{background:var(--green)}
+.log-tree-node.error>summary>.event-dot{background:var(--red)}
+.log-tree-children{margin-left:6px;padding-left:18px;border-left:1px solid #dbe1ea}
+.tree-leaf{border-bottom:0;padding:8px 0}
+.tree-leaf .event-dot{width:7px;height:7px;margin-top:6px}
+.tree-leaf .event-head strong{font-weight:650}
+.tree-leaf p{margin-top:3px}
 .run-toolbar{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:16px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px 16px}
 .run-toolbar>div{display:flex;align-items:center;gap:10px;min-width:0}
 .run-toolbar small{margin:0}
