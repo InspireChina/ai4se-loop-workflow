@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
+import { readFile } from 'node:fs/promises';
 import {
   addQuestion,
   appendStructuredRunLog,
@@ -64,6 +65,14 @@ function numberArg(args: Args, key: string) {
 
 function boolArg(args: Args, key: string) {
   return args[key] === true || args[key] === 'true';
+}
+
+async function jsonArg(args: Args) {
+  const inline = optional(args, 'json');
+  if (inline) return JSON.parse(inline) as Record<string, unknown>;
+  const file = optional(args, 'jsonFile');
+  if (file) return JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
+  return null;
 }
 
 function itemTypeArg(args: Args) {
@@ -308,20 +317,33 @@ async function main() {
       return;
     case 'question-add':
       {
-        const taskId = requireValue(args, 'taskId');
+        const payload = await jsonArg(args);
+        const taskId = String(payload?.taskId || requireValue(args, 'taskId'));
         const detail = await getTask(taskId);
-        const agent = detail?.task.current_subagent || '';
-        const kind = agent === 'analyst-agent' ? 'analysis' : agent === 'test-agent' ? 'test' : agent === 'review-agent' ? 'review' : 'local';
-        console.log(await addQuestion({
-          taskId,
-          kind,
-          title: optional(args, 'title') || '待确认问题',
-          question: requireValue(args, 'question'),
-          why: optional(args, 'why'),
-          recommendation: optional(args, 'recommendation'),
-          blockedReason: optional(args, 'blockedReason'),
-          blockTask: true,
-        }));
+        const agent = String(payload?.actor || detail?.task.current_subagent || '');
+        const kind = String(payload?.kind || (agent === 'analyst-agent' ? 'analysis' : agent === 'test-agent' ? 'test' : agent === 'review-agent' ? 'review' : 'local'));
+        const questions = Array.isArray(payload?.questions) ? payload.questions as Record<string, unknown>[] : [{
+          title: payload?.title || optional(args, 'title') || '待确认问题',
+          question: payload?.question || requireValue(args, 'question'),
+          why: payload?.why || optional(args, 'why'),
+          recommendation: payload?.recommendation || optional(args, 'recommendation'),
+        }];
+        const ids: string[] = [];
+        for (const [index, question] of questions.entries()) {
+          ids.push(await addQuestion({
+            taskId,
+            kind,
+            storyIndex: question.storyIndex || payload?.storyIndex || optional(args, 'story'),
+            title: question.title || '待确认问题',
+            question: question.question,
+            why: question.why,
+            recommendation: question.recommendation,
+            blockedReason: payload?.blockedReason || optional(args, 'blockedReason'),
+            blockTask: payload?.blockTask ?? true,
+            actor: agent || 'human',
+          }));
+        }
+        console.log(JSON.stringify({ questionIds: ids }));
       }
       return;
     default:

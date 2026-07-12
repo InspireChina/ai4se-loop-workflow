@@ -42,16 +42,18 @@ export type Question = {
   story_index: number | null;
   title: string;
   question: string;
+  why: string | null;
   recommendation: string | null;
   answer: string | null;
   status: string;
-  relative_path: string;
+  relative_path: string | null;
+  source_agent: string | null;
   kind: string;
   created_at: string;
   updated_at: string;
 };
 export type Artifact = { artifact_id: string; task_id: string; story_index: number | null; kind: string; relative_path: string; content_hash: string | null; updated_at: string };
-export type Approval = { approval_id: string; task_id: string; story_index: number | null; kind: string; decision: string; relative_path: string; updated_at: string };
+export type Approval = { approval_id: string; task_id: string; story_index: number | null; kind: string; decision: string; relative_path: string | null; updated_at: string };
 export type Event = { event_id: string; actor: string; event_type: string; summary: string; created_at: string };
 export type RunStatus = { leaseId: string; owner: string; startedAt: string; leaseUntil: string; active: boolean } | null;
 export type DelegationEnvelope = Delegation & {
@@ -179,11 +181,6 @@ function assertInsideData(fullPathValue: string) {
 
 function dataFullPath(relativePath: string) {
   return assertInsideData(join(paths.dataDir, relativePath));
-}
-
-function toRelativePath(pathValue: string) {
-  const full = assertInsideWorkspace(resolve(paths.root, pathValue));
-  return full.slice(resolve(paths.root).length + 1);
 }
 
 async function writeFileIfMissing(relativePath: string, content: string) {
@@ -319,35 +316,11 @@ async function syncTaskFiles(db: Awaited<ReturnType<typeof databaseConnection>>,
   await writeLoopStateFile(task);
 }
 
-function readApprovalDecision(text: string, actor: string) {
-  const key = actor === 'review-agent' ? 'Review Decision' : 'Analysis Decision';
-  const aliases: Record<string, string> = actor === 'review-agent'
-    ? { pending: 'pending', '待确认': 'pending', approved: 'approved', approve: 'approved', '已批准': 'approved', changes_requested: 'changes_requested', '要求修改': 'changes_requested', '驳回': 'changes_requested' }
-    : { pending: 'pending', '待确认': 'pending', continue: 'continue', '继续': 'continue', '继续澄清': 'continue', confirmed: 'confirmed', confirm: 'confirmed', '已确认': 'confirmed', '确认完成': 'confirmed' };
-  const pattern = new RegExp(`^\\s*(?:[-*]\\s*)?${key}\\s*[:：]\\s*(.*?)\\s*$`, 'gim');
-  const matches = [...text.matchAll(pattern)];
-  if (!matches.length) return 'pending';
-  const raw = String(matches[matches.length - 1][1] || '').trim().replace(/`/g, '').toLowerCase().replace(/ /g, '_');
-  return aliases[raw] || 'pending';
-}
-
-async function inferOrReadDecision(task: Task, pendingQuestions: number) {
-  if (!task.approval_file) {
-    if (task.current_subagent === 'analyst-agent') return pendingQuestions === 0 ? 'confirmed' : 'pending';
-    if (task.current_subagent === 'review-agent') return pendingQuestions === 0 ? 'approved' : 'pending';
-    return 'none';
-  }
-  let text = '';
-  try {
-    text = await readFile(fullPath(task.approval_file), 'utf8');
-  } catch {
-    text = '';
-  }
-  const decision = readApprovalDecision(text, task.current_subagent || '');
-  if (decision !== 'pending' || pendingQuestions > 0) return decision;
-  const inferred = task.current_subagent === 'review-agent' ? 'approved' : 'confirmed';
-  await appendFile(fullPath(task.approval_file), `\n- 用户确认：${inferred === 'approved' ? '已批准' : '已确认'}\n`, 'utf8');
-  return inferred;
+function inferDecisionFromAnsweredQuestions(task: Task, pendingQuestions: number) {
+  if (pendingQuestions > 0) return 'pending';
+  if (task.current_subagent === 'analyst-agent') return 'confirmed';
+  if (task.current_subagent === 'review-agent') return 'approved';
+  return 'none';
 }
 
 export async function listTasks(options: { includeTerminal?: boolean } = {}): Promise<Task[]> {
@@ -492,19 +465,6 @@ export async function initializeTaskContext(input: unknown) {
     '| 待收集 | 待收集 | 待收集 | 待收集 | 待收集 | 待收集 |',
     '',
   ].join('\n'));
-  await writeFileIfMissing(`${workDir}/90_questions.md`, [
-    '# 90 Questions',
-    '',
-    '这个文件用于当前工作目录级的通用 human-in-the-loop 问题。',
-    '',
-    '## 待确认',
-    '',
-    'story 级业务分析问题写入 stories/<story>/90_analysis_questions.md；测试上下文问题写入 stories/<story>/91_test_questions.md。',
-    '',
-    '## 已确认',
-    '',
-  ].join('\n'));
-
   const changes: Partial<TaskState> & { item_type?: string; work_dir?: string; next_step?: string } = {
     work_dir: workDir,
     agile_status: value.status || before.agile_status,
@@ -531,7 +491,6 @@ export async function initializeTaskContext(input: unknown) {
     await syncTaskFiles(db, value.taskId);
     await persistArtifact(db, value.taskId, null, 'loop-state', `${workDir}/00_loop_state.md`);
     await persistArtifact(db, value.taskId, null, 'input', `${workDir}/01_init_input.md`);
-    await persistArtifact(db, value.taskId, null, 'questions', `${workDir}/90_questions.md`);
     refreshPages('/', `/tasks/${value.taskId}`);
     return workDir;
   } catch (error) {
@@ -573,15 +532,11 @@ export async function answerQuestion(input: unknown) {
   const db = await databaseConnection();
   const question = db.prepare('SELECT * FROM questions WHERE question_id = ? AND task_id = ?').get(questionId, taskId) as Question | undefined;
   if (!question) throw new Error('Question not found');
-  const file = fullPath(question.relative_path);
-  await mkdir(dirname(file), { recursive: true });
-  await appendFile(file, `\n- 用户确认：${answer}\n`, 'utf8');
   db.exec('BEGIN');
   try {
     db.prepare('UPDATE questions SET answer = ?, status = \'answered\', updated_at = CURRENT_TIMESTAMP WHERE question_id = ?').run(answer, questionId);
     addEvent(db, taskId, 'human', 'QuestionAnswered', `回答了「${question.title}」。`);
     db.exec('COMMIT');
-    await persistArtifact(db, taskId, question.story_index, question.kind, question.relative_path);
   } catch (error) {
     db.exec('ROLLBACK');
     throw error;
@@ -599,6 +554,7 @@ const questionSchema = z.object({
   recommendation: z.string().max(2000).optional().nullable(),
   blockedReason: z.string().max(1000).optional().nullable(),
   blockTask: z.coerce.boolean().default(true),
+  actor: z.enum(['human', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent']).default('human'),
 });
 
 export async function addQuestion(input: unknown) {
@@ -606,44 +562,22 @@ export async function addQuestion(input: unknown) {
   const db = await databaseConnection();
   const task = fetchTask(db, value.taskId);
   if (!task) throw new Error('Task not found');
-  if (!task.work_dir) throw new Error('请先初始化本地工作目录');
   const questionId = `Q-${randomUUID().slice(0, 8)}`;
   const defaultStoryIndex = value.kind === 'analysis' ? Math.min(task.total_stories, task.analysis_index + 1) : value.kind === 'test' ? Math.min(task.total_stories, task.test_index + 1) : null;
   const storyIndex = value.storyIndex || defaultStoryIndex;
-  let story: Story | undefined;
   if (value.kind === 'analysis' || value.kind === 'test') {
     if (!storyIndex) throw new Error(`${value.kind} 问题必须关联 Story；请先拆分 Story`);
-    story = db.prepare('SELECT * FROM stories WHERE task_id = ? AND story_index = ?').get(value.taskId, storyIndex) as Story | undefined;
-    if (!story) throw new Error(`Story-${storyIndex} 不存在`);
+    const story = db.prepare('SELECT * FROM stories WHERE task_id = ? AND story_index = ?').get(value.taskId, storyIndex) as Story | undefined;
+    if (!story && storyIndex > task.total_stories) throw new Error(`Story-${storyIndex} 不存在`);
   } else if (storyIndex) {
-    story = db.prepare('SELECT * FROM stories WHERE task_id = ? AND story_index = ?').get(value.taskId, storyIndex) as Story | undefined;
+    const story = db.prepare('SELECT * FROM stories WHERE task_id = ? AND story_index = ?').get(value.taskId, storyIndex) as Story | undefined;
+    if (!story && storyIndex > task.total_stories) throw new Error(`Story-${storyIndex} 不存在`);
   }
-  const fileName = value.kind === 'analysis' ? '90_analysis_questions.md' : value.kind === 'test' ? '91_test_questions.md' : value.kind === 'review' ? '06_review.md' : '90_questions.md';
-  const relativePath = value.kind === 'local' || value.kind === 'review'
-    ? `${task.work_dir}/${fileName}`
-    : `${task.work_dir}/${story!.directory}/${fileName}`;
-  await writeFileIfMissing(relativePath, `${value.kind === 'analysis' ? '# 90 Analysis Questions' : value.kind === 'test' ? '# 91 Test Questions' : value.kind === 'review' ? '# 06 Review' : '# 90 Questions'}\n\n${value.kind === 'analysis' ? 'Analysis Decision: pending\n\n' : value.kind === 'review' ? 'Review Decision: pending\n\n' : ''}## 待确认\n\n## 已确认\n\n`);
-  const block = [
-    '',
-    `### ${questionId}：${value.title}`,
-    '',
-    `- Task ID：${value.taskId}`,
-    `- 本地目录：${task.work_dir}`,
-    '- Agile 状态：blocked',
-    `- 阻塞原因：${value.blockedReason || ''}`,
-    `- 问题：${value.question}`,
-    `- 为什么问：${value.why || ''}`,
-    `- 推荐答案：${value.recommendation || ''}`,
-    '- 你的答复：',
-    '',
-  ].join('\n');
-  const path = fullPath(relativePath);
-  const current = await readFile(path, 'utf8');
-  await writeFile(path, current.includes('\n## 已确认') ? current.replace('\n## 已确认', `${block}\n## 已确认`) : `${current.trimEnd()}${block}\n`, 'utf8');
+  const relativePath = null;
 
   db.exec('BEGIN');
   try {
-    db.prepare('INSERT INTO questions(question_id, task_id, story_index, kind, title, question, recommendation, relative_path) VALUES(?, ?, ?, ?, ?, ?, ?, ?)').run(questionId, value.taskId, storyIndex || null, value.kind, value.title, value.question, value.recommendation || null, relativePath);
+    db.prepare('INSERT INTO questions(question_id, task_id, story_index, kind, title, question, why, recommendation, relative_path, source_agent) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(questionId, value.taskId, storyIndex || null, value.kind, value.title, value.question, value.why || null, value.recommendation || null, relativePath, value.actor);
     if (value.kind === 'analysis' || value.kind === 'review') {
       db.prepare(`
         INSERT INTO approvals(approval_id, task_id, story_index, kind, decision, relative_path)
@@ -656,13 +590,12 @@ export async function addQuestion(input: unknown) {
       db.prepare(`
         UPDATE tasks
         SET agile_status = 'blocked', current_subagent = ?, resume_status = CASE WHEN agile_status != 'blocked' THEN agile_status ELSE resume_status END,
-            resume_pending = 0, blocked_reason = ?, approval_file = ?, next_step = ?, last_actor = 'human', updated_at = CURRENT_TIMESTAMP
+            resume_pending = 0, blocked_reason = ?, approval_file = NULL, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP
         WHERE task_id = ?
-      `).run(agent, value.blockedReason || value.title, value.kind === 'analysis' || value.kind === 'review' ? relativePath : task.approval_file, `等待人工回答：${value.title}`, value.taskId);
+      `).run(agent, value.blockedReason || value.title, `等待人工回答：${value.title}`, value.actor, value.taskId);
     }
-    addEvent(db, value.taskId, 'human', 'QuestionAdded', `新增问题：${value.title}`);
+    addEvent(db, value.taskId, value.actor, 'QuestionAdded', `新增问题：${value.title}`);
     db.exec('COMMIT');
-    await persistArtifact(db, value.taskId, storyIndex || null, value.kind, relativePath);
     await syncTaskFiles(db, value.taskId);
     refreshPages('/', `/tasks/${value.taskId}`);
     return questionId;
@@ -685,7 +618,7 @@ export async function releaseBlock(taskId: string) {
   let analysisApprovedIndex = task.analysis_approved_index;
   let reviewApproved = task.review_approved;
   let detail = '';
-  const decision = await inferOrReadDecision(task, pendingQuestions);
+  const decision = inferDecisionFromAnsweredQuestions(task, pendingQuestions);
   if (task.current_subagent === 'analyst-agent') {
     if (decision === 'pending') throw new Error(`human decision is still pending in ${task.approval_file || 'questions'}`);
     if (decision === 'confirmed') {
@@ -1129,14 +1062,10 @@ export function toPipeEnvelope(item: DelegationEnvelope) {
   return [item.taskId, item.title, item.workDir, item.pipeline, item.agent, item.storyIndex ?? '', item.description].map(clean).join('|');
 }
 
-export async function readQuestionArtifact(relativePath: string) {
+export async function readArtifact(relativePath: string) {
   try {
     return await readFile(fullPath(relativePath), 'utf8');
   } catch {
     return '';
   }
-}
-
-export async function readArtifact(relativePath: string) {
-  return readQuestionArtifact(toRelativePath(relativePath));
 }

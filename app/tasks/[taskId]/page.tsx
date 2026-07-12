@@ -1,7 +1,7 @@
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import { AlertTriangle, CheckCircle2, Clock3, FileText, GitBranch, RotateCcw, SlidersHorizontal } from 'lucide-react';
-import { getTask, pipelineForTask, readQuestionArtifact } from '../../../src/application/tasks';
+import { getTask, pipelineForTask } from '../../../src/application/tasks';
 import {
   addQuestionAction,
   addStoryAction,
@@ -23,10 +23,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const detail = await getTask(taskId);
   if (!detail) notFound();
   const { task, stories, questions, artifacts, approvals, events } = detail;
-  const [pipeline, artifactBodies] = await Promise.all([
-    pipelineForTask(taskId),
-    Promise.all(questions.map((question) => readQuestionArtifact(question.relative_path))),
-  ]);
+  const pipeline = await pipelineForTask(taskId);
   const unansweredQuestions = questions.filter((question) => question.status !== 'answered');
 
   return <>
@@ -110,10 +107,12 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                 <div>
                   <p className="eyebrow">{question.kind.toUpperCase()} · {question.story_index ? `STORY-${question.story_index}` : 'TASK'}</p>
                   <h3>{question.title}</h3>
+                  {question.source_agent && <small>来源：{question.source_agent}</small>}
                 </div>
                 <span className={`badge ${question.status === 'answered' ? 'green' : 'amber'}`}>{question.status === 'answered' ? '已回答' : '待确认'}</span>
               </div>
               <p>{question.question}</p>
+              {question.why && <p className="muted">为什么问：{question.why}</p>}
               {question.recommendation && <div className="recommendation">推荐：{question.recommendation}</div>}
               {question.answer ? <p className="answer"><b>你的答复：</b>{question.answer}</p> : <form action={answerQuestionAction}>
                 <input type="hidden" name="taskId" value={task.task_id}/>
@@ -121,7 +120,6 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                 <textarea name="answer" required placeholder="填写确认结论、边界或补充信息…"/>
                 <button className="button" type="submit">保存答复</button>
               </form>}
-              <details><summary><FileText size={14}/>查看原始 Markdown</summary><pre>{artifactBodies[index]}</pre></details>
             </article>)}
           </div>
           {task.agile_status === 'blocked' && questions.every((question) => question.status === 'answered') && <form action={releaseBlockAction} className="release-block">

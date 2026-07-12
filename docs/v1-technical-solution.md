@@ -69,7 +69,7 @@ data/                   # 应用本地运行数据，按 repo 根路径短 hash 
 | Task 生命周期、游标、当前 agent、lease | SQLite `tasks` / `meta` | 直接读库；状态改变必须走领域用例。 |
 | Story 列表、目录名、拆分说明 | `stories` 表，并可同步到 Story Markdown | UI 用表查询，文件作为兼容性正文。 |
 | requirements、plan、test result、dev response、review | 各工作目录 Markdown | 保存原始文件；数据库保存 artifact 元数据、版本快照和可查询投影。 |
-| Questions 与用户答复 | `90_questions.md`、`90_analysis_questions.md`、`91_test_questions.md` | 解析为 `questions` 表，UI 编辑后回写原文件。 |
+| Questions 与用户答复 | SQLite `questions` 表 | Agent 通过 JSON 创建结构化问题；UI 直接读表并逐条回答，不再写 question Markdown。 |
 | 附件、截图、日志 | 本地工作目录 | 数据库只存相对路径、hash、大小、类型和关联关系。 |
 
 ### 4.2 写入规则
@@ -77,10 +77,11 @@ data/                   # 应用本地运行数据，按 repo 根路径短 hash 
 1. 任何改变 Task 状态、游标、审批或资源占用的操作，必须先进入领域用例，不能由前端直接更新 SQLite。
 2. 对已有 CLI 语义，Server Action 调用等价的 application command；不再保留 `loopctl.py` 作为运行依赖。
 3. UI 编辑 Markdown 派生信息时，Server Action 先校验路径，再写文件并在 SQLite 事务中写入结构化投影。
-4. subagent 或人工在 UI 外修改文件后，后续读取以本地文件为准；V1 先保存 hash 与路径索引，不静默覆盖人工或 agent 的内容。
-5. 数据库不保存附件二进制；数据库只保存文件索引和证据关联。
+4. Question 不属于 Markdown 派生信息；Agent 必须通过 `question-add --json` 创建结构化问题，数据库是唯一事实来源。
+5. subagent 或人工在 UI 外修改文件后，后续读取以本地文件为准；V1 先保存 hash 与路径索引，不静默覆盖人工或 agent 的内容。
+6. 数据库不保存附件二进制；数据库只保存文件索引和证据关联。
 
-这意味着 V1 不会产生两个互相竞争的“文档正文真相”：Markdown 保持 agent 兼容的原始载体，SQLite 提供 UI 所需的结构化查询、历史和关系。
+这意味着 V1 不会产生两个互相竞争的“文档正文真相”：Question 以 SQLite 为唯一事实来源；其他工作产物的 Markdown 保持 agent 兼容的原始载体，SQLite 提供 UI 所需的结构化查询、历史和关系。
 
 ## 5. V1 页面与现有能力的映射
 
