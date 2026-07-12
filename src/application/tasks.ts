@@ -113,6 +113,33 @@ export async function appendLoopRunLog(leaseId: string, message: string) {
   await appendFile(logPath, loopLogLine(message), 'utf8');
 }
 
+export async function appendStructuredRunLog(input: {
+  leaseId: string;
+  agent?: string | null;
+  taskId?: string | null;
+  storyIndex?: string | number | null;
+  pipeline?: string | null;
+  event?: string | null;
+  tool?: string | null;
+  message: string;
+}) {
+  await requireRunLease(input.leaseId);
+  const event = input.event || 'message';
+  const agent = input.agent || '-';
+  const task = input.taskId || '-';
+  const story = input.storyIndex ?? '-';
+  const pipeline = input.pipeline || '-';
+  const prefix = event === 'tool-call' ? '[工具调用]'
+    : event === 'tool-result' ? '[工具结果]'
+      : event === 'error' ? '[错误]'
+        : event === 'complete' ? '[Agent] 完成'
+          : event === 'blocked' ? '[Agent] 阻塞'
+            : event === 'start' ? '[Agent] 开始'
+              : '[Agent] 进展';
+  const tool = input.tool ? ` tool=${input.tool}` : '';
+  await appendLoopRunLog(input.leaseId, `${prefix} agent=${agent} task=${task} story=${story} pipeline=${pipeline}${tool} - ${input.message}`);
+}
+
 function appendActiveRunLog(db: Awaited<ReturnType<typeof databaseConnection>>, message: string) {
   const run = getRunStatusFromDb(db);
   if (!run?.active) return;
@@ -995,10 +1022,14 @@ export async function beginRun(owner = 'ui', leaseMinutes = 120) {
   return leaseId;
 }
 
-export async function endRun(leaseId: string, force = false) {
+export async function endRun(leaseId: string, force = false, options: { stopRunner?: boolean } = {}) {
   const db = await databaseConnection();
   const current = getRunStatusFromDb(db);
   if (current?.leaseId && current.leaseId !== leaseId && !force) throw new Error('运行租约不匹配');
+  if (current?.leaseId && options.stopRunner !== false) {
+    const { stopCursorAgentRun } = await import('../infrastructure/cursor-agent');
+    await stopCursorAgentRun(current.leaseId);
+  }
   if (current?.leaseId) await appendLoopRunLog(current.leaseId, `[运行] 结束本轮 owner=${current.owner} force=${force ? '是' : '否'}`);
   db.prepare("DELETE FROM loop_meta WHERE key = 'run_lease'").run();
 }

@@ -15,6 +15,7 @@ import {
   rewindTask,
   transitionTask,
 } from '../src/application/tasks';
+import { startCursorAgentRun } from '../src/infrastructure/cursor-agent';
 
 export async function createTaskAction(formData: FormData) {
   const taskId = await createTask({
@@ -96,8 +97,9 @@ export async function cancelTaskAction(formData: FormData) {
 }
 
 export async function startLoopRunAction(formData?: FormData) {
-  const leaseId = await beginRun('ui', 120);
+  const leaseId = await beginRun('cursor-agent', 120);
   await createLoopDispatch(leaseId);
+  await startCursorAgentRun(leaseId);
   redirect(String(formData?.get('redirectTo') || '/'));
 }
 

@@ -34,6 +34,7 @@ python scripts/loop/loopctl.py block-list
 python scripts/loop/loopctl.py block-release TASK-id
 python scripts/loop/loopctl.py task-update TASK-id --actor analyst-agent --status blocked --blocked-reason "..."
 python scripts/loop/loopctl.py task-rewind TASK-id --actor human --to analysis --story 2
+python scripts/loop/loopctl.py run-log --run-token "$RUN_TOKEN" --agent dev-agent --task-id TASK-id --pipeline dev --event tool-call --tool shell --message "运行测试"
 ```
 
 不要直接改 SQLite。所有 Task 状态、游标、blocked、release 和 rewind 都通过 CLI 或 UI command。

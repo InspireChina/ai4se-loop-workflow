@@ -30,7 +30,13 @@ python scripts/loop/loopctl.py paths
 
 ## 跑一轮 Loop
 
-UI 工作台可以点击“开始 Loop”，会创建 run lease 并把本轮委派写到 `data/<repo-root-short-hash>/runs/<token>/`。
+UI 运行面板可以点击“开始运行”，会创建 run lease、写入本轮 dispatch，并通过 Cursor CLI 启动 headless Agent：
+
+```bash
+cursor agent --print --output-format stream-json --force --workspace <workspace-root>
+```
+
+Cursor Agent 的 stdout / stderr / tool 事件会被写入 `data/<repo-root-short-hash>/runs/<token>/app.log`，并在 `/runs` 页面实时展示。
 
 Cursor 中可以使用项目命令：
 
@@ -46,7 +52,7 @@ python scripts/loop/loopctl.py pipeline-all --run-token "$RUN_TOKEN" --format js
 python scripts/loop/loopctl.py run-end "$RUN_TOKEN"
 ```
 
-`pipeline-all` 输出的每一行都是一个 subagent 委派 envelope。Cursor `/loop` 会按 `agent` 字段把任务交给对应 agent。
+`pipeline-all` 输出的每一行都是一个 subagent 委派 envelope。Cursor `/loop` 会按 `agent` 字段把任务交给对应 agent，并通过 `run-log` 把关键过程写入运行日志。
 
 ## V1 已实现范围
 
@@ -57,7 +63,7 @@ python scripts/loop/loopctl.py run-end "$RUN_TOKEN"
 - blocked / block-release，保留 resume status 和 resume pending 规则。
 - rewind、cancel 和单代码槽保护。
 - pipeline 计算，包含浏览器资源限制和代码槽限制。
-- Cursor `/loop` 命令、`scripts/loop/loopctl.py` 兼容入口、run lease 和 dispatch 文件。
+- Cursor CLI headless runner、Cursor `/loop` 命令、`scripts/loop/loopctl.py` 兼容入口、run lease、dispatch 文件和流式运行日志。
 - 多 repo 数据隔离：按 repo 根目录短 hash 选择 `data/<hash>/loop-ui.db`。
 - Umzug 管理的 SQL migration，行为接近 Flyway 的顺序迁移。
 

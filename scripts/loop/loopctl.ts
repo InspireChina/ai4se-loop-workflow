@@ -2,6 +2,7 @@
 import '../load-env.js';
 import {
   addQuestion,
+  appendStructuredRunLog,
   beginRun,
   cancelTask,
   createLoopDispatch,
@@ -210,6 +211,19 @@ async function main() {
       console.log(run?.active ? `active until ${run.leaseUntil}` : run ? 'expired' : 'idle');
       return;
     }
+    case 'run-log':
+      await appendStructuredRunLog({
+        leaseId: requireValue(args, 'runToken'),
+        agent: optional(args, 'agent'),
+        taskId: optional(args, 'taskId'),
+        storyIndex: optional(args, 'story'),
+        pipeline: optional(args, 'pipeline'),
+        event: optional(args, 'event'),
+        tool: optional(args, 'tool'),
+        message: requireValue(args, 'message'),
+      });
+      console.log('logged');
+      return;
     case 'task-add':
       const taskId = await createTask({
         actor: requireValue(args, 'actor') as Actor,

@@ -34,6 +34,17 @@ python scripts/loop/loopctl.py pipeline-all --run-token "$RUN_TOKEN" --format js
 
 每个 subagent 必须使用 JSONL envelope 中的 `task_id`、`work_dir`、`story_index`、`pipeline` 和 `description`。
 
+每个 subagent 还必须把关键过程写入运行日志。日志入口：
+
+```bash
+python scripts/loop/loopctl.py run-log --run-token "$RUN_TOKEN" --agent AGENT --task-id TASK-id --pipeline PIPELINE --event start --message "开始处理"
+python scripts/loop/loopctl.py run-log --run-token "$RUN_TOKEN" --agent AGENT --task-id TASK-id --pipeline PIPELINE --event tool-call --tool TOOL --message "准备调用工具"
+python scripts/loop/loopctl.py run-log --run-token "$RUN_TOKEN" --agent AGENT --task-id TASK-id --pipeline PIPELINE --event tool-result --tool TOOL --message "工具结果摘要"
+python scripts/loop/loopctl.py run-log --run-token "$RUN_TOKEN" --agent AGENT --task-id TASK-id --pipeline PIPELINE --event complete --message "处理完成"
+```
+
+至少记录：subagent 开始、重要工具调用、工具结果摘要、状态写入、完成、阻塞或失败。不要把大段文件全文写入日志，只写摘要和路径。
+
 4. 所有委派完成后释放租约：
 
 ```bash
