@@ -8,8 +8,8 @@ export function cursorRunnerPidPath(leaseId: string) {
   return join(dirname(loopRunLogPath(leaseId)), 'cursor-agent.pid');
 }
 
-export async function startCursorAgentRun(leaseId: string) {
-  const script = join(paths.appRoot, 'scripts/loop/cursor-runner.ts');
+async function startDetachedRunner(leaseId: string, scriptName: string) {
+  const script = join(paths.appRoot, 'scripts/loop', scriptName);
   const child = spawn('npx', ['tsx', script, leaseId], {
     cwd: paths.appRoot,
     detached: true,
@@ -21,9 +21,20 @@ export async function startCursorAgentRun(leaseId: string) {
     },
   });
   child.unref();
+  if (!child.pid) throw new Error(`failed to start ${scriptName}`);
   await mkdir(dirname(cursorRunnerPidPath(leaseId)), { recursive: true });
   await writeFile(cursorRunnerPidPath(leaseId), String(child.pid), 'utf8');
-  await appendLoopRunLog(leaseId, `[Cursor] 已启动后台 runner pid=${child.pid}`);
+  return child.pid;
+}
+
+export async function startCursorAgentRun(leaseId: string) {
+  const pid = await startDetachedRunner(leaseId, 'cursor-runner.ts');
+  await appendLoopRunLog(leaseId, `[Cursor] 已启动后台 runner pid=${pid}`);
+}
+
+export async function startDispatchRetryRun(leaseId: string) {
+  const pid = await startDetachedRunner(leaseId, 'dispatch-waiter.ts');
+  await appendLoopRunLog(leaseId, `[运行] 已启动空队列重试 runner pid=${pid}`);
 }
 
 export async function stopCursorAgentRun(leaseId: string) {

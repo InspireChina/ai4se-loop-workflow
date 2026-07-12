@@ -1062,11 +1062,13 @@ export async function ensureLoopRuntimeFiles() {
   await mkdir(paths.blocksDir, { recursive: true });
 }
 
-export async function createLoopDispatch(leaseId: string) {
+export async function createLoopDispatch(leaseId: string, options: { includeRunHeader?: boolean } = {}) {
   await requireRunLease(leaseId);
-  await appendLoopRunLog(leaseId, `[运行] 开始本轮 lease=${leaseId}`);
-  await appendLoopRunLog(leaseId, `[运行] 工作区=${paths.root}`);
-  await appendLoopRunLog(leaseId, `[运行] 数据目录=${paths.dataDir}`);
+  if (options.includeRunHeader !== false) {
+    await appendLoopRunLog(leaseId, `[运行] 开始本轮 lease=${leaseId}`);
+    await appendLoopRunLog(leaseId, `[运行] 工作区=${paths.root}`);
+    await appendLoopRunLog(leaseId, `[运行] 数据目录=${paths.dataDir}`);
+  }
   const lines = await pipelineAllEnvelopes();
   const runDir = join(paths.runsDir, leaseId);
   await mkdir(runDir, { recursive: true });
@@ -1079,7 +1081,7 @@ export async function createLoopDispatch(leaseId: string) {
     '',
     ...lines.map((line, index) => `## ${index + 1}. ${line.agent} / ${line.pipeline}\n\n- Task: ${line.title || line.taskId}\n- Work Dir: ${line.workDir}\n- Story: ${line.storyIndex ?? ''}\n- Resource: ${line.resource}\n- Description: ${line.description}\n`),
   ].join('\n'), 'utf8');
-  await appendLoopRunLog(leaseId, `[派发] 本轮生成 ${lines.length} 个委派`);
+  await appendLoopRunLog(leaseId, `[派发] 本轮生成 ${lines.length} 个 agent`);
   for (const [index, line] of lines.entries()) {
     await appendLoopRunLog(leaseId, `[派发] #${index + 1} agent=${line.agent} pipeline=${line.pipeline} task=${line.taskId} story=${line.storyIndex ?? '-'} resource=${line.resource}`);
     await appendLoopRunLog(leaseId, `[派发]      ${line.description}`);
