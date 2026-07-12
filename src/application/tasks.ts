@@ -851,8 +851,8 @@ export async function endRun(leaseId: string, force = false, options: { stopRunn
   const current = getRunStatusFromDb(db);
   if (current?.leaseId && current.leaseId !== leaseId && !force) throw new Error('运行租约不匹配');
   if (current?.leaseId && options.stopRunner !== false) {
-    const { stopCursorAgentRun } = await import('../infrastructure/cursor-agent');
-    await stopCursorAgentRun(current.leaseId);
+    const { stopAgentRun } = await import('../infrastructure/agent-runner');
+    await stopAgentRun(current.leaseId);
   }
   if (current?.leaseId) await appendLoopRunLog(current.leaseId, `[运行] 结束本轮 owner=${current.owner} force=${force ? '是' : '否'}`);
   db.prepare("DELETE FROM loop_meta WHERE key = 'run_lease'").run();

@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
 import { appendLoopRunLog, createLoopDispatch, getRunStatus } from '../../src/application/tasks';
-import { startCursorAgentRun } from '../../src/infrastructure/cursor-agent';
+import { startAgentRun } from '../../src/infrastructure/agent-runner';
 
 const leaseId = process.argv[2];
 if (!leaseId) throw new Error('missing lease id');
@@ -30,7 +30,7 @@ async function main() {
     const dispatch = await createLoopDispatch(leaseId, { includeRunHeader: false });
     if (dispatch.delegations.length > 0) {
       await appendLoopRunLog(leaseId, `[运行] 重试发现 ${dispatch.delegations.length} 个 agent，启动逐个执行 runner`);
-      await startCursorAgentRun(leaseId);
+      await startAgentRun(leaseId);
       return;
     }
     await appendLoopRunLog(leaseId, `[运行] 当前 0 个 agent，${retryDelayLabel}后自动重试`);

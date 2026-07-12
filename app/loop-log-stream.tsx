@@ -15,11 +15,11 @@ type LogTreeNode = {
 };
 
 function shouldMergeEvent(previous: ParsedRunLog, next: ParsedRunLog) {
-  if (previous.kind !== 'cursor' || next.kind !== 'cursor') return false;
+  if (previous.kind !== 'executor' || next.kind !== 'executor') return false;
   if (previous.status !== 'info' || next.status !== 'info') return false;
   if (previous.title !== next.title) return false;
   if (previous.title !== 'Agent 思考' && previous.title !== 'Agent 输出') return false;
-  if (Object.keys(previous.meta).length > 0 || Object.keys(next.meta).length > 0) return false;
+  if (previous.meta.agent !== next.meta.agent || previous.meta.executor !== next.meta.executor || previous.meta.task !== next.meta.task || previous.meta.pipeline !== next.meta.pipeline) return false;
   return previous.detail.length + next.detail.length <= 5000;
 }
 
@@ -68,11 +68,11 @@ function makeNode(event: ParsedRunLog, index: number): LogTreeNode {
 
 function shouldMergeNode(previous: LogTreeNode, next: LogTreeNode) {
   if (previous.children.length || next.children.length) return false;
-  if (previous.kind !== 'cursor' || next.kind !== 'cursor') return false;
+  if (previous.kind !== 'executor' || next.kind !== 'executor') return false;
   if (previous.status !== 'info' || next.status !== 'info') return false;
   if (previous.title !== next.title) return false;
   if (previous.title !== 'Agent 思考' && previous.title !== 'Agent 输出') return false;
-  if (Object.keys(previous.meta).length > 0 || Object.keys(next.meta).length > 0) return false;
+  if (previous.meta.agent !== next.meta.agent || previous.meta.executor !== next.meta.executor || previous.meta.task !== next.meta.task || previous.meta.pipeline !== next.meta.pipeline) return false;
   return previous.detail.length + next.detail.length <= 5000;
 }
 
@@ -105,9 +105,9 @@ function mergeStatus(current: ParsedRunLog['status'], next: ParsedRunLog['status
 
 function buildLogTree(events: ParsedRunLog[]) {
   const roots: LogTreeNode[] = [];
-  const cursorRoot: LogTreeNode = {
-    id: 'cursor-agent-root',
-    title: 'Cursor CLI',
+  const executorRoot: LogTreeNode = {
+    id: 'agent-executor-root',
+    title: 'Agent 执行器',
     detail: '逐个执行 Agent',
     status: 'running',
     kind: 'group',
@@ -116,19 +116,20 @@ function buildLogTree(events: ParsedRunLog[]) {
     children: [],
   };
   const agentNodes = new Map<string, LogTreeNode>();
-  let hasCursorRoot = false;
+  let hasExecutorRoot = false;
   let currentAgent = '';
 
-  const ensureCursorRoot = () => {
-    if (!hasCursorRoot) {
-      roots.push(cursorRoot);
-      hasCursorRoot = true;
+  const ensureExecutorRoot = (executor?: string) => {
+    if (!hasExecutorRoot) {
+      roots.push(executorRoot);
+      hasExecutorRoot = true;
     }
-    return cursorRoot;
+    if (executor) executorRoot.title = `${executor[0].toUpperCase()}${executor.slice(1)} CLI`;
+    return executorRoot;
   };
 
   const ensureAgent = (agent: string, seed?: ParsedRunLog, index = 0) => {
-    const root = ensureCursorRoot();
+    const root = ensureExecutorRoot(seed?.meta.executor);
     const existing = agentNodes.get(agent);
     if (existing) {
       if (seed) {
@@ -169,17 +170,17 @@ function buildLogTree(events: ParsedRunLog[]) {
 
     if (event.kind === 'tool') {
       const agent = event.meta.agent || currentAgent;
-      const parent = agent ? ensureAgent(agent, undefined, index) : ensureCursorRoot();
+      const parent = agent ? ensureAgent(agent, undefined, index) : ensureExecutorRoot(event.meta.executor);
       appendChild(parent, makeNode(event, index));
       parent.status = mergeStatus(parent.status, event.status);
       parent.timestamp = event.timestamp || parent.timestamp;
       return;
     }
 
-    if (event.kind === 'cursor') {
+    if (event.kind === 'executor') {
       const parent = currentAgent && (event.title === 'Agent 思考' || event.title === 'Agent 输出')
         ? ensureAgent(currentAgent, undefined, index)
-        : ensureCursorRoot();
+        : ensureExecutorRoot(event.meta.executor);
       appendChild(parent, makeNode(event, index));
       parent.status = mergeStatus(parent.status, event.status);
       parent.timestamp = event.timestamp || parent.timestamp;
@@ -189,7 +190,7 @@ function buildLogTree(events: ParsedRunLog[]) {
     roots.push(makeNode(event, index));
   });
 
-  if (hasCursorRoot && cursorRoot.children.every((child) => child.status === 'success')) cursorRoot.status = 'success';
+  if (hasExecutorRoot && executorRoot.children.every((child) => child.status === 'success')) executorRoot.status = 'success';
   return roots;
 }
 

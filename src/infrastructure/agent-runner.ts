@@ -4,9 +4,9 @@ import { join } from 'node:path';
 import { appendLoopRunLog } from '../application/tasks';
 import { paths } from './database';
 
-export function cursorRunnerPidPath(leaseId: string) {
+export function agentRunnerPidPath(leaseId: string) {
   if (!/^[a-zA-Z0-9-]+$/.test(leaseId)) throw new Error('invalid run lease id');
-  return join(paths.runsDir, leaseId, 'cursor-agent.pid');
+  return join(paths.runsDir, leaseId, 'agent-runner.pid');
 }
 
 async function startDetachedRunner(leaseId: string, scriptName: string) {
@@ -24,12 +24,12 @@ async function startDetachedRunner(leaseId: string, scriptName: string) {
   child.unref();
   if (!child.pid) throw new Error(`failed to start ${scriptName}`);
   await mkdir(join(paths.runsDir, leaseId), { recursive: true });
-  await writeFile(cursorRunnerPidPath(leaseId), String(child.pid), 'utf8');
+  await writeFile(agentRunnerPidPath(leaseId), String(child.pid), 'utf8');
   return child.pid;
 }
 
-export async function startCursorAgentRun(leaseId: string) {
-  const pid = await startDetachedRunner(leaseId, 'cursor-runner.ts');
+export async function startAgentRun(leaseId: string) {
+  const pid = await startDetachedRunner(leaseId, 'agent-runner.ts');
   await appendLoopRunLog(leaseId, `[运行] 已启动逐个执行 runner pid=${pid}`);
 }
 
@@ -38,11 +38,11 @@ export async function startDispatchRetryRun(leaseId: string) {
   await appendLoopRunLog(leaseId, `[运行] 已启动空队列重试 runner pid=${pid}`);
 }
 
-export async function stopCursorAgentRun(leaseId: string) {
+export async function stopAgentRun(leaseId: string) {
   let pid = 0;
   try {
     const { readFile } = await import('node:fs/promises');
-    pid = Number((await readFile(cursorRunnerPidPath(leaseId), 'utf8')).trim());
+    pid = Number((await readFile(agentRunnerPidPath(leaseId), 'utf8')).trim());
   } catch {
     return;
   }

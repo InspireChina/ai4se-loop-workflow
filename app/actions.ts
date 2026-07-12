@@ -1,6 +1,7 @@
 'use server';
 
 import { redirect } from 'next/navigation';
+import { setAgentExecutorId } from '../src/application/project-settings';
 import {
   addQuestion,
   addStory,
@@ -15,7 +16,7 @@ import {
   rewindTask,
   transitionTask,
 } from '../src/application/tasks';
-import { startCursorAgentRun, startDispatchRetryRun } from '../src/infrastructure/cursor-agent';
+import { startAgentRun, startDispatchRetryRun } from '../src/infrastructure/agent-runner';
 
 export async function createTaskAction(formData: FormData) {
   const taskId = await createTask({
@@ -97,14 +98,19 @@ export async function cancelTaskAction(formData: FormData) {
 }
 
 export async function startLoopRunAction(formData?: FormData) {
-  const leaseId = await beginRun('cursor-agent', 120);
+  const leaseId = await beginRun('agent-runner', 120);
   const dispatch = await createLoopDispatch(leaseId);
   if (!dispatch.delegations.length) {
     await startDispatchRetryRun(leaseId);
     redirect(String(formData?.get('redirectTo') || '/'));
   }
-  await startCursorAgentRun(leaseId);
+  await startAgentRun(leaseId);
   redirect(String(formData?.get('redirectTo') || '/'));
+}
+
+export async function saveProjectSettingsAction(formData: FormData) {
+  await setAgentExecutorId(formData.get('agentExecutor'));
+  redirect('/settings');
 }
 
 export async function endLoopRunAction(formData: FormData) {

@@ -8,7 +8,7 @@ V1 必须保留：
 
 - 当前 `loopctl` 的状态机、角色权限、游标约束、代码槽、browser 限制、run lease、`blocked` / `block-release` / `task-rewind` 语义。
 - SQLite 作为本地持久化方案。
-- Cursor CLI 作为 agent 执行入口。
+- 可插拔 Agent Executor 作为执行入口，V1 支持 Cursor、Codex 与 Claude CLI。
 - 本地 workspace 仍是代码修改发生的位置。
 
 V1 明确不做：
@@ -27,13 +27,14 @@ flowchart LR
   App --> Domain["领域层\nTask / Story / Question / Document / Approval"]
   App --> DB[("SQLite\napp data / repo hash / loop-ui.db")]
   Runner["逐个执行 Runner"] --> App
-  Runner --> Agent["单步 Cursor CLI Agent\n每次只处理一个 delegation"]
+  Runner --> Executor["Agent Executor Port"]
+  Executor --> Agent["Cursor / Codex / Claude CLI\n每次只处理一个 delegation"]
   Agent --> CLI["loopctl commands"]
   CLI --> App
   Agent --> Repo["Workspace Repo\n只做代码读写"]
 ```
 
-系统是本地模块化单体：Next.js 页面、Server Action、领域用例、SQLite 连接、Cursor runner 都在同一应用仓库中。业务事实只落 SQLite；目标 repo 只作为代码工作区，不再生成 `.project` 工作文件。
+系统是本地模块化单体：Next.js 页面、Server Action、领域用例、SQLite 连接和 Agent runner 都在同一应用仓库中。业务事实只落 SQLite；目标 repo 只作为代码工作区，不再生成 `.project` 工作文件。
 
 ## 3. 技术选型
 
@@ -46,7 +47,8 @@ flowchart LR
 | 数据库 | SQLite | 每个 workspace root 独立数据库：`data/<repo-root-short-hash>/loop-ui.db`。 |
 | SQLite 访问 | `better-sqlite3` | 本地同步事务模型简单可控。 |
 | 数据库迁移 | Umzug + 顺序 SQL migration | `schema_migrations` 记录已执行 migration，提供类 Flyway 的顺序变更。 |
-| Agent 执行 | Cursor CLI `cursor agent --print --output-format stream-json` | App 启动逐个执行 runner；runner 对每个 delegation 单独启动一次 Cursor CLI，并解析 stream-json 为用户友好日志。 |
+| Agent 执行 | Agent Executor Port + Cursor/Codex/Claude Adapter | App 启动逐个执行 runner；runner 对每个 delegation 单独启动一次所选 CLI，并把不同 JSON 流标准化为用户友好日志。 |
+| 执行器设置 | SQLite `project_settings` | 每个 workspace 独立选择执行器，默认 Cursor；CLI 认证仍使用各工具本机账号。 |
 | Agent 上下文 | `loopctl` 命令 | Agent 通过 `task-context`、`document-*`、`question-add` 获取和写入结构化上下文。 |
 
 代码仓库结构：
@@ -55,7 +57,7 @@ flowchart LR
 app/                    # Next 页面与 Server Actions
 src/domain/             # 状态机、权限和领域规则
 src/application/        # 用例、查询、命令、运行日志
-src/infrastructure/     # SQLite、migration、Cursor CLI runner
+src/infrastructure/     # SQLite、migration、Agent Executor Adapter 与 runner
 migrations/             # 顺序 SQL migrations
 scripts/loop/           # loopctl wrapper、runner 脚本
 data/                   # 应用本地运行数据，按 repo 根路径短 hash 分目录
@@ -78,15 +80,15 @@ prototype/              # 历史资料与 prototype，不参与运行
 
 ### 4.2 Agent 执行边界
 
-App/runner 是唯一调度者。Runner 调用 `pipeline-all` / `createLoopDispatch` 得到本轮 delegation 后，按顺序逐条启动 Cursor CLI：
+App/runner 是唯一调度者。Runner 调用 `pipeline-all` / `createLoopDispatch` 得到本轮 delegation 后，读取当前项目的执行器设置，并按顺序逐条启动所选 CLI：
 
 ```text
-delegation-1 -> cursor agent(prompt for backlog-agent)
-delegation-2 -> cursor agent(prompt for analyst-agent)
-delegation-3 -> cursor agent(prompt for dev-agent)
+delegation-1 -> executor.run(prompt for backlog-agent)
+delegation-2 -> executor.run(prompt for analyst-agent)
+delegation-3 -> executor.run(prompt for dev-agent)
 ```
 
-每次 Cursor CLI 只收到当前 delegation 的 `task_id`、`agent`、`pipeline`、`story_index` 和目标描述。Prompt 明确禁止调用 `pipeline-all`、模拟其他 pipeline agent 或释放 run lease。
+每次 CLI 只收到当前 delegation 的 `task_id`、`agent`、`pipeline`、`story_index` 和目标描述。Prompt 明确禁止调用 `pipeline-all`、模拟其他 pipeline agent 或释放 run lease。
 
 当前 agent 可以在本 delegation 内部使用辅助 subagent 做上下文收集或局部分析，但辅助 subagent 不能处理其他 delegation，不能推进 Task 状态；最终写库和状态更新仍由当前 agent 负责。
 
@@ -160,7 +162,7 @@ python scripts/loop/loopctl.py question-add --json '{
 | Task 列表 | 状态、优先级、进度、当前 agent | 创建 Task、打开详情。 |
 | Task 详情 | Task 概览、Story、Questions、Documents、Approvals、事件 | 新增 Story、回答问题、解除阻塞、状态流转、rewind、cancel。 |
 | 运行面板 | 当前 run lease、Cursor agent 结构化日志 | 开始运行、结束运行、观察 pipeline 进展。 |
-| 项目设置 | 当前 workspace root | V1 只让用户设置工作区根目录。 |
+| 项目设置 | 当前 workspace root、Agent 执行器 | 选择 Cursor、Codex 或 Claude；内部数据路径仍然隐藏。 |
 
 ## 7. 迁移与实施顺序
 
@@ -170,7 +172,7 @@ python scripts/loop/loopctl.py question-add --json '{
 4. 将 Questions 线上化到 `questions` 表。
 5. 将业务文档线上化到 `documents` 表，并扩展 agent 命令替代读写文件。
 6. 将运行日志线上化到 `run_logs` 表。
-7. 更新 Cursor runner prompt，使每次 Cursor CLI 只执行单个 delegation；内部辅助 subagent 只作为当前 agent 的上下文工具，不参与 pipeline 调度。
+7. 通过 Agent Executor Port 隔离 CLI 差异，使每次 CLI 只执行单个 delegation；内部辅助 subagent 只作为当前 agent 的上下文工具，不参与 pipeline 调度。
 
 ## 8. V1 验收标准
 
@@ -178,5 +180,5 @@ python scripts/loop/loopctl.py question-add --json '{
 - 新建 Task 后可以进入持续 loop，并由外部 runner 逐个执行 pipeline agent。
 - Agent 的问题写入 `questions` 表，Task 详情页可展示和回答。
 - Agent 的分析、复现、测试、review 文档写入 `documents` 表，Task 详情页可查看正文。
-- 运行面板从 `run_logs` 表显示 Cursor CLI 的用户友好日志，能观察 agent、tool call、子过程和错误。
+- 运行面板从 `run_logs` 表显示所选执行器的用户友好日志，能观察 agent、tool call、子过程和错误。
 - 任一 UI command 都不能绕过 actor 权限、游标、审批和代码槽约束。

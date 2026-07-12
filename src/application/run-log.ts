@@ -1,6 +1,6 @@
 export type ParsedRunLog = {
   timestamp: string;
-  kind: 'run' | 'dispatch' | 'agent' | 'tool' | 'cursor' | 'error' | 'raw';
+  kind: 'run' | 'dispatch' | 'agent' | 'tool' | 'executor' | 'error' | 'raw';
   status: 'info' | 'running' | 'success' | 'error';
   title: string;
   detail: string;
@@ -69,6 +69,7 @@ function extractToolEventFromJson(text: string) {
   try {
     const event = JSON.parse(jsonText) as Record<string, unknown>;
     const toolCall = event.tool_call as Record<string, unknown> | undefined;
+    if (!toolCall && event.type !== 'tool_call') return null;
     const key = toolCall ? Object.keys(toolCall).find((item) => item.endsWith('ToolCall')) : '';
     const payload = key ? toolCall?.[key] as Record<string, unknown> | undefined : undefined;
     const args = payload?.args as Record<string, unknown> | undefined;
@@ -144,8 +145,8 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
   if (parsed.label === '工具调用' || parsed.label === '工具结果') {
     return { ...base, kind: 'tool', status: parsed.label === '工具结果' ? 'success' : 'running', title: `${meta.agent || 'Agent'} ${parsed.label}`, detail: parsed.body.replace(/^[^-]+-\s*/, '') };
   }
-  if (parsed.label === 'Cursor工具') {
-    const detailBody = stripLogPrefix(parsed.body);
+  if (parsed.label === '执行器工具' || parsed.label === 'Cursor工具') {
+    const detailBody = stripLogPrefix(parsed.body).replace(/^(?:调用|完成)：/, '');
     const extracted = extractToolEventFromJson(detailBody);
     if (extracted) {
       return {
@@ -161,34 +162,35 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
     const tool = meta.tool || '工具';
     return { ...base, kind: 'tool', status: isDone ? 'success' : 'running', title: `${isDone ? '完成' : '调用'} ${tool}`, detail: detailBody };
   }
-  if (parsed.label === 'Cursor输出') {
+  if (parsed.label === '执行器输出' || parsed.label === 'Cursor输出') {
     if (parsed.body.includes('type=user')) return null;
     const detail = stripLogPrefix(parsed.body).replace(/^type=\w+\s*-\s*/, '');
     if (detail.trim().startsWith('{')) {
       try {
         const content = JSON.parse(detail).content as { text?: string }[] | undefined;
         const text = content?.map((item) => item.text).filter(Boolean).join('\n');
-        if (text) return { ...base, kind: 'cursor', status: 'info', title: 'Agent 输出', detail: compact(text, 500) };
+        if (text) return { ...base, kind: 'executor', status: 'info', title: 'Agent 输出', detail: compact(text, 500) };
       } catch {
         return null;
       }
     }
-    return { ...base, kind: 'cursor', status: 'info', title: 'Agent 思考', detail };
+    return { ...base, kind: 'executor', status: 'info', title: 'Agent 思考', detail };
   }
-  if (parsed.label === 'Cursor事件') {
+  if (parsed.label === '执行器事件' || parsed.label === 'Cursor事件') {
     if (parsed.body.includes('"type":"system"') || parsed.body.includes('"subtype":"completed"')) return null;
   }
-  if (parsed.label === 'Cursor诊断') {
-    return { ...base, kind: 'cursor', status: 'info', title: 'Cursor 诊断', detail: friendlyCursorDiagnostic(parsed.body) };
+  if (parsed.label === '执行器诊断' || parsed.label === 'Cursor诊断') {
+    return { ...base, kind: 'executor', status: 'info', title: `${meta.executor || 'Cursor'} 诊断`, detail: friendlyCursorDiagnostic(parsed.body) };
   }
   if (parsed.label === 'Cursor错误' && isCursorDiagnostic(parsed.body)) {
-    return { ...base, kind: 'cursor', status: 'info', title: 'Cursor 诊断', detail: friendlyCursorDiagnostic(parsed.body) };
+    return { ...base, kind: 'executor', status: 'info', title: 'Cursor 诊断', detail: friendlyCursorDiagnostic(parsed.body) };
   }
-  if (parsed.label === 'Cursor错误' || parsed.label === '错误') {
+  if (parsed.label === '执行器错误' || parsed.label === 'Cursor错误' || parsed.label === '错误') {
     return { ...base, kind: 'error', status: 'error', title: '运行错误', detail: parsed.body };
   }
-  if (parsed.label === 'Cursor') {
-    return { ...base, kind: 'cursor', status: parsed.body.includes('退出') ? 'success' : 'info', title: 'Cursor CLI', detail: parsed.body };
+  if (parsed.label === '执行器' || parsed.label === 'Cursor') {
+    const executor = meta.executor ? `${meta.executor[0].toUpperCase()}${meta.executor.slice(1)}` : 'Cursor';
+    return { ...base, kind: 'executor', status: parsed.body.includes('退出') ? 'success' : 'info', title: `${executor} CLI`, detail: parsed.body };
   }
   return { ...base, kind: 'raw', status: 'info', title: parsed.label, detail: parsed.body };
 }

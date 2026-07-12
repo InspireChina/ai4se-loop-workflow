@@ -2,109 +2,14 @@
 import '../load-env.js';
 import { spawn } from 'node:child_process';
 import { join } from 'node:path';
+import { getAgentExecutorId } from '../../src/application/project-settings';
 import { appendLoopRunLog, createLoopDispatch, endRun, getRunStatus, type DelegationEnvelope } from '../../src/application/tasks';
-import { startCursorAgentRun, startDispatchRetryRun } from '../../src/infrastructure/cursor-agent';
+import { getAgentExecutor, type AgentExecutionContext, type AgentExecutor } from '../../src/infrastructure/agent-executor';
+import { startAgentRun, startDispatchRetryRun } from '../../src/infrastructure/agent-runner';
 import { paths } from '../../src/infrastructure/database';
 
 const leaseId = process.argv[2];
 if (!leaseId) throw new Error('missing lease id');
-
-function compact(value: string, limit = 1600) {
-  const text = value.replace(/\s+/g, ' ').trim();
-  return text.length > limit ? `${text.slice(0, limit)}…` : text;
-}
-
-function isCursorDiagnosticStderr(line: string) {
-  return /^cursor-retrieval:\s+tracing to\b/.test(line.trim());
-}
-
-function logCursorStderrLine(line: string, delegation?: DelegationEnvelope) {
-  const text = compact(line);
-  const meta = delegation ? `${delegationMeta(delegation)} - ` : '';
-  return `${isCursorDiagnosticStderr(text) ? '[Cursor诊断]' : '[Cursor错误]'} ${meta}${text}`;
-}
-
-function stringifyValue(value: unknown) {
-  if (value === undefined || value === null) return '';
-  if (typeof value === 'string') return value;
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
-}
-
-function getToolPayload(event: Record<string, unknown>) {
-  const toolCall = event.tool_call as Record<string, unknown> | undefined;
-  if (!toolCall) return { tool: '', args: undefined as Record<string, unknown> | undefined, result: undefined as Record<string, unknown> | undefined };
-  const key = Object.keys(toolCall).find((item) => item.endsWith('ToolCall'));
-  const payload = key ? toolCall[key] as Record<string, unknown> : undefined;
-  const tool = key ? key.replace(/ToolCall$/, '') : stringifyValue(event.tool || event.name || '');
-  return {
-    tool,
-    args: payload?.args as Record<string, unknown> | undefined,
-    result: payload?.result as Record<string, unknown> | undefined,
-  };
-}
-
-function summarizeCommand(command: string) {
-  if (!command) return '';
-  if (command.includes(' pipeline-all ')) return '获取本轮 pipeline 委派';
-  if (command.includes(' run-log ')) return '写入 Agent 运行日志';
-  if (command.includes(' task-context ')) return '读取数据库 Task 上下文';
-  if (command.includes(' document-list ')) return '列出数据库文档';
-  if (command.includes(' document-get ')) return '读取数据库文档';
-  if (command.includes(' document-upsert ')) return '保存数据库文档';
-  if (command.includes(' story-add ')) return '新增 Story';
-  if (command.includes(' task-get ') || command.includes(' task-show ')) return '查询 Task 详情';
-  if (command.includes(' task-context-init ')) return '初始化数据库上下文';
-  if (command.includes(' task-update ')) return '更新 Task 状态';
-  if (command.includes(' paths')) return '查看工作区路径配置';
-  if (command.includes('--help')) return '查看 loopctl 可用命令';
-  return compact(command);
-}
-
-function summarizeResult(result: Record<string, unknown> | undefined) {
-  if (!result) return '';
-  const success = result.success as Record<string, unknown> | undefined;
-  const failure = result.error as Record<string, unknown> | undefined;
-  if (failure) return `失败：${compact(stringifyValue(failure), 500)}`;
-  if (!success) return compact(stringifyValue(result), 500);
-  const exitCode = success.exitCode !== undefined ? `exit=${success.exitCode}` : '';
-  const stdout = stringifyValue(success.stdout);
-  const files = Array.isArray(success.files) ? `files=${success.files.length}` : '';
-  const matches = stringifyValue((success.workspaceResults as Record<string, unknown> | undefined) || '');
-  const summary = stdout ? `输出 ${stdout.split(/\r?\n/).filter(Boolean).length} 行：${compact(stdout, 500)}` : files || (matches ? '找到匹配结果' : '成功');
-  return [exitCode, summary].filter(Boolean).join('，');
-}
-
-function delegationMeta(delegation: DelegationEnvelope) {
-  return `agent=${delegation.agent} task=${delegation.taskId} story=${delegation.storyIndex ?? '-'} pipeline=${delegation.pipeline}`;
-}
-
-function logCursorJsonLine(line: string, delegation: DelegationEnvelope) {
-  const meta = delegationMeta(delegation);
-  try {
-    const event = JSON.parse(line) as Record<string, unknown>;
-    const type = String(event.type || event.event || event.kind || 'event');
-    const subtype = String(event.subtype || '');
-    const { tool, args, result } = getToolPayload(event);
-    const text = stringifyValue(event.text || event.message || event.delta || event.content || event.summary);
-    if (type === 'tool_call' || tool) {
-      const description = stringifyValue(args?.description) || stringifyValue((event.tool_call as Record<string, unknown> | undefined)?.description);
-      const command = stringifyValue(args?.command);
-      const path = stringifyValue(args?.path || args?.targetDirectory);
-      const message = subtype === 'completed'
-        ? summarizeResult(result)
-        : description || summarizeCommand(command) || path || '执行工具';
-      return `[Cursor工具] ${meta} tool=${tool || 'unknown'} - ${subtype === 'completed' ? '完成' : '调用'}：${compact(message || text || '工具事件')}`;
-    }
-    if (text) return `[Cursor输出] ${meta} type=${type} - ${compact(text)}`;
-    return `[Cursor事件] ${meta} - ${compact(line)}`;
-  } catch {
-    return `[Cursor输出] ${delegationMeta(delegation)} - ${compact(line)}`;
-  }
-}
 
 function roleInstruction(delegation: DelegationEnvelope) {
   switch (delegation.agent) {
@@ -265,23 +170,29 @@ async function scheduleNextLoop() {
   const dispatch = await createLoopDispatch(leaseId, { includeRunHeader: false });
   if (dispatch.delegations.length > 0) {
     await appendLoopRunLog(leaseId, `[运行] 下一轮发现 ${dispatch.delegations.length} 个 agent，启动逐个执行 runner`);
-    await startCursorAgentRun(leaseId);
+    await startAgentRun(leaseId);
     return;
   }
   await startDispatchRetryRun(leaseId);
 }
 
-async function runDelegation(delegation: DelegationEnvelope) {
+async function runDelegation(delegation: DelegationEnvelope, executor: AgentExecutor) {
   const prompt = buildPrompt(delegation);
-  const cursorBin = process.env.CURSOR_CLI || 'cursor';
-  const args = ['agent', '--print', '--output-format', 'stream-json', '--trust', '--force', '--workspace', paths.root, prompt];
-  const maxRuntimeMs = Number(process.env.CURSOR_AGENT_TIMEOUT_MS || 30 * 60 * 1000);
-  const idleTimeoutMs = Number(process.env.CURSOR_AGENT_IDLE_TIMEOUT_MS || 10 * 60 * 1000);
+  const args = executor.buildArgs(prompt, paths.root);
+  const maxRuntimeMs = Number(process.env.AGENT_EXECUTOR_TIMEOUT_MS || process.env.CURSOR_AGENT_TIMEOUT_MS || 30 * 60 * 1000);
+  const idleTimeoutMs = Number(process.env.AGENT_EXECUTOR_IDLE_TIMEOUT_MS || process.env.CURSOR_AGENT_IDLE_TIMEOUT_MS || 10 * 60 * 1000);
+  const context: AgentExecutionContext = {
+    agent: delegation.agent,
+    taskId: delegation.taskId,
+    storyIndex: delegation.storyIndex,
+    pipeline: delegation.pipeline,
+  };
   let lastOutputAt = Date.now();
   let timedOut = false;
   let logQueue = Promise.resolve();
 
-  const enqueueLog = (message: string) => {
+  const enqueueLog = (message: string | null) => {
+    if (!message) return;
     logQueue = logQueue.catch(() => undefined).then(() => appendLoopRunLog(leaseId, message)).catch(() => undefined);
   };
 
@@ -290,9 +201,9 @@ async function runDelegation(delegation: DelegationEnvelope) {
   };
 
   await appendLoopRunLog(leaseId, `[Agent] 开始 agent=${delegation.agent} task=${delegation.taskId} story=${delegation.storyIndex ?? '-'} pipeline=${delegation.pipeline} - ${delegation.description}`);
-  await appendLoopRunLog(leaseId, `[Cursor] 启动 ${delegation.agent}：${cursorBin} agent --print --output-format stream-json --force --workspace ${paths.root}`);
+  await appendLoopRunLog(leaseId, `[执行器] executor=${executor.id} agent=${delegation.agent} - 启动 ${executor.label} CLI：${executor.formatCommand(paths.root)}`);
 
-  const child = spawn(cursorBin, args, {
+  const child = spawn(executor.command, args, {
     cwd: paths.root,
     env: process.env,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -305,20 +216,20 @@ async function runDelegation(delegation: DelegationEnvelope) {
     stdoutBuffer += chunk.toString('utf8');
     const lines = stdoutBuffer.split(/\r?\n/);
     stdoutBuffer = lines.pop() || '';
-    for (const line of lines.filter(Boolean)) enqueueLog(logCursorJsonLine(line, delegation));
+    for (const line of lines.filter(Boolean)) enqueueLog(executor.parseStdout(line, context));
   });
   child.stderr.on('data', (chunk: Buffer) => {
     lastOutputAt = Date.now();
     stderrBuffer += chunk.toString('utf8');
     const lines = stderrBuffer.split(/\r?\n/);
     stderrBuffer = lines.pop() || '';
-    for (const line of lines.filter(Boolean)) enqueueLog(logCursorStderrLine(line, delegation));
+    for (const line of lines.filter(Boolean)) enqueueLog(executor.parseStderr(line, context));
   });
 
   const terminate = async (reason: string) => {
     if (timedOut) return;
     timedOut = true;
-    await appendLoopRunLog(leaseId, `[Cursor] ${reason}，正在终止 ${delegation.agent}`);
+    await appendLoopRunLog(leaseId, `[执行器] executor=${executor.id} agent=${delegation.agent} - ${reason}，正在终止`);
     child.kill('SIGTERM');
     setTimeout(() => {
       if (!child.killed) child.kill('SIGKILL');
@@ -336,32 +247,34 @@ async function runDelegation(delegation: DelegationEnvelope) {
   });
   clearTimeout(maxTimer);
   clearInterval(idleTimer);
-  if (stdoutBuffer.trim()) enqueueLog(logCursorJsonLine(stdoutBuffer, delegation));
-  if (stderrBuffer.trim()) enqueueLog(logCursorStderrLine(stderrBuffer, delegation));
+  if (stdoutBuffer.trim()) enqueueLog(executor.parseStdout(stdoutBuffer, context));
+  if (stderrBuffer.trim()) enqueueLog(executor.parseStderr(stderrBuffer, context));
   await flushLogs();
-  await appendLoopRunLog(leaseId, `[Cursor] ${delegation.agent} 已退出 code=${exitCode ?? 'signal'}`);
+  await appendLoopRunLog(leaseId, `[执行器] executor=${executor.id} agent=${delegation.agent} - ${executor.label} CLI 已退出 code=${exitCode ?? 'signal'}`);
   if (exitCode && exitCode !== 0) await appendLoopRunLog(leaseId, `[错误] ${delegation.agent} 执行失败 code=${exitCode}`);
   else await appendLoopRunLog(leaseId, `[Agent] 完成 agent=${delegation.agent} task=${delegation.taskId} story=${delegation.storyIndex ?? '-'} pipeline=${delegation.pipeline} - 处理完成`);
   return exitCode ?? 1;
 }
 
 async function main() {
+  const executorId = await getAgentExecutorId();
+  const executor = getAgentExecutor(executorId);
   const dispatch = await createLoopDispatch(leaseId, { includeRunHeader: false, logDelegations: false });
   if (!dispatch.delegations.length) {
     await startDispatchRetryRun(leaseId);
     return;
   }
-  await appendLoopRunLog(leaseId, `[运行] 外部 runner 将逐个执行 ${dispatch.delegations.length} 个 agent`);
+  await appendLoopRunLog(leaseId, `[运行] 使用 ${executor.label} CLI，逐个执行 ${dispatch.delegations.length} 个 agent`);
   for (const [index, delegation] of dispatch.delegations.entries()) {
     if (!(await isLeaseActive())) return;
     await appendLoopRunLog(leaseId, `[运行] 执行第 ${index + 1}/${dispatch.delegations.length} 个 agent：${delegation.agent}`);
-    const exitCode = await runDelegation(delegation);
+    const exitCode = await runDelegation(delegation, executor);
     if (exitCode !== 0) break;
   }
   await scheduleNextLoop();
 }
 
 main().catch(async (error) => {
-  await appendLoopRunLog(leaseId, `[Cursor错误] ${error instanceof Error ? error.message : String(error)}`);
+  await appendLoopRunLog(leaseId, `[执行器错误] ${error instanceof Error ? error.message : String(error)}`);
   await endRun(leaseId, true, { stopRunner: false });
 });

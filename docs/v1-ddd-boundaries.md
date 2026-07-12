@@ -39,7 +39,7 @@ V1 的产品术语沿用现有系统，不采用 prototype 的新术语替代已
 - 关键命令：`RunBegin`、`PipelineAll`、`RunEnd`、`RunLog`
 - 依赖：Task Management 的只读状态与 Resource Management 的可用性
 
-V1 的持续 loop 由 App runner 驱动。若本轮有委派，runner 按 delegation 逐个启动 Cursor CLI；每次 Cursor CLI 只执行一个明确 pipeline agent。当前 agent 可以在本 delegation 内使用辅助 subagent 做上下文收集，但辅助 subagent 不参与 pipeline 调度。若没有委派，等待后继续重试。
+V1 的持续 loop 由 App runner 驱动。若本轮有委派，runner 通过 Agent Executor Port 按 delegation 逐个启动项目所选 CLI；每次执行只处理一个明确 pipeline agent。当前 agent 可以在本 delegation 内使用辅助 subagent 做上下文收集，但辅助 subagent 不参与 pipeline 调度。若没有委派，等待后继续重试。
 
 ### 2.3 Question and Approval
 
@@ -164,7 +164,7 @@ classDiagram
 | `BlockRelease` | Question and Approval + Task Management | human | 确认全部问题已回答，恢复 Task 并设置 resume pending。 |
 | `RunBegin` / `RunEnd` | Loop Orchestration | UI / runner | 管理 Run Lease。 |
 | `PipelineAll` | Loop Orchestration | UI / runner | 只计算 Delegation，不改变 Task。 |
-| `RunDelegation` | Loop Orchestration | runner | 为单条 Delegation 启动一次 Cursor CLI。 |
+| `RunDelegation` | Loop Orchestration | runner | 通过所选 Agent Executor 为单条 Delegation 启动一次 CLI。 |
 
 ## 6. SQLite 表的职责
 
@@ -177,6 +177,7 @@ classDiagram
 | `questions` | Question 事实来源 | `question-add` 和 UI 回答。 |
 | `approvals` | analysis/review 决策记录 | `question-add` / `block-release`。 |
 | `run_logs` | 持续 loop 的运行日志 | runner / agent 追加，运行面板增量读取。 |
+| `project_settings` | 当前项目的 Agent 执行器等设置 | UI command 写入。 |
 | `task_events` | 面向 UI 的审计时间线 | 成功 command 追加；不是 Event Sourcing。 |
 
 旧迁移中的兼容列可以保留为空值，但不参与 V1 运行语义。
@@ -205,6 +206,6 @@ TaskCancelled
 - UI 不直接访问 SQLite。
 - Server Action 不写状态机判断；判断放在 application/domain 层。
 - domain 不 import Next、SQLite driver、React 或 `fs`。
-- infrastructure 只负责 SQLite migration、连接、Cursor CLI 和路径解析。
+- infrastructure 只负责 SQLite migration、连接、Agent Executor Adapter、runner 进程和路径解析。
 - Agent 不读写旧工作文档；所有上下文通过 `loopctl` 命令进入 application 层。
 - 每一个 UI 操作都映射到明确 application command 或只读查询，不能发明绕过既有规则的快捷入口。
