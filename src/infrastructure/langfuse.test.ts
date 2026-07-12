@@ -68,6 +68,25 @@ test('does not create a trace or send a prompt when prompt capture is disabled',
   assert.equal(traced, 1);
 });
 
+test('records structured lifecycle and tool events using the existing delegation trace', async () => {
+  const events: Array<Record<string, unknown>> = [];
+  const telemetry = createLangfuseTelemetry({
+    env: credentials,
+    createClient: () => ({ trace: () => ({ update: () => undefined, event: (attributes) => { events.push(attributes); } }) }),
+  });
+  const trace = await telemetry.startDelegationTrace(context, { executor: 'codex', prompt: 'private' });
+  await trace.event({ name: 'loop.agent.tool', executor: 'codex', tool: 'shell', phase: 'started', input: { authorization: 'Bearer private-token' } });
+  await trace.event({ name: 'loop.agent.diagnostic', executor: 'codex', summary: 'WARNING: retry', level: 'WARNING' });
+  assert.equal(events.length, 2);
+  assert.deepEqual(events[0], {
+    name: 'loop.agent.tool',
+    metadata: { executor: 'codex', phase: 'started', tool: 'shell', summary: null },
+    input: { value: { authorization: '[REDACTED]' } },
+    level: 'DEFAULT',
+  });
+  assert.equal(events[1].level, 'WARNING');
+});
+
 test('swallows client initialization errors', async () => {
   const diagnostics: string[] = [];
   const telemetry = createLangfuseTelemetry({ env: credentials, diagnostic: (code) => diagnostics.push(code), createClient: () => { throw new Error('bad credentials'); } });

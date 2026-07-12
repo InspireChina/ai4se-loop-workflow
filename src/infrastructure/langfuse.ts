@@ -31,6 +31,15 @@ type LangfuseTracePayload = {
 
 type LangfuseTraceClient = {
   update?: (attributes: Pick<LangfuseTracePayload, 'metadata'>) => unknown;
+  event?: (attributes: LangfuseEventPayload) => unknown;
+};
+
+type LangfuseEventPayload = {
+  name: string;
+  metadata?: Record<string, unknown>;
+  input?: Record<string, unknown>;
+  output?: Record<string, unknown>;
+  level?: 'DEFAULT' | 'WARNING' | 'ERROR';
 };
 
 export type DelegationTraceAttributes = {
@@ -39,10 +48,22 @@ export type DelegationTraceAttributes = {
 };
 
 export type DelegationTraceEndAttributes = {
-  status: 'completed' | 'failed';
+  status: 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'execution_error';
+};
+
+export type DelegationTelemetryEvent = {
+  name: 'loop.agent.lifecycle' | 'loop.agent.tool' | 'loop.agent.output' | 'loop.agent.diagnostic';
+  phase?: 'started' | 'completed';
+  executor: string;
+  tool?: string;
+  summary?: string;
+  input?: unknown;
+  output?: unknown;
+  level?: 'DEFAULT' | 'WARNING' | 'ERROR';
 };
 
 export type DelegationTrace = {
+  event(attributes: DelegationTelemetryEvent): Promise<void>;
   end(attributes: DelegationTraceEndAttributes): Promise<void>;
 };
 
@@ -174,7 +195,7 @@ export function createLangfuseTelemetry(options: LangfuseTelemetryOptions = {}):
       return undefined;
     }
   };
-  const noOpTrace: DelegationTrace = { end: async () => undefined };
+  const noOpTrace: DelegationTrace = { event: async () => undefined, end: async () => undefined };
 
   return {
     isEnabled,
@@ -201,6 +222,20 @@ export function createLangfuseTelemetry(options: LangfuseTelemetryOptions = {}):
       }));
       if (!trace?.update) return noOpTrace;
       return {
+        event: async (attributes) => {
+          await this.safe(() => trace.event?.({
+            name: attributes.name,
+            metadata: sanitizeLangfuseValue({
+              executor: attributes.executor,
+              phase: attributes.phase ?? null,
+              tool: attributes.tool ?? null,
+              summary: attributes.summary ?? null,
+            }) as Record<string, unknown>,
+            ...(attributes.input === undefined ? {} : { input: sanitizeLangfuseValue({ value: attributes.input }) as Record<string, unknown> }),
+            ...(attributes.output === undefined ? {} : { output: sanitizeLangfuseValue({ value: attributes.output }) as Record<string, unknown> }),
+            level: attributes.level ?? 'DEFAULT',
+          }));
+        },
         end: async ({ status }) => {
           await this.safe(() => trace.update?.({ metadata: sanitizeLangfuseValue({ executionStatus: status }) as Record<string, unknown> }));
         },
