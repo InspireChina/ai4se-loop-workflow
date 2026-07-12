@@ -3,6 +3,53 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ParsedRunLog } from '../src/application/run-log';
 
+function eventTime(event: ParsedRunLog) {
+  const time = Date.parse(event.timestamp);
+  return Number.isFinite(time) ? time : 0;
+}
+
+function shouldMergeEvent(previous: ParsedRunLog, next: ParsedRunLog) {
+  if (previous.kind !== 'cursor' || next.kind !== 'cursor') return false;
+  if (previous.status !== 'info' || next.status !== 'info') return false;
+  if (previous.title !== next.title) return false;
+  if (previous.title !== 'Agent 思考' && previous.title !== 'Agent 输出') return false;
+  if (Object.keys(previous.meta).length > 0 || Object.keys(next.meta).length > 0) return false;
+  const previousTime = eventTime(previous);
+  const nextTime = eventTime(next);
+  if (!previousTime || !nextTime) return false;
+  return Math.abs(nextTime - previousTime) <= 1500 && previous.detail.length + next.detail.length <= 1400;
+}
+
+function joinDetail(previous: string, next: string) {
+  const left = previous.trimEnd();
+  const right = next.trimStart();
+  if (!left) return right;
+  if (!right) return left;
+  if (/^[，。；：！？、）)\]}》”’]/.test(right)) return `${left}${right}`;
+  if (/[。；：！？.!?]$/.test(left)) return `${left} ${right}`;
+  if (/[\u4e00-\u9fff]$/.test(left) && /^[\u4e00-\u9fff]/.test(right)) return `${left}${right}`;
+  if (/[\u4e00-\u9fff]$/.test(left) && /^[A-Za-z0-9_./-]/.test(right)) return `${left} ${right}`;
+  return `${left} ${right}`;
+}
+
+function appendMergedEvents(current: ParsedRunLog[], incoming: ParsedRunLog[]) {
+  const next = [...current];
+  for (const event of incoming) {
+    const previous = next[next.length - 1];
+    if (previous && shouldMergeEvent(previous, event)) {
+      next[next.length - 1] = {
+        ...previous,
+        timestamp: event.timestamp || previous.timestamp,
+        detail: joinDetail(previous.detail, event.detail),
+        raw: `${previous.raw}\n${event.raw}`,
+      };
+    } else {
+      next.push(event);
+    }
+  }
+  return next.slice(-200);
+}
+
 export default function LoopLogStream({ leaseId }: { leaseId: string }) {
   const [rawContent, setRawContent] = useState('');
   const [events, setEvents] = useState<ParsedRunLog[]>([]);
@@ -25,7 +72,7 @@ export default function LoopLogStream({ leaseId }: { leaseId: string }) {
         const next = current + raw;
         return next.length > 30000 ? next.slice(-30000) : next;
       });
-      setEvents((current) => [...current, ...nextEvents].slice(-200));
+      setEvents((current) => appendMergedEvents(current, nextEvents));
     };
     source.addEventListener('done', () => {
       setConnected(false);

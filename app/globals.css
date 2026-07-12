@@ -77,7 +77,7 @@ h2{font-size:15px;margin:30px 0 12px;display:flex;align-items:center;gap:7px}
 .attention .button{margin-left:auto}
 .button{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:0;border-radius:7px;background:var(--blue);color:#fff;padding:9px 13px;font-weight:650;text-decoration:none;cursor:pointer;min-height:36px}
 .secondary{background:#fff;color:var(--blue);border:1px solid #b9cef7}
-.success{background:var(--green)}
+.button.success{background:var(--green)}
 .danger{background:var(--red)}
 .table{overflow:hidden}
 .row{display:grid;grid-template-columns:1.6fr .8fr 1fr 1.3fr;gap:16px;padding:14px 16px;border-bottom:1px solid var(--line);align-items:center;text-decoration:none;color:inherit}

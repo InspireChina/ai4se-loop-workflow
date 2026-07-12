@@ -129,6 +129,15 @@ async function main() {
   const idleTimeoutMs = Number(process.env.CURSOR_AGENT_IDLE_TIMEOUT_MS || 10 * 60 * 1000);
   let lastOutputAt = Date.now();
   let timedOut = false;
+  let logQueue = Promise.resolve();
+
+  const enqueueLog = (message: string) => {
+    logQueue = logQueue.catch(() => undefined).then(() => appendLoopRunLog(leaseId, message)).catch(() => undefined);
+  };
+
+  const flushLogs = async () => {
+    await logQueue;
+  };
 
   await appendLoopRunLog(leaseId, `[Cursor] 启动 Cursor Agent：${cursorBin} agent --print --output-format stream-json --force --workspace ${paths.root}`);
 
@@ -145,14 +154,14 @@ async function main() {
     stdoutBuffer += chunk.toString('utf8');
     const lines = stdoutBuffer.split(/\r?\n/);
     stdoutBuffer = lines.pop() || '';
-    for (const line of lines.filter(Boolean)) void appendLoopRunLog(leaseId, logCursorJsonLine(line));
+    for (const line of lines.filter(Boolean)) enqueueLog(logCursorJsonLine(line));
   });
   child.stderr.on('data', (chunk: Buffer) => {
     lastOutputAt = Date.now();
     stderrBuffer += chunk.toString('utf8');
     const lines = stderrBuffer.split(/\r?\n/);
     stderrBuffer = lines.pop() || '';
-    for (const line of lines.filter(Boolean)) void appendLoopRunLog(leaseId, logCursorStderrLine(line));
+    for (const line of lines.filter(Boolean)) enqueueLog(logCursorStderrLine(line));
   });
 
   const terminate = async (reason: string) => {
@@ -173,8 +182,9 @@ async function main() {
   const exitCode = await new Promise<number | null>((resolve) => child.on('exit', resolve));
   clearTimeout(maxTimer);
   clearInterval(idleTimer);
-  if (stdoutBuffer.trim()) await appendLoopRunLog(leaseId, logCursorJsonLine(stdoutBuffer));
-  if (stderrBuffer.trim()) await appendLoopRunLog(leaseId, logCursorStderrLine(stderrBuffer));
+  if (stdoutBuffer.trim()) enqueueLog(logCursorJsonLine(stdoutBuffer));
+  if (stderrBuffer.trim()) enqueueLog(logCursorStderrLine(stderrBuffer));
+  await flushLogs();
   await appendLoopRunLog(leaseId, `[Cursor] Cursor Agent 已退出 code=${exitCode ?? 'signal'}`);
   await endRun(leaseId, false, { stopRunner: false });
 }
