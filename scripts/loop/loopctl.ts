@@ -3,6 +3,7 @@ import '../load-env.js';
 import { readFile } from 'node:fs/promises';
 import {
   addQuestion,
+  addStory,
   appendStructuredRunLog,
   beginRun,
   cancelTask,
@@ -12,7 +13,10 @@ import {
   ensureLoopRuntimeFiles,
   getRunStatus,
   getTask,
+  getTaskContext,
+  getDocument,
   initializeTaskContext,
+  listDocuments,
   listTasks,
   pipelineAllEnvelopes,
   pipelineForTask,
@@ -23,6 +27,7 @@ import {
   toPipeEnvelope,
   transitionTask,
   updateTask,
+  upsertDocument,
 } from '../../src/application/tasks';
 import { databaseConnection, paths } from '../../src/infrastructure/database';
 import type { Actor, TaskStatus } from '../../src/domain/task';
@@ -129,9 +134,6 @@ async function printBlockList(format: string) {
   for (const task of tasks) {
     console.log(`- ${task.title} (${task.task_id})`);
     console.log(`  - Agent: ${task.current_subagent || ''}`);
-    console.log(`  - Work Dir: ${task.work_dir || ''}`);
-    console.log(`  - Block File: ${task.work_dir ? `${task.work_dir}/block.md` : `${paths.blocksDir}/${task.task_id}.md`}`);
-    if (task.approval_file) console.log(`  - Approval File: ${task.approval_file}`);
     console.log(`  - Reason: ${task.blocked_reason || ''}`);
     console.log(`  - Next Step: ${task.next_step || ''}`);
     console.log(`  - Release: python scripts/loop/loopctl.py block-release ${task.task_id}`);
@@ -167,9 +169,7 @@ async function printTaskPipeline(taskId: string, args: Args) {
       resumePending: task.resume_pending,
       analysisApprovedIndex: task.analysis_approved_index,
       reviewApproved: task.review_approved,
-      approvalFile: task.approval_file || '',
       lastActor: task.last_actor || '',
-      workDir: task.work_dir || '',
       analysisIndex: task.analysis_index,
       devIndex: task.dev_index,
       testIndex: task.test_index,
@@ -287,12 +287,40 @@ async function main() {
         total_stories: numberArg(args, 'totalStories'),
         next_step: optional(args, 'nextStep'),
         blocked_reason: optional(args, 'blockedReason'),
-        work_dir: optional(args, 'workDir'),
         item_type: optional(args, 'itemType'),
         priority: optional(args, 'priority'),
-        approval_file: optional(args, 'approvalFile'),
       });
       console.log(`updated ${taskId}`);
+      return;
+    }
+    case 'story-add':
+      await addStory({ taskId: requireValue(args, 'taskId'), title: requireValue(args, 'title'), actor: optional(args, 'actor') || 'human' });
+      console.log('story added');
+      return;
+    case 'task-context':
+      console.log(JSON.stringify(await getTaskContext(requireValue(args, 'taskId')), null, 2));
+      return;
+    case 'document-upsert': {
+      const payload = await jsonArg(args);
+      const input = payload || {
+        taskId: requireValue(args, 'taskId'),
+        storyIndex: optional(args, 'story'),
+        kind: requireValue(args, 'kind'),
+        title: optional(args, 'title'),
+        content: requireValue(args, 'content'),
+        format: optional(args, 'format') || 'markdown',
+        actor: optional(args, 'actor') || 'human',
+      };
+      console.log(await upsertDocument(input));
+      return;
+    }
+    case 'document-list':
+      console.log(JSON.stringify(await listDocuments(requireValue(args, 'taskId')), null, 2));
+      return;
+    case 'document-get': {
+      const document = await getDocument(requireValue(args, 'taskId'), requireValue(args, 'kind'), numberArg(args, 'story'));
+      if (!document) throw new Error('document not found');
+      console.log(JSON.stringify(document, null, 2));
       return;
     }
     case 'task-rewind':

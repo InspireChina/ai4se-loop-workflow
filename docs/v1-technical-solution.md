@@ -2,20 +2,21 @@
 
 ## 1. 目标与边界
 
-V1 的目标是把现有 Cursor Loop 的任务、Story、人工确认和文档证据以 UI 展示和操作出来；不是重做现有流程，也不是引入新的自动化能力。运行形态为本地模块化单体。
+V1 的目标是把现有 Cursor Loop 的任务、Story、人工确认、运行日志和工作文档产品化为本地 UI。第一版不扩展流程能力，不引入远端服务；重点是把现有 loop 流程线上化、结构化、可观察。
 
 V1 必须保留：
 
 - 当前 `loopctl` 的状态机、角色权限、游标约束、代码槽、browser 限制、run lease、`blocked` / `block-release` / `task-rewind` 语义。
-- 现有目录、Markdown 文件名和 subagent 协议。本地文件仍然保存在项目目录中，Cursor subagent 仍可按当前协议读写。
 - SQLite 作为本地持久化方案。
+- Cursor CLI 作为 agent 执行入口。
+- 本地 workspace 仍是代码修改发生的位置。
 
 V1 明确不做：
 
 - 云端部署、多用户实时协作、远程文件存储。
-- 新的异步任务平台、队列、Redis、独立 Worker、Run Center 的实时执行控制。
-- 修改现有 Task / Story 流程或引入原型中的新阶段名。
-- 替换 Cursor `/loop` 或直接在浏览器中执行 agent。
+- Redis、独立 Worker、队列平台或新的异步任务系统。
+- 修改已有 Task / Story / Agent / Pipeline 术语。
+- 兼容旧 `.project` 数据。
 
 ## 2. 总体架构
 
@@ -23,110 +24,142 @@ V1 明确不做：
 flowchart LR
   User["用户"] --> Web["Next.js UI\nReact + TypeScript"]
   Web --> App["Server Action / Route Handler\n应用层与权限校验"]
-  App --> Domain["领域层\nTask / Story / Question / Approval"]
-  App --> DB[("SQLite\nloop.db + UI 表")]
-  App --> FS["项目本地文件系统\n.project/、Markdown、附件"]
-  Agent["Cursor subagent\n沿用本地文件协议"] --> DB
-  Agent --> FS
+  App --> Domain["领域层\nTask / Story / Question / Document / Approval"]
+  App --> DB[("SQLite\napp data / repo hash / loop-ui.db")]
+  Runner["Cursor CLI Runner"] --> App
+  Agent["Cursor Agent"] --> CLI["loopctl commands"]
+  CLI --> App
+  Agent --> Repo["Workspace Repo\n只做代码读写"]
 ```
 
-系统以同一项目目录为运行边界。Next.js UI、Server Action、SQLite 和本地文件系统在一个进程内协作；不存在远程服务依赖。
+系统是本地模块化单体：Next.js 页面、Server Action、领域用例、SQLite 连接、Cursor runner 都在同一应用仓库中。业务事实只落 SQLite；目标 repo 只作为代码工作区，不再生成 `.project` 工作文件。
 
 ## 3. 技术选型
 
 | 层次 | V1 选择 | 说明 |
 |---|---|---|
 | 应用框架 | Next.js + React + TypeScript | 单进程承载页面、Server Action、领域用例和本地数据访问。 |
-| UI 组件 | lucide 图标 + 自定义组件 | 以新的产品界面为基础，不再依赖原型生成物。 |
-| 服务端入口 | Next.js Server Action / Route Handler + Zod | 不部署独立 API；仍由服务端入口校验输入、调用领域用例。 |
-| 领域代码 | 纯 TypeScript | 不依赖 React、Next、SQLite 或文件路径，便于测试。 |
-| 数据库 | SQLite | V1 使用应用本地 `data/<repo-root-short-hash>/loop-ui.db`；使用版本化 SQL migration 管理表和索引。 |
-| SQLite 访问 | `better-sqlite3` | 以同步事务边界匹配本地单机模型，并可被 Next server runtime 正确加载。 |
-| 数据库迁移 | Umzug + 版本化 SQL 文件 | 以 `schema_migrations` 记录已执行版本，提供类 Flyway 的顺序迁移。 |
-| 文件访问 | Node `fs/promises` | 所有路径必须限制在当前项目根目录内，禁止 API 读取任意主机路径。 |
-| 页面更新 | Server Action + 页面刷新 | V1 无后台异步任务，操作完成后重新读取本地状态。 |
-| 测试 | Next 构建 + 领域/集成测试 | 以既有规则和文档协议作为回归基线。 |
+| UI 组件 | lucide 图标 + 自定义 CSS | 直接实现产品界面，不依赖 prototype 代码。 |
+| 服务端入口 | Next.js Server Action / Route Handler + Zod | 表单和命令统一进入 application command。 |
+| 领域代码 | 纯 TypeScript | 不依赖 React、Next 或 SQLite driver。 |
+| 数据库 | SQLite | 每个 workspace root 独立数据库：`data/<repo-root-short-hash>/loop-ui.db`。 |
+| SQLite 访问 | `better-sqlite3` | 本地同步事务模型简单可控。 |
+| 数据库迁移 | Umzug + 顺序 SQL migration | `schema_migrations` 记录已执行 migration，提供类 Flyway 的顺序变更。 |
+| Agent 执行 | Cursor CLI `cursor agent --print --output-format stream-json` | App 启动 runner，runner 解析 stream-json 为用户友好的运行日志。 |
+| Agent 上下文 | `loopctl` 命令 | Agent 通过 `task-context`、`document-*`、`question-add` 获取和写入结构化上下文。 |
 
-V1 只保留一个应用目录：
+代码仓库结构：
 
 ```text
 app/                    # Next 页面与 Server Actions
-src/domain/             # 纯领域模型和规则（按需要补齐）
-src/application/        # 用例与输入校验
-src/infrastructure/     # SQLite、migrations、文件系统
+src/domain/             # 状态机、权限和领域规则
+src/application/        # 用例、查询、命令、运行日志
+src/infrastructure/     # SQLite、migration、Cursor CLI runner
 migrations/             # 顺序 SQL migrations
-scripts/                # 本地 migration 命令
+scripts/loop/           # loopctl wrapper、runner 脚本
 data/                   # 应用本地运行数据，按 repo 根路径短 hash 分目录
-.project/               # 目标 repo 内的业务工作文件，不存应用数据库
+prototype/              # 历史资料与 prototype，不参与运行
 ```
 
-## 4. 数据与文件的边界
+## 4. 数据边界
 
 ### 4.1 事实来源
 
-| 信息 | 事实来源 | UI 使用方式 |
+| 信息 | 事实来源 | 说明 |
 |---|---|---|
-| Task 生命周期、游标、当前 agent、lease | SQLite `tasks` / `meta` | 直接读库；状态改变必须走领域用例。 |
-| Story 列表、目录名、拆分说明 | `stories` 表，并可同步到 Story Markdown | UI 用表查询，文件作为兼容性正文。 |
-| requirements、plan、test result、dev response、review | 各工作目录 Markdown | 保存原始文件；数据库保存 artifact 元数据、版本快照和可查询投影。 |
-| Questions 与用户答复 | SQLite `questions` 表 | Agent 通过 JSON 创建结构化问题；UI 直接读表并逐条回答，不再写 question Markdown。 |
-| 附件、截图、日志 | 本地工作目录 | 数据库只存相对路径、hash、大小、类型和关联关系。 |
+| Task 生命周期、游标、当前 agent、lease | SQLite `tasks` / `loop_meta` | 所有状态改变必须走 application command。 |
+| Story 列表 | SQLite `stories` | `story-add` 创建，UI 直接展示。 |
+| 分析、复现、测试、review、上下文文档 | SQLite `documents` | Agent 使用 `document-upsert` 写入，UI 可直接查看正文。 |
+| Questions 与用户答复 | SQLite `questions` | Agent 使用 `question-add --json` 创建结构化问题；用户在 UI 回答。 |
+| Approval | SQLite `approvals` | analysis/review 的人工门禁记录。 |
+| 运行日志 | App data 下的 run log 文件 | 这是运行观测日志，不是业务上下文；可后续迁移到表。 |
+| 代码变更 | Workspace repo | dev-agent 仍在用户选择的 repo 中修改代码。 |
 
 ### 4.2 写入规则
 
-1. 任何改变 Task 状态、游标、审批或资源占用的操作，必须先进入领域用例，不能由前端直接更新 SQLite。
-2. 对已有 CLI 语义，Server Action 调用等价的 application command；不再保留 `loopctl.py` 作为运行依赖。
-3. UI 编辑 Markdown 派生信息时，Server Action 先校验路径，再写文件并在 SQLite 事务中写入结构化投影。
-4. Question 不属于 Markdown 派生信息；Agent 必须通过 `question-add --json` 创建结构化问题，数据库是唯一事实来源。
-5. subagent 或人工在 UI 外修改文件后，后续读取以本地文件为准；V1 先保存 hash 与路径索引，不静默覆盖人工或 agent 的内容。
-6. 数据库不保存附件二进制；数据库只保存文件索引和证据关联。
+1. UI、runner、agent 都不能直接改 SQLite；必须通过 application command 或 `loopctl`。
+2. Agent 不再写 `.project`、`90_questions.md`、`06_review.md` 或工作文档 Markdown。
+3. Agent 需要上下文时调用 `task-context` / `document-list` / `document-get`。
+4. Agent 产生业务文档时调用 `document-upsert`。
+5. Agent 需要人工确认时调用 `question-add --json`。
+6. 数据库按 workspace root 短 hash 隔离；短 hash、数据库路径和 app data 目录对普通用户不可见。
 
-这意味着 V1 不会产生两个互相竞争的“文档正文真相”：Question 以 SQLite 为唯一事实来源；其他工作产物的 Markdown 保持 agent 兼容的原始载体，SQLite 提供 UI 所需的结构化查询、历史和关系。
+## 5. Agent 命令边界
 
-## 5. V1 页面与现有能力的映射
-
-| 页面 | 展示内容 | V1 可执行操作 |
-|---|---|---|
-| 工作台 | blocked、pipeline、run lease、活动 Task | 打开具体问题、进入 Task。 |
-| Task 列表 | `tasks` 的状态、优先级、进度、当前 agent | 创建 Task、打开详情。 |
-| Task 详情 | Task 概览、Story、上下文、活动、artifact | 初始化上下文、新增 Story、状态流转、rewind、cancel。 |
-| Question / Approval | 原始问题、推荐答案、用户答复、影响范围 | 填答、创建问题、确认 analysis、批准/驳回 review，并调用 `block-release` 语义。 |
-| 项目设置 | 项目根目录、命令、agent 配置只读摘要 | V1 只读或编辑安全的项目配置；密钥不在 V1 管理。 |
-
-V1 不实现新的后台运行中心。UI 展示 pipeline 和 run lease；每个按钮都落到明确的 application command。
-
-## 6. 本地 Command 边界
-
-V1 使用 Next.js Server Action 作为本地 command 入口，不提供泛化的 `PATCH /tasks/:id`。
+核心命令：
 
 ```text
-CreateTask
-TaskContextInit
-AddStory
-AddQuestion
-AnswerQuestion
-BlockRelease
-TaskUpdate
-TaskRewind
-TaskCancel
-PipelineAll
-RunBegin / RunEnd / RunStatus
+task-context
+story-add
+document-upsert
+document-list
+document-get
+question-add
+task-update
+task-rewind
+block-release
+pipeline-all
+run-begin / run-end / run-status
+run-log
 ```
 
-每个 command 必须说明 actor、允许的前置状态和失败原因，并由 application/domain 层校验。
+示例：
+
+```bash
+python scripts/loop/loopctl.py task-context --task-id TASK-id
+
+python scripts/loop/loopctl.py document-upsert --json '{
+  "taskId": "TASK-id",
+  "actor": "analyst-agent",
+  "kind": "analysis",
+  "storyIndex": 1,
+  "title": "Story-1 Analysis",
+  "format": "markdown",
+  "content": "分析正文"
+}'
+
+python scripts/loop/loopctl.py question-add --json '{
+  "taskId": "TASK-id",
+  "actor": "analyst-agent",
+  "kind": "analysis",
+  "storyIndex": 1,
+  "blockedReason": "等待用户确认业务规则",
+  "blockTask": true,
+  "questions": [
+    {
+      "title": "问题标题",
+      "question": "需要用户回答的具体问题",
+      "why": "为什么必须确认",
+      "recommendation": "建议答案，可为空"
+    }
+  ]
+}'
+```
+
+## 6. 页面与能力映射
+
+| 页面 | 展示内容 | 可执行操作 |
+|---|---|---|
+| 工作台 | blocked、近期事件、运行状态 | 打开 Task、进入运行面板。 |
+| Task 列表 | 状态、优先级、进度、当前 agent | 创建 Task、打开详情。 |
+| Task 详情 | Task 概览、Story、Questions、Documents、Approvals、事件 | 新增 Story、回答问题、解除阻塞、状态流转、rewind、cancel。 |
+| 运行面板 | 当前 run lease、Cursor agent 结构化日志 | 开始运行、结束运行、观察 pipeline 进展。 |
+| 项目设置 | 当前 workspace root | V1 只让用户设置工作区根目录。 |
 
 ## 7. 迁移与实施顺序
 
-1. 使用 `data/<repo-root-short-hash>/loop-ui.db` 作为 V1 数据库；不读取或复制旧 `.project/_loop` 数据。
-2. 新增 SQL migration：`tasks` 扩展列、`stories`、`artifacts`、`questions`、`approvals`、`task_events`、`loop_meta`。
-3. 实现 application command 和领域规则，先覆盖现有 loopctl 核心流程。
-4. 实现 Task / Question / Approval 的 UI 操作，并以旧规则验收。
-5. 再补文件扫描、artifact revision 等增强能力。
+1. 使用 `data/<repo-root-short-hash>/loop-ui.db` 作为每个 workspace 的独立数据库。
+2. 使用 SQL migration 管理表结构。
+3. 保留旧 schema 中必要兼容列为空值，但新逻辑不再读写旧工作文件。
+4. 将 Questions 线上化到 `questions` 表。
+5. 将业务文档线上化到 `documents` 表，并扩展 agent 命令替代读写文件。
+6. 更新 Cursor runner prompt，确保 agent 通过 `loopctl` 获取上下文和提交结果。
 
 ## 8. V1 验收标准
 
-- 已有项目可以直接打开，不需要迁移到远程服务。
-- UI 显示的 Task、Story、blocked 和审批状态与旧 loopctl 语义一致。
-- UI 中回答问题、确认审批、release 或 rewind 后，现有 Cursor subagent 可从原有 Markdown 文件和 SQLite 状态继续工作。
-- 外部修改 Markdown 后，UI 能发现并展示同步状态；不能静默覆盖人工或 agent 的内容。
-- 任一 UI command 都不能绕过现有的 actor 权限、游标、审批和代码槽约束。
+- 切换 workspace root 后，使用独立 `data/<repo-hash>/loop-ui.db`。
+- 新建 Task 后可以进入持续 loop，并由 pipeline 派发 agent。
+- Agent 的问题写入 `questions` 表，Task 详情页可展示和回答。
+- Agent 的分析、复现、测试、review 文档写入 `documents` 表，Task 详情页可查看正文。
+- 运行面板显示 Cursor CLI 的用户友好日志，能观察 agent、tool call、子过程和错误。
+- 任一 UI command 都不能绕过 actor 权限、游标、审批和代码槽约束。

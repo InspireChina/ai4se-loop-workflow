@@ -22,7 +22,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const { taskId } = await params;
   const detail = await getTask(taskId);
   if (!detail) notFound();
-  const { task, stories, questions, artifacts, approvals, events } = detail;
+  const { task, stories, questions, documents, approvals, events } = detail;
   const pipeline = await pipelineForTask(taskId);
   const unansweredQuestions = questions.filter((question) => question.status !== 'answered');
 
@@ -50,7 +50,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       <div><small>测试</small><b>{task.test_index} / {task.total_stories}</b></div>
       <div><small>待确认</small><b>{unansweredQuestions.length}</b></div>
       <div className="summary-wide"><small>下一步</small><p>{task.next_step || '—'}</p></div>
-      <div className="summary-wide"><small>工作目录</small><p>{task.work_dir || '尚未创建本地目录'}</p></div>
+      <div className="summary-wide"><small>文档</small><p>{documents.length} 个数据库文档</p></div>
     </section>
 
     <div className="task-detail-grid">
@@ -67,7 +67,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               </span>
               <div>
                 <strong>Story-{story.story_index} · {story.title}</strong>
-                <small>{story.directory}</small>
+                <small>{story.directory || 'DB'}</small>
               </div>
               <em>{story.story_index <= task.test_index ? '测试完成' : story.story_index <= task.dev_index ? '等待测试' : story.story_index <= task.analysis_index ? '等待开发' : '等待分析'}</em>
             </div>)}
@@ -130,12 +130,15 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
 
         <section className="task-section two-card-grid">
           <div>
-            <div className="section-head"><h2>Artifacts</h2><small>{artifacts.length} 个文件</small></div>
-            <div className="card artifact-list">{artifacts.length === 0 ? <div className="empty">还没有索引的本地文档。</div> : artifacts.map((artifact) => <div key={artifact.artifact_id}><FileText size={15}/><span>{artifact.relative_path}</span><small>{artifact.kind}</small></div>)}</div>
+            <div className="section-head"><h2>Documents</h2><small>{documents.length} 个文档</small></div>
+            <div className="card document-list">{documents.length === 0 ? <div className="empty">还没有数据库文档。</div> : documents.map((document) => <details key={document.document_id} className="document-item">
+              <summary><FileText size={15}/><span>{document.title}</span><small>{[document.kind, document.story_index ? `Story-${document.story_index}` : 'Task', document.source_agent || ''].filter(Boolean).join(' · ')}</small></summary>
+              <pre>{document.content}</pre>
+            </details>)}</div>
           </div>
           <div>
             <div className="section-head"><h2>Approvals</h2><small>{approvals.length} 条记录</small></div>
-            <div className="card artifact-list">{approvals.length === 0 ? <div className="empty">还没有 Approval。</div> : approvals.map((approval) => <div key={approval.approval_id}><CheckCircle2 size={15}/><span>{approval.kind} · {approval.decision}</span><small>{approval.relative_path}</small></div>)}</div>
+            <div className="card artifact-list">{approvals.length === 0 ? <div className="empty">还没有 Approval。</div> : approvals.map((approval) => <div key={approval.approval_id}><CheckCircle2 size={15}/><span>{approval.kind} · {approval.decision}</span><small>{approval.story_index ? `Story-${approval.story_index}` : 'Task'}</small></div>)}</div>
           </div>
         </section>
 
@@ -159,11 +162,11 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         </section>
 
         <form action={initializeContextAction} className="card form-panel">
-          <h2>本地上下文</h2>
+          <h2>数据库上下文</h2>
           <input type="hidden" name="taskId" value={task.task_id}/>
           <div className="fields">
             <label>类型<select name="kind" defaultValue={task.item_type}><option value="feature">feature</option><option value="bug">bug</option><option value="tech">tech</option><option value="intake">intake</option></select></label>
-            <label>Slug<input name="slug" placeholder="业务目录名"/></label>
+            <label>说明<input name="slug" placeholder="可选备注，不创建目录"/></label>
           </div>
           <div className="fields">
             <label>状态<select name="status" defaultValue={task.agile_status === 'backlog' ? 'in plan' : task.agile_status}>{statusOptions.map((status) => <option value={status} key={status}>{status}</option>)}</select></label>

@@ -16,7 +16,6 @@ export type TaskState = {
   resume_status: TaskStatus | null;
   resume_pending: number;
   blocked_reason: string | null;
-  work_dir: string;
 };
 
 const transitions: Record<TaskStatus, TaskStatus[]> = {
@@ -32,13 +31,13 @@ const transitions: Record<TaskStatus, TaskStatus[]> = {
 };
 
 const fieldPermissions: Partial<Record<Actor, string[]>> = {
-  'backlog-agent': ['title', 'agile_status', 'current_subagent', 'next_step', 'blocked_reason', 'work_dir', 'item_type', 'priority'],
+  'backlog-agent': ['title', 'agile_status', 'current_subagent', 'next_step', 'blocked_reason', 'item_type', 'priority'],
   'story-splitter-agent': ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'next_step', 'blocked_reason'],
-  'analyst-agent': ['agile_status', 'current_subagent', 'analysis_index', 'next_step', 'blocked_reason', 'approval_file'],
+  'analyst-agent': ['agile_status', 'current_subagent', 'analysis_index', 'next_step', 'blocked_reason'],
   'repro-agent': ['agile_status', 'current_subagent', 'next_step', 'blocked_reason'],
   'dev-agent': ['agile_status', 'current_subagent', 'dev_index', 'next_step', 'blocked_reason'],
   'test-agent': ['agile_status', 'current_subagent', 'test_index', 'next_step', 'blocked_reason'],
-  'review-agent': ['agile_status', 'current_subagent', 'next_step', 'blocked_reason', 'work_dir', 'approval_file'],
+  'review-agent': ['agile_status', 'current_subagent', 'next_step', 'blocked_reason'],
 };
 
 const statusPermissions: Partial<Record<Actor, TaskStatus[]>> = {

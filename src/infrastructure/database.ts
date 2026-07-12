@@ -58,6 +58,5 @@ export const paths = {
   repoHash,
   dbPath,
   runsDir: join(dataDir, 'runs'),
-  blocksDir: join(dataDir, 'blocks'),
 };
 export function hash(content: string) { return createHash('sha256').update(content).digest('hex'); }

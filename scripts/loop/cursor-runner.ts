@@ -51,8 +51,13 @@ function summarizeCommand(command: string) {
   if (!command) return '';
   if (command.includes(' pipeline-all ')) return '获取本轮 pipeline 委派';
   if (command.includes(' run-log ')) return '写入 Agent 运行日志';
+  if (command.includes(' task-context ')) return '读取数据库 Task 上下文';
+  if (command.includes(' document-list ')) return '列出数据库文档';
+  if (command.includes(' document-get ')) return '读取数据库文档';
+  if (command.includes(' document-upsert ')) return '保存数据库文档';
+  if (command.includes(' story-add ')) return '新增 Story';
   if (command.includes(' task-get ') || command.includes(' task-show ')) return '查询 Task 详情';
-  if (command.includes(' task-context-init ')) return '初始化本地上下文';
+  if (command.includes(' task-context-init ')) return '初始化数据库上下文';
   if (command.includes(' task-update ')) return '更新 Task 状态';
   if (command.includes(' paths')) return '查看工作区路径配置';
   if (command.includes('--help')) return '查看 loopctl 可用命令';
@@ -110,6 +115,16 @@ function buildPrompt(loopCommand: string) {
     '',
     '所有状态读取和写入必须通过：',
     `python ${join(paths.appRoot, 'scripts/loop/loopctl.py')} ...`,
+    '',
+    '不要读写 .project、90_questions.md、06_review.md 或旧工作目录。业务上下文、问题、分析、复现、测试和 review 结论都必须落 SQLite。',
+    '读取上下文：',
+    `python ${join(paths.appRoot, 'scripts/loop/loopctl.py')} task-context --task-id TASK-id`,
+    `python ${join(paths.appRoot, 'scripts/loop/loopctl.py')} document-list --task-id TASK-id`,
+    `python ${join(paths.appRoot, 'scripts/loop/loopctl.py')} document-get --task-id TASK-id --kind analysis --story 1`,
+    '',
+    '写入数据库文档：',
+    `python ${join(paths.appRoot, 'scripts/loop/loopctl.py')} document-upsert --json '{"taskId":"TASK-id","actor":"analyst-agent","kind":"analysis","storyIndex":1,"title":"Story-1 Analysis","format":"markdown","content":"结论正文"}'`,
+    '常用 kind：context、story_split、analysis、repro、dev_note、test_result、review。',
     '',
     '关键动作必须写入运行日志：',
     `python ${join(paths.appRoot, 'scripts/loop/loopctl.py')} run-log --run-token ${leaseId} --agent AGENT --task-id TASK --pipeline PIPELINE --event start --message "开始处理"`,

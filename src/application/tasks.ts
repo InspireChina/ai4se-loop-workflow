@@ -1,10 +1,9 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
-import { dirname, join, resolve, sep } from 'node:path';
+import { appendFile, mkdir, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
-import { databaseConnection, hash, paths } from '../infrastructure/database';
+import { databaseConnection, paths } from '../infrastructure/database';
 import {
   assertActorCanCreate,
   assertState,
@@ -25,7 +24,6 @@ export type Task = TaskState & {
   external_id: string | null;
   external_status: string | null;
   next_step: string | null;
-  approval_file: string | null;
   last_actor: string | null;
   owner: string | null;
   evidence: string | null;
@@ -36,6 +34,18 @@ export type Task = TaskState & {
 };
 
 export type Story = { task_id: string; story_index: number; title: string; directory: string };
+export type Document = {
+  document_id: string;
+  task_id: string;
+  story_index: number | null;
+  kind: string;
+  title: string;
+  content: string;
+  format: string;
+  source_agent: string | null;
+  created_at: string;
+  updated_at: string;
+};
 export type Question = {
   question_id: string;
   task_id: string;
@@ -52,7 +62,6 @@ export type Question = {
   created_at: string;
   updated_at: string;
 };
-export type Artifact = { artifact_id: string; task_id: string; story_index: number | null; kind: string; relative_path: string; content_hash: string | null; updated_at: string };
 export type Approval = { approval_id: string; task_id: string; story_index: number | null; kind: string; decision: string; relative_path: string | null; updated_at: string };
 export type Event = { event_id: string; actor: string; event_type: string; summary: string; created_at: string };
 export type RunStatus = { leaseId: string; owner: string; startedAt: string; leaseUntil: string; active: boolean } | null;
@@ -68,9 +77,7 @@ export type DelegationEnvelope = Delegation & {
   resumePending: number;
   analysisApprovedIndex: number;
   reviewApproved: number;
-  approvalFile: string;
   lastActor: string;
-  workDir: string;
   analysisIndex: number;
   devIndex: number;
   testIndex: number;
@@ -86,7 +93,7 @@ const taskSelect = `
   SELECT task_id, title, link, external_id, external_status, item_type, priority,
          agile_status, current_subagent, analysis_index, dev_index, test_index,
          total_stories, analysis_approved_index, review_approved, resume_status,
-         resume_pending, next_step, work_dir, blocked_reason, approval_file,
+         resume_pending, next_step, blocked_reason,
          last_actor, owner, evidence, risk, created_at, updated_at, completed_at
   FROM tasks
 `;
@@ -161,159 +168,13 @@ function refreshPages(...pagePaths: string[]) {
   }
 }
 
-function assertInsideWorkspace(fullPath: string) {
-  const root = resolve(paths.root);
-  const full = resolve(fullPath);
-  if (full !== root && !full.startsWith(`${root}${sep}`)) throw new Error('Invalid artifact path');
-  return full;
-}
-
-function fullPath(relativePath: string) {
-  return assertInsideWorkspace(join(paths.root, relativePath));
-}
-
-function assertInsideData(fullPathValue: string) {
-  const root = resolve(paths.dataDir);
-  const full = resolve(fullPathValue);
-  if (full !== root && !full.startsWith(`${root}${sep}`)) throw new Error('Invalid app data path');
-  return full;
-}
-
-function dataFullPath(relativePath: string) {
-  return assertInsideData(join(paths.dataDir, relativePath));
-}
-
-async function writeFileIfMissing(relativePath: string, content: string) {
-  const path = fullPath(relativePath);
-  await mkdir(dirname(path), { recursive: true });
-  if (!existsSync(path)) await writeFile(path, content, 'utf8');
-}
-
-async function persistArtifact(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: string, storyIndex: number | null, kind: string, relativePath: string) {
-  let contentHash: string | null = null;
-  try {
-    contentHash = hash(await readFile(fullPath(relativePath), 'utf8'));
-  } catch {
-    contentHash = null;
-  }
-  db.prepare(`
-    INSERT INTO artifacts(artifact_id, task_id, story_index, kind, relative_path, content_hash)
-    VALUES(?, ?, ?, ?, ?, ?)
-    ON CONFLICT(task_id, relative_path) DO UPDATE SET
-      story_index = excluded.story_index,
-      kind = excluded.kind,
-      content_hash = excluded.content_hash,
-      updated_at = CURRENT_TIMESTAMP
-  `).run(randomUUID(), taskId, storyIndex, kind, relativePath, contentHash);
-}
-
-function slugify(value: string) {
-  const parts: string[] = [];
-  let dash = false;
-  for (const char of value.trim().toLowerCase()) {
-    if (/[\p{Letter}\p{Number}]/u.test(char)) {
-      parts.push(char);
-      dash = false;
-    } else if (!dash) {
-      parts.push('-');
-      dash = true;
-    }
-  }
-  return parts.join('').replace(/^-+|-+$/g, '').slice(0, 60);
-}
-
-function buildWorkSlug(title: string, explicitSlug?: string | null) {
-  const slug = slugify(explicitSlug || title);
-  if (!slug) throw new Error('无法生成工作目录名，请填写 slug');
-  const normalized = slug.replace(/[-_]/g, '');
-  if (slug.startsWith('task-') || normalized === 'task' || normalized === '需求' || normalized === '问题') {
-    throw new Error('工作目录名过于技术化或泛化，请换一个业务 slug');
-  }
-  return slug;
-}
-
 function taskIdFromTitleLink(title: string, link?: string | null) {
   const seed = link || title;
   return `TASK-${createHash('sha1').update(seed).digest('hex').slice(0, 8)}`;
 }
 
-function todayCompact() {
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = `${date.getMonth() + 1}`.padStart(2, '0');
-  const day = `${date.getDate()}`.padStart(2, '0');
-  return `${year}${month}${day}`;
-}
-
-function blockFileForTask(task: Task) {
-  return task.work_dir ? fullPath(`${task.work_dir}/block.md`) : dataFullPath(`blocks/${task.task_id}.md`);
-}
-
-async function writeBlockFile(task: Task) {
-  const path = blockFileForTask(task);
-  await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, [
-    '# Blocked',
-    '',
-    `- Task ID: ${task.task_id}`,
-    `- Title: ${task.title || ''}`,
-    `- Current Subagent: ${task.current_subagent || ''}`,
-    `- Resume Status: ${task.resume_status || ''}`,
-    `- Resume Pending: ${task.resume_pending}`,
-    `- Blocked Reason: ${task.blocked_reason || ''}`,
-    `- Approval File: ${task.approval_file || ''}`,
-    `- Next Step: ${task.next_step || ''}`,
-    `- Updated At: ${task.updated_at || ''}`,
-    '',
-  ].join('\n'), 'utf8');
-}
-
-async function clearBlockFile(task: Task, create = false) {
-  const path = blockFileForTask(task);
-  if (create || existsSync(path)) {
-    await mkdir(dirname(path), { recursive: true });
-    await writeFile(path, '', 'utf8');
-  }
-}
-
-async function writeLoopStateFile(task: Task) {
-  if (!task.work_dir) return;
-  const dir = fullPath(task.work_dir);
-  if (!existsSync(dir)) return;
-  await writeFile(fullPath(`${task.work_dir}/00_loop_state.md`), [
-    '# Loop State',
-    '',
-    '本文件由 Loop Engineering 自动维护。agent 不应手写或手动同步本文件。',
-    '',
-    `- Task ID: ${task.task_id}`,
-    `- Title: ${task.title || ''}`,
-    `- 类型: ${task.item_type || ''}`,
-    `- Agile 状态: ${task.agile_status}`,
-    `- Resume Status: ${task.resume_status || ''}`,
-    `- 当前 Subagent: ${task.current_subagent || ''}`,
-    `- Analysis Approved Index: ${task.analysis_approved_index}`,
-    `- Review Approved: ${task.review_approved}`,
-    `- Approval File: ${task.approval_file || ''}`,
-    `- Last Actor: ${task.last_actor || ''}`,
-    `- Analysis Index: ${task.analysis_index}`,
-    `- Dev Index: ${task.dev_index}`,
-    `- Test Index: ${task.test_index}`,
-    `- Total Stories: ${task.total_stories}`,
-    `- Next Step: ${task.next_step || ''}`,
-    `- Blocked Reason: ${task.blocked_reason || ''}`,
-    `- 原始 URL: ${task.link || ''}`,
-    `- 本地目录: ${task.work_dir}`,
-    `- 最近更新: ${new Date().toISOString().slice(0, 10)}`,
-    '',
-  ].join('\n'), 'utf8');
-}
-
-async function syncTaskFiles(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: string, options: { createClearedBlock?: boolean } = {}) {
-  const task = fetchTask(db, taskId);
-  if (!task) return;
-  if (task.agile_status === 'blocked') await writeBlockFile(task);
-  else await clearBlockFile(task, options.createClearedBlock);
-  await writeLoopStateFile(task);
+async function syncTaskFiles(_db: Awaited<ReturnType<typeof databaseConnection>>, _taskId: string, _options: { createClearedBlock?: boolean } = {}) {
+  // DB-first product mode: target repo files are no longer generated or synchronized.
 }
 
 function inferDecisionFromAnsweredQuestions(task: Task, pendingQuestions: number) {
@@ -354,10 +215,69 @@ export async function getTask(taskId: string) {
   if (!task) return null;
   const stories = db.prepare('SELECT * FROM stories WHERE task_id = ? ORDER BY story_index').all(taskId) as Story[];
   const questions = db.prepare('SELECT * FROM questions WHERE task_id = ? ORDER BY created_at').all(taskId) as Question[];
-  const artifacts = db.prepare('SELECT * FROM artifacts WHERE task_id = ? ORDER BY relative_path').all(taskId) as Artifact[];
+  const documents = db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[];
   const approvals = db.prepare('SELECT * FROM approvals WHERE task_id = ? ORDER BY kind, story_index').all(taskId) as Approval[];
   const events = db.prepare('SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at DESC').all(taskId) as Event[];
-  return { task, stories, questions, artifacts, approvals, events };
+  return { task, stories, questions, documents, approvals, events };
+}
+
+export async function getTaskContext(taskId: string) {
+  const detail = await getTask(taskId);
+  if (!detail) throw new Error(`task not found: ${taskId}`);
+  const questions = detail.questions.map(({ relative_path: _relativePath, ...question }) => question);
+  const approvals = detail.approvals.map(({ relative_path: _relativePath, ...approval }) => approval);
+  return { ...detail, questions, approvals };
+}
+
+const documentSchema = z.object({
+  taskId: z.string().min(1),
+  storyIndex: z.coerce.number().int().positive().optional().nullable(),
+  kind: z.string().min(1).max(80),
+  title: z.string().min(1).max(240).optional().nullable(),
+  content: z.string().max(100000),
+  format: z.enum(['markdown', 'json', 'text']).default('markdown'),
+  actor: z.enum(['human', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent']).default('human'),
+});
+
+export async function upsertDocument(input: unknown) {
+  const value = documentSchema.parse(input);
+  const db = await databaseConnection();
+  const task = fetchTask(db, value.taskId);
+  if (!task) throw new Error('Task not found');
+  if (value.storyIndex && value.storyIndex > task.total_stories) throw new Error(`Story-${value.storyIndex} 不存在`);
+  const title = value.title || `${value.kind}${value.storyIndex ? ` · Story-${value.storyIndex}` : ''}`;
+  db.exec('BEGIN');
+  try {
+    const existing = db.prepare('SELECT document_id FROM documents WHERE task_id = ? AND story_index IS ? AND kind = ?').get(value.taskId, value.storyIndex || null, value.kind) as { document_id: string } | undefined;
+    const documentId = existing?.document_id || randomUUID();
+    db.prepare(`
+      INSERT INTO documents(document_id, task_id, story_index, kind, title, content, format, source_agent)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(task_id, story_index, kind) DO UPDATE SET
+        title = excluded.title,
+        content = excluded.content,
+        format = excluded.format,
+        source_agent = excluded.source_agent,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(documentId, value.taskId, value.storyIndex || null, value.kind, title, value.content, value.format, value.actor);
+    addEvent(db, value.taskId, value.actor, 'DocumentUpserted', `保存文档：${title}`);
+    db.exec('COMMIT');
+    refreshPages(`/tasks/${value.taskId}`);
+    return documentId;
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+export async function listDocuments(taskId: string) {
+  const db = await databaseConnection();
+  return db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[];
+}
+
+export async function getDocument(taskId: string, kind: string, storyIndex?: number | null) {
+  const db = await databaseConnection();
+  return db.prepare('SELECT * FROM documents WHERE task_id = ? AND kind = ? AND story_index IS ?').get(taskId, kind, storyIndex || null) as Document | undefined;
 }
 
 const createTaskSchema = z.object({
@@ -392,7 +312,6 @@ export async function createTask(input: unknown) {
     resume_status: null,
     resume_pending: 0,
     blocked_reason: value.status === 'blocked' ? '等待人工处理' : null,
-    work_dir: '',
   };
   assertState(state);
   const db = await databaseConnection();
@@ -436,37 +355,7 @@ export async function initializeTaskContext(input: unknown) {
   const before = fetchTask(db, value.taskId);
   if (!before) throw new Error('Task not found');
   if (value.actor !== 'human' && value.actor !== 'backlog-agent') throw new Error(`${value.actor} cannot initialize context`);
-  const kindDir = { feature: 'features', bug: 'bugs', tech: 'tech', intake: 'intake' }[value.kind];
-  const workDir = before.work_dir || `.project/${kindDir}/${todayCompact()}-${buildWorkSlug(before.title, value.slug)}`;
-  await mkdir(fullPath(`${workDir}/attachments`), { recursive: true });
-  await writeFileIfMissing(`${workDir}/01_init_input.md`, [
-    '# Initial Input',
-    '',
-    '## Source',
-    '',
-    `- Task ID: ${before.task_id}`,
-    `- Original URL: ${before.link || ''}`,
-    `- External ID: ${before.external_id || ''}`,
-    `- External Status: ${before.external_status || ''}`,
-    `- Priority: ${before.priority || ''}`,
-    '',
-    '## Raw Title',
-    '',
-    before.title,
-    '',
-    '## Raw Body / Comments / Attachments',
-    '',
-    '待 backlog-agent 从原始 URL 收集正文、评论、显式附件和页面内嵌图片。',
-    '',
-    '## Attachment Index',
-    '',
-    '| 本地文件 | 类型 | 来源位置 | 原始 URL | 尺寸/大小 | 说明 |',
-    '|---|---|---|---|---|---|',
-    '| 待收集 | 待收集 | 待收集 | 待收集 | 待收集 | 待收集 |',
-    '',
-  ].join('\n'));
-  const changes: Partial<TaskState> & { item_type?: string; work_dir?: string; next_step?: string } = {
-    work_dir: workDir,
+  const changes: Partial<TaskState> & { item_type?: string; next_step?: string } = {
     agile_status: value.status || before.agile_status,
     current_subagent: value.currentSubagent || before.current_subagent || 'backlog-agent',
     blocked_reason: value.blockedReason || before.blocked_reason,
@@ -480,26 +369,28 @@ export async function initializeTaskContext(input: unknown) {
   try {
     db.prepare(`
       UPDATE tasks
-      SET item_type = ?, work_dir = ?, agile_status = ?, current_subagent = ?,
+      SET item_type = ?, agile_status = ?, current_subagent = ?,
           next_step = ?, blocked_reason = ?, last_actor = ?, resume_pending = 0,
           resume_status = CASE WHEN ? = 'blocked' AND agile_status != 'blocked' THEN agile_status WHEN ? != 'blocked' THEN NULL ELSE resume_status END,
           updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
-    `).run(value.kind, workDir, changes.agile_status, changes.current_subagent, changes.next_step, changes.blocked_reason, value.actor, changes.agile_status, changes.agile_status, value.taskId);
-    addEvent(db, value.taskId, value.actor, 'ContextInitialized', `初始化本地目录：${workDir}`);
+    `).run(value.kind, changes.agile_status, changes.current_subagent, changes.next_step, changes.blocked_reason, value.actor, changes.agile_status, changes.agile_status, value.taskId);
+    addEvent(db, value.taskId, value.actor, 'ContextInitialized', '初始化数据库上下文');
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId);
-    await persistArtifact(db, value.taskId, null, 'loop-state', `${workDir}/00_loop_state.md`);
-    await persistArtifact(db, value.taskId, null, 'input', `${workDir}/01_init_input.md`);
     refreshPages('/', `/tasks/${value.taskId}`);
-    return workDir;
+    return 'database';
   } catch (error) {
     db.exec('ROLLBACK');
     throw error;
   }
 }
 
-const storySchema = z.object({ taskId: z.string().min(1), title: z.string().min(1).max(200) });
+const storySchema = z.object({
+  taskId: z.string().min(1),
+  title: z.string().min(1).max(200),
+  actor: z.enum(['human', 'story-splitter-agent']).default('human'),
+});
 
 export async function addStory(input: unknown) {
   const value = storySchema.parse(input);
@@ -507,16 +398,15 @@ export async function addStory(input: unknown) {
   const task = fetchTask(db, value.taskId);
   if (!task) throw new Error('Task not found');
   const nextIndex = ((db.prepare('SELECT COALESCE(MAX(story_index), 0) AS index_value FROM stories WHERE task_id = ?').get(value.taskId) as { index_value: number }).index_value || 0) + 1;
-  const directory = `stories/story-${String(nextIndex).padStart(3, '0')}`;
+  const directory = `story-${String(nextIndex).padStart(3, '0')}`;
   const prospective = { ...task, total_stories: Math.max(task.total_stories, nextIndex) };
   assertState(prospective);
   db.exec('BEGIN');
   try {
     db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, ?, ?, ?)').run(value.taskId, nextIndex, value.title, directory);
-    db.prepare('UPDATE tasks SET total_stories = ?, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?').run(prospective.total_stories, `已新增 Story-${nextIndex}，等待分析`, 'human', value.taskId);
-    addEvent(db, value.taskId, 'human', 'StoryAdded', `新增 Story-${nextIndex}：${value.title}`);
+    db.prepare('UPDATE tasks SET total_stories = ?, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?').run(prospective.total_stories, `已新增 Story-${nextIndex}，等待分析`, value.actor, value.taskId);
+    addEvent(db, value.taskId, value.actor, 'StoryAdded', `新增 Story-${nextIndex}：${value.title}`);
     db.exec('COMMIT');
-    if (task.work_dir) await mkdir(fullPath(`${task.work_dir}/${directory}`), { recursive: true });
     await syncTaskFiles(db, value.taskId);
     refreshPages(`/tasks/${value.taskId}`);
   } catch (error) {
@@ -590,7 +480,7 @@ export async function addQuestion(input: unknown) {
       db.prepare(`
         UPDATE tasks
         SET agile_status = 'blocked', current_subagent = ?, resume_status = CASE WHEN agile_status != 'blocked' THEN agile_status ELSE resume_status END,
-            resume_pending = 0, blocked_reason = ?, approval_file = NULL, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP
+            resume_pending = 0, blocked_reason = ?, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP
         WHERE task_id = ?
       `).run(agent, value.blockedReason || value.title, `等待人工回答：${value.title}`, value.actor, value.taskId);
     }
@@ -620,7 +510,7 @@ export async function releaseBlock(taskId: string) {
   let detail = '';
   const decision = inferDecisionFromAnsweredQuestions(task, pendingQuestions);
   if (task.current_subagent === 'analyst-agent') {
-    if (decision === 'pending') throw new Error(`human decision is still pending in ${task.approval_file || 'questions'}`);
+    if (decision === 'pending') throw new Error('human decision is still pending in questions table');
     if (decision === 'confirmed') {
       analysisApprovedIndex = Math.max(analysisApprovedIndex, task.analysis_index + 1);
       if (analysisApprovedIndex > task.total_stories) throw new Error('analysis approval exceeds total_stories');
@@ -629,7 +519,7 @@ export async function releaseBlock(taskId: string) {
       detail = '人工要求继续澄清，不得推进 analysis_index';
     }
   } else if (task.current_subagent === 'review-agent') {
-    if (decision === 'pending') throw new Error(`human decision is still pending in ${task.approval_file || 'questions'}`);
+    if (decision === 'pending') throw new Error('human decision is still pending in questions table');
     reviewApproved = decision === 'approved' ? 1 : 0;
     detail = reviewApproved ? '人工已批准交付' : '人工要求修改，必须执行 rewind';
   }
@@ -672,8 +562,6 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
   item_type?: string | null;
   priority?: string | null;
   title?: string | null;
-  work_dir?: string | null;
-  approval_file?: string | null;
 }) {
   const db = await databaseConnection();
   const before = fetchTask(db, taskId);
@@ -696,7 +584,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
     `).get(taskId) as Task | undefined;
     if (active) throw new Error(`代码槽已被 ${active.task_id} 占用`);
   }
-  const allowed = ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'analysis_approved_index', 'blocked_reason', 'next_step', 'item_type', 'priority', 'title', 'work_dir', 'approval_file', 'resume_status'];
+  const allowed = ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'analysis_approved_index', 'blocked_reason', 'next_step', 'item_type', 'priority', 'title', 'resume_status'];
   const keys = allowed.filter((key) => key in changes);
   if (!keys.length) throw new Error('没有需要更新的字段');
   const fields = keys.map((key) => `${key} = ?`);
@@ -708,7 +596,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
   if (changes.agile_status === 'done') fields.push('completed_at = CURRENT_TIMESTAMP');
   else if (changes.agile_status) fields.push('completed_at = NULL');
   if (changes.agile_status === 'in review' && before.agile_status !== 'in review') {
-    fields.push('review_approved = 0', 'approval_file = NULL');
+    fields.push('review_approved = 0');
   }
   fields.push('last_actor = ?', 'resume_pending = 0', 'updated_at = CURRENT_TIMESTAMP');
   values.push(actor);
@@ -806,7 +694,7 @@ export async function rewindTask(input: unknown) {
       UPDATE tasks
       SET agile_status = ?, current_subagent = ?, analysis_index = ?, dev_index = ?,
           test_index = ?, total_stories = ?, analysis_approved_index = ?,
-          review_approved = 0, approval_file = NULL, next_step = ?,
+          review_approved = 0, next_step = ?,
           blocked_reason = NULL, resume_status = NULL, resume_pending = 0,
           last_actor = ?, completed_at = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
@@ -837,7 +725,7 @@ export async function cancelTask(input: unknown) {
       UPDATE tasks
       SET agile_status = 'cancelled', current_subagent = NULL, next_step = ?,
           blocked_reason = NULL, resume_status = NULL, resume_pending = 0,
-          review_approved = 0, approval_file = NULL, last_actor = 'human',
+          review_approved = 0, last_actor = 'human',
           completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(`已取消：${value.reason}`, value.taskId);
@@ -894,9 +782,7 @@ function toEnvelope(task: Task, delegation: Delegation): DelegationEnvelope {
     resumePending: task.resume_pending,
     analysisApprovedIndex: task.analysis_approved_index,
     reviewApproved: task.review_approved,
-    approvalFile: task.approval_file || '',
     lastActor: task.last_actor || '',
-    workDir: task.work_dir || '',
     analysisIndex: task.analysis_index,
     devIndex: task.dev_index,
     testIndex: task.test_index,
@@ -992,7 +878,6 @@ export async function requireRunLease(leaseId: string) {
 
 export async function ensureLoopRuntimeFiles() {
   await mkdir(paths.runsDir, { recursive: true });
-  await mkdir(paths.blocksDir, { recursive: true });
 }
 
 export async function createLoopDispatch(leaseId: string, options: { includeRunHeader?: boolean } = {}) {
@@ -1012,7 +897,7 @@ export async function createLoopDispatch(leaseId: string, options: { includeRunH
     `- Run Token: ${leaseId}`,
     `- Delegations: ${lines.length}`,
     '',
-    ...lines.map((line, index) => `## ${index + 1}. ${line.agent} / ${line.pipeline}\n\n- Task: ${line.title || line.taskId}\n- Work Dir: ${line.workDir}\n- Story: ${line.storyIndex ?? ''}\n- Resource: ${line.resource}\n- Description: ${line.description}\n`),
+    ...lines.map((line, index) => `## ${index + 1}. ${line.agent} / ${line.pipeline}\n\n- Task: ${line.title || line.taskId}\n- Story: ${line.storyIndex ?? ''}\n- Resource: ${line.resource}\n- Description: ${line.description}\n`),
   ].join('\n'), 'utf8');
   await appendLoopRunLog(leaseId, `[派发] 本轮生成 ${lines.length} 个 agent`);
   for (const [index, line] of lines.entries()) {
@@ -1040,9 +925,7 @@ export function toJsonlEnvelope(item: DelegationEnvelope) {
     resume_pending: item.resumePending,
     analysis_approved_index: item.analysisApprovedIndex,
     review_approved: item.reviewApproved,
-    approval_file: item.approvalFile,
     last_actor: item.lastActor,
-    work_dir: item.workDir,
     story_index: item.storyIndex,
     analysis_index: item.analysisIndex,
     dev_index: item.devIndex,
@@ -1059,13 +942,5 @@ export function toJsonlEnvelope(item: DelegationEnvelope) {
 
 export function toPipeEnvelope(item: DelegationEnvelope) {
   const clean = (value: unknown) => String(value ?? '').replaceAll('|', '／').replaceAll('\n', ' ').trim();
-  return [item.taskId, item.title, item.workDir, item.pipeline, item.agent, item.storyIndex ?? '', item.description].map(clean).join('|');
-}
-
-export async function readArtifact(relativePath: string) {
-  try {
-    return await readFile(fullPath(relativePath), 'utf8');
-  } catch {
-    return '';
-  }
+  return [item.taskId, item.title, item.pipeline, item.agent, item.storyIndex ?? '', item.description].map(clean).join('|');
 }

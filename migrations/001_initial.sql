@@ -27,17 +27,6 @@ CREATE TABLE IF NOT EXISTS stories (
   PRIMARY KEY(task_id, story_index)
 );
 
-CREATE TABLE IF NOT EXISTS artifacts (
-  artifact_id TEXT PRIMARY KEY,
-  task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
-  story_index INTEGER,
-  kind TEXT NOT NULL,
-  relative_path TEXT NOT NULL,
-  content_hash TEXT,
-  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(task_id, relative_path)
-);
-
 CREATE TABLE IF NOT EXISTS questions (
   question_id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,

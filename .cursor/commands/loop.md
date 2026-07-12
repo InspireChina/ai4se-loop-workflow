@@ -24,15 +24,43 @@ python scripts/loop/loopctl.py pipeline-all --run-token "$RUN_TOKEN" --format js
 
 3. 对每一行 JSONL：
 
-- `agent=backlog-agent`：收集上下文，必要时执行 `task-context-init --actor backlog-agent`，再用 `task-update` 推进到 `in plan`、`in repro` 或 `blocked`。
-- `agent=story-splitter-agent`：拆分 Story，更新 `total_stories` 和状态。
-- `agent=analyst-agent`：处理指定 Story 的 requirements/plan；需要人工确认时调用 `question-add --json` 创建结构化问题并进入 `blocked`。
-- `agent=repro-agent`：复现 Bug 并写复现材料。
+- `agent=backlog-agent`：通过 `task-context` 收集上下文，必要时执行 `task-context-init --actor backlog-agent`，再用 `task-update` 推进到 `in plan`、`in repro` 或 `blocked`。
+- `agent=story-splitter-agent`：拆分 Story，使用 `story-add --actor story-splitter-agent` 创建 Story；拆分完成后用 `task-update` 推进状态。
+- `agent=analyst-agent`：处理指定 Story 的 requirements/plan；结论必须用 `document-upsert` 写入数据库；需要人工确认时调用 `question-add --json` 创建结构化问题并进入 `blocked`。
+- `agent=repro-agent`：复现 Bug 并用 `document-upsert` 写入复现材料。
 - `agent=dev-agent`：实现指定 Story，完成后推进 `dev_index`。
-- `agent=test-agent`：黑盒测试指定 Story，完成后推进 `test_index` 或回流。
-- `agent=review-agent`：审查完整 Task，写 `06_review.md`，需要人工批准时进入 `blocked`。
+- `agent=test-agent`：黑盒测试指定 Story，把测试结果用 `document-upsert` 写入数据库，完成后推进 `test_index` 或回流。
+- `agent=review-agent`：审查完整 Task，把 review 结论用 `document-upsert` 写入数据库；需要人工批准时调用 `question-add --json` 创建 review 问题并进入 `blocked`。
 
-每个 subagent 必须使用 JSONL envelope 中的 `task_id`、`work_dir`、`story_index`、`pipeline` 和 `description`。
+每个 subagent 必须使用 JSONL envelope 中的 `task_id`、`story_index`、`pipeline` 和 `description`。不要依赖 `work_dir`、`.project` 或任何旧 Markdown 工作目录。
+
+读取 Task 上下文必须通过：
+
+```bash
+python scripts/loop/loopctl.py task-context --task-id TASK-id
+python scripts/loop/loopctl.py document-list --task-id TASK-id
+python scripts/loop/loopctl.py document-get --task-id TASK-id --kind analysis --story 1
+```
+
+写入业务文档必须通过 `document-upsert`。数据库文档格式：
+
+```json
+{
+  "taskId": "TASK-id",
+  "actor": "analyst-agent",
+  "kind": "analysis",
+  "storyIndex": 1,
+  "title": "Story-1 Analysis",
+  "format": "markdown",
+  "content": "Markdown 正文"
+}
+```
+
+调用示例：
+
+```bash
+python scripts/loop/loopctl.py document-upsert --json '{"taskId":"TASK-id","actor":"analyst-agent","kind":"analysis","storyIndex":1,"title":"Story-1 Analysis","format":"markdown","content":"结论正文"}'
+```
 
 每个 subagent 还必须把关键过程写入运行日志。日志入口：
 
@@ -43,7 +71,7 @@ python scripts/loop/loopctl.py run-log --run-token "$RUN_TOKEN" --agent AGENT --
 python scripts/loop/loopctl.py run-log --run-token "$RUN_TOKEN" --agent AGENT --task-id TASK-id --pipeline PIPELINE --event complete --message "处理完成"
 ```
 
-至少记录：subagent 开始、重要工具调用、工具结果摘要、状态写入、完成、阻塞或失败。不要把大段文件全文写入日志，只写摘要和路径。
+至少记录：subagent 开始、重要工具调用、工具结果摘要、状态写入、完成、阻塞或失败。不要把大段正文写入日志，只写摘要和数据库 document kind / story。
 
 ## 人工确认问题
 

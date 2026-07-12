@@ -4,7 +4,6 @@ ALTER TABLE tasks ADD COLUMN external_status TEXT;
 ALTER TABLE tasks ADD COLUMN resume_status TEXT;
 ALTER TABLE tasks ADD COLUMN resume_pending INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE tasks ADD COLUMN review_approved INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE tasks ADD COLUMN approval_file TEXT;
 ALTER TABLE tasks ADD COLUMN last_actor TEXT;
 ALTER TABLE tasks ADD COLUMN owner TEXT;
 ALTER TABLE tasks ADD COLUMN evidence TEXT;
