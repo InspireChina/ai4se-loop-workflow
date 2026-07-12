@@ -3,7 +3,8 @@ import '../load-env.js';
 import { spawn } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { appendLoopRunLog, endRun } from '../../src/application/tasks';
+import { appendLoopRunLog, createLoopDispatch, endRun, getRunStatus } from '../../src/application/tasks';
+import { startCursorAgentRun, startDispatchRetryRun } from '../../src/infrastructure/cursor-agent';
 import { paths } from '../../src/infrastructure/database';
 
 const leaseId = process.argv[2];
@@ -100,6 +101,8 @@ function buildPrompt(loopCommand: string) {
     '你是 Loop Engineering 的 Cursor Agent 执行器。',
     '',
     '请执行本轮 loop。注意：本轮 run lease 已经由 App 创建，不要再调用 run-begin。',
+    '不要调用 run-end，也不要释放 run lease；本产品是持续 loop，运行生命周期由 App 的“结束本轮”按钮控制。',
+    '完成当前可执行委派后，记录必要日志，然后直接结束本次 Cursor Agent 输出。App runner 会在 1 分钟后自动继续下一轮 loop。',
     '',
     `Run Token: ${leaseId}`,
     `Loop App Root: ${paths.appRoot}`,
@@ -114,10 +117,39 @@ function buildPrompt(loopCommand: string) {
     `python ${join(paths.appRoot, 'scripts/loop/loopctl.py')} run-log --run-token ${leaseId} --agent AGENT --task-id TASK --pipeline PIPELINE --event tool-result --tool TOOL --message "工具结果摘要"`,
     `python ${join(paths.appRoot, 'scripts/loop/loopctl.py')} run-log --run-token ${leaseId} --agent AGENT --task-id TASK --pipeline PIPELINE --event complete --message "处理完成"`,
     '',
-    '下面是 /loop 原始协议，请遵守，但把 run-begin/run-end 替换为使用上面的既有 Run Token：',
+    '下面是 /loop 原始协议，请遵守；其中 run-begin/run-end 步骤在 App 持续运行模式下必须忽略：',
     '',
     loopCommand,
   ].join('\n');
+}
+
+function delayLabel(ms: number) {
+  return ms >= 60000 ? `${Math.max(1, Math.round(ms / 60000))} 分钟` : `${Math.max(1, Math.round(ms / 1000))} 秒`;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function isLeaseActive() {
+  const run = await getRunStatus();
+  return Boolean(run?.active && run.leaseId === leaseId);
+}
+
+async function scheduleNextLoop() {
+  const retryMs = Number(process.env.LOOP_ACTIVE_DISPATCH_RETRY_MS || 60 * 1000);
+  await appendLoopRunLog(leaseId, `[运行] 本轮 agent 已完成，${delayLabel(retryMs)}后继续 loop`);
+  await sleep(retryMs);
+  if (!(await isLeaseActive())) return;
+
+  await appendLoopRunLog(leaseId, '[运行] 继续下一轮派发');
+  const dispatch = await createLoopDispatch(leaseId, { includeRunHeader: false });
+  if (dispatch.delegations.length > 0) {
+    await appendLoopRunLog(leaseId, `[运行] 下一轮发现 ${dispatch.delegations.length} 个 agent，启动 Cursor Agent`);
+    await startCursorAgentRun(leaseId);
+    return;
+  }
+  await startDispatchRetryRun(leaseId);
 }
 
 async function main() {
@@ -179,14 +211,17 @@ async function main() {
     if (Date.now() - lastOutputAt > idleTimeoutMs) void terminate(`超过空闲时间 ${Math.round(idleTimeoutMs / 1000)} 秒`);
   }, Math.min(30000, idleTimeoutMs));
 
-  const exitCode = await new Promise<number | null>((resolve) => child.on('exit', resolve));
+  const exitCode = await new Promise<number | null>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('exit', resolve);
+  });
   clearTimeout(maxTimer);
   clearInterval(idleTimer);
   if (stdoutBuffer.trim()) enqueueLog(logCursorJsonLine(stdoutBuffer));
   if (stderrBuffer.trim()) enqueueLog(logCursorStderrLine(stderrBuffer));
   await flushLogs();
   await appendLoopRunLog(leaseId, `[Cursor] Cursor Agent 已退出 code=${exitCode ?? 'signal'}`);
-  await endRun(leaseId, false, { stopRunner: false });
+  await scheduleNextLoop();
 }
 
 main().catch(async (error) => {

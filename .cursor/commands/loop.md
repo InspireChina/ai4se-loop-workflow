@@ -45,13 +45,11 @@ python scripts/loop/loopctl.py run-log --run-token "$RUN_TOKEN" --agent AGENT --
 
 至少记录：subagent 开始、重要工具调用、工具结果摘要、状态写入、完成、阻塞或失败。不要把大段文件全文写入日志，只写摘要和路径。
 
-4. 所有委派完成后释放租约：
+4. 所有委派完成后，不要主动释放租约。
 
-```bash
-python scripts/loop/loopctl.py run-end "$RUN_TOKEN"
-```
+Loop Engineering 产品化版本是持续 loop：App/runner 会在本轮 agent 完成后等待一段时间并继续下一轮派发。`run-end` 只用于用户在 UI 点击“结束本轮”或人工运维停止持续 loop。
 
-如果中途失败，不要强制释放；向用户报告失败点和当前 token。只有确认没有 subagent 继续执行时，才允许：
+如果中途失败，不要强制释放；向用户报告失败点和当前 token。只有确认需要人工停止整个持续 loop，且没有 subagent 继续执行时，才允许人工运维执行：
 
 ```bash
 python scripts/loop/loopctl.py run-end "$RUN_TOKEN" --force
