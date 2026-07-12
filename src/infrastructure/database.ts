@@ -57,8 +57,6 @@ export const paths = {
   dataDir,
   repoHash,
   dbPath,
-  inboxPath: join(dataDir, 'inbox.md'),
-  controlPath: join(dataDir, 'control.md'),
   runsDir: join(dataDir, 'runs'),
   blocksDir: join(dataDir, 'blocks'),
 };

@@ -1,4 +1,4 @@
-export const ACTORS = ['human', 'source-agent', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent'] as const;
+export const ACTORS = ['human', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent'] as const;
 export const TASK_STATUSES = ['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'done', 'cancelled', 'blocked'] as const;
 export type Actor = typeof ACTORS[number];
 export type TaskStatus = typeof TASK_STATUSES[number];
@@ -104,8 +104,8 @@ export function assertUpdate(before: TaskState, actor: Actor, next: Partial<Task
 }
 
 export function assertActorCanCreate(actor: Actor, status: TaskStatus, currentSubagent: string | null) {
-  if (actor !== 'human' && actor !== 'source-agent') throw new Error(`${actor} 无权创建 Task`);
-  if (actor === 'source-agent' && (status !== 'backlog' || currentSubagent)) throw new Error('source-agent 只能创建未分配 backlog Task');
+  if (actor !== 'human') throw new Error(`${actor} 无权创建 Task`);
+  if (status !== 'backlog' || currentSubagent) throw new Error('Web 新建 Task 只能创建未分配 backlog Task');
 }
 
 export function occupiesCodeSlot(task: TaskState) {

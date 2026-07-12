@@ -9,8 +9,6 @@ import {
   ensureLoopRuntimeFiles,
   getRunStatus,
   getTask,
-  inboxCheck,
-  inboxCommit,
   initializeTaskContext,
   listTasks,
   pipelineAllEnvelopes,
@@ -134,7 +132,7 @@ async function printPipelineAll(args: Args) {
   const runToken = requireValue(args, 'runToken');
   await requireRunLease(runToken);
   const format = value(args, 'format', 'jsonl');
-  const lines = await pipelineAllEnvelopes({ includeInbox: true });
+  const lines = await pipelineAllEnvelopes();
   for (const line of lines) console.log(format === 'pipe' ? toPipeEnvelope(line) : toJsonlEnvelope(line));
 }
 
@@ -191,8 +189,6 @@ async function main() {
         repo_hash: paths.repoHash,
         data_dir: paths.dataDir,
         db_path: paths.dbPath,
-        inbox_path: paths.inboxPath,
-        control_path: paths.controlPath,
         runs_dir: paths.runsDir,
       }, null, 2));
       return;
@@ -213,22 +209,12 @@ async function main() {
       console.log(run?.active ? `active until ${run.leaseUntil}` : run ? 'expired' : 'idle');
       return;
     }
-    case 'inbox-check': {
-      const changed = await inboxCheck(optional(args, 'inbox'));
-      console.log(changed ? 'changed' : 'unchanged');
-      process.exitCode = changed ? 1 : 0;
-      return;
-    }
-    case 'inbox-commit':
-      console.log(`committed ${await inboxCommit(optional(args, 'inbox'))}`);
-      return;
     case 'task-add':
-    case 'task-ingest': {
       const taskId = await createTask({
         actor: requireValue(args, 'actor') as Actor,
         taskId: optional(args, 'taskId'),
         title: requireValue(args, 'title'),
-        link: command === 'task-ingest' ? requireValue(args, 'link') : optional(args, 'link'),
+        link: optional(args, 'link'),
         externalId: optional(args, 'externalId'),
         externalStatus: optional(args, 'externalStatus'),
         itemType: itemTypeArg(args),
@@ -236,9 +222,8 @@ async function main() {
         status: optional(args, 'status') || 'backlog',
         currentSubagent: optional(args, 'currentSubagent'),
       });
-      console.log(command === 'task-ingest' ? `200 OK ${taskId}` : taskId);
+      console.log(taskId);
       return;
-    }
     case 'task-list':
       await printTaskList(args);
       return;

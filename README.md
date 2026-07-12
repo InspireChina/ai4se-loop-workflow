@@ -57,7 +57,7 @@ python scripts/loop/loopctl.py run-end "$RUN_TOKEN"
 - blocked / block-release，保留 resume status 和 resume pending 规则。
 - rewind、cancel 和单代码槽保护。
 - pipeline 计算，包含浏览器资源限制和代码槽限制。
-- Cursor `/loop` 命令、`scripts/loop/loopctl.py` 兼容入口、run lease、inbox hash 和 dispatch 文件。
+- Cursor `/loop` 命令、`scripts/loop/loopctl.py` 兼容入口、run lease 和 dispatch 文件。
 - 多 repo 数据隔离：按 repo 根目录短 hash 选择 `data/<hash>/loop-ui.db`。
 - Umzug 管理的 SQL migration，行为接近 Flyway 的顺序迁移。
 

@@ -120,7 +120,7 @@ RunBegin / RunEnd / RunStatus
 2. 新增 SQL migration：`tasks` 扩展列、`stories`、`artifacts`、`questions`、`approvals`、`task_events`、`loop_meta`。
 3. 实现 application command 和领域规则，先覆盖现有 loopctl 核心流程。
 4. 实现 Task / Question / Approval 的 UI 操作，并以旧规则验收。
-5. 再补文件扫描、artifact revision、inbox 等增强能力。
+5. 再补文件扫描、artifact revision 等增强能力。
 
 ## 8. V1 验收标准
 

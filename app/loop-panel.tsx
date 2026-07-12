@@ -27,7 +27,7 @@ export default async function LoopPanel() {
         {pipeline.length === 0 ? <p className="side-empty">当前没有可派发步骤。</p> : pipeline.map((item) => <Link href={item.taskId ? `/tasks/${item.taskId}` : '/'} className="side-item" key={`${item.taskId}-${item.pipeline}-${item.storyIndex || 0}`}>
           <span className="badge blue">{item.pipeline}</span>
           <strong>{item.agent}</strong>
-          <small>{item.taskId || 'Inbox'}{item.storyIndex ? ` · Story-${item.storyIndex}` : ''}</small>
+          <small>{item.taskId || 'System'}{item.storyIndex ? ` · Story-${item.storyIndex}` : ''}</small>
           <em>{item.description}</em>
         </Link>)}
       </div>

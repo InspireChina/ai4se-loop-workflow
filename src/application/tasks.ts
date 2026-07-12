@@ -129,11 +129,6 @@ function dataFullPath(relativePath: string) {
   return assertInsideData(join(paths.dataDir, relativePath));
 }
 
-function runtimePath(pathValue?: string) {
-  if (!pathValue) return paths.inboxPath;
-  return pathValue.startsWith(sep) ? pathValue : resolve(paths.root, pathValue);
-}
-
 function toRelativePath(pathValue: string) {
   const full = assertInsideWorkspace(resolve(paths.root, pathValue));
   return full.slice(resolve(paths.root).length + 1);
@@ -347,7 +342,7 @@ const createTaskSchema = z.object({
   externalStatus: z.string().trim().optional().nullable(),
   itemType: z.enum(['feature', 'bug', 'tech', 'intake', 'other']).default('feature'),
   priority: z.string().trim().optional().nullable(),
-  actor: z.enum(['human', 'source-agent']).default('human'),
+  actor: z.enum(['human']).default('human'),
   status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'done', 'cancelled', 'blocked']).default('backlog'),
   currentSubagent: z.string().trim().optional().nullable(),
   taskId: z.string().trim().optional().nullable(),
@@ -929,41 +924,7 @@ function toEnvelope(task: Task, delegation: Delegation): DelegationEnvelope {
   };
 }
 
-function sourceEnvelope(): DelegationEnvelope {
-  return {
-    taskId: '',
-    pipeline: 'source',
-    agent: 'source-agent',
-    storyIndex: null,
-    resource: 'none',
-    description: 'process changed inbox.md',
-    title: 'Inbox changed',
-    itemType: 'source',
-    priority: '',
-    link: '',
-    externalId: '',
-    externalStatus: '',
-    agileStatus: '',
-    currentSubagent: '',
-    resumePending: 0,
-    analysisApprovedIndex: 0,
-    reviewApproved: 0,
-    approvalFile: '',
-    lastActor: 'loopctl',
-    workDir: paths.dataDir,
-    analysisIndex: 0,
-    devIndex: 0,
-    testIndex: 0,
-    totalStories: 0,
-    nextStep: 'process changed inbox.md',
-    blockedReason: '',
-    owner: '',
-    evidence: 'inbox.md md5 changed',
-    risk: 'new tasks will be routed on the next loop run after source-agent commits inbox md5',
-  };
-}
-
-export async function pipelineAllEnvelopes(options: { includeInbox?: boolean } = {}): Promise<DelegationEnvelope[]> {
+export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
   const db = await databaseConnection();
   const tasks = db.prepare(`${taskSelect} WHERE agile_status NOT IN ('done', 'cancelled') ORDER BY
     CASE agile_status
@@ -979,7 +940,6 @@ export async function pipelineAllEnvelopes(options: { includeInbox?: boolean } =
   const readyDev = !codeAvailable ? null : tasks.find((task) => task.agile_status === 'ready for dev' && task.dev_index < task.analysis_index)?.task_id || null;
   let browserUsed = false;
   const lines: DelegationEnvelope[] = [];
-  if (options.includeInbox && await inboxHasChanges()) lines.push(sourceEnvelope());
   for (const task of tasks) {
     const taskCodeAvailable = codeAvailable && (!readyDev || task.task_id === readyDev);
     const line = nextDelegation(task, taskCodeAvailable);
@@ -1040,67 +1000,14 @@ export async function requireRunLease(leaseId: string) {
   if (!run.active) throw new Error('run lease expired; start a new loop run');
 }
 
-function md5(value: Buffer | string) {
-  return createHash('md5').update(value).digest('hex');
-}
-
-async function fileHashByPath(path: string) {
-  try {
-    return md5(await readFile(path));
-  } catch {
-    return '';
-  }
-}
-
 export async function ensureLoopRuntimeFiles() {
-  await mkdir(paths.dataDir, { recursive: true });
   await mkdir(paths.runsDir, { recursive: true });
   await mkdir(paths.blocksDir, { recursive: true });
-  if (!existsSync(paths.inboxPath)) await writeFile(paths.inboxPath, [
-    '# Loop Inbox',
-    '',
-    '## 新输入',
-    '',
-    '把新卡片、Bug、临时需求或 URL 粘贴在这里。source-agent 处理后执行 inbox-commit。',
-    '',
-  ].join('\n'), 'utf8');
-  if (!existsSync(paths.controlPath)) await writeFile(paths.controlPath, [
-    '# Loop Control',
-    '',
-    '本文件由 `/loop` 命令读取。实际状态以 SQLite 和 loopctl 输出为准。',
-    '',
-  ].join('\n'), 'utf8');
-}
-
-export async function inboxHasChanges(inboxPath?: string) {
-  await ensureLoopRuntimeFiles();
-  const current = await fileHashByPath(runtimePath(inboxPath));
-  if (!current) return false;
-  const db = await databaseConnection();
-  const row = db.prepare("SELECT value FROM loop_meta WHERE key = 'inbox_md5'").get() as { value: string } | undefined;
-  return !row?.value || row.value !== current;
-}
-
-export async function inboxCheck(inboxPath?: string) {
-  return inboxHasChanges(inboxPath);
-}
-
-export async function inboxCommit(inboxPath?: string) {
-  await ensureLoopRuntimeFiles();
-  const path = runtimePath(inboxPath);
-  const current = await fileHashByPath(path);
-  if (!current) throw new Error(`inbox not found: ${path}`);
-  const db = await databaseConnection();
-  db.prepare(`
-    INSERT INTO loop_meta(key, value) VALUES('inbox_md5', ?)
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
-  `).run(current);
-  return current;
 }
 
 export async function createLoopDispatch(leaseId: string) {
   await requireRunLease(leaseId);
-  const lines = await pipelineAllEnvelopes({ includeInbox: true });
+  const lines = await pipelineAllEnvelopes();
   const runDir = join(paths.runsDir, leaseId);
   await mkdir(runDir, { recursive: true });
   await writeFile(join(runDir, 'delegations.jsonl'), lines.map(toJsonlEnvelope).join('\n') + (lines.length ? '\n' : ''), 'utf8');
@@ -1110,7 +1017,7 @@ export async function createLoopDispatch(leaseId: string) {
     `- Run Token: ${leaseId}`,
     `- Delegations: ${lines.length}`,
     '',
-    ...lines.map((line, index) => `## ${index + 1}. ${line.agent} / ${line.pipeline}\n\n- Task: ${line.title || line.taskId || 'Inbox'}\n- Work Dir: ${line.workDir}\n- Story: ${line.storyIndex ?? ''}\n- Resource: ${line.resource}\n- Description: ${line.description}\n`),
+    ...lines.map((line, index) => `## ${index + 1}. ${line.agent} / ${line.pipeline}\n\n- Task: ${line.title || line.taskId}\n- Work Dir: ${line.workDir}\n- Story: ${line.storyIndex ?? ''}\n- Resource: ${line.resource}\n- Description: ${line.description}\n`),
   ].join('\n'), 'utf8');
   return { runDir, delegations: lines };
 }

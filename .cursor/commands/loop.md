@@ -24,7 +24,6 @@ python scripts/loop/loopctl.py pipeline-all --run-token "$RUN_TOKEN" --format js
 
 3. 对每一行 JSONL：
 
-- `agent=source-agent`：先执行 `python scripts/loop/loopctl.py paths` 获取 `inbox_path`，读取该文件，将新输入用 `task-ingest --actor source-agent` 幂等写入；成功后执行 `inbox-commit`。
 - `agent=backlog-agent`：收集上下文，必要时执行 `task-context-init --actor backlog-agent`，再用 `task-update` 推进到 `in plan`、`in repro` 或 `blocked`。
 - `agent=story-splitter-agent`：拆分 Story，更新 `total_stories` 和状态。
 - `agent=analyst-agent`：处理指定 Story 的 requirements/plan；需要人工确认时写 `90_analysis_questions.md` 并进入 `blocked`。

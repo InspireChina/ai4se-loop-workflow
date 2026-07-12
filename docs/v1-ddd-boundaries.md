@@ -8,7 +8,7 @@ V1 的产品术语必须沿用现有系统，不采用 prototype 的新术语替
 |---|---|
 | Task | `tasks` 表中的工作项，Feature、Bug、Tech 等均以 Task 进入 loop。 |
 | Story | Task 经 `story-splitter-agent` 拆出的可推进单元。 |
-| Agent | `source-agent`、`backlog-agent`、`story-splitter-agent`、`analyst-agent`、`repro-agent`、`dev-agent`、`test-agent`、`review-agent`。 |
+| Agent | `backlog-agent`、`story-splitter-agent`、`analyst-agent`、`repro-agent`、`dev-agent`、`test-agent`、`review-agent`。 |
 | Pipeline | CLI 根据 Task 状态和游标给出的下一步委派。 |
 | Analysis / Dev / Test Index | Story 分别完成分析、开发、测试的顺序游标。 |
 | Blocked | Task 等待人工或外部信息的状态，不是 Agent 失败的同义词。 |
@@ -27,7 +27,7 @@ V1 的产品术语必须沿用现有系统，不采用 prototype 的新术语替
 - Aggregate Root：`Task`
 - 内部实体：`Story`
 - 值对象：`TaskStatus`、`ItemType`、`Priority`、`PipelineProgress`
-- 关键命令：`TaskIngest`、`TaskContextInit`、`TaskUpdate`、`TaskRewind`、`TaskCancel`
+- 关键命令：`CreateTask`、`TaskContextInit`、`TaskUpdate`、`TaskRewind`、`TaskCancel`
 
 `Task` 是 V1 的唯一流程 aggregate root。Story 作为其内部实体存在，因为当前状态机必须在同一一致性边界内维护 Task 状态与三个 Story 游标。
 
@@ -157,7 +157,7 @@ classDiagram
 
 | 命令 | 负责 context | 允许 actor / 来源 | 结果 |
 |---|---|---|---|
-| `CreateTask` / `TaskIngest` | Task Management | source-agent / human | 创建 backlog Task。 |
+| `CreateTask` | Task Management | human | 创建 backlog Task。 |
 | `TaskContextInit` | Task Management + Artifact Management | backlog-agent / human | 创建工作目录和初始文件。 |
 | `TaskUpdate` | Task Management | 当前角色权限 | 正向推进或记录 blocked。 |
 | `TaskRewind` | Task Management | analyst/dev/test/review/human | 统一逆向游标与责任 agent。 |
@@ -171,7 +171,7 @@ classDiagram
 | 表 | 职责 | V1 来源 |
 |---|---|---|
 | `tasks` | Task 当前事实与流程游标 | 保留现有表，必要时迁移扩展。 |
-| `loop_meta` | schema version、inbox MD5、run lease | V1 本地元数据表。 |
+| `loop_meta` | schema version、run lease | V1 本地元数据表。 |
 | `stories` | Story 的结构化索引 | 从 `03_story_list.md` 同步。 |
 | `artifacts` | Artifact 当前索引 | 从本地目录扫描。 |
 | `artifact_revisions` | 文档 hash、快照元数据、同步时间 | V1 后续增强；当前先以 `artifacts.content_hash` 记录当前版本。 |
@@ -187,7 +187,7 @@ classDiagram
 V1 仅追加审计事件，不以事件回放重建系统状态。
 
 ```text
-TaskIngested
+TaskCreated
 TaskContextInitialized
 TaskClassified
 StoriesSplit
