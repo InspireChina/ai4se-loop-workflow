@@ -24,14 +24,60 @@ function stringifyValue(value: unknown) {
   }
 }
 
+function getToolPayload(event: Record<string, unknown>) {
+  const toolCall = event.tool_call as Record<string, unknown> | undefined;
+  if (!toolCall) return { tool: '', args: undefined as Record<string, unknown> | undefined, result: undefined as Record<string, unknown> | undefined };
+  const key = Object.keys(toolCall).find((item) => item.endsWith('ToolCall'));
+  const payload = key ? toolCall[key] as Record<string, unknown> : undefined;
+  const tool = key ? key.replace(/ToolCall$/, '') : stringifyValue(event.tool || event.name || '');
+  return {
+    tool,
+    args: payload?.args as Record<string, unknown> | undefined,
+    result: payload?.result as Record<string, unknown> | undefined,
+  };
+}
+
+function summarizeCommand(command: string) {
+  if (!command) return '';
+  if (command.includes(' pipeline-all ')) return '获取本轮 pipeline 委派';
+  if (command.includes(' run-log ')) return '写入 Agent 运行日志';
+  if (command.includes(' task-get ') || command.includes(' task-show ')) return '查询 Task 详情';
+  if (command.includes(' task-context-init ')) return '初始化本地上下文';
+  if (command.includes(' task-update ')) return '更新 Task 状态';
+  if (command.includes(' paths')) return '查看工作区路径配置';
+  if (command.includes('--help')) return '查看 loopctl 可用命令';
+  return compact(command);
+}
+
+function summarizeResult(result: Record<string, unknown> | undefined) {
+  if (!result) return '';
+  const success = result.success as Record<string, unknown> | undefined;
+  const failure = result.error as Record<string, unknown> | undefined;
+  if (failure) return `失败：${compact(stringifyValue(failure), 500)}`;
+  if (!success) return compact(stringifyValue(result), 500);
+  const exitCode = success.exitCode !== undefined ? `exit=${success.exitCode}` : '';
+  const stdout = stringifyValue(success.stdout);
+  const files = Array.isArray(success.files) ? `files=${success.files.length}` : '';
+  const matches = stringifyValue((success.workspaceResults as Record<string, unknown> | undefined) || '');
+  const summary = stdout ? `输出 ${stdout.split(/\r?\n/).filter(Boolean).length} 行：${compact(stdout, 500)}` : files || (matches ? '找到匹配结果' : '成功');
+  return [exitCode, summary].filter(Boolean).join('，');
+}
+
 function logCursorJsonLine(line: string) {
   try {
     const event = JSON.parse(line) as Record<string, unknown>;
     const type = String(event.type || event.event || event.kind || 'event');
-    const tool = stringifyValue(event.tool || event.toolName || event.name);
+    const subtype = String(event.subtype || '');
+    const { tool, args, result } = getToolPayload(event);
     const text = stringifyValue(event.text || event.message || event.delta || event.content || event.summary);
-    if (type.toLowerCase().includes('tool') || tool) {
-      return `[Cursor工具] type=${type}${tool ? ` tool=${compact(tool, 200)}` : ''} - ${compact(text || line)}`;
+    if (type === 'tool_call' || tool) {
+      const description = stringifyValue(args?.description) || stringifyValue((event.tool_call as Record<string, unknown> | undefined)?.description);
+      const command = stringifyValue(args?.command);
+      const path = stringifyValue(args?.path || args?.targetDirectory);
+      const message = subtype === 'completed'
+        ? summarizeResult(result)
+        : description || summarizeCommand(command) || path || '执行工具';
+      return `[Cursor工具] ${subtype === 'completed' ? '完成' : '调用'} tool=${tool || 'unknown'} - ${compact(message || text || '工具事件')}`;
     }
     if (text) return `[Cursor输出] type=${type} - ${compact(text)}`;
     return `[Cursor事件] ${compact(line)}`;

@@ -27,9 +27,22 @@ main{min-width:0;padding:42px 42px}
 .run-log-box{border:1px solid #20293a;background:#111722;border-radius:8px;overflow:hidden}
 .run-log-status{display:flex;align-items:center;gap:7px;padding:8px 10px;border-bottom:1px solid #263246;background:#171f2e}
 .run-log-status small{color:#a8b3c7;margin:0}
+.run-log-status .text-toggle{margin-left:auto;background:transparent;border:1px solid #3a465b;color:#c9d3e6;border-radius:6px;padding:4px 8px;cursor:pointer}
 .live-dot{width:7px;height:7px;border-radius:50%;background:#2fd17c;box-shadow:0 0 0 3px rgba(47,209,124,.15)}
 .live-dot.idle{background:#6d778a;box-shadow:none}
 .run-log-box pre{margin:0;max-height:420px;border-radius:0;background:#111722;color:#dce4f4;font-size:12px;line-height:1.45}
+.friendly-log{max-height:420px;overflow:auto;background:#fff;color:var(--ink);padding:10px 14px}
+.friendly-empty{margin:0;color:var(--muted);padding:16px}
+.friendly-event{display:grid;grid-template-columns:14px minmax(0,1fr);gap:10px;padding:12px 0;border-bottom:1px solid var(--line)}
+.friendly-event:last-child{border-bottom:0}
+.event-dot{width:9px;height:9px;border-radius:50%;background:#8ca2c8;margin-top:5px}
+.friendly-event.running .event-dot{background:var(--blue);box-shadow:0 0 0 3px rgba(39,104,216,.12)}
+.friendly-event.success .event-dot{background:var(--green)}
+.friendly-event.error .event-dot{background:var(--red)}
+.event-head{display:flex;justify-content:space-between;gap:12px;align-items:flex-start}
+.event-head time{font-size:12px;color:var(--muted);white-space:nowrap}
+.friendly-event small{margin:3px 0 0;color:#7a8497}
+.friendly-event p{margin:6px 0 0;color:#364154;line-height:1.45;overflow-wrap:anywhere}
 .run-toolbar{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:16px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px 16px}
 .run-toolbar>div{display:flex;align-items:center;gap:10px;min-width:0}
 .run-toolbar small{margin:0}
@@ -40,6 +53,7 @@ main{min-width:0;padding:42px 42px}
 .run-console-head h2{margin:0 0 6px}
 .run-page-log .run-log-box{border:0;border-radius:0}
 .run-page-log .run-log-box pre{max-height:calc(100vh - 300px);min-height:560px;font-size:13px;line-height:1.55}
+.run-page-log .friendly-log{max-height:calc(100vh - 300px);min-height:560px}
 .run-idle-note{min-height:260px}
 .run-event-list{overflow:hidden}
 .run-event-row{display:grid;grid-template-columns:20px 140px minmax(0,1fr) auto;gap:12px;align-items:center;padding:12px 14px;border-bottom:1px solid var(--line);text-decoration:none;color:inherit}

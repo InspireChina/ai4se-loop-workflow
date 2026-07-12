@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { getRunStatus, loopRunLogPath } from '../../../../src/application/tasks';
+import { parseRunLog } from '../../../../src/application/run-log';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -10,8 +11,8 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function eventData(chunk: string) {
-  return encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`);
+function eventData(data: unknown) {
+  return encoder.encode(`data: ${JSON.stringify(data)}\n\n`);
 }
 
 function doneEvent() {
@@ -32,7 +33,8 @@ export async function GET(request: Request) {
           return;
         }
         if (content.length <= offset) return;
-        controller.enqueue(eventData(content.slice(offset)));
+        const chunk = content.slice(offset);
+        controller.enqueue(eventData({ raw: chunk, events: parseRunLog(chunk) }));
         offset = content.length;
       };
 
