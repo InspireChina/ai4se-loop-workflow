@@ -16,32 +16,31 @@ export default async function RunsPage() {
       <p className="muted">这里展示每轮 loop 的实时运行日志。需要执行的 agent、dispatch 和状态变化都会写到日志里。</p>
     </header>
 
+    <section className="run-toolbar">
+      <div>
+        <span className={`badge ${run?.active ? 'amber' : 'green'}`}>{run?.active ? 'running' : 'idle'}</span>
+        <small>{run?.active ? `${run.owner} · ${run.leaseUntil}` : '当前没有运行中的 loop。'}</small>
+      </div>
+      {run?.active ? <form action={endLoopRunAction}>
+        <input type="hidden" name="leaseId" value={run.leaseId}/>
+        <input type="hidden" name="redirectTo" value="/runs"/>
+        <button className="button secondary" type="submit"><LockKeyhole size={15}/>结束本轮</button>
+      </form> : <form action={startLoopRunAction}>
+        <input type="hidden" name="redirectTo" value="/runs"/>
+        <button className="button" type="submit"><Route size={15}/>开始运行</button>
+      </form>}
+    </section>
+
     <section className="run-console-layout">
       <div className="card run-console-main">
         <div className="run-console-head">
           <div>
             <h2><ScrollText size={16}/>{run?.active ? '实时运行日志' : '运行日志'}</h2>
-            <p className="muted">{run?.active ? `${run.owner} · ${run.leaseUntil}` : '当前没有运行中的 loop。点击开始运行后，这里会实时追加日志。'}</p>
+            <p className="muted">{run?.active ? '日志会在本轮运行期间持续追加。' : '点击上方开始运行后，这里会实时追加日志。'}</p>
           </div>
-          <span className={`badge ${run?.active ? 'amber' : 'green'}`}>{run?.active ? 'running' : 'idle'}</span>
         </div>
         {run?.active ? <div className="run-page-log"><LoopLogStream leaseId={run.leaseId}/></div> : <div className="empty run-idle-note">暂无实时日志。最近事件在下方可查看。</div>}
       </div>
-
-      <aside className="run-console-actions">
-        {run?.active ? <form action={endLoopRunAction} className="card form-panel">
-          <h2><LockKeyhole size={15}/>本轮运行中</h2>
-          <small>{run.leaseId}</small>
-          <input type="hidden" name="leaseId" value={run.leaseId}/>
-          <input type="hidden" name="redirectTo" value="/runs"/>
-          <button className="button secondary" type="submit">结束本轮</button>
-        </form> : <form action={startLoopRunAction} className="card form-panel">
-          <h2><Route size={15}/>开始 Loop</h2>
-          <p className="muted">生成 run lease、dispatch，并打开实时日志。</p>
-          <input type="hidden" name="redirectTo" value="/runs"/>
-          <button className="button" type="submit">开始运行</button>
-        </form>}
-      </aside>
     </section>
 
     <section className="task-section">
