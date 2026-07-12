@@ -1,3 +1,4 @@
+import './load-env.js';
 import { migrateDatabase, paths } from '../src/infrastructure/database.js';
 
 await migrateDatabase();

@@ -1,4 +1,5 @@
 #!/usr/bin/env tsx
+import '../load-env.js';
 import {
   addQuestion,
   beginRun,
