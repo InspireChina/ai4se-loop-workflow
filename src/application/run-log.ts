@@ -25,6 +25,15 @@ function compact(value: string, limit = 220) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
+function isCursorDiagnostic(text: string) {
+  return /^cursor-retrieval:\s+tracing to\b/.test(text.trim());
+}
+
+function friendlyCursorDiagnostic(text: string) {
+  if (isCursorDiagnostic(text)) return `Cursor retrieval 已开启诊断 trace（非错误）：${text.replace(/^cursor-retrieval:\s*/, '')}`;
+  return text;
+}
+
 function toolNameLabel(tool: string) {
   const lower = tool.toLowerCase();
   if (lower.includes('shell')) return 'Shell 命令';
@@ -161,6 +170,12 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
   }
   if (parsed.label === 'Cursor事件') {
     if (parsed.body.includes('"type":"system"') || parsed.body.includes('"subtype":"completed"')) return null;
+  }
+  if (parsed.label === 'Cursor诊断') {
+    return { ...base, kind: 'cursor', status: 'info', title: 'Cursor 诊断', detail: friendlyCursorDiagnostic(parsed.body) };
+  }
+  if (parsed.label === 'Cursor错误' && isCursorDiagnostic(parsed.body)) {
+    return { ...base, kind: 'cursor', status: 'info', title: 'Cursor 诊断', detail: friendlyCursorDiagnostic(parsed.body) };
   }
   if (parsed.label === 'Cursor错误' || parsed.label === '错误') {
     return { ...base, kind: 'error', status: 'error', title: '运行错误', detail: parsed.body };

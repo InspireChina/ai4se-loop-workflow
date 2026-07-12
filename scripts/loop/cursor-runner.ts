@@ -14,6 +14,15 @@ function compact(value: string, limit = 1600) {
   return text.length > limit ? `${text.slice(0, limit)}…` : text;
 }
 
+function isCursorDiagnosticStderr(line: string) {
+  return /^cursor-retrieval:\s+tracing to\b/.test(line.trim());
+}
+
+function logCursorStderrLine(line: string) {
+  const text = compact(line);
+  return `${isCursorDiagnosticStderr(text) ? '[Cursor诊断]' : '[Cursor错误]'} ${text}`;
+}
+
 function stringifyValue(value: unknown) {
   if (value === undefined || value === null) return '';
   if (typeof value === 'string') return value;
@@ -143,7 +152,7 @@ async function main() {
     stderrBuffer += chunk.toString('utf8');
     const lines = stderrBuffer.split(/\r?\n/);
     stderrBuffer = lines.pop() || '';
-    for (const line of lines.filter(Boolean)) void appendLoopRunLog(leaseId, `[Cursor错误] ${compact(line)}`);
+    for (const line of lines.filter(Boolean)) void appendLoopRunLog(leaseId, logCursorStderrLine(line));
   });
 
   const terminate = async (reason: string) => {
@@ -165,7 +174,7 @@ async function main() {
   clearTimeout(maxTimer);
   clearInterval(idleTimer);
   if (stdoutBuffer.trim()) await appendLoopRunLog(leaseId, logCursorJsonLine(stdoutBuffer));
-  if (stderrBuffer.trim()) await appendLoopRunLog(leaseId, `[Cursor错误] ${compact(stderrBuffer)}`);
+  if (stderrBuffer.trim()) await appendLoopRunLog(leaseId, logCursorStderrLine(stderrBuffer));
   await appendLoopRunLog(leaseId, `[Cursor] Cursor Agent 已退出 code=${exitCode ?? 'signal'}`);
   await endRun(leaseId, false, { stopRunner: false });
 }
