@@ -98,7 +98,11 @@ export async function cancelTaskAction(formData: FormData) {
 
 export async function startLoopRunAction(formData?: FormData) {
   const leaseId = await beginRun('cursor-agent', 120);
-  await createLoopDispatch(leaseId);
+  const dispatch = await createLoopDispatch(leaseId);
+  if (!dispatch.delegations.length) {
+    await endRun(leaseId, false, { stopRunner: false });
+    redirect(String(formData?.get('redirectTo') || '/'));
+  }
   await startCursorAgentRun(leaseId);
   redirect(String(formData?.get('redirectTo') || '/'));
 }
