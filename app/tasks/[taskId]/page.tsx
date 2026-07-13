@@ -1,6 +1,7 @@
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import { AlertTriangle, CheckCircle2, Clock3, FileText, GitBranch, RotateCcw, SlidersHorizontal } from 'lucide-react';
+import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
 import {
   addQuestionAction,
@@ -144,7 +145,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
 
         <section className="task-section">
           <div className="section-head"><h2>活动记录</h2><small>{events.length} 条</small></div>
-          <div className="card timeline">{events.length === 0 ? <div className="empty">暂无活动记录。</div> : events.map((event) => <div key={event.event_id}><span/><p><b>{event.actor}</b> · {event.summary}</p><small>{event.created_at}</small></div>)}</div>
+          <div className="card timeline">{events.length === 0 ? <div className="empty">暂无活动记录。</div> : events.map((event) => <div key={event.event_id}><span/><p><b>{event.actor}</b> · {event.summary}</p><small>{formatEventTime(event.created_at)}</small></div>)}</div>
         </section>
       </div>
 

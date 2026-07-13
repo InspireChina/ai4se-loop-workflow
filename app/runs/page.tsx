@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { Activity, LockKeyhole, Route, ScrollText } from 'lucide-react';
+import { formatEventTime } from '../../src/application/event-time';
 import { getRunStatus, listRecentEvents } from '../../src/application/tasks';
 import { endLoopRunAction, startLoopRunAction } from '../actions';
 import LoopLogStream from '../loop-log-stream';
@@ -50,7 +51,7 @@ export default async function RunsPage() {
           <Activity size={14}/>
           <span><strong>{event.actor}</strong><small>{event.title}</small></span>
           <em>{event.summary}</em>
-          <small>{event.created_at}</small>
+          <small>{formatEventTime(event.created_at)}</small>
         </Link>)}
       </div>
     </section>
