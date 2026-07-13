@@ -14,9 +14,9 @@ python scripts/loop/loopctl.py <command>
 python scripts/loop/loopctl.py paths
 ```
 
-Run Lease、全量 Pipeline 派发和结束运行只由 Web App 与内部 Runner 管理，不提供 Agent CLI 命令。Runner 会按 delegation 的 `agent` 字段逐个启动项目设置中选择的 CLI（Cursor、Codex 或 Claude）。单个 agent 仍可在当前 delegation 内使用辅助 subagent 收集上下文。
+Run 生命周期、Pipeline 派发和结束运行只由 Web App 与内部 Runner 管理。Runner 每次只启动一个 Agent，注入完整上下文并接收结构化 JSON；正常 Agent 不调用本 CLI。单个 agent 仍可在当前 delegation 内使用辅助 subagent 收集上下文。
 
-## 常用命令
+## 人工维护与诊断命令
 
 ```bash
 python scripts/loop/loopctl.py status

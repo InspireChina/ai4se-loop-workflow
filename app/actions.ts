@@ -1,7 +1,7 @@
 'use server';
 
 import { redirect } from 'next/navigation';
-import { normalizeWorkspaceRoot, setAgentExecutorId, setWorkspaceRoot } from '../src/application/project-settings';
+import { normalizeWorkspaceRoot, setAgentExecutorSettings, setWorkspaceRoot } from '../src/application/project-settings';
 import {
   addQuestion,
   addStory,
@@ -100,18 +100,22 @@ export async function cancelTaskAction(formData: FormData) {
 }
 
 export async function startLoopRunAction(formData?: FormData) {
-  const leaseId = await beginRun('agent-runner', 120);
-  const dispatch = await createLoopDispatch(leaseId);
+  const runId = await beginRun('agent-runner');
+  const dispatch = await createLoopDispatch(runId);
   if (!dispatch.delegations.length) {
-    await startDispatchRetryRun(leaseId);
+    await startDispatchRetryRun(runId);
     redirect(String(formData?.get('redirectTo') || '/'));
   }
-  await startAgentRun(leaseId);
+  await startAgentRun(runId);
   redirect(String(formData?.get('redirectTo') || '/'));
 }
 
 export async function saveAgentExecutorAction(formData: FormData) {
-  await setAgentExecutorId(formData.get('agentExecutor'));
+  await setAgentExecutorSettings({
+    executorId: formData.get('agentExecutor'),
+    codexModel: formData.get('codexModel'),
+    codexReasoningEffort: formData.get('codexReasoningEffort'),
+  });
   redirect('/settings');
 }
 
@@ -124,7 +128,7 @@ export async function changeWorkspaceRootAction(formData: FormData) {
 }
 
 export async function endLoopRunAction(formData: FormData) {
-  await endRun(String(formData.get('leaseId')), formData.get('force') === 'on');
+  await endRun(String(formData.get('runId')), formData.get('force') === 'on');
   redirect(String(formData.get('redirectTo') || '/'));
 }
 

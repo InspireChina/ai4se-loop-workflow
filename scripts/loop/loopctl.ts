@@ -17,7 +17,6 @@ import {
   listTasks,
   pipelineForTask,
   releaseBlock,
-  requireRunLease,
   rewindTask,
   toJsonlEnvelope,
   toPipeEnvelope,
@@ -196,7 +195,7 @@ async function main() {
       return;
     case 'run-status': {
       const run = await getRunStatus();
-      console.log(run?.active ? `active until ${run.leaseUntil}` : run ? 'expired' : 'idle');
+      console.log(run?.active ? `active pid=${run.pid ?? 'starting'} run=${run.runId}` : 'idle');
       return;
     }
     case 'task-add':

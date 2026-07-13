@@ -3,15 +3,11 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { appendLoopRunLog } from '../application/tasks';
 import { paths } from './database';
+import { readRunPid, runPidPath } from './run-process';
 
-export function agentRunnerPidPath(leaseId: string) {
-  if (!/^[a-zA-Z0-9-]+$/.test(leaseId)) throw new Error('invalid run lease id');
-  return join(paths.runsDir, leaseId, 'agent-runner.pid');
-}
-
-async function startDetachedRunner(leaseId: string, scriptName: string) {
+async function startDetachedRunner(runId: string, scriptName: string) {
   const script = join(paths.appRoot, 'scripts/loop', scriptName);
-  const child = spawn('npx', ['tsx', script, leaseId], {
+  const child = spawn('npx', ['tsx', script, runId], {
     cwd: paths.appRoot,
     detached: true,
     stdio: 'ignore',
@@ -23,29 +19,23 @@ async function startDetachedRunner(leaseId: string, scriptName: string) {
   });
   child.unref();
   if (!child.pid) throw new Error(`failed to start ${scriptName}`);
-  await mkdir(join(paths.runsDir, leaseId), { recursive: true });
-  await writeFile(agentRunnerPidPath(leaseId), String(child.pid), 'utf8');
+  await mkdir(join(paths.runsDir, runId), { recursive: true });
+  await writeFile(runPidPath(runId), String(child.pid), 'utf8');
   return child.pid;
 }
 
-export async function startAgentRun(leaseId: string) {
-  const pid = await startDetachedRunner(leaseId, 'agent-runner.ts');
-  await appendLoopRunLog(leaseId, `[运行] 已启动逐个执行 runner pid=${pid}`);
+export async function startAgentRun(runId: string) {
+  const pid = await startDetachedRunner(runId, 'agent-runner.ts');
+  await appendLoopRunLog(runId, `[运行] 已启动逐个执行 runner pid=${pid}`);
 }
 
-export async function startDispatchRetryRun(leaseId: string) {
-  const pid = await startDetachedRunner(leaseId, 'dispatch-waiter.ts');
-  await appendLoopRunLog(leaseId, `[运行] 已启动空队列重试 runner pid=${pid}`);
+export async function startDispatchRetryRun(runId: string) {
+  const pid = await startDetachedRunner(runId, 'dispatch-waiter.ts');
+  await appendLoopRunLog(runId, `[运行] 已启动空队列重试 runner pid=${pid}`);
 }
 
-export async function stopAgentRun(leaseId: string) {
-  let pid = 0;
-  try {
-    const { readFile } = await import('node:fs/promises');
-    pid = Number((await readFile(agentRunnerPidPath(leaseId), 'utf8')).trim());
-  } catch {
-    return;
-  }
+export async function stopAgentRun(runId: string) {
+  const pid = readRunPid(runId) || 0;
   if (!pid || pid === process.pid) return;
   try {
     process.kill(-pid, 'SIGTERM');

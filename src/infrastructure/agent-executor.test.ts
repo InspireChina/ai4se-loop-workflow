@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseAgentTelemetryStderr, parseAgentTelemetryStdout } from './agent-executor';
+import { extractAgentFinalText, getAgentExecutor, parseAgentTelemetryStderr, parseAgentTelemetryStdout } from './agent-executor';
 
 test('normalizes Cursor tool calls without retaining raw log lines', () => {
   const event = parseAgentTelemetryStdout('cursor', JSON.stringify({
@@ -33,4 +33,30 @@ test('maps output, errors, and non-JSON stderr to bounded telemetry summaries', 
   assert.equal(error?.level, 'ERROR');
   assert.equal(stderr?.level, 'WARNING');
   assert.equal(parseAgentTelemetryStderr('codex', 'Reading additional input from stdin...'), null);
+});
+
+test('extracts final assistant text from every executor stream', () => {
+  const result = '{"outcome":"completed","summary":"ok"}';
+  assert.equal(extractAgentFinalText('codex', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: result } })), result);
+  assert.equal(extractAgentFinalText('cursor', JSON.stringify({ type: 'result', subtype: 'success', result })), result);
+  assert.equal(extractAgentFinalText('claude', JSON.stringify({ type: 'result', is_error: false, result })), result);
+  assert.equal(extractAgentFinalText('codex', JSON.stringify({ type: 'item.completed', item: { type: 'reasoning', text: 'thinking' } })), null);
+});
+
+test('passes Codex model and reasoning effort as explicit CLI overrides', () => {
+  const executor = getAgentExecutor('codex');
+  const args = executor.buildArgs('prompt', '/workspace', { model: 'gpt-5.6-terra', reasoningEffort: 'high' });
+  assert.deepEqual(args, [
+    'exec', '--json', '--dangerously-bypass-approvals-and-sandbox',
+    '--model', 'gpt-5.6-terra',
+    '--config', 'model_reasoning_effort="high"',
+    '-C', '/workspace', '-',
+  ]);
+  assert.match(executor.formatCommand('/workspace', { model: 'gpt-5.6-terra', reasoningEffort: 'high' }), /--model gpt-5\.6-terra --config model_reasoning_effort=high/);
+});
+
+test('leaves Codex model defaults untouched when no override is configured', () => {
+  const args = getAgentExecutor('codex').buildArgs('prompt', '/workspace');
+  assert.equal(args.includes('--model'), false);
+  assert.equal(args.includes('--config'), false);
 });

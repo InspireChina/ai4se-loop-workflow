@@ -3,6 +3,7 @@ import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { databaseConnection, paths } from '../infrastructure/database';
 import { verifyDevCommit } from '../infrastructure/git';
+import { isRunProcessAlive, readRunPid } from '../infrastructure/run-process';
 import {
   assertActorCanCreate,
   assertState,
@@ -63,7 +64,7 @@ export type Question = {
 };
 export type Approval = { approval_id: string; task_id: string; story_index: number | null; kind: string; decision: string; relative_path: string | null; updated_at: string };
 export type Event = { event_id: string; actor: string; event_type: string; summary: string; created_at: string };
-export type RunStatus = { leaseId: string; owner: string; startedAt: string; leaseUntil: string; active: boolean } | null;
+export type RunStatus = { runId: string; owner: string; startedAt: string; pid: number | null; active: boolean } | null;
 export type RunLogChunk = { lastId: number; raw: string };
 export type DelegationEnvelope = Delegation & {
   title: string;
@@ -111,20 +112,20 @@ function loopLogLine(message: string) {
   return `${new Date().toISOString()} ${message}\n`;
 }
 
-function appendRunLogInDb(db: Awaited<ReturnType<typeof databaseConnection>>, leaseId: string, message: string) {
-  if (!/^[a-zA-Z0-9-]+$/.test(leaseId)) throw new Error('invalid run lease id');
-  db.prepare('INSERT INTO run_logs(lease_id, line) VALUES(?, ?)').run(leaseId, loopLogLine(message));
+function appendRunLogInDb(db: Awaited<ReturnType<typeof databaseConnection>>, runId: string, message: string) {
+  if (!/^[a-zA-Z0-9-]+$/.test(runId)) throw new Error('invalid run id');
+  db.prepare('INSERT INTO run_logs(run_id, line) VALUES(?, ?)').run(runId, loopLogLine(message));
 }
 
-export async function appendLoopRunLog(leaseId: string, message: string) {
+export async function appendLoopRunLog(runId: string, message: string) {
   const db = await databaseConnection();
-  appendRunLogInDb(db, leaseId, message);
+  appendRunLogInDb(db, runId, message);
 }
 
-export async function readLoopRunLogChunk(leaseId: string, afterId = 0): Promise<RunLogChunk> {
-  if (!/^[a-zA-Z0-9-]+$/.test(leaseId)) throw new Error('invalid run lease id');
+export async function readLoopRunLogChunk(runId: string, afterId = 0): Promise<RunLogChunk> {
+  if (!/^[a-zA-Z0-9-]+$/.test(runId)) throw new Error('invalid run id');
   const db = await databaseConnection();
-  const rows = db.prepare('SELECT log_id, line FROM run_logs WHERE lease_id = ? AND log_id > ? ORDER BY log_id').all(leaseId, afterId) as { log_id: number; line: string }[];
+  const rows = db.prepare('SELECT log_id, line FROM run_logs WHERE run_id = ? AND log_id > ? ORDER BY log_id').all(runId, afterId) as { log_id: number; line: string }[];
   return {
     lastId: rows.length ? rows[rows.length - 1].log_id : afterId,
     raw: rows.map((row) => row.line).join(''),
@@ -134,7 +135,7 @@ export async function readLoopRunLogChunk(leaseId: string, afterId = 0): Promise
 function appendActiveRunLog(db: Awaited<ReturnType<typeof databaseConnection>>, message: string) {
   const run = getRunStatusFromDb(db);
   if (!run?.active) return;
-  appendRunLogInDb(db, run.leaseId, message);
+  appendRunLogInDb(db, run.runId, message);
 }
 
 function refreshPages(...pagePaths: string[]) {
@@ -455,7 +456,7 @@ export async function addQuestion(input: unknown) {
       `).run(randomUUID(), value.taskId, storyIndex || null, value.kind, relativePath);
     }
     if (value.blockTask) {
-      const agent = value.kind === 'analysis' ? 'analyst-agent' : value.kind === 'test' ? 'test-agent' : value.kind === 'review' ? 'review-agent' : task.current_subagent || 'backlog-agent';
+      const agent = value.kind === 'analysis' ? 'analyst-agent' : value.kind === 'test' ? 'test-agent' : value.kind === 'review' ? 'review-agent' : value.actor !== 'human' ? value.actor : task.current_subagent || 'backlog-agent';
       db.prepare(`
         UPDATE tasks
         SET agile_status = 'blocked', current_subagent = ?, resume_status = CASE WHEN agile_status != 'blocked' THEN agile_status ELSE resume_status END,
@@ -551,8 +552,8 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
   if (changes.agile_status === 'blocked' && before.agile_status !== 'blocked') changes.resume_status = before.agile_status;
   const prospective = { ...before, ...changes } as TaskState;
   assertState(prospective);
-  if (changes.analysis_index !== undefined && changes.analysis_index > before.analysis_index && before.analysis_approved_index < changes.analysis_index) {
-    throw new Error(`story-${changes.analysis_index} analysis 尚未人工确认`);
+  if (changes.analysis_index !== undefined && changes.analysis_index > before.analysis_index && prospective.analysis_approved_index < changes.analysis_index) {
+    throw new Error(`story-${changes.analysis_index} analysis 尚有未解决决策`);
   }
   if (changes.dev_index !== undefined && changes.dev_index > before.dev_index) {
     const verification = verifyDevCommit(paths.root, taskId, changes.dev_index);
@@ -732,48 +733,6 @@ export async function pipelineForTask(taskId: string): Promise<Delegation[]> {
   return line ? [line] : [];
 }
 
-export async function ensureDelegationOutcome(delegation: Pick<DelegationEnvelope, 'agent' | 'pipeline' | 'storyIndex' | 'taskId'>): Promise<'ok' | 'approval-created' | 'analysis-advanced' | 'missing-analysis'> {
-  if (delegation.agent !== 'analyst-agent' || !delegation.storyIndex) return 'ok';
-  const db = await databaseConnection();
-  const task = fetchTask(db, delegation.taskId);
-  if (!task) throw new Error(`task not found: ${delegation.taskId}`);
-  if (task.agile_status === 'blocked') return 'ok';
-  if (delegation.pipeline === 'resume') {
-    if (task.analysis_index >= delegation.storyIndex) return 'ok';
-    if (task.analysis_approved_index < delegation.storyIndex) return 'ok';
-    await updateTask(delegation.taskId, 'analyst-agent', {
-      analysis_index: delegation.storyIndex,
-      next_step: `Story-${delegation.storyIndex} 分析已确认，等待下一阶段`,
-    });
-    return 'analysis-advanced';
-  }
-  if (task.analysis_index >= delegation.storyIndex) return 'ok';
-  const analysis = db.prepare(`
-    SELECT document_id FROM documents
-    WHERE task_id = ? AND story_index = ? AND kind = 'analysis'
-  `).get(delegation.taskId, delegation.storyIndex) as { document_id: string } | undefined;
-  if (!analysis) return 'missing-analysis';
-  const existing = db.prepare(`
-    SELECT question_id FROM questions
-    WHERE task_id = ? AND story_index = ? AND kind = 'analysis' AND status = 'pending'
-    LIMIT 1
-  `).get(delegation.taskId, delegation.storyIndex) as { question_id: string } | undefined;
-  if (existing) return 'ok';
-  await addQuestion({
-    taskId: delegation.taskId,
-    actor: 'analyst-agent',
-    kind: 'analysis',
-    storyIndex: delegation.storyIndex,
-    title: `确认 Story-${delegation.storyIndex} 分析方案`,
-    question: `请确认 Story-${delegation.storyIndex} 的分析方案是否可以进入开发；如需调整，请在答复中说明。`,
-    why: 'Story 分析必须经过人工确认后才能推进 analysis_index。',
-    recommendation: '确认当前方案后继续。',
-    blockedReason: `等待确认 Story-${delegation.storyIndex} 分析方案`,
-    blockTask: true,
-  });
-  return 'approval-created';
-}
-
 export async function pipelineAll(): Promise<Delegation[]> {
   const db = await databaseConnection();
   const tasks = db.prepare(`${taskSelect} WHERE agile_status NOT IN ('done', 'cancelled') ORDER BY updated_at`).all() as Task[];
@@ -848,43 +807,47 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
   return lines;
 }
 
-export async function beginRun(owner = 'ui', leaseMinutes = 120) {
-  if (!Number.isInteger(leaseMinutes) || leaseMinutes < 1 || leaseMinutes > 1440) throw new Error('leaseMinutes must be between 1 and 1440');
+export async function beginRun(owner = 'ui') {
   const db = await databaseConnection();
   const current = getRunStatusFromDb(db);
   if (current?.active) {
-    const minutes = Math.max(1, Math.ceil((new Date(current.leaseUntil).getTime() - Date.now()) / 60000));
-    throw new Error(`busy: another loop run is active for about ${minutes} more minute(s)`);
+    throw new Error(`已有本地 loop 正在运行 pid=${current.pid ?? 'starting'}`);
   }
-  const leaseId = randomUUID();
+  const runId = randomUUID();
   const startedAt = new Date();
-  const leaseUntil = new Date(startedAt.getTime() + leaseMinutes * 60000);
   db.prepare(`
-    INSERT INTO loop_meta(key, value) VALUES('run_lease', ?)
+    INSERT INTO loop_meta(key, value) VALUES('active_run', ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
-  `).run(JSON.stringify({ leaseId, owner, startedAt: startedAt.toISOString(), leaseUntil: leaseUntil.toISOString() }));
-  return leaseId;
+  `).run(JSON.stringify({ runId, owner, startedAt: startedAt.toISOString() }));
+  return runId;
 }
 
-export async function endRun(leaseId: string, force = false, options: { stopRunner?: boolean } = {}) {
+export async function endRun(runId: string, force = false, options: { stopRunner?: boolean; reason?: string } = {}) {
   const db = await databaseConnection();
   const current = getRunStatusFromDb(db);
-  if (current?.leaseId && current.leaseId !== leaseId && !force) throw new Error('运行租约不匹配');
-  if (current?.leaseId && options.stopRunner !== false) {
-    const { stopAgentRun } = await import('../infrastructure/agent-runner');
-    await stopAgentRun(current.leaseId);
+  if (current?.runId && current.runId !== runId) {
+    if (force) return;
+    throw new Error('运行 ID 不匹配');
   }
-  if (current?.leaseId) await appendLoopRunLog(current.leaseId, `[运行] 结束本轮 owner=${current.owner} force=${force ? '是' : '否'}`);
-  db.prepare("DELETE FROM loop_meta WHERE key = 'run_lease'").run();
+  if (current?.runId && options.stopRunner !== false) {
+    const { stopAgentRun } = await import('../infrastructure/agent-runner');
+    await stopAgentRun(current.runId);
+  }
+  if (current?.runId) {
+    const reason = options.reason || (force ? '异常终止' : '用户停止');
+    await appendLoopRunLog(current.runId, `[运行] Loop 已停止：${reason}`);
+  }
+  db.prepare("DELETE FROM loop_meta WHERE key = 'active_run'").run();
 }
 
 function getRunStatusFromDb(db: Awaited<ReturnType<typeof databaseConnection>>) {
-  const row = db.prepare("SELECT value FROM loop_meta WHERE key = 'run_lease'").get() as { value: string } | undefined;
+  const row = db.prepare("SELECT value FROM loop_meta WHERE key = 'active_run'").get() as { value: string } | undefined;
   if (!row) return null;
   try {
-    const parsed = JSON.parse(row.value) as { leaseId: string; owner: string; startedAt: string; leaseUntil?: string };
-    const leaseUntil = parsed.leaseUntil || parsed.startedAt;
-    return { ...parsed, leaseUntil, active: new Date(leaseUntil).getTime() > Date.now() } satisfies NonNullable<RunStatus>;
+    const parsed = JSON.parse(row.value) as { runId: string; owner: string; startedAt: string };
+    const pid = readRunPid(parsed.runId);
+    const starting = !pid && Date.now() - new Date(parsed.startedAt).getTime() < 15_000;
+    return { ...parsed, pid, active: starting || isRunProcessAlive(parsed.runId) } satisfies NonNullable<RunStatus>;
   } catch {
     return null;
   }
@@ -895,31 +858,30 @@ export async function getRunStatus(): Promise<RunStatus> {
   return getRunStatusFromDb(db);
 }
 
-export async function requireRunLease(leaseId: string) {
+export async function requireActiveRun(runId: string) {
   const run = await getRunStatus();
-  if (!run || run.leaseId !== leaseId) throw new Error('invalid or inactive run token; start the loop from the UI first');
-  if (!run.active) throw new Error('run lease expired; start a new loop run');
+  if (!run || run.runId !== runId || !run.active) throw new Error('运行已停止，请从运行面板重新开始');
 }
 
 export async function ensureLoopRuntimeFiles() {
   await databaseConnection();
 }
 
-export async function createLoopDispatch(leaseId: string, options: { includeRunHeader?: boolean; logDelegations?: boolean } = {}) {
-  await requireRunLease(leaseId);
+export async function createLoopDispatch(runId: string, options: { includeRunHeader?: boolean; logDelegations?: boolean } = {}) {
+  await requireActiveRun(runId);
   if (options.includeRunHeader !== false) {
-    await appendLoopRunLog(leaseId, `[运行] 开始本轮 lease=${leaseId}`);
-    await appendLoopRunLog(leaseId, `[运行] 工作区=${paths.root}`);
-    await appendLoopRunLog(leaseId, `[运行] 数据目录=${paths.dataDir}`);
+    await appendLoopRunLog(runId, `[运行] 开始运行 run=${runId}`);
+    await appendLoopRunLog(runId, `[运行] 工作区=${paths.root}`);
+    await appendLoopRunLog(runId, `[运行] 数据目录=${paths.dataDir}`);
   }
-  const lines = await pipelineAllEnvelopes();
+  const lines = (await pipelineAllEnvelopes()).slice(0, 1);
   if (options.logDelegations !== false) {
-    await appendLoopRunLog(leaseId, `[派发] 本轮生成 ${lines.length} 个 agent`);
+    await appendLoopRunLog(runId, `[派发] 本轮生成 ${lines.length} 个 agent`);
     for (const [index, line] of lines.entries()) {
-      await appendLoopRunLog(leaseId, `[派发] #${index + 1} agent=${line.agent} pipeline=${line.pipeline} task=${line.taskId} story=${line.storyIndex ?? '-'} resource=${line.resource}`);
-      await appendLoopRunLog(leaseId, `[派发]      ${line.description}`);
+      await appendLoopRunLog(runId, `[派发] #${index + 1} agent=${line.agent} pipeline=${line.pipeline} task=${line.taskId} story=${line.storyIndex ?? '-'} resource=${line.resource}`);
+      await appendLoopRunLog(runId, `[派发]      ${line.description}`);
     }
-    if (!lines.length) await appendLoopRunLog(leaseId, '[派发] 当前没有可执行委派，等待新 Task 或状态变化');
+    if (!lines.length) await appendLoopRunLog(runId, '[派发] 当前没有可执行委派，等待新 Task 或状态变化');
   }
   return { runDir: 'database', delegations: lines };
 }

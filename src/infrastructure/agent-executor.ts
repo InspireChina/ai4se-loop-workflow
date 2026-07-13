@@ -7,6 +7,11 @@ export type AgentExecutionContext = {
   pipeline: string;
 };
 
+export type AgentExecutionOptions = {
+  model?: string;
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+};
+
 export type AgentTelemetryEvent = {
   name: 'loop.agent.tool' | 'loop.agent.output' | 'loop.agent.diagnostic';
   phase?: 'started' | 'completed';
@@ -23,11 +28,27 @@ export type AgentExecutor = {
   label: string;
   command: string;
   promptMode: 'argument' | 'stdin';
-  buildArgs(prompt: string, workspaceRoot: string): string[];
-  formatCommand(workspaceRoot: string): string;
+  buildArgs(prompt: string, workspaceRoot: string, options?: AgentExecutionOptions): string[];
+  formatCommand(workspaceRoot: string, options?: AgentExecutionOptions): string;
   parseStdout(line: string, context: AgentExecutionContext): string | null;
   parseStderr(line: string, context: AgentExecutionContext): string | null;
 };
+
+/** Returns provider-neutral final assistant text when a stream record contains it. */
+export function extractAgentFinalText(executor: AgentExecutorId, line: string) {
+  try {
+    const event = JSON.parse(line) as Record<string, unknown>;
+    if (executor === 'codex') {
+      const item = event.item as Record<string, unknown> | undefined;
+      return event.type === 'item.completed' && item?.type === 'agent_message' ? stringifyValue(item.text) || null : null;
+    }
+    if (executor === 'claude') return event.type === 'result' && !event.is_error ? stringifyValue(event.result) || null : null;
+    if (event.type === 'result' || event.subtype === 'result' || event.subtype === 'success') return stringifyValue(event.result || event.text || event.message) || null;
+    return null;
+  } catch {
+    return null;
+  }
+}
 
 function compact(value: string, limit = 1600) {
   const text = value.replace(/\s+/g, ' ').trim();
@@ -263,8 +284,18 @@ const executors: Record<AgentExecutorId, AgentExecutor> = {
   },
   codex: {
     id: 'codex', label: 'Codex', command: process.env.CODEX_CLI || 'codex', promptMode: 'stdin',
-    buildArgs: (_prompt, workspace) => ['exec', '--json', '--dangerously-bypass-approvals-and-sandbox', '-C', workspace, '-'],
-    formatCommand: (workspace) => `codex exec --json -C ${workspace}`,
+    buildArgs: (_prompt, workspace, options) => [
+      'exec', '--json', '--dangerously-bypass-approvals-and-sandbox',
+      ...(options?.model ? ['--model', options.model] : []),
+      ...(options?.reasoningEffort ? ['--config', `model_reasoning_effort="${options.reasoningEffort}"`] : []),
+      '-C', workspace, '-',
+    ],
+    formatCommand: (workspace, options) => [
+      'codex exec --json',
+      options?.model ? `--model ${options.model}` : '',
+      options?.reasoningEffort ? `--config model_reasoning_effort=${options.reasoningEffort}` : '',
+      `-C ${workspace}`,
+    ].filter(Boolean).join(' '),
     parseStdout: parseCodexStdout,
     parseStderr: (line, context) => stderrLog('codex', context, line),
   },

@@ -19,10 +19,10 @@ export default async function RunsPage() {
     <section className="run-toolbar">
       <div>
         <span className={`badge ${run?.active ? 'amber' : 'green'}`}>{run?.active ? 'running' : 'idle'}</span>
-        <small>{run?.active ? `${run.owner} · ${run.leaseUntil}` : '当前没有运行中的 loop。'}</small>
+        <small>{run?.active ? `${run.owner} · pid ${run.pid ?? '启动中'}` : '当前没有运行中的 loop。'}</small>
       </div>
       {run?.active ? <form action={endLoopRunAction}>
-        <input type="hidden" name="leaseId" value={run.leaseId}/>
+        <input type="hidden" name="runId" value={run.runId}/>
         <input type="hidden" name="redirectTo" value="/runs"/>
         <button className="button secondary" type="submit"><LockKeyhole size={15}/>结束本轮</button>
       </form> : <form action={startLoopRunAction}>
@@ -39,7 +39,7 @@ export default async function RunsPage() {
             <p className="muted">{run?.active ? '日志会在本轮运行期间持续追加。' : '点击上方开始运行后，这里会实时追加日志。'}</p>
           </div>
         </div>
-        {run?.active ? <div className="run-page-log"><LoopLogStream leaseId={run.leaseId}/></div> : <div className="empty run-idle-note">暂无实时日志。最近事件在下方可查看。</div>}
+        {run?.active ? <div className="run-page-log"><LoopLogStream runId={run.runId}/></div> : <div className="empty run-idle-note">暂无实时日志。最近事件在下方可查看。</div>}
       </div>
     </section>
 

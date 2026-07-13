@@ -215,7 +215,7 @@ function LogNodeView({ node }: { node: LogTreeNode }) {
   </details>;
 }
 
-export default function LoopLogStream({ leaseId }: { leaseId: string }) {
+export default function LoopLogStream({ runId }: { runId: string }) {
   const [rawContent, setRawContent] = useState('');
   const [events, setEvents] = useState<ParsedRunLog[]>([]);
   const [showRaw, setShowRaw] = useState(false);
@@ -225,7 +225,7 @@ export default function LoopLogStream({ leaseId }: { leaseId: string }) {
     setRawContent('');
     setEvents([]);
     setConnected(false);
-    const source = new EventSource(`/api/loop/logs?leaseId=${encodeURIComponent(leaseId)}`);
+    const source = new EventSource(`/api/loop/logs?runId=${encodeURIComponent(runId)}`);
     source.onopen = () => setConnected(true);
     source.onmessage = (event) => {
       const payload = JSON.parse(event.data) as { raw?: string; events?: ParsedRunLog[] } | string;
@@ -243,7 +243,7 @@ export default function LoopLogStream({ leaseId }: { leaseId: string }) {
     });
     source.onerror = () => setConnected(false);
     return () => source.close();
-  }, [leaseId]);
+  }, [runId]);
 
   return <div className="run-log-box">
     <div className="run-log-status">

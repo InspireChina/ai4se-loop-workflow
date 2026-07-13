@@ -20,14 +20,14 @@ function doneEvent() {
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  const leaseId = searchParams.get('leaseId') || '';
+  const runId = searchParams.get('runId') || '';
   const stream = new ReadableStream({
     async start(controller) {
       let afterId = 0;
       const sendNewContent = async () => {
         let chunk = { raw: '', lastId: afterId };
         try {
-          chunk = await readLoopRunLogChunk(leaseId, afterId);
+          chunk = await readLoopRunLogChunk(runId, afterId);
         } catch {
           return;
         }
@@ -38,7 +38,7 @@ export async function GET(request: Request) {
 
       while (!request.signal.aborted) {
         const run = await getRunStatus();
-        if (!run?.active || run.leaseId !== leaseId) {
+        if (!run?.active || run.runId !== runId) {
           await sendNewContent();
           controller.enqueue(doneEvent());
           controller.close();

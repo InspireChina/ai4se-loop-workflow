@@ -156,6 +156,10 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .dialog-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:4px}
 .settings-stack{display:grid;gap:14px}
 .settings-description{font-size:12px;margin-top:5px}
+.codex-settings{border-top:1px solid var(--line);padding-top:16px;margin-top:4px}
+.codex-settings>small{display:block;margin-top:8px}
+.settings:has(input[name="agentExecutor"][value="cursor"]:checked) .codex-settings,
+.settings:has(input[name="agentExecutor"][value="claude"]:checked) .codex-settings{display:none}
 .workspace-switch{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}
 .workspace-switch label{min-width:0}
 .settings>.button{justify-self:start}
