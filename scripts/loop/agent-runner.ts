@@ -8,7 +8,7 @@ import { parseAgentResult } from '../../src/domain/agent-result';
 import { extractAgentFinalText, getAgentExecutor, parseAgentTelemetryStderr, parseAgentTelemetryStdout, type AgentExecutionContext, type AgentExecutor } from '../../src/infrastructure/agent-executor';
 import { startAgentRun, startDispatchRetryRun } from '../../src/infrastructure/agent-runner';
 import { paths } from '../../src/infrastructure/database';
-import { checkDevWorkspaceReady, commitDevStory, gitHead } from '../../src/infrastructure/git';
+import { commitDevStory, prepareDevWorkspace } from '../../src/infrastructure/git';
 import { getLangfuseTelemetry } from '../../src/infrastructure/langfuse';
 
 const runId = process.argv[2];
@@ -281,14 +281,17 @@ async function main() {
 
   let headBefore = '';
   if (delegation.agent === 'dev-agent') {
-    const readiness = checkDevWorkspaceReady(paths.root);
-    if (!readiness.ok) {
-      await blockDelegation(delegation, readiness.reason);
-      await appendLoopRunLog(runId, `[错误] ${delegation.agent} 未启动：${readiness.reason}`);
+    const preparation = prepareDevWorkspace(paths.root, delegation.taskId, delegation.storyIndex!);
+    if (!preparation.ok) {
+      await blockDelegation(delegation, preparation.reason);
+      await appendLoopRunLog(runId, `[错误] ${delegation.agent} 未启动：${preparation.reason}`);
       await scheduleNextLoop();
       return;
     }
-    headBefore = gitHead(paths.root);
+    if (preparation.checkpointCommit) {
+      await appendLoopRunLog(runId, `[运行] Runner 已保存开发前工作区 checkpoint：${preparation.checkpointCommit}`);
+    }
+    headBefore = preparation.head;
   }
 
   const execution = await runDelegation(delegation, executor, executionOptions);

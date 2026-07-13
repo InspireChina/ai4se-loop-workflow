@@ -38,7 +38,7 @@ codex exec --json -C <workspace-root> <prompt>
 claude --print --output-format stream-json <prompt>
 ```
 
-选择 Codex 时，可为当前项目从 GPT-5.6 Sol、Terra 和 Luna 三档模型中选择，并单独配置思考强度。Runner 使用 `--model` 和 `--config model_reasoning_effort=...` 传递显式覆盖。
+选择 Codex 时，可为当前项目从 GPT-5.6 Sol、Terra 和 Luna 三档模型中选择，并单独配置思考强度。Runner 使用 `--model` 和 `--config model_reasoning_effort=...` 传递显式覆盖。dev-agent 启动前若已有未提交改动，Runner 会先创建独立 checkpoint commit，再将当前 Story 的实现提交为另一个 commit；敏感文件仍会阻止自动提交。
 
 执行器的 stdout、stderr 和 tool 事件会被标准化后写入 SQLite `run_logs`，并通过 SSE 在 `/runs` 页面实时展示。
 

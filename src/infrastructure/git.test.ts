@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { checkDevWorkspaceReady, commitDevStory, gitHead } from './git';
+import { commitDevStory, gitHead, prepareDevWorkspace } from './git';
 
 function git(cwd: string, ...args: string[]) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -25,7 +25,10 @@ function repository() {
 test('runner commits a cleanly isolated dev story', () => {
   const cwd = repository();
   const head = gitHead(cwd);
-  assert.deepEqual(checkDevWorkspaceReady(cwd), { ok: true, reason: '' });
+  const preparation = prepareDevWorkspace(cwd, 'TASK-1234', 2);
+  assert.equal(preparation.ok, true);
+  assert.equal(preparation.checkpointCommit, '');
+  assert.equal(preparation.head, head);
   writeFileSync(join(cwd, 'feature.ts'), 'export const ready = true;\n');
   const result = commitDevStory(cwd, 'TASK-1234', 2, head);
   assert.equal(result.ok, true);
@@ -34,12 +37,23 @@ test('runner commits a cleanly isolated dev story', () => {
   assert.equal(git(cwd, 'status', '--porcelain'), '');
 });
 
-test('runner refuses a dirty workspace before dev starts', () => {
+test('runner checkpoints a dirty workspace before dev starts', () => {
   const cwd = repository();
   writeFileSync(join(cwd, 'README.md'), 'user change\n');
-  const result = checkDevWorkspaceReady(cwd);
+  const result = prepareDevWorkspace(cwd, 'TASK-1234', 3);
+  assert.equal(result.ok, true);
+  assert.equal(result.checkpointCommit, gitHead(cwd));
+  assert.match(git(cwd, 'log', '-1', '--pretty=%s'), /checkpoint before TASK-1234 Story-3/);
+  assert.equal(git(cwd, 'status', '--porcelain'), '');
+});
+
+test('runner refuses to checkpoint sensitive existing files', () => {
+  const cwd = repository();
+  writeFileSync(join(cwd, '.env.local'), 'TOKEN=secret\n');
+  const result = prepareDevWorkspace(cwd, 'TASK-1234', 3);
   assert.equal(result.ok, false);
-  assert.match(result.reason, /未提交改动/);
+  assert.match(result.reason, /敏感文件/);
+  assert.equal(git(cwd, 'status', '--porcelain'), '?? .env.local');
 });
 
 test('runner refuses to commit sensitive files', () => {

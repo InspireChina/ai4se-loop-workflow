@@ -14,12 +14,31 @@ export function gitHead(workspaceRoot: string) {
   try { return git(['rev-parse', 'HEAD'], workspaceRoot); } catch { return ''; }
 }
 
-export function checkDevWorkspaceReady(workspaceRoot: string) {
+function sensitiveFiles(status: string) {
+  return status.split(/\r?\n/)
+    .map((line) => line.slice(3).trim())
+    .filter((file) => /(^|\/)(\.env(?:\.[^/]*)?|credentials?(?:\.[^/]*)?|secrets?(?:\.[^/]*)?)(\/|$)/i.test(file));
+}
+
+export function prepareDevWorkspace(workspaceRoot: string, taskId: string, storyIndex: number) {
   try {
     const dirty = git(['status', '--porcelain', '--untracked-files=all'], workspaceRoot);
-    return dirty ? { ok: false, reason: '工作区存在未提交改动，无法安全隔离当前 Story' } : { ok: true, reason: '' };
+    if (!dirty) return { ok: true, reason: '', checkpointCommit: '', head: gitHead(workspaceRoot) };
+    const sensitive = sensitiveFiles(dirty);
+    if (sensitive.length) {
+      return { ok: false, reason: `已有改动包含敏感文件，拒绝自动 checkpoint：${sensitive.join(', ')}`, checkpointCommit: '', head: '' };
+    }
+    git(['add', '-A'], workspaceRoot);
+    git(['commit', '-m', `chore(loop): checkpoint before ${taskId} Story-${storyIndex}`], workspaceRoot);
+    const remaining = git(['status', '--porcelain', '--untracked-files=all'], workspaceRoot);
+    if (remaining) {
+      return { ok: false, reason: 'checkpoint 提交后工作区仍有改动', checkpointCommit: '', head: '' };
+    }
+    const head = gitHead(workspaceRoot);
+    return { ok: true, reason: '', checkpointCommit: head, head };
   } catch (error) {
-    return { ok: false, reason: `无法检查 Git 工作区：${error instanceof Error ? error.message : String(error)}` };
+    try { git(['restore', '--staged', '.'], workspaceRoot); } catch { /* preserve workspace changes for inspection */ }
+    return { ok: false, reason: `无法创建开发前 checkpoint：${error instanceof Error ? error.message : String(error)}`, checkpointCommit: '', head: '' };
   }
 }
 
@@ -33,7 +52,7 @@ export function commitDevStory(workspaceRoot: string, taskId: string, storyIndex
       return verification.ok ? verification : { ...verification, reason: `Agent 创建了不可接受的提交：${verification.reason}` };
     }
     if (!dirty) return { ok: false, reason: 'Agent 没有产生代码变更', commit: '' };
-    const sensitive = dirty.split(/\r?\n/).map((line) => line.slice(3).trim()).filter((file) => /(^|\/)(\.env(?:\.[^/]*)?|credentials?(?:\.[^/]*)?|secrets?(?:\.[^/]*)?)(\/|$)/i.test(file));
+    const sensitive = sensitiveFiles(dirty);
     if (sensitive.length) return { ok: false, reason: `检测到敏感文件，拒绝提交：${sensitive.join(', ')}`, commit: '' };
     git(['add', '-A'], workspaceRoot);
     git(['commit', '-m', `feat(${taskId}): Story-${storyIndex} 完成实现`], workspaceRoot);
