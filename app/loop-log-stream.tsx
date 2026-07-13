@@ -175,7 +175,15 @@ export function buildLogTree(events: ParsedRunLog[]) {
     roots.push(makeNode(event, index));
   });
 
-  return roots;
+  const newestFirst = (nodes: LogTreeNode[]): LogTreeNode[] => [...nodes]
+    .map((node) => ({ ...node, children: newestFirst(node.children) }))
+    .sort((left, right) => right.timestamp.localeCompare(left.timestamp));
+
+  return newestFirst(roots);
+}
+
+function reverseRawLog(content: string) {
+  return content.split(/\r?\n/).filter(Boolean).reverse().join('\n');
 }
 
 function formatTime(timestamp: string) {
@@ -251,7 +259,7 @@ export default function LoopLogStream({ runId }: { runId: string }) {
       <small>{connected ? '实时连接中' : '等待日志'}</small>
       <button type="button" className="text-toggle" onClick={() => setShowRaw((value) => !value)}>{showRaw ? '友好视图' : '原始日志'}</button>
     </div>
-    {showRaw ? <pre>{rawContent || 'waiting for app log...\n'}</pre> : <div className="friendly-log tree-log">
+    {showRaw ? <pre>{rawContent ? reverseRawLog(rawContent) : 'waiting for app log...\n'}</pre> : <div className="friendly-log tree-log">
       {events.length === 0 ? <p className="friendly-empty">等待 pipeline 进展...</p> : buildLogTree(events).map((node) => <LogNodeView node={node} key={node.id}/>)}
     </div>}
   </div>;
