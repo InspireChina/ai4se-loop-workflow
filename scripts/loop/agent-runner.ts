@@ -1,8 +1,8 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
 import { getAgentExecutorSettings } from '../../src/application/project-settings';
-import { applyAgentResult, blockDelegation } from '../../src/application/agent-results';
-import { appendLoopRunLog, createLoopDispatch, endRun, getRunStatus, getTaskContext, type DelegationEnvelope } from '../../src/application/tasks';
+import { applyAgentResult, applyNextQueuedAgentResult, blockDelegation } from '../../src/application/agent-results';
+import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTaskContext, type DelegationEnvelope } from '../../src/application/tasks';
 import { parseAgentResult } from '../../src/domain/agent-result';
 import { getAgentExecutor, type AgentExecutor } from '../../src/infrastructure/agent-executor';
 import { executeDelegation } from '../../src/infrastructure/delegation-execution';
@@ -179,8 +179,25 @@ async function main() {
     model: settings.codexModel || undefined,
     reasoningEffort: settings.codexReasoningEffort === 'default' ? undefined : settings.codexReasoningEffort,
   } : {};
+  const queued = await applyNextQueuedAgentResult();
+  let queuedWaiting = false;
+  if (queued.status === 'applied') {
+    await appendLoopRunLog(runId, `[运行] 已应用排队结果：${queued.agent} ${queued.taskId}${queued.storyIndex ? ` Story-${queued.storyIndex}` : ''}，结果=${queued.outcome}`);
+    await scheduleNextLoop();
+    return;
+  }
+  if (queued.status === 'waiting') {
+    queuedWaiting = true;
+    await appendLoopRunLog(runId, `[运行] 排队结果等待代码槽释放：${queued.agent} ${queued.taskId}${queued.storyIndex ? ` Story-${queued.storyIndex}` : ''}，当前占用=${queued.ownerTaskId}`);
+  } else if (queued.status === 'failed') {
+    await appendLoopRunLog(runId, `[错误] 排队结果应用失败：${queued.agent} ${queued.taskId}${queued.storyIndex ? ` Story-${queued.storyIndex}` : ''} - ${queued.reason}`);
+  }
   const dispatch = await createLoopDispatch(runId, { includeRunHeader: false, logDelegations: false });
   if (!dispatch.delegations.length) {
+    if (queuedWaiting) {
+      await scheduleNextLoop();
+      return;
+    }
     await startDispatchRetryRun(runId);
     return;
   }
@@ -222,6 +239,7 @@ async function main() {
     return;
   }
 
+  let codeCommit = '';
   if (delegation.agent === 'dev-agent' && result.outcome === 'completed') {
     const commit = commitDevStory(paths.root, delegation.taskId, delegation.storyIndex!, headBefore);
     if (!commit.ok) {
@@ -230,13 +248,19 @@ async function main() {
       await scheduleNextLoop();
       return;
     }
+    codeCommit = commit.commit;
     await appendLoopRunLog(runId, `[运行] Runner 已提交 Story-${delegation.storyIndex}：${commit.commit}`);
   }
 
   try {
-    const outcome = await applyAgentResult(runId, delegation, result);
+    const outcome = await applyAgentResult(runId, delegation, result, { codeCommit });
     await appendLoopRunLog(runId, `[运行] ${delegation.agent} 结构化结果已应用：${outcome}`);
   } catch (error) {
+    if (error instanceof CodeSlotBusyError) {
+      await appendLoopRunLog(runId, `[运行] ${delegation.agent} 结果已进入队列，等待 ${error.ownerTaskId} 释放代码槽`);
+      await scheduleNextLoop();
+      return;
+    }
     const reason = `应用 Agent 结果失败：${error instanceof Error ? error.message : String(error)}`;
     await appendLoopRunLog(runId, `[错误] ${delegation.agent} ${reason}`);
     await blockDelegation(delegation, reason);

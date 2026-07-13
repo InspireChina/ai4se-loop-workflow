@@ -48,7 +48,7 @@ export function commitDevStory(workspaceRoot: string, taskId: string, storyIndex
     const dirty = git(['status', '--porcelain', '--untracked-files=all'], workspaceRoot);
     if (currentHead !== headBefore) {
       if (dirty) return { ok: false, reason: 'Agent 修改了 Git 历史且仍有未提交改动，拒绝自动提交', commit: '' };
-      const verification = verifyDevCommit(workspaceRoot, taskId, storyIndex);
+      const verification = verifyDevCommit(workspaceRoot, taskId, storyIndex, currentHead);
       return verification.ok ? verification : { ...verification, reason: `Agent 创建了不可接受的提交：${verification.reason}` };
     }
     if (!dirty) return { ok: false, reason: 'Agent 没有产生代码变更', commit: '' };
@@ -56,24 +56,38 @@ export function commitDevStory(workspaceRoot: string, taskId: string, storyIndex
     if (sensitive.length) return { ok: false, reason: `检测到敏感文件，拒绝提交：${sensitive.join(', ')}`, commit: '' };
     git(['add', '-A'], workspaceRoot);
     git(['commit', '-m', `feat(${taskId}): Story-${storyIndex} 完成实现`], workspaceRoot);
-    return verifyDevCommit(workspaceRoot, taskId, storyIndex);
+    return verifyDevCommit(workspaceRoot, taskId, storyIndex, gitHead(workspaceRoot));
   } catch (error) {
     try { git(['restore', '--staged', '.'], workspaceRoot); } catch { /* keep working tree changes for inspection */ }
     return { ok: false, reason: `自动提交失败：${error instanceof Error ? error.message : String(error)}`, commit: '' };
   }
 }
 
-export function verifyDevCommit(workspaceRoot: string, taskId: string, storyIndex: number): DevCommitVerification {
+function subjectMatches(subject: string, taskId: string, storyIndex: number) {
+  const hasTask = subject.toLowerCase().includes(taskId.toLowerCase());
+  const hasStory = new RegExp(`\\bstory[- _]?${storyIndex}\\b`, 'i').test(subject);
+  return hasTask && hasStory;
+}
+
+export function verifyDevCommit(workspaceRoot: string, taskId: string, storyIndex: number, expectedCommit?: string): DevCommitVerification {
   try {
     const dirty = git(['status', '--porcelain', '--untracked-files=all'], workspaceRoot);
     if (dirty) return { ok: false, reason: '工作区仍有未提交改动', commit: '' };
-    const commit = git(['log', '-1', '--pretty=%s'], workspaceRoot);
-    const hasTask = commit.toLowerCase().includes(taskId.toLowerCase());
-    const hasStory = new RegExp(`\\bstory[- _]?${storyIndex}\\b`, 'i').test(commit);
-    if (!hasTask || !hasStory) {
-      return { ok: false, reason: `最新提交标题必须包含 ${taskId} 和 Story-${storyIndex}`, commit };
+    if (expectedCommit) {
+      const subject = git(['show', '-s', '--format=%s', expectedCommit], workspaceRoot);
+      if (!subjectMatches(subject, taskId, storyIndex)) {
+        return { ok: false, reason: `提交标题必须包含 ${taskId} 和 Story-${storyIndex}`, commit: subject };
+      }
+      return { ok: true, reason: '', commit: subject };
     }
-    return { ok: true, reason: '', commit };
+    const commits = git(['log', '--all', '--format=%H%x09%s'], workspaceRoot);
+    const match = commits.split(/\r?\n/).find((line) => {
+      const [, subject = ''] = line.split(/\t/, 2);
+      return subjectMatches(subject, taskId, storyIndex);
+    });
+    if (!match) return { ok: false, reason: `未找到包含 ${taskId} 和 Story-${storyIndex} 的提交`, commit: '' };
+    const [, subject = ''] = match.split(/\t/, 2);
+    return { ok: true, reason: '', commit: subject };
   } catch (error) {
     return { ok: false, reason: `无法验证 Git commit：${error instanceof Error ? error.message : String(error)}`, commit: '' };
   }

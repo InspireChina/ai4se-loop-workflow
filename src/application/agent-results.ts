@@ -1,10 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import type { AgentResult } from '../domain/agent-result';
+import { parseAgentResult, type AgentResult } from '../domain/agent-result';
 import type { Actor } from '../domain/task';
 import { databaseConnection } from '../infrastructure/database';
 import {
   addQuestion,
   addStory,
+  CodeSlotBusyError,
   getTask,
   rewindTask,
   updateTask,
@@ -79,24 +80,100 @@ async function saveQuestions(delegation: DelegationEnvelope, result: AgentResult
   }
 }
 
-async function recordResult(runId: string, delegation: DelegationEnvelope, result: AgentResult) {
+async function recordResult(runId: string, delegation: DelegationEnvelope, result: AgentResult, codeCommit?: string) {
+  const db = await databaseConnection();
+  const resultId = randomUUID();
+  db.prepare(`
+    INSERT INTO agent_results(result_id, run_id, task_id, story_index, agent, pipeline, outcome, result_json, application_status, code_commit)
+    VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+  `).run(resultId, runId, delegation.taskId, delegation.storyIndex, delegation.agent, delegation.pipeline, result.outcome, JSON.stringify(result), codeCommit || null);
+  return resultId;
+}
+
+async function markApplication(resultId: string, status: 'pending' | 'applied' | 'failed', error?: string | null) {
   const db = await databaseConnection();
   db.prepare(`
-    INSERT INTO agent_results(result_id, run_id, task_id, story_index, agent, pipeline, outcome, result_json)
-    VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(randomUUID(), runId, delegation.taskId, delegation.storyIndex, delegation.agent, delegation.pipeline, result.outcome, JSON.stringify(result));
+    UPDATE agent_results
+    SET application_status = ?,
+        application_error = ?,
+        applied_at = CASE WHEN ? = 'applied' THEN CURRENT_TIMESTAMP ELSE applied_at END
+    WHERE result_id = ?
+  `).run(status, error || null, status, resultId);
+}
+
+type QueuedAgentResult = {
+  result_id: string;
+  run_id: string;
+  task_id: string;
+  story_index: number | null;
+  agent: string;
+  pipeline: string;
+  outcome: string;
+  result_json: string;
+};
+
+function envelopeFromTask(row: QueuedAgentResult, detail: NonNullable<Awaited<ReturnType<typeof getTask>>>): DelegationEnvelope {
+  const task = detail.task;
+  return {
+    taskId: row.task_id,
+    pipeline: row.pipeline,
+    agent: row.agent,
+    storyIndex: row.story_index,
+    resource: ['backlog-agent', 'repro-agent', 'test-agent'].includes(row.agent) ? 'browser' : 'none',
+    description: '应用排队中的 Agent 结果',
+    title: task.title,
+    itemType: task.item_type,
+    priority: task.priority || '',
+    link: task.link || '',
+    externalId: task.external_id || '',
+    externalStatus: task.external_status || '',
+    agileStatus: task.agile_status,
+    currentSubagent: task.current_subagent || '',
+    resumePending: task.resume_pending,
+    analysisApprovedIndex: task.analysis_approved_index,
+    reviewApproved: task.review_approved,
+    lastActor: task.last_actor || '',
+    analysisIndex: task.analysis_index,
+    devIndex: task.dev_index,
+    testIndex: task.test_index,
+    totalStories: task.total_stories,
+    nextStep: task.next_step || '',
+    blockedReason: task.blocked_reason || '',
+    owner: task.owner || '',
+    evidence: task.evidence || '',
+    risk: task.risk || '',
+  };
 }
 
 function requireArtifact(result: AgentResult, agent: string) {
   if (!result.artifact) throw new Error(`${agent} 结果缺少 artifact`);
 }
 
+async function ensureCodeSlotForDelegation(delegation: DelegationEnvelope, result: AgentResult) {
+  if (result.outcome !== 'completed' || !['dev-agent', 'review-agent'].includes(delegation.agent)) return;
+  const db = await databaseConnection();
+  const active = db.prepare(`
+    SELECT task_id
+    FROM tasks
+    WHERE task_id != ?
+      AND (
+        agile_status IN ('in dev', 'in review')
+        OR (agile_status = 'blocked' AND resume_status IN ('in dev', 'in review'))
+        OR (agile_status = 'blocked' AND current_subagent = 'review-agent')
+      )
+    LIMIT 1
+  `).get(delegation.taskId) as { task_id: string } | undefined;
+  if (active) throw new CodeSlotBusyError(active.task_id);
+}
+
 export async function blockDelegation(delegation: DelegationEnvelope, reason: string) {
   await saveQuestions(delegation, { outcome: 'needs_input', summary: reason, questions: [] });
 }
 
-export async function applyAgentResult(runId: string, delegation: DelegationEnvelope, result: AgentResult) {
-  await recordResult(runId, delegation, result);
+type ApplyOutcome = 'advanced' | 'blocked' | 'rewound';
+
+async function applyResultEffects(delegation: DelegationEnvelope, result: AgentResult): Promise<ApplyOutcome> {
+  await ensureCodeSlotForDelegation(delegation, result);
   await saveArtifact(delegation, result);
 
   if (result.outcome !== 'completed' || (result.questions.length > 0 && delegation.agent !== 'analyst-agent' && delegation.agent !== 'review-agent')) {
@@ -215,5 +292,59 @@ export async function applyAgentResult(runId: string, delegation: DelegationEnve
     }
     default:
       throw new Error(`不支持的 agent：${delegation.agent}`);
+  }
+}
+
+export async function applyAgentResult(runId: string, delegation: DelegationEnvelope, result: AgentResult, options: { codeCommit?: string } = {}) {
+  const resultId = await recordResult(runId, delegation, result, options.codeCommit);
+  try {
+    const outcome = await applyResultEffects(delegation, result);
+    await markApplication(resultId, 'applied');
+    return outcome;
+  } catch (error) {
+    if (error instanceof CodeSlotBusyError) {
+      await markApplication(resultId, 'pending', error.message);
+      throw error;
+    }
+    await markApplication(resultId, 'failed', error instanceof Error ? error.message : String(error));
+    throw error;
+  }
+}
+
+export type QueuedApplicationResult =
+  | { status: 'none' }
+  | { status: 'applied'; resultId: string; taskId: string; storyIndex: number | null; agent: string; outcome: ApplyOutcome }
+  | { status: 'waiting'; resultId: string; taskId: string; storyIndex: number | null; agent: string; ownerTaskId: string }
+  | { status: 'failed'; resultId: string; taskId: string; storyIndex: number | null; agent: string; reason: string };
+
+export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationResult> {
+  const db = await databaseConnection();
+  const row = db.prepare(`
+    SELECT ar.result_id, ar.run_id, ar.task_id, ar.story_index, ar.agent, ar.pipeline, ar.outcome, ar.result_json
+    FROM agent_results ar
+    JOIN tasks t ON t.task_id = ar.task_id
+    WHERE ar.application_status = 'pending'
+      AND t.agile_status NOT IN ('blocked', 'done', 'cancelled')
+    ORDER BY ar.created_at, ar.result_id
+    LIMIT 1
+  `).get() as QueuedAgentResult | undefined;
+  if (!row) return { status: 'none' };
+
+  try {
+    const detail = await getTask(row.task_id);
+    if (!detail) throw new Error(`task not found: ${row.task_id}`);
+    const result = parseAgentResult(row.result_json);
+    const delegation = envelopeFromTask(row, detail);
+    const outcome = await applyResultEffects(delegation, result);
+    await markApplication(row.result_id, 'applied');
+    return { status: 'applied', resultId: row.result_id, taskId: row.task_id, storyIndex: row.story_index, agent: row.agent, outcome };
+  } catch (error) {
+    if (error instanceof CodeSlotBusyError) {
+      await markApplication(row.result_id, 'pending', error.message);
+      return { status: 'waiting', resultId: row.result_id, taskId: row.task_id, storyIndex: row.story_index, agent: row.agent, ownerTaskId: error.ownerTaskId };
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    await markApplication(row.result_id, 'failed', reason);
+    return { status: 'failed', resultId: row.result_id, taskId: row.task_id, storyIndex: row.story_index, agent: row.agent, reason };
   }
 }

@@ -538,6 +538,13 @@ export async function releaseBlock(taskId: string) {
   refreshPages(`/tasks/${taskId}`, '/');
 }
 
+export class CodeSlotBusyError extends Error {
+  constructor(public readonly ownerTaskId: string) {
+    super(`代码槽已被 ${ownerTaskId} 占用`);
+    this.name = 'CodeSlotBusyError';
+  }
+}
+
 export async function updateTask(taskId: string, actor: Actor, changes: Partial<TaskState> & {
   next_step?: string | null;
   item_type?: string | null;
@@ -567,7 +574,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
       WHERE task_id != ? AND (agile_status IN ('in dev','in review') OR (agile_status='blocked' AND resume_status IN ('in dev','in review')) OR (agile_status='blocked' AND current_subagent='review-agent'))
       LIMIT 1
     `).get(taskId) as Task | undefined;
-    if (active) throw new Error(`代码槽已被 ${active.task_id} 占用`);
+    if (active) throw new CodeSlotBusyError(active.task_id);
   }
   const allowed = ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'analysis_approved_index', 'blocked_reason', 'next_step', 'item_type', 'priority', 'title', 'resume_status'];
   const keys = allowed.filter((key) => key in changes);
@@ -742,7 +749,7 @@ export async function pipelineAll(): Promise<Delegation[]> {
   let browserUsed = false;
   const lines: Delegation[] = [];
   for (const task of tasks) {
-    const taskCodeAvailable = codeAvailable && (!readyDev || task.task_id === readyDev);
+    const taskCodeAvailable = occupiesCodeSlot(task) || (codeAvailable && (!readyDev || task.task_id === readyDev));
     const line = nextDelegation(task, taskCodeAvailable);
     if (!line) continue;
     if (line.resource === 'browser' && browserUsed) continue;
@@ -797,7 +804,7 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
   let browserUsed = false;
   const lines: DelegationEnvelope[] = [];
   for (const task of tasks) {
-    const taskCodeAvailable = codeAvailable && (!readyDev || task.task_id === readyDev);
+    const taskCodeAvailable = occupiesCodeSlot(task) || (codeAvailable && (!readyDev || task.task_id === readyDev));
     const line = nextDelegation(task, taskCodeAvailable);
     if (!line) continue;
     if (line.resource === 'browser' && browserUsed) continue;

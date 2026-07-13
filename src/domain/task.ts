@@ -126,6 +126,7 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
   if (status === 'done' || status === 'cancelled' || status === 'blocked') return null;
   if (task.resume_pending) {
     const agent = task.current_subagent!;
+    if (['dev-agent', 'review-agent'].includes(agent) && !codeSlotAvailable) return null;
     const storyIndex = agent === 'analyst-agent' && a < total ? a + 1 : agent === 'dev-agent' && d < a ? d + 1 : agent === 'test-agent' && t < d ? t + 1 : null;
     return line('resume', agent, storyIndex, '读取人工输入，并安全恢复任务');
   }

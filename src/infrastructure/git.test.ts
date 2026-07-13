@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { commitDevStory, gitHead, prepareDevWorkspace } from './git';
+import { commitDevStory, gitHead, prepareDevWorkspace, verifyDevCommit } from './git';
 
 function git(cwd: string, ...args: string[]) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -63,4 +63,21 @@ test('runner refuses to commit sensitive files', () => {
   const result = commitDevStory(cwd, 'TASK-1234', 1, head);
   assert.equal(result.ok, false);
   assert.match(result.reason, /敏感文件/);
+});
+
+test('verification can find a story commit after later commits', () => {
+  const cwd = repository();
+  const head = gitHead(cwd);
+  writeFileSync(join(cwd, 'feature.ts'), 'export const ready = true;\n');
+  const result = commitDevStory(cwd, 'TASK-1234', 2, head);
+  assert.equal(result.ok, true);
+
+  writeFileSync(join(cwd, 'later.ts'), 'export const later = true;\n');
+  git(cwd, 'add', 'later.ts');
+  git(cwd, 'commit', '-m', 'chore: unrelated later work');
+
+  const verification = verifyDevCommit(cwd, 'TASK-1234', 2);
+  assert.equal(verification.ok, true);
+  assert.match(verification.commit, /TASK-1234/);
+  assert.match(verification.commit, /Story-2/);
 });
