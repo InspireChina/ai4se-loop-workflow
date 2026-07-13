@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { databaseConnection, paths } from '../infrastructure/database';
 import { verifyDevCommit } from '../infrastructure/git';
 import { isRunProcessAlive, readRunPid } from '../infrastructure/run-process';
+import { toUtcIsoString } from './event-time';
 import {
   assertActorCanCreate,
   assertState,
@@ -109,7 +110,7 @@ function addEvent(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: st
 }
 
 function loopLogLine(message: string) {
-  return `${new Date().toISOString()} ${message}\n`;
+  return `${toUtcIsoString()} ${message}\n`;
 }
 
 function appendRunLogInDb(db: Awaited<ReturnType<typeof databaseConnection>>, runId: string, message: string) {
@@ -818,7 +819,7 @@ export async function beginRun(owner = 'ui') {
   db.prepare(`
     INSERT INTO loop_meta(key, value) VALUES('active_run', ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
-  `).run(JSON.stringify({ runId, owner, startedAt: startedAt.toISOString() }));
+  `).run(JSON.stringify({ runId, owner, startedAt: toUtcIsoString(startedAt) }));
   return runId;
 }
 
