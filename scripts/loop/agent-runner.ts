@@ -1,11 +1,11 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
-import { spawn } from 'node:child_process';
 import { getAgentExecutorSettings } from '../../src/application/project-settings';
 import { applyAgentResult, blockDelegation } from '../../src/application/agent-results';
 import { appendLoopRunLog, createLoopDispatch, endRun, getRunStatus, getTaskContext, type DelegationEnvelope } from '../../src/application/tasks';
 import { parseAgentResult } from '../../src/domain/agent-result';
-import { extractAgentFinalText, getAgentExecutor, parseAgentTelemetryStderr, parseAgentTelemetryStdout, type AgentExecutionContext, type AgentExecutor } from '../../src/infrastructure/agent-executor';
+import { getAgentExecutor, type AgentExecutor } from '../../src/infrastructure/agent-executor';
+import { executeDelegation } from '../../src/infrastructure/delegation-execution';
 import { startAgentRun, startDispatchRetryRun } from '../../src/infrastructure/agent-runner';
 import { paths } from '../../src/infrastructure/database';
 import { commitDevStory, prepareDevWorkspace } from '../../src/infrastructure/git';
@@ -150,116 +150,26 @@ async function scheduleNextLoop() {
 
 async function runDelegation(delegation: DelegationEnvelope, executor: AgentExecutor, executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' }) {
   const prompt = await buildPrompt(delegation);
-  const args = executor.buildArgs(prompt, paths.root, executionOptions);
   const maxRuntimeMs = Number(process.env.AGENT_EXECUTOR_TIMEOUT_MS || process.env.CURSOR_AGENT_TIMEOUT_MS || 30 * 60 * 1000);
   const idleTimeoutMs = Number(process.env.AGENT_EXECUTOR_IDLE_TIMEOUT_MS || process.env.CURSOR_AGENT_IDLE_TIMEOUT_MS || 10 * 60 * 1000);
-  const context: AgentExecutionContext = {
+  return executeDelegation({
+    runId,
+    prompt,
+    workspaceRoot: paths.root,
+    executor,
+    executionOptions,
+    context: {
     agent: delegation.agent,
     taskId: delegation.taskId,
     storyIndex: delegation.storyIndex,
     pipeline: delegation.pipeline,
-  };
-  const telemetryContext = { ...context, runToken: runId };
-  const telemetry = getLangfuseTelemetry();
-  const trace = await telemetry.startDelegationTrace(telemetryContext, { executor: executor.id, prompt });
-  let lastOutputAt = Date.now();
-  let timedOut = false;
-  let logQueue = Promise.resolve();
-
-  const enqueueLog = (message: string | null) => {
-    if (!message) return;
-    logQueue = logQueue.catch(() => undefined).then(() => appendLoopRunLog(runId, message)).catch(() => undefined);
-  };
-
-  const flushLogs = async () => {
-    await logQueue;
-  };
-
-  let traceStatus: 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'execution_error' = 'execution_error';
-  let terminalExitCode: number | null | undefined;
-  let finalText = '';
-  const enqueueTelemetry = (event: ReturnType<typeof parseAgentTelemetryStdout>) => {
-    if (event) void trace.event(event);
-  };
-  try {
-    await trace.event({ name: 'loop.agent.lifecycle', executor: executor.id, phase: 'started', summary: 'Agent CLI started' });
-    await appendLoopRunLog(runId, `[Agent] 开始 agent=${delegation.agent} task=${delegation.taskId} story=${delegation.storyIndex ?? '-'} pipeline=${delegation.pipeline} - ${delegation.description}`);
-    await appendLoopRunLog(runId, `[执行器] executor=${executor.id} agent=${delegation.agent} - 启动 ${executor.label} CLI：${executor.formatCommand(paths.root, executionOptions)}`);
-    const child = spawn(executor.command, args, {
-      cwd: paths.root,
-      env: process.env,
-      stdio: [executor.promptMode === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
-    });
-    if (executor.promptMode === 'stdin') child.stdin?.end(prompt);
-
-    let stdoutBuffer = '';
-    let stderrBuffer = '';
-    child.stdout?.on('data', (chunk: Buffer) => {
-      lastOutputAt = Date.now();
-      stdoutBuffer += chunk.toString('utf8');
-      const lines = stdoutBuffer.split(/\r?\n/);
-      stdoutBuffer = lines.pop() || '';
-      for (const line of lines.filter(Boolean)) {
-        enqueueLog(executor.parseStdout(line, context));
-        enqueueTelemetry(parseAgentTelemetryStdout(executor.id, line));
-        finalText = extractAgentFinalText(executor.id, line) || finalText;
-      }
-    });
-    child.stderr?.on('data', (chunk: Buffer) => {
-      lastOutputAt = Date.now();
-      stderrBuffer += chunk.toString('utf8');
-      const lines = stderrBuffer.split(/\r?\n/);
-      stderrBuffer = lines.pop() || '';
-      for (const line of lines.filter(Boolean)) {
-        enqueueLog(executor.parseStderr(line, context));
-        enqueueTelemetry(parseAgentTelemetryStderr(executor.id, line));
-      }
-    });
-
-    const terminate = async (reason: string) => {
-      if (timedOut) return;
-      timedOut = true;
-      await appendLoopRunLog(runId, `[执行器] executor=${executor.id} agent=${delegation.agent} - ${reason}，正在终止`);
-      child.kill('SIGTERM');
-      setTimeout(() => {
-        if (!child.killed) child.kill('SIGKILL');
-      }, 5000).unref();
-    };
-
-    const maxTimer = setTimeout(() => void terminate(`超过最大运行时间 ${Math.round(maxRuntimeMs / 1000)} 秒`), maxRuntimeMs);
-    const idleTimer = setInterval(() => {
-      if (Date.now() - lastOutputAt > idleTimeoutMs) void terminate(`超过空闲时间 ${Math.round(idleTimeoutMs / 1000)} 秒`);
-    }, Math.min(30000, idleTimeoutMs));
-
-    try {
-      terminalExitCode = await new Promise<number | null>((resolve, reject) => {
-        child.once('error', reject);
-        child.once('exit', resolve);
-      });
-    } finally {
-      clearTimeout(maxTimer);
-      clearInterval(idleTimer);
-    }
-    if (stdoutBuffer.trim()) {
-      enqueueLog(executor.parseStdout(stdoutBuffer, context));
-      enqueueTelemetry(parseAgentTelemetryStdout(executor.id, stdoutBuffer));
-      finalText = extractAgentFinalText(executor.id, stdoutBuffer) || finalText;
-    }
-    if (stderrBuffer.trim()) {
-      enqueueLog(executor.parseStderr(stderrBuffer, context));
-      enqueueTelemetry(parseAgentTelemetryStderr(executor.id, stderrBuffer));
-    }
-    await flushLogs();
-    await appendLoopRunLog(runId, `[执行器] executor=${executor.id} agent=${delegation.agent} - ${executor.label} CLI 已退出 code=${terminalExitCode ?? 'signal'}`);
-    if (terminalExitCode && terminalExitCode !== 0) await appendLoopRunLog(runId, `[错误] ${delegation.agent} 执行失败 code=${terminalExitCode}`);
-    else await appendLoopRunLog(runId, `[Agent] 完成 agent=${delegation.agent} task=${delegation.taskId} story=${delegation.storyIndex ?? '-'} pipeline=${delegation.pipeline} - 处理完成`);
-    traceStatus = timedOut ? 'timed_out' : terminalExitCode === 0 ? 'completed' : terminalExitCode === null ? 'cancelled' : 'failed';
-    return { exitCode: terminalExitCode ?? 1, finalText };
-  } finally {
-    await trace.event({ name: 'loop.agent.lifecycle', executor: executor.id, phase: 'completed', summary: `Agent CLI ${traceStatus}`, output: { exitCode: terminalExitCode ?? null, timedOut } });
-    await trace.end({ status: traceStatus });
-    await telemetry.flush();
-  }
+    },
+    description: delegation.description,
+    telemetry: getLangfuseTelemetry(),
+    appendLog: (message) => appendLoopRunLog(runId, message),
+    maxRuntimeMs,
+    idleTimeoutMs,
+  });
 }
 
 async function main() {
