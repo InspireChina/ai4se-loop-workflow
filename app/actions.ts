@@ -3,7 +3,6 @@
 import { redirect } from 'next/navigation';
 import { normalizeWorkspaceRoot, setAgentExecutorSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
 import {
-  addQuestion,
   addStory,
   answerQuestion,
   beginRun,
@@ -49,22 +48,6 @@ export async function initializeContextAction(formData: FormData) {
 export async function addStoryAction(formData: FormData) {
   const taskId = String(formData.get('taskId'));
   await addStory({ taskId, title: formData.get('title') });
-  redirect(`/tasks/${taskId}`);
-}
-
-export async function addQuestionAction(formData: FormData) {
-  const taskId = String(formData.get('taskId'));
-  await addQuestion({
-    taskId,
-    storyIndex: formData.get('storyIndex') || undefined,
-    kind: formData.get('kind') || 'local',
-    title: formData.get('title'),
-    question: formData.get('question'),
-    why: formData.get('why'),
-    recommendation: formData.get('recommendation'),
-    blockedReason: formData.get('blockedReason'),
-    blockTask: formData.get('blockTask') === 'on',
-  });
   redirect(`/tasks/${taskId}`);
 }
 

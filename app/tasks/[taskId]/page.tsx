@@ -4,7 +4,6 @@ import { AlertTriangle, CheckCircle2, Clock3, FileText, GitBranch, RotateCcw, Sl
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
 import {
-  addQuestionAction,
   addStoryAction,
   answerQuestionAction,
   cancelTaskAction,
@@ -85,22 +84,6 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             <h2>Questions 与 Approval</h2>
             <small>{questions.length} 个问题 · {approvals.length} 个 Approval</small>
           </div>
-          <form action={addQuestionAction} className="card form-panel question-create">
-            <input type="hidden" name="taskId" value={task.task_id}/>
-            <div className="fields">
-              <label>类型<select name="kind" defaultValue="analysis"><option value="local">local</option><option value="analysis">analysis</option><option value="test">test</option><option value="review">review</option></select></label>
-              <label>Story<input name="storyIndex" type="number" min="1" max={Math.max(task.total_stories, 1)} placeholder="可选"/></label>
-            </div>
-            <label>标题<input name="title" required placeholder="需要确认的问题标题"/></label>
-            <label>问题<textarea name="question" required placeholder="填写需要人工确认的具体问题"/></label>
-            <div className="fields">
-              <label>为什么问<input name="why"/></label>
-              <label>推荐答案<input name="recommendation"/></label>
-            </div>
-            <label>阻塞原因<input name="blockedReason" placeholder="默认使用问题标题"/></label>
-            <label className="checkbox"><input type="checkbox" name="blockTask" defaultChecked/>创建后进入 blocked</label>
-            <button className="button" type="submit">新增问题</button>
-          </form>
           <div className="question-list">
             {questions.length === 0 ? <div className="card empty">当前没有待确认问题。</div> : questions.map((question, index) => <article className="question card" key={question.question_id}>
               <div className="question-title">

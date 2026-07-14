@@ -138,7 +138,6 @@ textarea{min-height:90px;resize:vertical}
 .story>span.done{color:var(--green)}
 .story em{margin-left:auto;color:var(--muted);font-style:normal}
 .question{padding:18px;margin-bottom:12px}
-.question-create{margin-bottom:12px}
 .question-title{display:flex;gap:10px;align-items:flex-start}
 .question-title .badge{margin-left:auto}
 .recommendation{background:#eef4ff;border-left:3px solid var(--blue);padding:10px;margin:12px 0}
