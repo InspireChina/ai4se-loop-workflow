@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
-import { getAgentExecutorSettings } from '../../src/application/project-settings';
+import { getAgentExecutorSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
 import { applyAgentResult, applyNextQueuedAgentResult, blockDelegation } from '../../src/application/agent-results';
 import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTaskContext, type DelegationEnvelope } from '../../src/application/tasks';
 import { parseAgentResult } from '../../src/domain/agent-result';
@@ -9,7 +9,7 @@ import { executeDelegation } from '../../src/infrastructure/delegation-execution
 import { startAgentRun, startDispatchRetryRun } from '../../src/infrastructure/agent-runner';
 import { paths } from '../../src/infrastructure/database';
 import { commitDevStory, prepareDevWorkspace } from '../../src/infrastructure/git';
-import { getLangfuseTelemetry } from '../../src/infrastructure/langfuse';
+import { createLangfuseTelemetry } from '../../src/infrastructure/langfuse';
 
 const runId = process.argv[2];
 if (!runId) throw new Error('missing run id');
@@ -154,6 +154,7 @@ async function runDelegation(delegation: DelegationEnvelope, executor: AgentExec
   const prompt = await buildPrompt(delegation);
   const maxRuntimeMs = Number(process.env.AGENT_EXECUTOR_TIMEOUT_MS || process.env.CURSOR_AGENT_TIMEOUT_MS || 30 * 60 * 1000);
   const idleTimeoutMs = Number(process.env.AGENT_EXECUTOR_IDLE_TIMEOUT_MS || process.env.CURSOR_AGENT_IDLE_TIMEOUT_MS || 10 * 60 * 1000);
+  const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
   return executeDelegation({
     runId,
     prompt,
@@ -167,7 +168,7 @@ async function runDelegation(delegation: DelegationEnvelope, executor: AgentExec
     pipeline: delegation.pipeline,
     },
     description: delegation.description,
-    telemetry: getLangfuseTelemetry(),
+    telemetry,
     appendLog: (message) => appendLoopRunLog(runId, message),
     maxRuntimeMs,
     idleTimeoutMs,

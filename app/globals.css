@@ -160,6 +160,9 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .dialog-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:4px}
 .settings-stack{display:grid;gap:14px}
 .settings-description{font-size:12px;margin-top:5px}
+.settings-section-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:start}
+.settings-section-head .badge{align-self:center}
+.settings code{background:#eef3ff;color:var(--blue);border-radius:5px;padding:1px 5px}
 .codex-settings{border-top:1px solid var(--line);padding-top:16px;margin-top:4px}
 .codex-settings>small{display:block;margin-top:8px}
 .settings:has(input[name="agentExecutor"][value="cursor"]:checked) .codex-settings,

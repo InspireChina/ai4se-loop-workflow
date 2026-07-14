@@ -1,7 +1,7 @@
 'use server';
 
 import { redirect } from 'next/navigation';
-import { normalizeWorkspaceRoot, setAgentExecutorSettings, setWorkspaceRoot } from '../src/application/project-settings';
+import { normalizeWorkspaceRoot, setAgentExecutorSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
 import {
   addQuestion,
   addStory,
@@ -116,6 +116,18 @@ export async function saveAgentExecutorAction(formData: FormData) {
     executorId: formData.get('agentExecutor'),
     codexModel: formData.get('codexModel'),
     codexReasoningEffort: formData.get('codexReasoningEffort'),
+  });
+  redirect('/settings');
+}
+
+export async function saveLangfuseSettingsAction(formData: FormData) {
+  await setLangfuseSettings({
+    enabled: formData.get('langfuseEnabled'),
+    publicKey: formData.get('langfusePublicKey'),
+    secretKey: formData.get('langfuseSecretKey'),
+    baseUrl: formData.get('langfuseBaseUrl'),
+    sampleRate: formData.get('langfuseSampleRate'),
+    capturePrompts: formData.get('langfuseCapturePrompts'),
   });
   redirect('/settings');
 }

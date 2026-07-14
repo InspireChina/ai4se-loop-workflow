@@ -1,12 +1,13 @@
 import { paths } from '../../src/infrastructure/database';
-import { Bot, Check } from 'lucide-react';
-import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, getAgentExecutorSettings } from '../../src/application/project-settings';
-import { changeWorkspaceRootAction, saveAgentExecutorAction } from '../actions';
+import { Activity, Bot, Check } from 'lucide-react';
+import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, getAgentExecutorSettings, getLangfuseSettings } from '../../src/application/project-settings';
+import { changeWorkspaceRootAction, saveAgentExecutorAction, saveLangfuseSettingsAction } from '../actions';
 
 export const dynamic = 'force-dynamic';
 
 export default async function SettingsPage() {
   const settings = await getAgentExecutorSettings();
+  const langfuse = await getLangfuseSettings();
   return <>
     <header><p className="eyebrow">PROJECT SETTINGS</p><h1>项目设置</h1><p className="muted">设置当前项目与执行 pipeline agent 的 CLI。</p></header>
     <section className="settings-stack">
@@ -46,6 +47,39 @@ export default async function SettingsPage() {
         <small className="muted">可选值：minimal、low、medium、high、xhigh。部分模型不支持所有强度。</small>
       </fieldset>
       <button className="button" type="submit">保存设置</button>
+    </form>
+    <form action={saveLangfuseSettingsAction} className="card settings">
+      <div className="settings-section-head">
+        <span className="executor-icon"><Activity size={18}/></span>
+        <div>
+          <strong>可观测性 · Langfuse</strong>
+          <p className="muted settings-description">开启后，每个 agent delegation 会创建一个 <code>loop.delegation</code> trace，并记录工具调用、输出摘要和诊断事件。</p>
+        </div>
+        <span className={`badge ${langfuse.status === 'enabled' ? 'green' : langfuse.status === 'disabled' ? 'blue' : 'amber'}`}>
+          {langfuse.status === 'enabled' ? '已启用' : langfuse.status === 'disabled' ? '未启用' : '需配置'}
+        </span>
+      </div>
+      <p className="path-line">{langfuse.statusMessage} 当前来源：{langfuse.source === 'project' ? '项目设置' : '环境变量'}。</p>
+      <div className="fields">
+        <label className="checkbox"><input type="checkbox" name="langfuseEnabled" defaultChecked={langfuse.enabled}/>启用 Langfuse trace</label>
+        <label className="checkbox"><input type="checkbox" name="langfuseCapturePrompts" defaultChecked={langfuse.capturePrompts}/>采集 Prompt（会脱敏，默认建议关闭）</label>
+        <label>Public Key
+          <input name="langfusePublicKey" defaultValue={langfuse.publicKey} placeholder="pk-..." spellCheck={false}/>
+        </label>
+        <label>Secret Key
+          <input name="langfuseSecretKey" type="password" placeholder={langfuse.hasSecretKey ? '已保存；留空则不修改' : 'sk-...'} spellCheck={false}/>
+          <small className="muted">{langfuse.hasSecretKey ? 'Secret Key 已保存，不会在页面回显。' : '尚未保存 Secret Key。'}</small>
+        </label>
+        <label>Base URL
+          <input name="langfuseBaseUrl" defaultValue={langfuse.baseUrl} placeholder="https://cloud.langfuse.com" spellCheck={false}/>
+        </label>
+        <label>采样率
+          <input name="langfuseSampleRate" type="number" min="0" max="1" step="0.01" defaultValue={langfuse.sampleRate}/>
+          <small className="muted">1 表示全量采集，0 表示完全不采集。</small>
+        </label>
+      </div>
+      <small className="muted">保存后只影响新的 agent 执行；已经完成的历史任务不会补传 trace。</small>
+      <button className="button" type="submit">保存可观测性设置</button>
     </form>
     </section>
   </>;
