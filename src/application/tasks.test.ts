@@ -136,3 +136,90 @@ test('lists only completed Tasks in completion order while preserving terminal T
   assert.equal(detail?.documents[0]?.content, 'History remains available');
   assert.equal(detail?.events[0]?.summary, 'Task completed');
 });
+
+test('keeps agent analysis Questions displayable, answerable, and releasable with their approval', async () => {
+  const { addQuestion, answerQuestion, getTask, releaseBlock } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = 'TASK-agent-analysis-question';
+  db.prepare(`
+    INSERT INTO tasks(task_id, title, item_type, agile_status, current_subagent, total_stories, work_dir)
+    VALUES(?, 'Agent analysis Question', 'feature', 'ready for dev', 'analyst-agent', 1, '')
+  `).run(taskId);
+  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Analysis story', 'story-001')").run(taskId);
+
+  const questionId = await addQuestion({
+    taskId,
+    storyIndex: 1,
+    actor: 'analyst-agent',
+    kind: 'analysis',
+    title: 'Confirm API boundary',
+    question: 'Should the existing endpoint remain public?',
+    why: 'The implementation needs a stable compatibility decision.',
+    recommendation: 'Keep it public for this release.',
+    blockedReason: 'Waiting for API decision',
+    blockTask: true,
+  });
+
+  let detail = await getTask(taskId);
+  const question = detail?.questions.find((item) => item.question_id === questionId);
+  assert.equal(question?.title, 'Confirm API boundary');
+  assert.equal(question?.question, 'Should the existing endpoint remain public?');
+  assert.equal(question?.kind, 'analysis');
+  assert.equal(question?.source_agent, 'analyst-agent');
+  assert.equal(question?.story_index, 1);
+  assert.equal(question?.why, 'The implementation needs a stable compatibility decision.');
+  assert.equal(question?.recommendation, 'Keep it public for this release.');
+  assert.equal(question?.status, 'pending');
+  assert.equal(detail?.approvals.find((item) => item.kind === 'analysis')?.decision, 'pending');
+  await assert.rejects(() => releaseBlock(taskId), /仍有待回答问题/);
+
+  await answerQuestion({ taskId, questionId, answer: 'Keep it public.' });
+  detail = await getTask(taskId);
+  assert.equal(detail?.questions.find((item) => item.question_id === questionId)?.status, 'answered');
+  assert.equal(detail?.questions.find((item) => item.question_id === questionId)?.answer, 'Keep it public.');
+  assert.ok(detail?.events.some((event) => event.event_type === 'QuestionAnswered'));
+
+  await releaseBlock(taskId);
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'ready for dev');
+  assert.equal(detail?.task.current_subagent, 'analyst-agent');
+  assert.equal(detail?.task.resume_pending, 1);
+  assert.equal(detail?.task.resume_status, null);
+  assert.equal(detail?.task.analysis_approved_index, 1);
+  assert.equal(detail?.approvals.find((item) => item.kind === 'analysis')?.decision, 'confirmed');
+});
+
+test('releases answered review Questions back to the review agent with approved approval', async () => {
+  const { addQuestion, answerQuestion, getTask, releaseBlock } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = 'TASK-agent-review-question';
+  db.prepare(`
+    INSERT INTO tasks(task_id, title, item_type, agile_status, current_subagent, analysis_index, dev_index, test_index, total_stories, analysis_approved_index, work_dir)
+    VALUES(?, 'Agent review Question', 'feature', 'in review', 'review-agent', 1, 1, 1, 1, 1, '')
+  `).run(taskId);
+  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Review story', 'story-001')").run(taskId);
+
+  const questionId = await addQuestion({
+    taskId,
+    actor: 'review-agent',
+    kind: 'review',
+    title: 'Confirm final delivery',
+    question: 'Can this Task be delivered?',
+    why: 'Final delivery needs human approval.',
+    recommendation: 'Approve the verified implementation.',
+    blockTask: true,
+  });
+  assert.equal((await getTask(taskId))?.approvals.find((item) => item.kind === 'review')?.decision, 'pending');
+
+  await answerQuestion({ taskId, questionId, answer: 'Approved.' });
+  await releaseBlock(taskId);
+  const detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'in review');
+  assert.equal(detail?.task.current_subagent, 'review-agent');
+  assert.equal(detail?.task.resume_pending, 1);
+  assert.equal(detail?.task.review_approved, 1);
+  assert.equal(detail?.approvals.find((item) => item.kind === 'review')?.decision, 'approved');
+  assert.ok(detail?.events.some((event) => event.event_type === 'BlockReleased'));
+});
