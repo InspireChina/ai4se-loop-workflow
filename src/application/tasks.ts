@@ -230,17 +230,24 @@ export async function upsertDocument(input: unknown) {
   db.exec('BEGIN');
   try {
     const existing = db.prepare('SELECT document_id FROM documents WHERE task_id = ? AND story_index IS ? AND kind = ?').get(value.taskId, value.storyIndex || null, value.kind) as { document_id: string } | undefined;
+    const storyIndex = value.storyIndex || null;
     const documentId = existing?.document_id || randomUUID();
-    db.prepare(`
-      INSERT INTO documents(document_id, task_id, story_index, kind, title, content, format, source_agent)
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(task_id, story_index, kind) DO UPDATE SET
-        title = excluded.title,
-        content = excluded.content,
-        format = excluded.format,
-        source_agent = excluded.source_agent,
-        updated_at = CURRENT_TIMESTAMP
-    `).run(documentId, value.taskId, value.storyIndex || null, value.kind, title, value.content, value.format, value.actor);
+    if (existing) {
+      db.prepare(`
+        UPDATE documents
+        SET title = ?,
+            content = ?,
+            format = ?,
+            source_agent = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE document_id = ?
+      `).run(title, value.content, value.format, value.actor, documentId);
+    } else {
+      db.prepare(`
+        INSERT INTO documents(document_id, task_id, story_index, kind, title, content, format, source_agent)
+        VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(documentId, value.taskId, storyIndex, value.kind, title, value.content, value.format, value.actor);
+    }
     addEvent(db, value.taskId, value.actor, 'DocumentUpserted', `保存文档：${title}`);
     db.exec('COMMIT');
     refreshPages(`/tasks/${value.taskId}`);
