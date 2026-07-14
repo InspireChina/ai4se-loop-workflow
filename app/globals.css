@@ -117,6 +117,10 @@ h2{font-size:15px;margin:30px 0 12px;display:flex;align-items:center;gap:7px}
 .overview p{margin:4px 0}
 .split{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px;align-items:start}
 .task-table{min-width:0}
+.task-views{display:flex;gap:8px;margin:0 0 12px}
+.task-views a{border:1px solid var(--line);border-radius:7px;color:var(--muted);padding:7px 11px;text-decoration:none;font-size:13px}
+.task-views a:hover{background:#f7f9fe;color:var(--blue)}
+.task-views a[aria-current="page"]{background:#eef3ff;border-color:#b9cef7;color:var(--blue);font-weight:650}
 .form-panel{padding:18px;display:grid;gap:12px}
 .form-panel h2{margin:0 0 4px}
 .form-panel label,.settings label{display:block;color:var(--muted);font-size:12px}
