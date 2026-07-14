@@ -18,6 +18,7 @@ export default function CreateTaskDialog() {
       </div>
       <form action={createTaskAction} className="form-panel dialog-form">
         <label>标题<input name="title" required autoFocus placeholder="例如：项目列表支持按 PIC 筛选"/></label>
+        <label>描述（可选）<textarea name="description" rows={4} placeholder="补充背景、目标或验收要求"/></label>
         <div className="fields">
           <label>类型<select name="itemType" defaultValue="feature"><option value="feature">feature</option><option value="bug">bug</option><option value="tech">tech</option><option value="intake">intake</option><option value="other">other</option></select></label>
           <label>优先级<input name="priority" placeholder="P1"/></label>

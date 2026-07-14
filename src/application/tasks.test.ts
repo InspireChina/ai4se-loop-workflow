@@ -14,7 +14,7 @@ test('updates an existing task-level document instead of inserting a duplicate N
   process.env.LOOP_WORKSPACE_ROOT_OVERRIDE = workspaceRoot;
 
   const { databaseConnection } = await import('../infrastructure/database');
-  const { listDocuments, upsertDocument } = await import('./tasks');
+  const { createTask, listDocuments, upsertDocument } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare(`
     INSERT INTO tasks(task_id, title, item_type, agile_status, work_dir)
@@ -42,4 +42,12 @@ test('updates an existing task-level document instead of inserting a duplicate N
   assert.equal(documents[0].title, 'Second review');
   assert.equal(documents[0].content, 'second');
   assert.equal(documents[0].story_index, null);
+
+  const titleOnlyTaskId = await createTask({ title: 'Title only Task' });
+  const blankDescriptionTaskId = await createTask({ title: 'Blank description Task', description: '   ' });
+  const describedTaskId = await createTask({ title: 'Described Task', description: 'Keep this value for the next story.' });
+
+  assert.ok(titleOnlyTaskId);
+  assert.ok(blankDescriptionTaskId);
+  assert.ok(describedTaskId);
 });

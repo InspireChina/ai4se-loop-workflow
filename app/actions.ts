@@ -23,6 +23,7 @@ import { paths } from '../src/infrastructure/database';
 export async function createTaskAction(formData: FormData) {
   const taskId = await createTask({
     title: formData.get('title'),
+    description: formData.get('description') || undefined,
     link: formData.get('link'),
     itemType: formData.get('itemType') || 'feature',
     priority: formData.get('priority'),

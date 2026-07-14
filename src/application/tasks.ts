@@ -270,6 +270,9 @@ export async function getDocument(taskId: string, kind: string, storyIndex?: num
 
 const createTaskSchema = z.object({
   title: z.string().min(1).max(300),
+  // Story 2 persists and exposes this value to agents. Accept it here so the
+  // creation boundary remains stable while title-only Tasks stay valid.
+  description: z.string().optional().nullable(),
   link: z.string().trim().optional().nullable(),
   externalId: z.string().trim().optional().nullable(),
   externalStatus: z.string().trim().optional().nullable(),
