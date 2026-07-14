@@ -177,6 +177,19 @@ export async function listTasks(options: { includeTerminal?: boolean } = {}): Pr
   `).all() as Task[];
 }
 
+/**
+ * Returns completed Tasks only. Cancelled Tasks are a separate terminal state
+ * and deliberately do not appear in this result.
+ */
+export async function listCompletedTasks(): Promise<Task[]> {
+  const db = await databaseConnection();
+  return db.prepare(`
+    ${taskSelect}
+    WHERE agile_status = 'done'
+    ORDER BY COALESCE(completed_at, updated_at) DESC
+  `).all() as Task[];
+}
+
 export async function listPipeline() {
   return pipelineAll();
 }

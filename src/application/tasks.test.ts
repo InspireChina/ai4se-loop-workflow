@@ -89,3 +89,50 @@ test('creates title-only and described Tasks without blocking delegation and ser
   assert.equal(describedAgentInput.task_description, 'Keep this value for the next story.');
   assert.equal(describedAgentInput.description, '收集上下文并完成分类');
 });
+
+test('lists only completed Tasks in completion order while preserving terminal Task details', async () => {
+  const { getTask, listCompletedTasks, listTasks } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+
+  db.prepare(`
+    INSERT INTO tasks(task_id, title, item_type, agile_status, work_dir, completed_at, updated_at)
+    VALUES (?, ?, 'task', ?, '', ?, ?)
+  `).run('TASK-completed-new', 'Recently completed', 'done', '2026-07-14 10:00:00', '2026-07-14 10:00:00');
+  db.prepare(`
+    INSERT INTO tasks(task_id, title, item_type, agile_status, work_dir, completed_at, updated_at)
+    VALUES (?, ?, 'task', ?, '', ?, ?)
+  `).run('TASK-completed-legacy', 'Legacy completed', 'done', null, '2026-07-14 09:00:00');
+  db.prepare(`
+    INSERT INTO tasks(task_id, title, item_type, agile_status, work_dir, updated_at)
+    VALUES (?, ?, 'task', ?, '', ?)
+  `).run('TASK-cancelled', 'Cancelled', 'cancelled', '2026-07-14 11:00:00');
+  db.prepare(`
+    INSERT INTO tasks(task_id, title, item_type, agile_status, work_dir, updated_at)
+    VALUES (?, ?, 'task', ?, '', ?)
+  `).run('TASK-active', 'Active', 'backlog', '2026-07-14 12:00:00');
+  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES('TASK-completed-new', 1, 'Completed story', 'story-001')").run();
+  db.prepare("INSERT INTO documents(document_id, task_id, kind, title, content) VALUES('DOC-completed', 'TASK-completed-new', 'analysis', 'Completed analysis', 'History remains available')").run();
+  db.prepare("INSERT INTO task_events(event_id, task_id, actor, event_type, summary) VALUES('EVENT-completed', 'TASK-completed-new', 'dev-agent', 'completed', 'Task completed')").run();
+
+  const completed = await listCompletedTasks();
+  const completedIds = completed.map((task) => task.task_id);
+  assert.deepEqual(
+    completedIds.filter((taskId) => taskId === 'TASK-completed-new' || taskId === 'TASK-completed-legacy'),
+    ['TASK-completed-new', 'TASK-completed-legacy'],
+  );
+  assert.ok(completed.every((task) => task.agile_status === 'done'));
+  assert.ok(!completedIds.includes('TASK-cancelled'));
+  assert.ok(!completedIds.includes('TASK-active'));
+
+  const activeIds = (await listTasks()).map((task) => task.task_id);
+  assert.ok(!activeIds.includes('TASK-completed-new'));
+  assert.ok(!activeIds.includes('TASK-cancelled'));
+  assert.ok(activeIds.includes('TASK-active'));
+
+  const detail = await getTask('TASK-completed-new');
+  assert.equal(detail?.task.task_id, 'TASK-completed-new');
+  assert.equal(detail?.stories[0]?.title, 'Completed story');
+  assert.equal(detail?.documents[0]?.content, 'History remains available');
+  assert.equal(detail?.events[0]?.summary, 'Task completed');
+});
