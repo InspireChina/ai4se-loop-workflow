@@ -146,6 +146,7 @@ async function printTaskPipeline(taskId: string, args: Args) {
     const envelope = {
       ...line,
       title: task.title,
+      taskDescription: task.description,
       itemType: task.item_type,
       priority: task.priority || '',
       link: task.link || '',

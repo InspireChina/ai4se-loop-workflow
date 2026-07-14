@@ -59,6 +59,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     task: {
       taskId: full.task.task_id,
       title: full.task.title,
+      description: full.task.description,
       itemType: full.task.item_type,
       priority: full.task.priority,
       link: full.task.link,
@@ -85,6 +86,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     JSON.stringify({
       task_id: delegation.taskId,
       title: delegation.title,
+      task_description: delegation.taskDescription,
       item_type: delegation.itemType,
       priority: delegation.priority,
       pipeline: delegation.pipeline,

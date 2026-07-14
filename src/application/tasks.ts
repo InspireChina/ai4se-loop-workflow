@@ -19,6 +19,7 @@ import {
 
 export type Task = TaskState & {
   title: string;
+  description: string | null;
   item_type: string;
   priority: string | null;
   link: string | null;
@@ -69,6 +70,7 @@ export type RunStatus = { runId: string; owner: string; startedAt: string; pid: 
 export type RunLogChunk = { lastId: number; raw: string };
 export type DelegationEnvelope = Delegation & {
   title: string;
+  taskDescription: string | null;
   itemType: string;
   priority: string;
   link: string;
@@ -92,7 +94,7 @@ export type DelegationEnvelope = Delegation & {
 };
 
 const taskSelect = `
-  SELECT task_id, title, link, external_id, external_status, item_type, priority,
+  SELECT task_id, title, description, link, external_id, external_status, item_type, priority,
          agile_status, current_subagent, analysis_index, dev_index, test_index,
          total_stories, analysis_approved_index, review_approved, resume_status,
          resume_pending, next_step, blocked_reason,
@@ -286,6 +288,7 @@ const createTaskSchema = z.object({
 
 export async function createTask(input: unknown) {
   const value = createTaskSchema.parse(input);
+  const description = value.description?.trim() || null;
   const link = value.link || null;
   const taskId = value.taskId || taskIdFromTitleLink(value.title, link);
   const currentSubagent = value.currentSubagent || null;
@@ -310,12 +313,12 @@ export async function createTask(input: unknown) {
   try {
     db.prepare(`
       INSERT OR IGNORE INTO tasks(
-        task_id, title, link, external_id, external_status, item_type, priority,
+        task_id, title, description, link, external_id, external_status, item_type, priority,
         agile_status, current_subagent, analysis_index, dev_index, test_index,
         total_stories, analysis_approved_index, review_approved, next_step,
         work_dir, blocked_reason, last_actor
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, ?, '', ?, ?)
-    `).run(taskId, value.title, link, value.externalId || null, value.externalStatus || null, value.itemType, value.priority || null, value.status, currentSubagent, '新建 Task，等待 loop 处理', state.blocked_reason, value.actor);
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, ?, '', ?, ?)
+    `).run(taskId, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, value.priority || null, value.status, currentSubagent, '新建 Task，等待 loop 处理', state.blocked_reason, value.actor);
     const task = link ? (db.prepare(`${taskSelect} WHERE link = ?`).get(link) as Task | undefined) : fetchTask(db, taskId);
     if (!task) throw new Error('Task 创建失败');
     addEvent(db, task.task_id, value.actor, 'TaskCreated', `创建 Task：${task.title}`);
@@ -774,6 +777,7 @@ function toEnvelope(task: Task, delegation: Delegation): DelegationEnvelope {
   return {
     ...delegation,
     title: task.title || '',
+    taskDescription: task.description,
     itemType: task.item_type || 'other',
     priority: task.priority || '',
     link: task.link || '',
@@ -908,6 +912,7 @@ export function toJsonlEnvelope(item: DelegationEnvelope) {
   return JSON.stringify({
     task_id: item.taskId,
     title: item.title,
+    task_description: item.taskDescription,
     item_type: item.itemType,
     priority: item.priority,
     link: item.link,

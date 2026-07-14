@@ -14,7 +14,7 @@ test('updates an existing task-level document instead of inserting a duplicate N
   process.env.LOOP_WORKSPACE_ROOT_OVERRIDE = workspaceRoot;
 
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask, listDocuments, upsertDocument } = await import('./tasks');
+  const { createTask, getTaskContext, listDocuments, pipelineAllEnvelopes, toJsonlEnvelope, upsertDocument } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare(`
     INSERT INTO tasks(task_id, title, item_type, agile_status, work_dir)
@@ -50,4 +50,19 @@ test('updates an existing task-level document instead of inserting a duplicate N
   assert.ok(titleOnlyTaskId);
   assert.ok(blankDescriptionTaskId);
   assert.ok(describedTaskId);
+
+  const titleOnlyContext = await getTaskContext(titleOnlyTaskId);
+  const blankDescriptionContext = await getTaskContext(blankDescriptionTaskId);
+  const describedContext = await getTaskContext(describedTaskId);
+  assert.equal(titleOnlyContext.task.description, null);
+  assert.equal(blankDescriptionContext.task.description, null);
+  assert.equal(describedContext.task.description, 'Keep this value for the next story.');
+
+  db.prepare("UPDATE tasks SET agile_status = 'done' WHERE task_id != ?").run(describedTaskId);
+  const envelope = (await pipelineAllEnvelopes()).find((item) => item.taskId === describedTaskId);
+  assert.ok(envelope);
+  assert.equal(envelope.taskDescription, 'Keep this value for the next story.');
+  const json = JSON.parse(toJsonlEnvelope(envelope));
+  assert.equal(json.task_description, 'Keep this value for the next story.');
+  assert.equal(json.description, '收集上下文并完成分类');
 });

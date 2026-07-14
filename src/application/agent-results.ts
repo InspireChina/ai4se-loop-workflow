@@ -122,6 +122,7 @@ function envelopeFromTask(row: QueuedAgentResult, detail: NonNullable<Awaited<Re
     resource: ['backlog-agent', 'repro-agent', 'test-agent'].includes(row.agent) ? 'browser' : 'none',
     description: '应用排队中的 Agent 结果',
     title: task.title,
+    taskDescription: task.description,
     itemType: task.item_type,
     priority: task.priority || '',
     link: task.link || '',
