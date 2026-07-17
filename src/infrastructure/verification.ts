@@ -6,19 +6,24 @@ export type CommandVerificationResult = {
   timedOut: boolean;
 };
 
-const allowedCommand = /^(?:npm|pnpm|yarn|bun|npx|node|tsx|tsc|vitest|jest|pytest|python\s+-m\s+pytest|cargo\s+(?:test|check|clippy)|go\s+test|make\s+(?:test|check|lint)|eslint)(?:\s|$)/;
-
+/**
+ * Harness commands run with the same unrestricted workspace authority as Agents.
+ * The command belongs to the resolved Slice Spec, which is the execution contract.
+ */
 export function assertVerificationCommandAllowed(command: string) {
   const normalized = command.trim();
-  if (!allowedCommand.test(normalized)) throw new Error(`Harness 拒绝执行未允许的验证命令：${normalized}`);
-  if (/[;&|`]|\$\(|\n|\r/.test(normalized)) throw new Error('Harness 验证命令不能包含 shell 组合、管道或命令替换');
+  if (!normalized) throw new Error('Harness 验证命令不能为空');
   return normalized;
 }
 
 export async function executeVerificationCommand(command: string, workspaceRoot: string, timeoutMs = 10 * 60 * 1000): Promise<CommandVerificationResult> {
   const normalized = assertVerificationCommandAllowed(command);
-  const [program, ...args] = normalized.split(/\s+/);
-  const child = spawn(program, args, { cwd: workspaceRoot, env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(normalized, {
+    cwd: workspaceRoot,
+    env: process.env,
+    shell: true,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
   let output = '';
   let timedOut = false;
   const append = (chunk: Buffer) => {
