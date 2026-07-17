@@ -276,9 +276,9 @@ function stderrLog(executor: AgentExecutorId, context: AgentExecutionContext, li
 
 const executors: Record<AgentExecutorId, AgentExecutor> = {
   cursor: {
-    id: 'cursor', label: 'Cursor', command: process.env.CURSOR_CLI || 'cursor', promptMode: 'argument',
-    buildArgs: (prompt, workspace) => ['agent', '--print', '--output-format', 'stream-json', '--trust', '--force', '--workspace', workspace, prompt],
-    formatCommand: (workspace) => `cursor agent --print --output-format stream-json --force --workspace ${workspace}`,
+    id: 'cursor', label: 'Cursor', command: process.env.CURSOR_CLI || 'cursor-agent', promptMode: 'argument',
+    buildArgs: (prompt) => ['--print', '--output-format', 'stream-json', '--force', prompt],
+    formatCommand: (workspace) => `cursor-agent --print --output-format stream-json --force (cwd=${workspace})`,
     parseStdout: parseCursorStdout,
     parseStderr: (line, context) => stderrLog('cursor', context, line),
   },

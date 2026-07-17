@@ -149,7 +149,7 @@ python scripts/loop/loopctl.py paths
 UI 运行面板可以点击“开始运行”，创建一次本地 Loop 运行并逐个执行 Agent。应用负责决定下一步应由哪个 Agent 处理；没有可执行步骤时等待 5 分钟，有执行结果时等待 1 分钟，然后继续下一轮。项目设置中可以选择 Cursor、Codex 或 Claude，默认使用 Cursor：
 
 ```bash
-cursor agent --print --output-format stream-json --force --workspace <workspace-root>
+cursor-agent --print --output-format stream-json --force <prompt> # 进程 cwd 为工作区根目录
 codex exec --json -C <workspace-root> <prompt>
 claude --print --output-format stream-json <prompt>
 ```

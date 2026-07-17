@@ -60,3 +60,14 @@ test('leaves Codex model defaults untouched when no override is configured', () 
   assert.equal(args.includes('--model'), false);
   assert.equal(args.includes('--config'), false);
 });
+
+test('uses the native Cursor Agent CLI with the workspace supplied as cwd', () => {
+  const executor = getAgentExecutor('cursor');
+  const args = executor.buildArgs('do the work', 'C:\\Users\\developer\\project');
+  assert.equal(executor.command, process.env.CURSOR_CLI || 'cursor-agent');
+  assert.deepEqual(args, ['--print', '--output-format', 'stream-json', '--force', 'do the work']);
+  assert.equal(args.includes('agent'), false);
+  assert.equal(args.includes('--workspace'), false);
+  assert.equal(args.includes('--trust'), false);
+  assert.match(executor.formatCommand('C:\\Users\\developer\\project'), /^cursor-agent .*\(cwd=C:\\Users\\developer\\project\)$/);
+});
