@@ -3,37 +3,40 @@ import Link from 'next/link';
 import { AlertTriangle, Check, CheckCircle2, Clock3, FileText, GitBranch, RotateCcw, SlidersHorizontal } from 'lucide-react';
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
-import { agentLabel, confirmationDecisionLabel, confirmationKindLabel, deliveryUnitLabel, documentKindLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
+import { agentLabel, confirmationKindLabel, deliveryUnitLabel, documentKindLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
 import {
+  acknowledgeClosureAction,
   addStoryAction,
   answerQuestionAction,
   cancelTaskAction,
   initializeContextAction,
-  releaseBlockAction,
+  submitClarificationAnswersAction,
   rewindTaskAction,
   transitionTaskAction,
 } from '../../actions';
 
 export const dynamic = 'force-dynamic';
 
-const statusOptions = ['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'done', 'blocked'];
+const statusOptions = ['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'blocked'];
 const agentOptions = ['backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent'];
 const taskSteps = [
   { label: '需求整理', statuses: ['backlog', 'in repro'] },
   { label: '交付拆分', statuses: ['in plan'] },
   { label: '单元推进', statuses: ['ready for dev', 'in dev'] },
   { label: '整体验收', statuses: ['in review'] },
+  { label: '阅读结卡', statuses: ['ready_to_close'] },
   { label: '完成', statuses: ['done'] },
 ] as const;
 
 function stepDetail(task: { agile_status: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number }) {
-  if (task.agile_status === 'blocked') return `等待人工确认 · ${agentLabel(task.current_subagent)}`;
+  if (task.agile_status === 'blocked') return `系统异常已暂停 · ${agentLabel(task.current_subagent)}`;
   if (task.agile_status === 'backlog') return '正在收集上下文';
   if (task.agile_status === 'in repro') return '正在复现并定位问题';
   if (task.agile_status === 'in plan') return '正在拆分交付单元';
   if (task.agile_status === 'ready for dev') return '准备逐个推进交付单元';
   if (task.agile_status === 'in dev') return `分析 ${task.analysis_index}/${task.total_stories} · 实现 ${task.dev_index}/${task.total_stories} · 验证 ${task.test_index}/${task.total_stories}`;
   if (task.agile_status === 'in review') return '正在进行整体验收';
+  if (task.agile_status === 'ready_to_close') return '结卡报告已生成，等待阅读';
   if (task.agile_status === 'done') return '需求已完成交付';
   return '需求已取消';
 }
@@ -42,11 +45,14 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const { taskId } = await params;
   const detail = await getTask(taskId);
   if (!detail) notFound();
-  const { task, stories, questions, documents, approvals, events } = detail;
+  const { task, stories, storySpecs, questions, documents, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events } = detail;
   const pipeline = await pipelineForTask(taskId);
-  const unansweredQuestions = questions.filter((question) => question.status !== 'answered');
+  const unansweredQuestions = questions.filter((question) => question.status === 'pending');
+  const waitingForAnswers = task.run_state === 'waiting_for_answers';
+  const reviewDocument = task.review_document_id ? documents.find((document) => document.document_id === task.review_document_id) : null;
   const progressStatus = task.agile_status === 'blocked' ? task.resume_status || 'backlog' : task.agile_status;
   const currentStep = taskSteps.findIndex((step) => step.statuses.some((status) => status === progressStatus));
+  const currentSpecs = storySpecs.filter((spec) => spec.status !== 'superseded');
 
   return <>
     <header className="task-header">
@@ -56,7 +62,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           <p className="eyebrow">{task.task_id}</p>
           <h1>{task.title}</h1>
         </div>
-        <span className={`badge ${task.agile_status === 'blocked' ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{statusLabel(task.agile_status)}</span>
+        <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForAnswers ? '等待澄清' : statusLabel(task.agile_status)}</span>
       </div>
       <div className="chips">
         <span>{itemTypeLabel(task.item_type)}</span>
@@ -96,7 +102,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       <div><small>分析</small><b>{task.analysis_index} / {task.total_stories}</b></div>
       <div><small>实现</small><b>{task.dev_index} / {task.total_stories}</b></div>
       <div><small>验证</small><b>{task.test_index} / {task.total_stories}</b></div>
-      <div><small>待确认</small><b>{unansweredQuestions.length}</b></div>
+      <div><small>待回答澄清</small><b>{unansweredQuestions.length}</b></div>
       <div className="summary-wide"><small>下一步</small><p>{terminologyText(task.next_step) || '—'}</p></div>
       <div className="summary-wide"><small>文档</small><p>{documents.length} 个数据库文档</p></div>
     </section>
@@ -129,11 +135,61 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
 
         <section className="task-section">
           <div className="section-head">
-            <h2>确认事项</h2>
-            <small>{questions.length} 个事项 · {approvals.length} 条确认记录</small>
+            <h2>规格与验证证据</h2>
+            <small>{currentSpecs.length} 个当前规格 · {verificationRuns.length} 次 Harness 验证 · {executionAttempts.length} 次执行尝试</small>
+          </div>
+          <div className="card document-list">
+            {currentSpecs.length === 0 && verificationRuns.length === 0 && executionAttempts.length === 0 ? <div className="empty">方案分析完成后会在这里显示版本化 Slice Spec；开发完成后会显示 Harness 证据。</div> : <>
+              {currentSpecs.map((spec) => {
+                const parsed = JSON.parse(spec.spec_json) as {
+                  goal: string;
+                  ambiguities: { key: string; description: string }[];
+                  acceptanceCriteria: { id: string; description: string; oracle: string }[];
+                  changeBudget: { capabilities: string[]; paths: string[] };
+                };
+                return <details key={spec.spec_id} className="document-item" open={spec.status === 'waiting_for_answers'}>
+                  <summary><FileText size={15}/><span>{deliveryUnitLabel(spec.story_index)} · Slice Spec v{spec.revision}</span><small>{spec.status === 'resolved' ? '歧义已归零' : '等待产品决策'}</small></summary>
+                  <div className="answer"><b>目标：</b>{parsed.goal}</div>
+                  {parsed.ambiguities.length > 0 && <pre>{parsed.ambiguities.map((item) => `${item.key}: ${item.description}`).join('\n')}</pre>}
+                  <pre>{parsed.acceptanceCriteria.map((item) => `${item.id} · ${item.description}\nOracle: ${item.oracle}`).join('\n\n')}</pre>
+                  <small>变更预算：{parsed.changeBudget.capabilities.join('、')}{parsed.changeBudget.paths.length ? ` · ${parsed.changeBudget.paths.join('、')}` : ''}</small>
+                </details>;
+              })}
+              {verificationRuns.map((run) => {
+                const evidence = verificationEvidence.filter((item) => item.verification_id === run.verification_id);
+                return <details key={run.verification_id} className="document-item">
+                  <summary><CheckCircle2 size={15}/><span>{deliveryUnitLabel(run.story_index)} · Harness</span><small>Spec v{run.spec_revision} · {run.status === 'passed' ? '通过' : run.status === 'failed' ? '失败' : run.status}</small></summary>
+                  <pre>{evidence.length ? evidence.map((item) => [
+                    `${item.passed ? 'PASS' : 'FAIL'} ${item.criterion_id} · ${item.instruction}`,
+                    item.command ? `$ ${item.command}` : '',
+                    item.output_summary || '',
+                  ].filter(Boolean).join('\n')).join('\n\n') : '该规格没有可由 Harness 确定性执行的命令步骤。'}</pre>
+                </details>;
+              })}
+              {executionAttempts.map((attempt) => <details key={attempt.execution_id} className="document-item">
+                <summary><GitBranch size={15}/><span>{deliveryUnitLabel(attempt.story_index)} · {agentLabel(attempt.agent)} · attempt {attempt.attempt}</span><small>{attempt.status}</small></summary>
+                <pre>{[
+                  `execution: ${attempt.execution_id}`,
+                  `input hash: ${attempt.input_hash}`,
+                  attempt.base_commit ? `base commit: ${attempt.base_commit}` : '',
+                  attempt.code_commit ? `code commit: ${attempt.code_commit}` : '',
+                  attempt.verification_id ? `verification: ${attempt.verification_id}` : '',
+                  attempt.prompt_version ? `prompt: v${attempt.prompt_version} · ${attempt.prompt_hash || ''}` : '',
+                  attempt.memory_revision ? `memory: r${attempt.memory_revision} · ${attempt.memory_hash || ''}` : '',
+                  attempt.last_error ? `error: ${attempt.last_error}` : '',
+                ].filter(Boolean).join('\n')}</pre>
+              </details>)}
+            </>}
+          </div>
+        </section>
+
+        <section className="task-section">
+          <div className="section-head">
+            <h2>产品澄清</h2>
+            <small>{questions.length} 个问题</small>
           </div>
           <div className="question-list">
-            {questions.length === 0 ? <div className="card empty">当前没有待确认问题。</div> : questions.map((question, index) => <article className="question card" key={question.question_id}>
+            {questions.length === 0 ? <div className="card empty">当前没有待回答的产品歧义。</div> : questions.map((question) => <article className="question card" key={question.question_id}>
               <div className="question-title">
                 <AlertTriangle size={18}/>
                 <div>
@@ -141,26 +197,29 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                   <h3>{terminologyText(question.title)}</h3>
                   {question.source_agent && <small>来源：{agentLabel(question.source_agent)}</small>}
                 </div>
-                <span className={`badge ${question.status === 'answered' ? 'green' : 'amber'}`}>{question.status === 'answered' ? '已回答' : '待确认'}</span>
+                <span className={`badge ${question.status === 'answered' || question.status === 'resolved' ? 'green' : 'amber'}`}>{question.status === 'resolved' ? '已纳入规格' : question.status === 'answered' ? '已回答' : '待回答'}</span>
               </div>
               <p>{terminologyText(question.question)}</p>
               {question.why && <p className="muted">为什么问：{terminologyText(question.why)}</p>}
               {question.recommendation && <div className="recommendation">推荐：{terminologyText(question.recommendation)}</div>}
+              {question.recommendation_reason && <p className="muted">推荐理由：{terminologyText(question.recommendation_reason)}</p>}
+              {question.alternatives_json && <pre>{(JSON.parse(question.alternatives_json) as { id: string; label: string; consequences: string[] }[]).map((option) => `${option.id} · ${option.label}${option.consequences.length ? `\n  ${option.consequences.join('\n  ')}` : ''}`).join('\n\n')}</pre>}
+              {question.depends_on_json && <p className="muted">依赖决策：{(JSON.parse(question.depends_on_json) as string[]).join('、')}</p>}
               {question.answer ? <p className="answer"><b>你的答复：</b>{question.answer}</p> : <form action={answerQuestionAction}>
                 <input type="hidden" name="taskId" value={task.task_id}/>
                 <input type="hidden" name="questionId" value={question.question_id}/>
-                <textarea name="answer" required placeholder="填写确认结论、边界或补充信息…"/>
+                <textarea name="answer" required placeholder="填写产品决策、边界或补充信息…"/>
                 <button className="button" type="submit">保存答复</button>
               </form>}
             </article>)}
           </div>
-          {task.agile_status === 'blocked' && questions.every((question) => question.status === 'answered') && <form action={releaseBlockAction} className="release-block">
+          {waitingForAnswers && unansweredQuestions.length === 0 && <form action={submitClarificationAnswersAction} className="release-block">
             <input type="hidden" name="taskId" value={task.task_id}/>
-            <button className="button success">解除阻塞并交回 {agentLabel(task.current_subagent)}</button>
+            <button className="button success">提交全部回答并交回方案分析 Agent</button>
           </form>}
         </section>
 
-        <section className="task-section two-card-grid">
+        <section className="task-section">
           <div>
             <div className="section-head"><h2>交付文档</h2><small>{documents.length} 个文档</small></div>
             <div className="card document-list">{documents.length === 0 ? <div className="empty">还没有数据库文档。</div> : documents.map((document) => <details key={document.document_id} className="document-item">
@@ -168,11 +227,19 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               <pre>{document.content}</pre>
             </details>)}</div>
           </div>
-          <div>
-            <div className="section-head"><h2>确认记录</h2><small>{approvals.length} 条记录</small></div>
-            <div className="card artifact-list">{approvals.length === 0 ? <div className="empty">还没有确认记录。</div> : approvals.map((approval) => <div key={approval.approval_id}><CheckCircle2 size={15}/><span>{confirmationKindLabel(approval.kind)} · {confirmationDecisionLabel(approval.decision)}</span><small>{deliveryUnitLabel(approval.story_index)}</small></div>)}</div>
-          </div>
         </section>
+
+        {(task.agile_status === 'ready_to_close' || closureAcknowledgements.length > 0) && <section className="task-section">
+          <div className="section-head"><h2>结卡报告</h2><small>版本 {task.review_revision}</small></div>
+          <div className="card document-list">
+            {reviewDocument ? <div className="document-item"><pre>{reviewDocument.content}</pre></div> : <div className="empty">结卡报告不可用，请重新运行 Review Agent。</div>}
+          </div>
+          {task.agile_status === 'ready_to_close' && reviewDocument && <form action={acknowledgeClosureAction} className="release-block">
+            <input type="hidden" name="taskId" value={task.task_id}/>
+            <input type="hidden" name="reviewRevision" value={task.review_revision}/>
+            <button className="button success">我已阅读结卡报告并关闭需求</button>
+          </form>}
+        </section>}
 
         <section className="task-section">
           <div className="section-head"><h2>活动记录</h2><small>{events.length} 条</small></div>

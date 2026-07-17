@@ -2,8 +2,11 @@
 
 import { redirect } from 'next/navigation';
 import { normalizeWorkspaceRoot, setAgentExecutorSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
+import { rollbackAgentPrompt, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
+import { setSoftwareMaintenanceSettings } from '../src/application/software-maintenance';
 import {
   addStory,
+  acknowledgeClosure,
   answerQuestion,
   beginRun,
   cancelTask,
@@ -13,6 +16,7 @@ import {
   getRunStatus,
   initializeTaskContext,
   releaseBlock,
+  submitClarificationAnswers,
   rewindTask,
   transitionTask,
 } from '../src/application/tasks';
@@ -139,4 +143,49 @@ export async function answerQuestionAction(formData: FormData) {
 export async function releaseBlockAction(formData: FormData) {
   await releaseBlock(String(formData.get('taskId')));
   redirect(`/tasks/${formData.get('taskId')}`);
+}
+
+export async function submitClarificationAnswersAction(formData: FormData) {
+  await submitClarificationAnswers(String(formData.get('taskId')));
+  redirect(`/tasks/${formData.get('taskId')}`);
+}
+
+export async function acknowledgeClosureAction(formData: FormData) {
+  await acknowledgeClosure({
+    taskId: formData.get('taskId'),
+    reviewRevision: formData.get('reviewRevision'),
+  });
+  redirect(`/tasks/${formData.get('taskId')}`);
+}
+
+export async function saveAgentPromptAction(formData: FormData) {
+  const agentId = String(formData.get('agentId'));
+  await saveAgentPrompt({ agentId, content: formData.get('content'), reason: formData.get('reason') });
+  redirect(`/agents/${agentId}`);
+}
+
+export async function saveAgentMemoryAction(formData: FormData) {
+  const agentId = String(formData.get('agentId'));
+  await saveAgentMemory({ agentId, content: formData.get('content'), reason: formData.get('reason') });
+  redirect(`/agents/${agentId}`);
+}
+
+export async function setAgentAutoEvolutionAction(formData: FormData) {
+  const agentId = String(formData.get('agentId'));
+  await setAgentAutoEvolution({ agentId, enabled: formData.get('enabled') });
+  redirect(`/agents/${agentId}`);
+}
+
+export async function rollbackAgentPromptAction(formData: FormData) {
+  const agentId = String(formData.get('agentId'));
+  await rollbackAgentPrompt({ agentId, version: formData.get('version') });
+  redirect(`/agents/${agentId}`);
+}
+
+export async function saveSoftwareMaintenanceSettingsAction(formData: FormData) {
+  await setSoftwareMaintenanceSettings({
+    enabled: formData.get('softwareMaintenanceEnabled'),
+    autoApply: formData.get('softwareMaintenanceAutoApply'),
+  });
+  redirect('/maintenance');
 }

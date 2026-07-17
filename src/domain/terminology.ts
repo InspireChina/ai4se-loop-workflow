@@ -5,9 +5,10 @@ const statusLabels: Record<string, string> = {
   'ready for dev': '等待推进',
   'in dev': '单元推进',
   'in review': '整体验收',
+  ready_to_close: '等待阅读结卡',
   done: '已完成',
   cancelled: '已取消',
-  blocked: '待确认',
+  blocked: '系统阻塞',
 };
 
 const agentLabels: Record<string, string> = {
@@ -19,7 +20,7 @@ const agentLabels: Record<string, string> = {
   'repro-agent': '问题复现 Agent',
   'dev-agent': '开发实现 Agent',
   'test-agent': '验证 Agent',
-  'review-agent': '整体验收 Agent',
+  'review-agent': '结卡报告 Agent',
 };
 
 const itemTypeLabels: Record<string, string> = {
@@ -37,7 +38,7 @@ const flowLabels: Record<string, string> = {
   analysis: '方案分析',
   dev: '开发实现',
   test: '验证',
-  review: '整体验收',
+  review: '结卡报告',
   resume: '恢复推进',
 };
 
@@ -58,13 +59,6 @@ const confirmationKindLabels: Record<string, string> = {
   review: '整体验收',
 };
 
-const confirmationDecisionLabels: Record<string, string> = {
-  pending: '待确认',
-  confirmed: '已确认',
-  approved: '已通过',
-  rejected: '未通过',
-};
-
 export function statusLabel(status: string) {
   return statusLabels[status] || status;
 }
@@ -82,15 +76,12 @@ export function flowLabel(flow: string | null | undefined) {
 }
 
 export function documentKindLabel(kind: string) {
+  if (/^review_v\d+$/.test(kind)) return `结卡报告 v${kind.slice('review_v'.length)}`;
   return documentKindLabels[kind] || kind;
 }
 
 export function confirmationKindLabel(kind: string) {
   return confirmationKindLabels[kind] || kind;
-}
-
-export function confirmationDecisionLabel(decision: string) {
-  return confirmationDecisionLabels[decision] || decision;
 }
 
 export function deliveryUnitLabel(index: number | null | undefined) {
@@ -104,5 +95,5 @@ export function terminologyText(value: string | null | undefined) {
     .replace(/\bStories\b/gi, '交付单元')
     .replace(/\bStory\b/gi, '交付单元')
     .replace(/\bTask\b(?!-)/gi, '需求')
-    .replace(/\bApproval\b/gi, '确认记录');
+    .replace(/\bApproval\b/gi, '旧版确认记录');
 }

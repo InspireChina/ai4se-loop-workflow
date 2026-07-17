@@ -8,6 +8,7 @@ import {
   CodeSlotBusyError,
   getTask,
   rewindTask,
+  saveStorySpec,
   updateTask,
   upsertDocument,
   type DelegationEnvelope,
@@ -48,19 +49,25 @@ async function saveArtifact(delegation: DelegationEnvelope, result: AgentResult)
     title: `交付单元 ${delegation.storyIndex} 验证结果`,
     content: [`结论：${result.verdict || result.outcome}`, result.summary, ...(result.tests || []).map((test) => `- ${test.passed ? '通过' : '失败'}：${test.command}${test.summary ? ` — ${test.summary}` : ''}`)].join('\n\n'),
   };
-  if (!artifact) return;
-  await upsertDocument({
+  if (!artifact) return null;
+  let kind = artifactKinds[delegation.agent] || 'context';
+  if (delegation.agent === 'review-agent') {
+    const detail = await getTask(delegation.taskId);
+    if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
+    kind = `review_v${detail.task.review_revision + 1}`;
+  }
+  return upsertDocument({
     taskId: delegation.taskId,
     storyIndex: delegation.storyIndex,
     actor: delegation.agent,
-    kind: artifactKinds[delegation.agent] || 'context',
+    kind,
     title: artifact.title,
     content: artifact.content,
     format: 'markdown',
   });
 }
 
-async function saveQuestions(delegation: DelegationEnvelope, result: AgentResult) {
+async function saveQuestions(delegation: DelegationEnvelope, result: AgentResult, specRevision = 1) {
   const drafts = result.questions.length ? result.questions : [{
     title: `${delegation.agent} 需要人工处理`,
     question: result.summary,
@@ -74,31 +81,40 @@ async function saveQuestions(delegation: DelegationEnvelope, result: AgentResult
       actor: delegation.agent,
       kind: questionKind(delegation.agent),
       ...draft,
+      specRevision,
       blockedReason: draft.title,
       blockTask: true,
     });
   }
 }
 
-async function recordResult(runId: string, delegation: DelegationEnvelope, result: AgentResult, codeCommit?: string) {
+async function recordResult(runId: string, delegation: DelegationEnvelope, result: AgentResult, codeCommit?: string, executionId?: string) {
   const db = await databaseConnection();
+  if (executionId) {
+    const existing = db.prepare(`
+      SELECT result_id, application_status, effect_outcome
+      FROM agent_results WHERE execution_id = ?
+    `).get(executionId) as { result_id: string; application_status: string; effect_outcome: ApplyOutcome | null } | undefined;
+    if (existing) return { resultId: existing.result_id, applicationStatus: existing.application_status, effectOutcome: existing.effect_outcome };
+  }
   const resultId = randomUUID();
   db.prepare(`
-    INSERT INTO agent_results(result_id, run_id, task_id, story_index, agent, pipeline, outcome, result_json, application_status, code_commit)
-    VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
-  `).run(resultId, runId, delegation.taskId, delegation.storyIndex, delegation.agent, delegation.pipeline, result.outcome, JSON.stringify(result), codeCommit || null);
-  return resultId;
+    INSERT INTO agent_results(result_id, run_id, task_id, story_index, agent, pipeline, outcome, result_json, application_status, code_commit, execution_id)
+    VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+  `).run(resultId, runId, delegation.taskId, delegation.storyIndex, delegation.agent, delegation.pipeline, result.outcome, JSON.stringify(result), codeCommit || null, executionId || null);
+  return { resultId, applicationStatus: 'pending', effectOutcome: null };
 }
 
-async function markApplication(resultId: string, status: 'pending' | 'applied' | 'failed', error?: string | null) {
+async function markApplication(resultId: string, status: 'pending' | 'applied' | 'failed', error?: string | null, effectOutcome?: ApplyOutcome) {
   const db = await databaseConnection();
   db.prepare(`
     UPDATE agent_results
     SET application_status = ?,
         application_error = ?,
-        applied_at = CASE WHEN ? = 'applied' THEN CURRENT_TIMESTAMP ELSE applied_at END
+        applied_at = CASE WHEN ? = 'applied' THEN CURRENT_TIMESTAMP ELSE applied_at END,
+        effect_outcome = COALESCE(?, effect_outcome)
     WHERE result_id = ?
-  `).run(status, error || null, status, resultId);
+  `).run(status, error || null, status, effectOutcome || null, resultId);
 }
 
 type QueuedAgentResult = {
@@ -131,8 +147,11 @@ function envelopeFromTask(row: QueuedAgentResult, detail: NonNullable<Awaited<Re
     agileStatus: task.agile_status,
     currentSubagent: task.current_subagent || '',
     resumePending: task.resume_pending,
-    analysisApprovedIndex: task.analysis_approved_index,
-    reviewApproved: task.review_approved,
+    specResolvedIndex: task.spec_resolved_index,
+    runState: task.run_state,
+    closureStatus: task.closure_status,
+    reviewRevision: task.review_revision,
+    reviewDocumentId: task.review_document_id || '',
     lastActor: task.last_actor || '',
     analysisIndex: task.analysis_index,
     devIndex: task.dev_index,
@@ -151,16 +170,15 @@ function requireArtifact(result: AgentResult, agent: string) {
 }
 
 async function ensureCodeSlotForDelegation(delegation: DelegationEnvelope, result: AgentResult) {
-  if (result.outcome !== 'completed' || !['dev-agent', 'review-agent'].includes(delegation.agent)) return;
+  if (result.outcome !== 'completed' || delegation.agent !== 'dev-agent') return;
   const db = await databaseConnection();
   const active = db.prepare(`
     SELECT task_id
     FROM tasks
     WHERE task_id != ?
       AND (
-        agile_status IN ('in dev', 'in review')
-        OR (agile_status = 'blocked' AND resume_status IN ('in dev', 'in review'))
-        OR (agile_status = 'blocked' AND current_subagent = 'review-agent')
+        agile_status = 'in dev'
+        OR (agile_status = 'blocked' AND resume_status = 'in dev')
       )
     LIMIT 1
   `).get(delegation.taskId) as { task_id: string } | undefined;
@@ -168,19 +186,26 @@ async function ensureCodeSlotForDelegation(delegation: DelegationEnvelope, resul
 }
 
 export async function blockDelegation(delegation: DelegationEnvelope, reason: string) {
-  await saveQuestions(delegation, { outcome: 'needs_input', summary: reason, questions: [] });
+  await updateTask(delegation.taskId, 'system', {
+    agile_status: 'blocked',
+    current_subagent: delegation.agent,
+    run_state: 'system_blocked',
+    blocked_reason: reason,
+    next_step: `系统阻塞：${reason}`,
+  });
 }
 
 type ApplyOutcome = 'advanced' | 'blocked' | 'rewound';
 
-async function applyResultEffects(delegation: DelegationEnvelope, result: AgentResult): Promise<ApplyOutcome> {
+async function applyResultEffects(delegation: DelegationEnvelope, result: AgentResult, sourceResultId?: string): Promise<ApplyOutcome> {
   await ensureCodeSlotForDelegation(delegation, result);
-  await saveArtifact(delegation, result);
+  const artifactDocumentId = await saveArtifact(delegation, result);
 
-  if (result.outcome !== 'completed' || (result.questions.length > 0 && delegation.agent !== 'analyst-agent' && delegation.agent !== 'review-agent')) {
-    await saveQuestions(delegation, result);
+  if (result.outcome !== 'completed' && !(delegation.agent === 'analyst-agent' && result.questions.length)) {
+    await blockDelegation(delegation, result.summary);
     return 'blocked' as const;
   }
+  if (result.questions.length && delegation.agent !== 'analyst-agent') throw new Error(`${delegation.agent} 不允许创建人工澄清问题`);
 
   const actor = delegation.agent as Actor;
   switch (delegation.agent) {
@@ -210,13 +235,30 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     case 'analyst-agent': {
       requireArtifact(result, delegation.agent);
       if (!delegation.storyIndex) throw new Error('方案分析 Agent 缺少交付单元序号');
+      if (!result.spec) throw new Error('方案分析 Agent 结果缺少结构化 Slice Spec');
       if (result.questions.length) {
-        await saveQuestions(delegation, result);
+        if (!result.spec.ambiguities.length) throw new Error('方案分析 Agent 提问时必须在 Slice Spec 中列出对应歧义');
+        const saved = await saveStorySpec({
+          taskId: delegation.taskId,
+          storyIndex: delegation.storyIndex,
+          status: 'waiting_for_answers',
+          spec: result.spec,
+          sourceResultId,
+        });
+        await saveQuestions(delegation, result, saved.revision);
         return 'blocked' as const;
       }
+      if (result.outcome !== 'completed') throw new Error('没有待澄清问题时，方案分析 Agent 必须完成当前规格');
+      await saveStorySpec({
+        taskId: delegation.taskId,
+        storyIndex: delegation.storyIndex,
+        status: 'resolved',
+        spec: result.spec,
+        sourceResultId,
+      });
       await updateTask(delegation.taskId, actor, {
         analysis_index: delegation.storyIndex,
-        analysis_approved_index: delegation.storyIndex,
+        spec_resolved_index: delegation.storyIndex,
         next_step: delegation.pipeline === 'resume'
           ? `交付单元 ${delegation.storyIndex} 的方案已按人工答复更新`
           : `交付单元 ${delegation.storyIndex} 的方案分析完成，无待确认设计决策`,
@@ -263,44 +305,35 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     }
     case 'review-agent': {
       requireArtifact(result, delegation.agent);
-      if (result.verdict === 'changes_requested') {
-        if (!result.rewindTo) throw new Error('review-agent 要求修改时必须给出 rewindTo');
-        await rewindTask({ taskId: delegation.taskId, actor, to: result.rewindTo, story: result.rewindDeliveryUnit, reason: result.summary });
-        return 'rewound' as const;
-      }
-      if (result.verdict !== 'ready_for_approval') throw new Error('review-agent 结果缺少有效 verdict');
-      if (delegation.pipeline === 'resume') {
-        await updateTask(delegation.taskId, actor, {
-          agile_status: 'done',
-          current_subagent: null,
-          next_step: result.summary,
-        });
-        return 'advanced' as const;
-      }
-      if (result.questions.length) await saveQuestions(delegation, result);
-      await addQuestion({
-        taskId: delegation.taskId,
-        actor,
-        kind: 'review',
-        title: '确认需求最终交付',
-        question: '请确认当前需求的实现与验证结果是否可以完成交付。',
-        why: '需求完成需要最终人工确认。',
-        recommendation: '确认交付后完成需求。',
-        blockedReason: '等待最终交付批准',
-        blockTask: true,
+      if (result.verdict !== 'report_ready') throw new Error('Review Agent 必须返回 verdict=report_ready');
+      if (!artifactDocumentId) throw new Error('Review Agent 结卡报告未保存');
+      const detail = await getTask(delegation.taskId);
+      if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
+      const reviewRevision = detail.task.review_revision + 1;
+      await updateTask(delegation.taskId, actor, {
+        agile_status: 'ready_to_close',
+        current_subagent: null,
+        run_state: 'idle',
+        closure_status: 'awaiting_read',
+        review_revision: reviewRevision,
+        review_document_id: artifactDocumentId,
+        next_step: `结卡报告 v${reviewRevision} 已生成，等待用户阅读并关闭需求`,
       });
-      return 'blocked' as const;
+      return 'advanced' as const;
     }
     default:
       throw new Error(`不支持的 agent：${delegation.agent}`);
   }
 }
 
-export async function applyAgentResult(runId: string, delegation: DelegationEnvelope, result: AgentResult, options: { codeCommit?: string } = {}) {
-  const resultId = await recordResult(runId, delegation, result, options.codeCommit);
+export async function applyAgentResult(runId: string, delegation: DelegationEnvelope, result: AgentResult, options: { codeCommit?: string; executionId?: string } = {}) {
+  const recorded = await recordResult(runId, delegation, result, options.codeCommit, options.executionId);
+  if (recorded.applicationStatus === 'applied') return recorded.effectOutcome || 'advanced';
+  if (recorded.applicationStatus === 'failed') throw new Error('该 execution attempt 的 Agent 结果此前应用失败，拒绝重复产生副作用');
+  const resultId = recorded.resultId;
   try {
-    const outcome = await applyResultEffects(delegation, result);
-    await markApplication(resultId, 'applied');
+    const outcome = await applyResultEffects(delegation, result, resultId);
+    await markApplication(resultId, 'applied', null, outcome);
     return outcome;
   } catch (error) {
     if (error instanceof CodeSlotBusyError) {
@@ -336,8 +369,22 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
     if (!detail) throw new Error(`需求不存在：${row.task_id}`);
     const result = parseAgentResult(row.result_json);
     const delegation = envelopeFromTask(row, detail);
-    const outcome = await applyResultEffects(delegation, result);
+    const outcome = await applyResultEffects(delegation, result, row.result_id);
     await markApplication(row.result_id, 'applied');
+    const execution = db.prepare('SELECT execution_id FROM agent_results WHERE result_id = ?').get(row.result_id) as { execution_id: string | null } | undefined;
+    if (execution?.execution_id) {
+      db.prepare(`
+        UPDATE execution_attempts
+        SET status = 'applied', finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP,
+            lease_expires_at = NULL
+        WHERE execution_id = ?
+      `).run(execution.execution_id);
+      db.prepare(`
+        INSERT INTO execution_receipts(receipt_id, execution_id, kind, receipt_key, payload_json)
+        VALUES(?, ?, 'application', ?, ?)
+        ON CONFLICT(execution_id, kind, receipt_key) DO NOTHING
+      `).run(randomUUID(), execution.execution_id, outcome, JSON.stringify({ outcome, source: 'application_queue' }));
+    }
     return { status: 'applied', resultId: row.result_id, taskId: row.task_id, storyIndex: row.story_index, agent: row.agent, outcome };
   } catch (error) {
     if (error instanceof CodeSlotBusyError) {

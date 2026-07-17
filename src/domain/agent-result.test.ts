@@ -61,3 +61,24 @@ test('accepts a batch of more than ten design questions', () => {
   }));
   assert.equal(result.questions.length, 12);
 });
+
+test('parses a versionable Slice Spec and normalizes the legacy review verdict', () => {
+  const result = parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'Decision tree is resolved.',
+    verdict: 'ready_for_approval',
+    spec: {
+      goal: 'A user can close one delivery unit without ambiguity.',
+      scope: { included: ['Closure behavior'], excluded: ['Unrelated redesign'] },
+      behaviors: [{ scenario: 'All decisions are resolved', expected: 'Development can start' }],
+      decisions: [{ key: 'closure-mode', decision: 'Acknowledge reading', rationale: 'No approval gate', source: 'user' }],
+      ambiguities: [],
+      acceptanceCriteria: [{ id: 'AC-1', description: 'The unit has a deterministic contract', oracle: 'The stored spec is resolved' }],
+      verificationPlan: [{ criterionId: 'AC-1', kind: 'command', instruction: 'Run tests', command: 'npm test' }],
+      dependencies: [],
+      changeBudget: { capabilities: ['Task closure'], paths: ['src/application/tasks.ts'] },
+    },
+  }));
+  assert.equal(result.verdict, 'report_ready');
+  assert.equal(result.spec?.acceptanceCriteria[0]?.id, 'AC-1');
+});

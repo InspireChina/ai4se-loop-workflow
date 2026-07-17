@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
+import { sliceSpecSchema } from '../domain/agent-result';
 import { databaseConnection, paths } from '../infrastructure/database';
 import { verifyDevCommit } from '../infrastructure/git';
 import { isRunProcessAlive, readRunPid } from '../infrastructure/run-process';
 import { toUtcIsoString } from './event-time';
+import { recordLoopLogEventInDb } from './runtime-events';
 import {
   assertActorCanCreate,
   assertState,
@@ -36,6 +38,7 @@ export type Task = TaskState & {
 };
 
 export type Story = { task_id: string; story_index: number; title: string; directory: string };
+export type StorySpec = { spec_id: string; task_id: string; story_index: number; revision: number; status: 'draft' | 'waiting_for_answers' | 'resolved' | 'superseded'; spec_json: string; source_result_id: string | null; created_at: string; resolved_at: string | null };
 export type Document = {
   document_id: string;
   task_id: string;
@@ -61,10 +64,19 @@ export type Question = {
   relative_path: string | null;
   source_agent: string | null;
   kind: string;
+  decision_key: string | null;
+  alternatives_json: string | null;
+  recommendation_reason: string | null;
+  depends_on_json: string | null;
+  spec_revision: number;
+  resolved_at: string | null;
   created_at: string;
   updated_at: string;
 };
-export type Approval = { approval_id: string; task_id: string; story_index: number | null; kind: string; decision: string; relative_path: string | null; updated_at: string };
+export type ClosureAcknowledgement = { acknowledgement_id: string; task_id: string; review_document_id: string; review_revision: number; acknowledged_by: string; acknowledged_at: string };
+export type VerificationRun = { verification_id: string; task_id: string; story_index: number; spec_revision: number; code_commit: string | null; status: string; started_at: string; finished_at: string | null };
+export type VerificationEvidence = { evidence_id: string; verification_id: string; criterion_id: string; kind: string; instruction: string; command: string | null; exit_code: number | null; output_summary: string | null; passed: number; created_at: string };
+export type ExecutionAttemptView = { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; last_error: string | null; created_at: string; started_at: string | null; finished_at: string | null };
 export type Event = { event_id: string; actor: string; event_type: string; summary: string; created_at: string };
 export type RunStatus = { runId: string; owner: string; startedAt: string; pid: number | null; active: boolean } | null;
 export type RunLogChunk = { lastId: number; raw: string };
@@ -79,8 +91,11 @@ export type DelegationEnvelope = Delegation & {
   agileStatus: string;
   currentSubagent: string;
   resumePending: number;
-  analysisApprovedIndex: number;
-  reviewApproved: number;
+  specResolvedIndex: number;
+  runState: string;
+  closureStatus: string;
+  reviewRevision: number;
+  reviewDocumentId: string;
   lastActor: string;
   analysisIndex: number;
   devIndex: number;
@@ -96,8 +111,9 @@ export type DelegationEnvelope = Delegation & {
 const taskSelect = `
   SELECT task_id, title, description, link, external_id, external_status, item_type, priority,
          agile_status, current_subagent, analysis_index, dev_index, test_index,
-         total_stories, analysis_approved_index, review_approved, resume_status,
-         resume_pending, next_step, blocked_reason,
+         total_stories, spec_resolved_index, resume_status,
+         resume_pending, next_step, blocked_reason, run_state, closure_status,
+         review_revision, review_document_id, closure_acknowledged_at,
          last_actor, owner, evidence, risk, created_at, updated_at, completed_at
   FROM tasks
 `;
@@ -118,6 +134,7 @@ function loopLogLine(message: string) {
 function appendRunLogInDb(db: Awaited<ReturnType<typeof databaseConnection>>, runId: string, message: string) {
   if (!/^[a-zA-Z0-9-]+$/.test(runId)) throw new Error('invalid run id');
   db.prepare('INSERT INTO run_logs(run_id, line) VALUES(?, ?)').run(runId, loopLogLine(message));
+  recordLoopLogEventInDb(db, runId, message);
 }
 
 export async function appendLoopRunLog(runId: string, message: string) {
@@ -158,13 +175,6 @@ function taskIdFromTitleLink(title: string, link?: string | null) {
 
 async function syncTaskFiles(_db: Awaited<ReturnType<typeof databaseConnection>>, _taskId: string, _options: { createClearedBlock?: boolean } = {}) {
   // DB-first product mode: target repo files are no longer generated or synchronized.
-}
-
-function inferDecisionFromAnsweredQuestions(task: Task, pendingQuestions: number) {
-  if (pendingQuestions > 0) return 'pending';
-  if (task.current_subagent === 'analyst-agent') return 'confirmed';
-  if (task.current_subagent === 'review-agent') return 'approved';
-  return 'none';
 }
 
 export async function listTasks(options: { includeTerminal?: boolean } = {}): Promise<Task[]> {
@@ -210,19 +220,34 @@ export async function getTask(taskId: string) {
   const task = fetchTask(db, taskId);
   if (!task) return null;
   const stories = db.prepare('SELECT * FROM stories WHERE task_id = ? ORDER BY story_index').all(taskId) as Story[];
+  const storySpecs = db.prepare('SELECT * FROM story_specs WHERE task_id = ? ORDER BY story_index, revision').all(taskId) as StorySpec[];
   const questions = db.prepare('SELECT * FROM questions WHERE task_id = ? ORDER BY created_at').all(taskId) as Question[];
   const documents = db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[];
-  const approvals = db.prepare('SELECT * FROM approvals WHERE task_id = ? ORDER BY kind, story_index').all(taskId) as Approval[];
+  const closureAcknowledgements = db.prepare('SELECT * FROM closure_acknowledgements WHERE task_id = ? ORDER BY review_revision').all(taskId) as ClosureAcknowledgement[];
+  const verificationRuns = db.prepare('SELECT * FROM verification_runs WHERE task_id = ? ORDER BY started_at, verification_id').all(taskId) as VerificationRun[];
+  const verificationEvidence = db.prepare(`
+    SELECT evidence.* FROM verification_evidence evidence
+    JOIN verification_runs run ON run.verification_id = evidence.verification_id
+    WHERE run.task_id = ? ORDER BY evidence.created_at, evidence.evidence_id
+  `).all(taskId) as VerificationEvidence[];
+  const executionAttempts = db.prepare(`
+    SELECT execution_id, run_id, task_id, story_index, agent, pipeline, attempt, status,
+           input_hash, base_commit, code_commit, verification_id,
+           prompt_version, prompt_hash, memory_revision, memory_hash, evolution_candidate_id, last_error,
+           created_at, started_at, finished_at
+    FROM execution_attempts
+    WHERE task_id = ?
+    ORDER BY created_at, execution_id
+  `).all(taskId) as ExecutionAttemptView[];
   const events = db.prepare('SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at DESC').all(taskId) as Event[];
-  return { task, stories, questions, documents, approvals, events };
+  return { task, stories, storySpecs, questions, documents, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events };
 }
 
 export async function getTaskContext(taskId: string) {
   const detail = await getTask(taskId);
   if (!detail) throw new Error(`需求不存在：${taskId}`);
   const questions = detail.questions.map(({ relative_path: _relativePath, ...question }) => question);
-  const approvals = detail.approvals.map(({ relative_path: _relativePath, ...approval }) => approval);
-  return { ...detail, questions, approvals };
+  return { ...detail, questions };
 }
 
 const documentSchema = z.object({
@@ -294,7 +319,7 @@ const createTaskSchema = z.object({
   itemType: z.enum(['feature', 'bug', 'tech', 'intake', 'other']).default('feature'),
   priority: z.string().trim().optional().nullable(),
   actor: z.enum(['human']).default('human'),
-  status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'done', 'cancelled', 'blocked']).default('backlog'),
+  status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'ready_to_close', 'done', 'cancelled', 'blocked']).default('backlog'),
   currentSubagent: z.string().trim().optional().nullable(),
   taskId: z.string().trim().optional().nullable(),
 });
@@ -314,11 +339,15 @@ export async function createTask(input: unknown) {
     dev_index: 0,
     test_index: 0,
     total_stories: 0,
-    analysis_approved_index: 0,
-    review_approved: 0,
+    spec_resolved_index: 0,
+    run_state: 'runnable',
+    closure_status: 'none',
+    review_revision: 0,
+    review_document_id: null,
+    closure_acknowledged_at: null,
     resume_status: null,
     resume_pending: 0,
-    blocked_reason: value.status === 'blocked' ? '等待人工处理' : null,
+    blocked_reason: value.status === 'blocked' ? '系统异常暂停' : null,
   };
   assertState(state);
   const db = await databaseConnection();
@@ -328,9 +357,9 @@ export async function createTask(input: unknown) {
       INSERT OR IGNORE INTO tasks(
         task_id, title, description, link, external_id, external_status, item_type, priority,
         agile_status, current_subagent, analysis_index, dev_index, test_index,
-        total_stories, analysis_approved_index, review_approved, next_step,
+        total_stories, spec_resolved_index, next_step,
         work_dir, blocked_reason, last_actor
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, ?, '', ?, ?)
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, '', ?, ?)
     `).run(taskId, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, value.priority || null, value.status, currentSubagent, '新建需求，等待 Loop 梳理', state.blocked_reason, value.actor);
     const task = link ? (db.prepare(`${taskSelect} WHERE link = ?`).get(link) as Task | undefined) : fetchTask(db, taskId);
     if (!task) throw new Error('需求创建失败');
@@ -349,7 +378,7 @@ const contextSchema = z.object({
   taskId: z.string().min(1),
   kind: z.enum(['feature', 'bug', 'tech', 'intake']).default('feature'),
   slug: z.string().trim().optional().nullable(),
-  status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'done', 'cancelled', 'blocked']).optional().nullable(),
+  status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'ready_to_close', 'done', 'cancelled', 'blocked']).optional().nullable(),
   currentSubagent: z.string().trim().optional().nullable(),
   nextStep: z.string().trim().optional().nullable(),
   blockedReason: z.string().trim().optional().nullable(),
@@ -422,6 +451,65 @@ export async function addStory(input: unknown) {
   }
 }
 
+export async function saveStorySpec(input: unknown) {
+  const value = z.object({
+    taskId: z.string().min(1),
+    storyIndex: z.coerce.number().int().positive(),
+    status: z.enum(['draft', 'waiting_for_answers', 'resolved']),
+    spec: sliceSpecSchema,
+    sourceResultId: z.string().optional().nullable(),
+  }).parse(input);
+  if (value.status === 'resolved' && value.spec.ambiguities.length) throw new Error('resolved Slice Spec 不能包含未解决歧义');
+  if (value.status === 'waiting_for_answers' && !value.spec.ambiguities.length) throw new Error('等待回答的 Slice Spec 必须列出歧义');
+  const criterionIds = new Set(value.spec.acceptanceCriteria.map((criterion) => criterion.id));
+  const missingCriteria = value.spec.verificationPlan.filter((step) => !criterionIds.has(step.criterionId));
+  if (missingCriteria.length) throw new Error(`验证计划引用了不存在的验收标准：${missingCriteria.map((step) => step.criterionId).join(', ')}`);
+  const db = await databaseConnection();
+  const task = fetchTask(db, value.taskId);
+  if (!task || value.storyIndex > task.total_stories) throw new Error('交付单元不存在');
+  if (value.status === 'resolved') {
+    const pending = (db.prepare(`
+      SELECT COUNT(*) AS count FROM questions
+      WHERE task_id = ? AND story_index = ? AND status = 'pending'
+    `).get(value.taskId, value.storyIndex) as { count: number }).count;
+    if (pending) throw new Error('仍有未回答的产品歧义，不能保存 resolved Slice Spec');
+    const answeredKeys = (db.prepare(`
+      SELECT decision_key FROM questions
+      WHERE task_id = ? AND story_index = ? AND status = 'answered' AND decision_key IS NOT NULL
+    `).all(value.taskId, value.storyIndex) as { decision_key: string }[]).map((row) => row.decision_key);
+    const decisionKeys = new Set(value.spec.decisions.map((decision) => decision.key));
+    const missingDecisions = answeredKeys.filter((key) => !decisionKeys.has(key));
+    if (missingDecisions.length) throw new Error(`用户回答尚未写入规格决策：${missingDecisions.join(', ')}`);
+  }
+  const revision = ((db.prepare('SELECT COALESCE(MAX(revision), 0) AS revision FROM story_specs WHERE task_id = ? AND story_index = ?').get(value.taskId, value.storyIndex) as { revision: number }).revision || 0) + 1;
+  const specId = randomUUID();
+  db.exec('BEGIN');
+  try {
+    db.prepare(`
+      UPDATE story_specs SET status = 'superseded'
+      WHERE task_id = ? AND story_index = ? AND status != 'superseded'
+    `).run(value.taskId, value.storyIndex);
+    db.prepare(`
+      INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json, source_result_id, resolved_at)
+      VALUES(?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'resolved' THEN CURRENT_TIMESTAMP ELSE NULL END)
+    `).run(specId, value.taskId, value.storyIndex, revision, value.status, JSON.stringify(value.spec), value.sourceResultId || null, value.status);
+    if (value.status === 'resolved') {
+      db.prepare(`
+        UPDATE questions
+        SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ? AND story_index = ? AND status = 'answered'
+      `).run(value.taskId, value.storyIndex);
+    }
+    addEvent(db, value.taskId, 'analyst-agent', 'SliceSpecSaved', `保存交付单元 ${value.storyIndex} 规格 v${revision}（${value.status}）。`);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  refreshPages(`/tasks/${value.taskId}`);
+  return { specId, revision, status: value.status };
+}
+
 const answerSchema = z.object({ taskId: z.string().min(1), questionId: z.string().min(1), answer: z.string().min(1).max(4000) });
 
 export async function answerQuestion(input: unknown) {
@@ -449,6 +537,15 @@ const questionSchema = z.object({
   question: z.string().min(1).max(4000),
   why: z.string().max(1000).optional().nullable(),
   recommendation: z.string().max(2000).optional().nullable(),
+  decisionKey: z.string().min(1).max(240).optional().nullable(),
+  alternatives: z.array(z.object({
+    id: z.string().min(1).max(100),
+    label: z.string().min(1).max(240),
+    consequences: z.array(z.string().max(1000)).max(20).optional().default([]),
+  })).max(20).optional().default([]),
+  recommendationReason: z.string().max(2000).optional().nullable(),
+  dependsOn: z.array(z.string().min(1).max(240)).max(50).optional().default([]),
+  specRevision: z.coerce.number().int().positive().default(1),
   blockedReason: z.string().max(1000).optional().nullable(),
   blockTask: z.coerce.boolean().default(true),
   actor: z.enum(['human', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent']).default('human'),
@@ -456,6 +553,7 @@ const questionSchema = z.object({
 
 export async function addQuestion(input: unknown) {
   const value = questionSchema.parse(input);
+  if (value.actor === 'review-agent' || value.kind === 'review') throw new Error('Review Agent 只生成结卡报告，不能创建人工审批或澄清问题');
   const db = await databaseConnection();
   const task = fetchTask(db, value.taskId);
   if (!task) throw new Error('需求不存在');
@@ -474,24 +572,29 @@ export async function addQuestion(input: unknown) {
 
   db.exec('BEGIN');
   try {
-    db.prepare('INSERT INTO questions(question_id, task_id, story_index, kind, title, question, why, recommendation, relative_path, source_agent) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(questionId, value.taskId, storyIndex || null, value.kind, value.title, value.question, value.why || null, value.recommendation || null, relativePath, value.actor);
-    if (value.kind === 'analysis' || value.kind === 'review') {
-      db.prepare(`
-        INSERT INTO approvals(approval_id, task_id, story_index, kind, decision, relative_path)
-        VALUES(?, ?, ?, ?, 'pending', ?)
-        ON CONFLICT(task_id, story_index, kind) DO UPDATE SET decision = 'pending', relative_path = excluded.relative_path, updated_at = CURRENT_TIMESTAMP
-      `).run(randomUUID(), value.taskId, storyIndex || null, value.kind, relativePath);
-    }
+    db.prepare(`
+      INSERT INTO questions(
+        question_id, task_id, story_index, kind, title, question, why, recommendation,
+        relative_path, source_agent, decision_key, alternatives_json,
+        recommendation_reason, depends_on_json, spec_revision
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      questionId, value.taskId, storyIndex || null, value.kind, value.title, value.question,
+      value.why || null, value.recommendation || null, relativePath, value.actor,
+      value.decisionKey || null, value.alternatives.length ? JSON.stringify(value.alternatives) : null,
+      value.recommendationReason || null, value.dependsOn.length ? JSON.stringify(value.dependsOn) : null,
+      value.specRevision,
+    );
     if (value.blockTask) {
-      const agent = value.kind === 'analysis' ? 'analyst-agent' : value.kind === 'test' ? 'test-agent' : value.kind === 'review' ? 'review-agent' : value.actor !== 'human' ? value.actor : task.current_subagent || 'backlog-agent';
+      const agent = value.kind === 'analysis' ? 'analyst-agent' : value.actor !== 'human' ? value.actor : task.current_subagent || 'backlog-agent';
       db.prepare(`
         UPDATE tasks
-        SET agile_status = 'blocked', current_subagent = ?, resume_status = CASE WHEN agile_status != 'blocked' THEN agile_status ELSE resume_status END,
+        SET run_state = 'waiting_for_answers', current_subagent = ?,
             resume_pending = 0, blocked_reason = ?, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP
         WHERE task_id = ?
       `).run(agent, value.blockedReason || value.title, `等待人工回答：${value.title}`, value.actor, value.taskId);
     }
-    addEvent(db, value.taskId, value.actor, 'QuestionAdded', `新增确认事项：${value.title}`);
+    addEvent(db, value.taskId, value.actor, 'ClarificationRequested', `请求澄清：${value.title}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId);
     refreshPages('/', `/tasks/${value.taskId}`);
@@ -502,59 +605,60 @@ export async function addQuestion(input: unknown) {
   }
 }
 
+export async function submitClarificationAnswers(taskId: string) {
+  const db = await databaseConnection();
+  const task = fetchTask(db, taskId);
+  if (!task || task.run_state !== 'waiting_for_answers') throw new Error('需求当前不在等待澄清回答状态');
+  if (task.current_subagent !== 'analyst-agent') throw new Error('只有方案分析阶段可以提交产品澄清回答');
+  const pending = (db.prepare("SELECT COUNT(*) AS count FROM questions WHERE task_id = ? AND status = 'pending'").get(taskId) as { count: number }).count;
+  if (pending) throw new Error('仍有未回答的澄清问题，不能继续分析');
+  db.exec('BEGIN');
+  try {
+    db.prepare(`
+      UPDATE tasks
+      SET run_state = 'runnable', resume_pending = 1, blocked_reason = NULL,
+          next_step = '用户回答已提交，交回方案分析 Agent 重建完整规格',
+          last_actor = 'human', updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ?
+    `).run(taskId);
+    addEvent(db, taskId, 'human', 'ClarificationAnswersSubmitted', '提交全部澄清回答，等待 AI 重建规格。');
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  refreshPages('/', `/tasks/${taskId}`);
+}
+
 export async function releaseBlock(taskId: string) {
   const db = await databaseConnection();
   const task = fetchTask(db, taskId);
-  if (!task || task.agile_status !== 'blocked') throw new Error('需求当前不在待确认状态');
+  if (!task || task.agile_status !== 'blocked') throw new Error('需求当前不在系统阻塞状态');
   const pendingQuestions = (db.prepare('SELECT COUNT(*) AS count FROM questions WHERE task_id = ? AND status = \'pending\'').get(taskId) as { count: number }).count;
-  if (pendingQuestions) throw new Error('仍有未回答的确认事项，不能解除阻塞');
+  if (pendingQuestions) throw new Error('产品澄清必须通过提交回答恢复，不能用系统恢复命令绕过');
   const resumeStatus = task.resume_status;
-  if (!resumeStatus || resumeStatus === 'blocked') throw new Error('待确认需求缺少可恢复状态');
-  if (!task.current_subagent) throw new Error('待确认需求缺少负责 Agent');
+  if (!resumeStatus || resumeStatus === 'blocked') throw new Error('系统阻塞缺少可恢复状态');
+  if (!task.current_subagent) throw new Error('系统阻塞缺少负责 Agent');
 
-  let analysisApprovedIndex = task.analysis_approved_index;
-  let reviewApproved = task.review_approved;
-  let detail = '';
-  const decision = inferDecisionFromAnsweredQuestions(task, pendingQuestions);
-  if (task.current_subagent === 'analyst-agent') {
-    if (decision === 'pending') throw new Error('human decision is still pending in questions table');
-    if (decision === 'confirmed') {
-      analysisApprovedIndex = Math.max(analysisApprovedIndex, task.analysis_index + 1);
-      if (analysisApprovedIndex > task.total_stories) throw new Error('analysis approval exceeds total_stories');
-      detail = '人工已确认当前 story 分析决策';
-    } else {
-      detail = '人工要求继续澄清，不得推进 analysis_index';
-    }
-  } else if (task.current_subagent === 'review-agent') {
-    if (decision === 'pending') throw new Error('human decision is still pending in questions table');
-    reviewApproved = decision === 'approved' ? 1 : 0;
-    detail = reviewApproved ? '人工已批准交付' : '人工要求修改，必须执行 rewind';
-  }
-  const prospective = { ...task, agile_status: resumeStatus, analysis_approved_index: analysisApprovedIndex, review_approved: reviewApproved };
+  const prospective = { ...task, agile_status: resumeStatus, run_state: 'runnable' as const };
   assertState(prospective);
   const active = db.prepare(`
     ${taskSelect}
-    WHERE task_id != ? AND (agile_status IN ('in dev', 'in review') OR (agile_status = 'blocked' AND resume_status IN ('in dev', 'in review')) OR (agile_status = 'blocked' AND current_subagent = 'review-agent'))
+    WHERE task_id != ? AND (agile_status = 'in dev' OR (agile_status = 'blocked' AND resume_status = 'in dev'))
     LIMIT 1
   `).get(taskId) as Task | undefined;
-  if (active && ['in dev', 'in review'].includes(resumeStatus)) throw new Error(`代码槽已被 ${active.task_id} 占用`);
+  if (active && resumeStatus === 'in dev') throw new Error(`代码槽已被 ${active.task_id} 占用`);
 
   db.exec('BEGIN');
   try {
     db.prepare(`
       UPDATE tasks
-      SET agile_status = ?, resume_status = NULL, resume_pending = 1, blocked_reason = NULL,
-          analysis_approved_index = ?, review_approved = ?, next_step = ?,
-          last_actor = 'human', updated_at = CURRENT_TIMESTAMP
+      SET agile_status = ?, run_state = 'runnable', resume_status = NULL, resume_pending = 1, blocked_reason = NULL,
+          next_step = ?,
+          last_actor = 'system', updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
-    `).run(resumeStatus, analysisApprovedIndex, reviewApproved, `阻塞已解除，交回 ${task.current_subagent} 继续处理${detail ? `；${detail}` : ''}`, taskId);
-    if (task.current_subagent === 'analyst-agent') {
-      db.prepare('UPDATE approvals SET decision = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ? AND kind = ? AND story_index IS ?').run(decision, taskId, 'analysis', task.analysis_index + 1);
-    }
-    if (task.current_subagent === 'review-agent') {
-      db.prepare('UPDATE approvals SET decision = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ? AND kind = ?').run(decision, taskId, 'review');
-    }
-    addEvent(db, taskId, 'human', 'BlockReleased', `解除阻塞，交回 ${task.current_subagent}。`);
+    `).run(resumeStatus, `系统阻塞已解除，交回 ${task.current_subagent} 继续处理`, taskId);
+    addEvent(db, taskId, 'system', 'SystemBlockRecovered', `恢复系统阻塞，交回 ${task.current_subagent}。`);
     db.exec('COMMIT');
     await syncTaskFiles(db, taskId, { createClearedBlock: true });
   } catch (error) {
@@ -586,23 +690,31 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
   if (changes.agile_status === 'blocked' && before.agile_status !== 'blocked') changes.resume_status = before.agile_status;
   const prospective = { ...before, ...changes } as TaskState;
   assertState(prospective);
-  if (changes.analysis_index !== undefined && changes.analysis_index > before.analysis_index && prospective.analysis_approved_index < changes.analysis_index) {
-    throw new Error(`story-${changes.analysis_index} analysis 尚有未解决决策`);
+  if (changes.analysis_index !== undefined && changes.analysis_index > before.analysis_index && prospective.spec_resolved_index < changes.analysis_index) {
+    throw new Error(`交付单元 ${changes.analysis_index} 尚无已解决的 Slice Spec`);
+  }
+  if (changes.analysis_index !== undefined && changes.analysis_index > before.analysis_index) {
+    const resolvedSpec = db.prepare(`
+      SELECT 1 FROM story_specs
+      WHERE task_id = ? AND story_index = ? AND status = 'resolved'
+      LIMIT 1
+    `).get(taskId, changes.analysis_index);
+    if (!resolvedSpec) throw new Error(`交付单元 ${changes.analysis_index} 缺少 resolved Slice Spec`);
   }
   if (changes.dev_index !== undefined && changes.dev_index > before.dev_index) {
     const verification = verifyDevCommit(paths.root, taskId, changes.dev_index);
     if (!verification.ok) throw new Error(`交付单元 ${changes.dev_index} 的代码尚未按要求提交：${verification.reason}`);
   }
-  if (changes.agile_status === 'done' && !before.review_approved) throw new Error('review 尚未人工批准');
-  if (['in dev', 'in review'].includes(prospective.agile_status)) {
+  if (changes.agile_status === 'done' && before.closure_status !== 'acknowledged') throw new Error('当前版本的结卡报告尚未阅读');
+  if (prospective.agile_status === 'in dev') {
     const active = db.prepare(`
       ${taskSelect}
-      WHERE task_id != ? AND (agile_status IN ('in dev','in review') OR (agile_status='blocked' AND resume_status IN ('in dev','in review')) OR (agile_status='blocked' AND current_subagent='review-agent'))
+      WHERE task_id != ? AND (agile_status = 'in dev' OR (agile_status='blocked' AND resume_status = 'in dev'))
       LIMIT 1
     `).get(taskId) as Task | undefined;
     if (active) throw new CodeSlotBusyError(active.task_id);
   }
-  const allowed = ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'analysis_approved_index', 'blocked_reason', 'next_step', 'item_type', 'priority', 'title', 'resume_status'];
+  const allowed = ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'spec_resolved_index', 'blocked_reason', 'next_step', 'item_type', 'priority', 'title', 'resume_status', 'run_state', 'closure_status', 'review_revision', 'review_document_id', 'closure_acknowledged_at'];
   const keys = allowed.filter((key) => key in changes);
   if (!keys.length) throw new Error('没有需要更新的字段');
   const fields = keys.map((key) => `${key} = ?`);
@@ -613,8 +725,8 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
   }
   if (changes.agile_status === 'done') fields.push('completed_at = CURRENT_TIMESTAMP');
   else if (changes.agile_status) fields.push('completed_at = NULL');
-  if (changes.agile_status === 'in review' && before.agile_status !== 'in review') {
-    fields.push('review_approved = 0');
+  if (changes.agile_status && !['ready_to_close', 'done'].includes(changes.agile_status)) {
+    fields.push("closure_status = 'none'", 'review_document_id = NULL', 'closure_acknowledged_at = NULL');
   }
   fields.push('last_actor = ?', 'resume_pending = 0', 'updated_at = CURRENT_TIMESTAMP');
   values.push(actor);
@@ -633,13 +745,14 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
 
 const transitionSchema = z.object({
   taskId: z.string().min(1),
-  status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'done', 'cancelled', 'blocked']),
+  status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'ready_to_close', 'done', 'cancelled', 'blocked']),
   currentSubagent: z.string().trim().optional().nullable(),
   nextStep: z.string().trim().optional().nullable(),
 });
 
 export async function transitionTask(input: unknown) {
   const value = transitionSchema.parse(input);
+  if (value.status === 'done' || value.status === 'ready_to_close') throw new Error('结卡状态只能由 Review 报告和阅读结卡流程推进');
   await updateTask(value.taskId, 'human', {
     agile_status: value.status,
     current_subagent: value.currentSubagent || undefined,
@@ -647,12 +760,45 @@ export async function transitionTask(input: unknown) {
   });
 }
 
+export async function acknowledgeClosure(input: unknown) {
+  const value = z.object({
+    taskId: z.string().min(1),
+    reviewRevision: z.coerce.number().int().positive(),
+    actor: z.enum(['human']).default('human'),
+  }).parse(input);
+  const db = await databaseConnection();
+  const task = fetchTask(db, value.taskId);
+  if (!task || task.agile_status !== 'ready_to_close' || task.closure_status !== 'awaiting_read') throw new Error('需求当前没有等待阅读的结卡报告');
+  if (task.review_revision !== value.reviewRevision || !task.review_document_id) throw new Error('结卡报告版本已变化，请阅读最新版本');
+  db.exec('BEGIN');
+  try {
+    db.prepare(`
+      INSERT INTO closure_acknowledgements(
+        acknowledgement_id, task_id, review_document_id, review_revision, acknowledged_by
+      ) VALUES(?, ?, ?, ?, ?)
+    `).run(randomUUID(), value.taskId, task.review_document_id, value.reviewRevision, value.actor);
+    db.prepare(`
+      UPDATE tasks
+      SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle',
+          closure_acknowledged_at = CURRENT_TIMESTAMP, completed_at = CURRENT_TIMESTAMP,
+          next_step = '结卡报告已阅读，需求已关闭', last_actor = 'human', updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ?
+    `).run(value.taskId);
+    addEvent(db, value.taskId, value.actor, 'ClosureAcknowledged', `已阅读结卡报告 v${value.reviewRevision} 并关闭需求。`);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  refreshPages('/', '/tasks', `/tasks/${value.taskId}`);
+}
+
 const rewindSchema = z.object({
   taskId: z.string().min(1),
   to: z.enum(['plan', 'analysis', 'dev', 'test']),
   story: z.coerce.number().int().positive().optional().nullable(),
   reason: z.string().trim().optional().nullable(),
-  actor: z.enum(['human', 'analyst-agent', 'dev-agent', 'test-agent', 'review-agent']).default('human'),
+  actor: z.enum(['human', 'system', 'analyst-agent', 'dev-agent', 'test-agent', 'review-agent']).default('human'),
 });
 
 export async function rewindTask(input: unknown) {
@@ -668,14 +814,14 @@ export async function rewindTask(input: unknown) {
     'test-agent': ['analysis', 'dev'],
     'review-agent': ['plan', 'analysis', 'dev', 'test'],
   };
-  if (value.actor !== 'human' && !permissions[value.actor]?.includes(value.to)) throw new Error(`${value.actor} 无权 rewind 到 ${value.to}`);
+  if (value.actor !== 'human' && value.actor !== 'system' && !permissions[value.actor]?.includes(value.to)) throw new Error(`${value.actor} 无权 rewind 到 ${value.to}`);
   const occupied = occupiesCodeSlot(task) || task.dev_index > 0;
   const targetAgent = { plan: 'story-splitter-agent', analysis: 'analyst-agent', dev: 'dev-agent', test: 'test-agent' }[value.to];
   let analysisIndex = task.analysis_index;
   let devIndex = task.dev_index;
   let testIndex = task.test_index;
   let totalStories = task.total_stories;
-  let approvedIndex = task.analysis_approved_index;
+  let resolvedSpecIndex = task.spec_resolved_index;
   let nextStatus: TaskStatus;
   let storyLabel: string;
   if (value.to === 'plan') {
@@ -683,7 +829,7 @@ export async function rewindTask(input: unknown) {
     devIndex = 0;
     testIndex = 0;
     totalStories = 0;
-    approvedIndex = 0;
+    resolvedSpecIndex = 0;
     nextStatus = occupied ? 'in dev' : 'in plan';
     storyLabel = '全部交付单元';
   } else {
@@ -692,7 +838,7 @@ export async function rewindTask(input: unknown) {
     const boundary = value.story - 1;
     if (value.to === 'analysis') {
       analysisIndex = Math.min(analysisIndex, boundary);
-      approvedIndex = Math.min(approvedIndex, boundary);
+      resolvedSpecIndex = Math.min(resolvedSpecIndex, boundary);
       devIndex = Math.min(devIndex, boundary);
       testIndex = Math.min(testIndex, devIndex);
     } else if (value.to === 'dev') {
@@ -704,19 +850,21 @@ export async function rewindTask(input: unknown) {
     nextStatus = occupied || devIndex > 0 ? 'in dev' : 'ready for dev';
     storyLabel = `交付单元 ${value.story}`;
   }
-  const prospective = { ...task, agile_status: nextStatus, analysis_index: analysisIndex, dev_index: devIndex, test_index: testIndex, total_stories: totalStories, analysis_approved_index: approvedIndex };
+  const prospective = { ...task, agile_status: nextStatus, analysis_index: analysisIndex, dev_index: devIndex, test_index: testIndex, total_stories: totalStories, spec_resolved_index: resolvedSpecIndex };
   assertState(prospective);
   db.exec('BEGIN');
   try {
     db.prepare(`
       UPDATE tasks
       SET agile_status = ?, current_subagent = ?, analysis_index = ?, dev_index = ?,
-          test_index = ?, total_stories = ?, analysis_approved_index = ?,
-          review_approved = 0, next_step = ?,
+          test_index = ?, total_stories = ?, spec_resolved_index = ?,
+          next_step = ?,
           blocked_reason = NULL, resume_status = NULL, resume_pending = 0,
+          run_state = 'runnable', closure_status = 'none', review_document_id = NULL,
+          closure_acknowledged_at = NULL,
           last_actor = ?, completed_at = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
-    `).run(nextStatus, targetAgent, analysisIndex, devIndex, testIndex, totalStories, approvedIndex, value.reason || `回退 ${storyLabel} 到 ${value.to}`, value.actor, value.taskId);
+    `).run(nextStatus, targetAgent, analysisIndex, devIndex, testIndex, totalStories, resolvedSpecIndex, value.reason || `回退 ${storyLabel} 到 ${value.to}`, value.actor, value.taskId);
     addEvent(db, value.taskId, value.actor, 'TaskRewound', `回退 ${storyLabel} 到 ${value.to}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId, { createClearedBlock: true });
@@ -743,7 +891,7 @@ export async function cancelTask(input: unknown) {
       UPDATE tasks
       SET agile_status = 'cancelled', current_subagent = NULL, next_step = ?,
           blocked_reason = NULL, resume_status = NULL, resume_pending = 0,
-          review_approved = 0, last_actor = 'human',
+          last_actor = 'human',
           completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(`已取消：${value.reason}`, value.taskId);
@@ -799,8 +947,11 @@ function toEnvelope(task: Task, delegation: Delegation): DelegationEnvelope {
     agileStatus: task.agile_status,
     currentSubagent: task.current_subagent || '',
     resumePending: task.resume_pending,
-    analysisApprovedIndex: task.analysis_approved_index,
-    reviewApproved: task.review_approved,
+    specResolvedIndex: task.spec_resolved_index,
+    runState: task.run_state,
+    closureStatus: task.closure_status,
+    reviewRevision: task.review_revision,
+    reviewDocumentId: task.review_document_id || '',
     lastActor: task.last_actor || '',
     analysisIndex: task.analysis_index,
     devIndex: task.dev_index,
@@ -843,6 +994,8 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
 }
 
 export async function beginRun(owner = 'ui') {
+  const { ensureAgentRuntimeWorkspace } = await import('./agent-profiles');
+  await ensureAgentRuntimeWorkspace();
   const db = await databaseConnection();
   const current = getRunStatusFromDb(db);
   if (current?.active) {
@@ -937,8 +1090,11 @@ export function toJsonlEnvelope(item: DelegationEnvelope) {
     resource: item.resource,
     current_subagent: item.currentSubagent,
     resume_pending: item.resumePending,
-    analysis_approved_index: item.analysisApprovedIndex,
-    review_approved: item.reviewApproved,
+    spec_resolved_index: item.specResolvedIndex,
+    run_state: item.runState,
+    closure_status: item.closureStatus,
+    review_revision: item.reviewRevision,
+    review_document_id: item.reviewDocumentId,
     last_actor: item.lastActor,
     story_index: item.storyIndex,
     analysis_index: item.analysisIndex,

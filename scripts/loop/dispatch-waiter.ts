@@ -1,7 +1,10 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
 import { appendLoopRunLog, createLoopDispatch, getRunStatus } from '../../src/application/tasks';
+import { enqueueSoftwareMaintenance } from '../../src/application/software-maintenance';
+import { recordRuntimeException } from '../../src/application/runtime-events';
 import { startAgentRun } from '../../src/infrastructure/agent-runner';
+import { startMaintenanceRunner } from '../../src/infrastructure/maintenance-runner';
 
 const runId = process.argv[2];
 if (!runId) throw new Error('missing run id');
@@ -38,6 +41,24 @@ async function main() {
   }
 }
 
-main().catch(async (error) => {
-  await appendLoopRunLog(runId, `[错误] 空队列重试 runner 退出：${error instanceof Error ? error.message : String(error)}`);
-});
+async function run() {
+  let failure: unknown;
+  try {
+    await main();
+  } catch (error) {
+    failure = error;
+    await appendLoopRunLog(runId, `[错误] 空队列重试 runner 退出：${error instanceof Error ? error.message : String(error)}`);
+  } finally {
+    if (!failure) return;
+    try {
+      const eventId = await recordRuntimeException({ runId, component: 'dispatch-waiter', stage: 'finally', error: failure, fatal: true });
+      const jobId = await enqueueSoftwareMaintenance({
+        triggerKind: 'runner_error', runId, eventFromId: eventId, severity: 'FATAL',
+        summary: failure instanceof Error ? failure.message : String(failure),
+      });
+      if (jobId) await startMaintenanceRunner();
+    } catch { /* maintenance must never replace the original runner outcome */ }
+  }
+}
+
+void run();

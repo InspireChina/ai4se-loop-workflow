@@ -131,7 +131,7 @@ async function printBlockList(format: string) {
     console.log(`  - Agent: ${task.current_subagent || ''}`);
     console.log(`  - Reason: ${task.blocked_reason || ''}`);
     console.log(`  - Next Step: ${task.next_step || ''}`);
-    console.log(`  - Release: python scripts/loop/loopctl.py block-release ${task.task_id}`);
+    console.log(`  - Operator recovery: npm run loopctl -- system-unblock ${task.task_id}`);
     console.log('');
   }
 }
@@ -155,8 +155,11 @@ async function printTaskPipeline(taskId: string, args: Args) {
       agileStatus: task.agile_status,
       currentSubagent: task.current_subagent || '',
       resumePending: task.resume_pending,
-      analysisApprovedIndex: task.analysis_approved_index,
-      reviewApproved: task.review_approved,
+      specResolvedIndex: task.spec_resolved_index,
+      runState: task.run_state,
+      closureStatus: task.closure_status,
+      reviewRevision: task.review_revision,
+      reviewDocumentId: task.review_document_id || '',
       lastActor: task.last_actor || '',
       analysisIndex: task.analysis_index,
       devIndex: task.dev_index,
@@ -234,9 +237,10 @@ async function main() {
     case 'block-list':
       await printBlockList(value(args, 'format', 'markdown'));
       return;
-    case 'block-release':
+    case 'system-unblock':
+    case 'block-release': // legacy operator alias
       await releaseBlock(args._[0]);
-      console.log(`released ${args._[0]}`);
+      console.log(`system block recovered ${args._[0]}`);
       return;
     case 'task-update': {
       const taskId = args._[0];
