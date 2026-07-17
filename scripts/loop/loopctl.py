@@ -6,11 +6,13 @@ from __future__ import annotations
 import subprocess
 import sys
 import os
+import shutil
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "loop" / "loopctl.ts"
+TSX_CLI = ROOT / "node_modules" / "tsx" / "dist" / "cli.mjs"
 
 
 def load_env_file(path: Path, env: dict[str, str], explicit: set[str]) -> None:
@@ -34,7 +36,14 @@ def main() -> int:
     explicit = set(env)
     load_env_file(ROOT / ".env", env, explicit)
     load_env_file(ROOT / ".env.local", env, explicit)
-    command = ["npx", "tsx", str(SCRIPT), *sys.argv[1:]]
+    node = shutil.which("node")
+    if not node:
+        print("Node.js is required to run loopctl", file=sys.stderr)
+        return 1
+    if not TSX_CLI.exists():
+        print("tsx is not installed; run npm install first", file=sys.stderr)
+        return 1
+    command = [node, str(TSX_CLI), str(SCRIPT), *sys.argv[1:]]
     return subprocess.call(command, cwd=ROOT, env=env)
 
 

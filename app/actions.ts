@@ -85,13 +85,16 @@ export async function cancelTaskAction(formData: FormData) {
 
 export async function startLoopRunAction(formData?: FormData) {
   const runId = await beginRun('agent-runner');
-  const dispatch = await createLoopDispatch(runId);
-  if (!dispatch.delegations.length) {
-    await startDispatchRetryRun(runId);
-    redirect(String(formData?.get('redirectTo') || '/'));
+  const redirectTo = String(formData?.get('redirectTo') || '/');
+  try {
+    const dispatch = await createLoopDispatch(runId);
+    if (!dispatch.delegations.length) await startDispatchRetryRun(runId);
+    else await startAgentRun(runId);
+  } catch (error) {
+    await endRun(runId, true);
+    throw error;
   }
-  await startAgentRun(runId);
-  redirect(String(formData?.get('redirectTo') || '/'));
+  redirect(redirectTo);
 }
 
 export async function saveAgentExecutorAction(formData: FormData) {

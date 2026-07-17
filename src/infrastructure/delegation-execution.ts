@@ -1,4 +1,5 @@
-import { spawn as nodeSpawn, type ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
+import crossSpawn from 'cross-spawn';
 import { extractAgentFinalText, parseAgentTelemetryStderr, parseAgentTelemetryStdout, type AgentExecutionContext, type AgentExecutionOptions, type AgentExecutor } from './agent-executor';
 import type { LangfuseTelemetry } from './langfuse';
 
@@ -14,7 +15,7 @@ export type DelegationExecutionInput = {
   appendLog: (message: string) => Promise<unknown>;
   maxRuntimeMs: number;
   idleTimeoutMs: number;
-  spawn?: typeof nodeSpawn;
+  spawn?: typeof crossSpawn;
 };
 
 export type DelegationExecutionResult = { exitCode: number; finalText: string };
@@ -25,7 +26,7 @@ export type DelegationExecutionResult = { exitCode: number; finalText: string };
  */
 export async function executeDelegation(input: DelegationExecutionInput): Promise<DelegationExecutionResult> {
   const { runId, prompt, workspaceRoot, executor, executionOptions, context, description, telemetry, appendLog, maxRuntimeMs, idleTimeoutMs } = input;
-  const spawn = input.spawn ?? nodeSpawn;
+  const spawn = input.spawn ?? crossSpawn;
   const args = executor.buildArgs(prompt, workspaceRoot, executionOptions);
   const telemetryContext = { ...context, runToken: runId };
   const trace = await telemetry.startDelegationTrace(telemetryContext, { executor: executor.id, prompt });
@@ -53,6 +54,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       cwd: workspaceRoot,
       env: process.env,
       stdio: [executor.promptMode === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      windowsHide: true,
     });
     if (executor.promptMode === 'stdin') child.stdin?.end(prompt);
 
