@@ -3,12 +3,13 @@ import { mkdirSync, readFileSync, readdirSync, renameSync, writeFileSync } from 
 import { join } from 'node:path';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
-import { AGENT_PROFILE_DEFINITIONS, DEFAULT_AGENT_MEMORY, FLOW_AGENT_IDS, isFlowAgentId, type FlowAgentId } from '../domain/agent-profile';
+import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, DEFAULT_AGENT_MEMORY, FLOW_AGENT_IDS, isFlowAgentId, type FlowAgentId } from '../domain/agent-profile';
 import { databaseConnection, hash, paths } from '../infrastructure/database';
 
 export type AgentProfile = {
   agent_id: FlowAgentId;
   display_name: string;
+  prompt_seed_revision: number;
   auto_evolve: number;
   current_prompt_version: number;
   current_memory_revision: number;
@@ -100,7 +101,7 @@ async function writeManifest() {
   const db = await databaseConnection();
   const profiles = db.prepare(`
     SELECT agent_id, current_prompt_version, current_memory_revision,
-           candidate_prompt_version, canary_remaining, updated_at
+           candidate_prompt_version, canary_remaining, prompt_seed_revision, updated_at
     FROM agent_profiles ORDER BY agent_id
   `).all();
   atomicWrite(join(agentRuntimeRoot(), 'manifest.json'), `${JSON.stringify({
@@ -118,8 +119,8 @@ export async function ensureAgentRuntimeWorkspace() {
   mkdirSync(join(agentRuntimeRoot(), 'evolution', 'evaluations'), { recursive: true, mode: 0o700 });
 
   const insertProfile = db.prepare(`
-    INSERT OR IGNORE INTO agent_profiles(agent_id, display_name)
-    VALUES(?, ?)
+    INSERT OR IGNORE INTO agent_profiles(agent_id, display_name, prompt_seed_revision)
+    VALUES(?, ?, ?)
   `);
   const insertPrompt = db.prepare(`
     INSERT OR IGNORE INTO agent_prompt_versions(
@@ -134,15 +135,39 @@ export async function ensureAgentRuntimeWorkspace() {
   db.transaction(() => {
     for (const agentId of FLOW_AGENT_IDS) {
       const definition = AGENT_PROFILE_DEFINITIONS[agentId];
-      insertProfile.run(agentId, definition.label);
+      insertProfile.run(agentId, definition.label, AGENT_PROMPT_SEED_REVISION);
       insertPrompt.run(agentId, definition.prompt, hash(definition.prompt));
       insertMemory.run(agentId, DEFAULT_AGENT_MEMORY, hash(DEFAULT_AGENT_MEMORY.trim()));
     }
   })();
 
   for (const agentId of FLOW_AGENT_IDS) await reconcileAgentFiles(agentId);
+  await upgradeSeedPrompts();
   await writeManifest();
   return agentRuntimeRoot();
+}
+
+async function upgradeSeedPrompts() {
+  const db = await databaseConnection();
+  for (const agentId of FLOW_AGENT_IDS) {
+    const profile = db.prepare('SELECT * FROM agent_profiles WHERE agent_id = ?').get(agentId) as AgentProfile;
+    if (profile.prompt_seed_revision >= AGENT_PROMPT_SEED_REVISION) continue;
+    const current = db.prepare(`
+      SELECT * FROM agent_prompt_versions WHERE agent_id = ? AND version = ?
+    `).get(agentId, profile.current_prompt_version) as PromptVersion;
+    if (current.source === 'seed' && !profile.candidate_prompt_version) {
+      await createPromptVersion(
+        agentId,
+        AGENT_PROFILE_DEFINITIONS[agentId].prompt,
+        'seed',
+        `升级内置角色 Prompt seed r${AGENT_PROMPT_SEED_REVISION}`,
+        { fromSeedRevision: profile.prompt_seed_revision, toSeedRevision: AGENT_PROMPT_SEED_REVISION },
+      );
+    }
+    db.prepare(`
+      UPDATE agent_profiles SET prompt_seed_revision = ?, updated_at = CURRENT_TIMESTAMP WHERE agent_id = ?
+    `).run(AGENT_PROMPT_SEED_REVISION, agentId);
+  }
 }
 
 async function reconcileAgentFiles(agentId: FlowAgentId) {

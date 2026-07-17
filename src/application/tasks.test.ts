@@ -329,16 +329,41 @@ test('persists execution input before work and recovers output without rerunning
 test('materializes editable Agent Prompt and Memory outside the workspace with version history', async () => {
   const {
     ensureAgentRuntimeWorkspace,
+    agentProfileInternals,
     getAgentProfile,
     loadAgentRuntime,
     rollbackAgentPrompt,
     saveAgentMemory,
     saveAgentPrompt,
   } = await import('./agent-profiles');
+  const { databaseConnection, hash } = await import('../infrastructure/database');
 
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
+  assert.equal(original.profile.prompt_seed_revision, 2);
+  assert.ok(original.currentPrompt.content.length > 800);
+  assert.match(original.currentPrompt.content, /# 角色目标/);
+  assert.match(original.currentPrompt.content, /# 完成条件/);
+
+  const db = await databaseConnection();
+  const legacyPrompt = '判断需求类型并整理上下文，完成时提供分类、流程方向和需求文档。';
+  db.prepare(`
+    UPDATE agent_prompt_versions SET content = ?, content_hash = ?, source = 'seed'
+    WHERE agent_id = 'backlog-agent' AND version = 1
+  `).run(legacyPrompt, hash(legacyPrompt));
+  db.prepare(`
+    UPDATE agent_profiles SET current_prompt_version = 1, candidate_prompt_version = NULL, prompt_seed_revision = 1
+    WHERE agent_id = 'backlog-agent'
+  `).run();
+  agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
+  await ensureAgentRuntimeWorkspace();
+  const upgradedSeed = await getAgentProfile('backlog-agent');
+  assert.equal(upgradedSeed.profile.prompt_seed_revision, 2);
+  assert.equal(upgradedSeed.currentPrompt.source, 'seed');
+  assert.ok(upgradedSeed.currentPrompt.version > 1);
+  assert.match(upgradedSeed.currentPrompt.content, /# 输入与证据优先级/);
+
   const promptContent = `${original.currentPrompt.content}\n\n- 在修改前先读取相关 Slice Spec。`;
   const promptVersion = await saveAgentPrompt({ agentId: 'dev-agent', content: promptContent, reason: 'test prompt version' });
   const memoryRevision = await saveAgentMemory({
@@ -351,6 +376,13 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   assert.equal(edited.currentMemory.revision, memoryRevision);
   assert.equal(readFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), 'utf8').trim(), promptContent.trim());
   assert.match(readFileSync(join(edited.runtimeDirectory, 'MEMORY.md'), 'utf8'), /npm test/);
+
+  db.prepare("UPDATE agent_profiles SET prompt_seed_revision = 1 WHERE agent_id = 'dev-agent'").run();
+  await ensureAgentRuntimeWorkspace();
+  const preservedHumanPrompt = await getAgentProfile('dev-agent');
+  assert.equal(preservedHumanPrompt.currentPrompt.version, promptVersion);
+  assert.equal(preservedHumanPrompt.currentPrompt.source, 'human');
+  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 2);
 
   const localPrompt = `${promptContent}\n- 本地文件修改也必须形成版本。`;
   writeFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), localPrompt);

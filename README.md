@@ -135,6 +135,8 @@ data/<repo-root-short-hash>/agent-runtime/
 
 这个目录属于应用本地数据并被 Git 忽略；目标 repo 中的 Prompt 或 Memory 文件不会成为运行时事实。SQLite 保存版本、哈希、来源和演化证据，Runtime Workspace 保存当前实际使用的可编辑文件。界面的“Agent 配置”菜单可以编辑各 Agent 的 Role Prompt 和 Durable Memory、查看最终组合后的 Prompt、浏览历史与 daily memory，并开启或关闭自动演化。直接编辑本地 `PROMPT.md` / `MEMORY.md` 也会在下一次运行时导入成新版本。
 
+内置 Prompt 使用独立 seed revision。初始角色契约至少包含角色目标、证据优先级或工作步骤、决策边界和完成条件。应用升级 seed 时，只为仍在使用旧 `source=seed` 的 Agent 创建新 Prompt 版本；任何 human、local、evolution 或正在 Canary 的版本都不会被内置默认值覆盖。
+
 实际 Prompt 按固定层级组装，后层不能覆盖前层：
 
 ```text
