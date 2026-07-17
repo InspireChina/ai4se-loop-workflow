@@ -51,7 +51,7 @@ test('records one safe delegation trace and normalized Cursor, Codex, and Claude
     const { result, logs } = await run(fixtureExecutor(id, program), record.telemetry);
     assert.deepEqual(result, { exitCode: 0, finalText: 'done' });
     assert.equal(record.traces.length, 1);
-    assert.deepEqual(record.traces[0].metadata, { runToken: 'run-story-4', taskId: 'TASK-4', storyIndex: 4, pipeline: 'resume', agent: 'dev-agent', executor: id, promptCaptured: true, promptLength: 50 });
+    assert.deepEqual(record.traces[0].metadata, { runToken: 'run-story-4', requirementId: 'TASK-4', deliveryUnitIndex: 4, flow: 'resume', agent: 'dev-agent', executor: id, promptCaptured: true, promptLength: 50 });
     assert.ok(record.events.some((event) => event.name === 'loop.agent.lifecycle'));
     assert.ok(record.events.some((event) => event.name === 'loop.agent.tool'));
     assert.ok(record.events.some((event) => event.name === 'loop.agent.output'));

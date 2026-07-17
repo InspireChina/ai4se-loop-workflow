@@ -153,7 +153,7 @@ function refreshPages(...pagePaths: string[]) {
 
 function taskIdFromTitleLink(title: string, link?: string | null) {
   const seed = link || title;
-  return `TASK-${createHash('sha1').update(seed).digest('hex').slice(0, 8)}`;
+  return `REQ-${createHash('sha1').update(seed).digest('hex').slice(0, 8)}`;
 }
 
 async function syncTaskFiles(_db: Awaited<ReturnType<typeof databaseConnection>>, _taskId: string, _options: { createClearedBlock?: boolean } = {}) {
@@ -219,7 +219,7 @@ export async function getTask(taskId: string) {
 
 export async function getTaskContext(taskId: string) {
   const detail = await getTask(taskId);
-  if (!detail) throw new Error(`task not found: ${taskId}`);
+  if (!detail) throw new Error(`需求不存在：${taskId}`);
   const questions = detail.questions.map(({ relative_path: _relativePath, ...question }) => question);
   const approvals = detail.approvals.map(({ relative_path: _relativePath, ...approval }) => approval);
   return { ...detail, questions, approvals };
@@ -239,9 +239,9 @@ export async function upsertDocument(input: unknown) {
   const value = documentSchema.parse(input);
   const db = await databaseConnection();
   const task = fetchTask(db, value.taskId);
-  if (!task) throw new Error('Task not found');
-  if (value.storyIndex && value.storyIndex > task.total_stories) throw new Error(`Story-${value.storyIndex} 不存在`);
-  const title = value.title || `${value.kind}${value.storyIndex ? ` · Story-${value.storyIndex}` : ''}`;
+  if (!task) throw new Error('需求不存在');
+  if (value.storyIndex && value.storyIndex > task.total_stories) throw new Error(`交付单元 ${value.storyIndex} 不存在`);
+  const title = value.title || `${value.kind}${value.storyIndex ? ` · 交付单元 ${value.storyIndex}` : ''}`;
   db.exec('BEGIN');
   try {
     const existing = db.prepare('SELECT document_id FROM documents WHERE task_id = ? AND story_index IS ? AND kind = ?').get(value.taskId, value.storyIndex || null, value.kind) as { document_id: string } | undefined;
@@ -331,10 +331,10 @@ export async function createTask(input: unknown) {
         total_stories, analysis_approved_index, review_approved, next_step,
         work_dir, blocked_reason, last_actor
       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, 0, ?, '', ?, ?)
-    `).run(taskId, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, value.priority || null, value.status, currentSubagent, '新建 Task，等待 loop 处理', state.blocked_reason, value.actor);
+    `).run(taskId, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, value.priority || null, value.status, currentSubagent, '新建需求，等待 Loop 梳理', state.blocked_reason, value.actor);
     const task = link ? (db.prepare(`${taskSelect} WHERE link = ?`).get(link) as Task | undefined) : fetchTask(db, taskId);
-    if (!task) throw new Error('Task 创建失败');
-    addEvent(db, task.task_id, value.actor, 'TaskCreated', `创建 Task：${task.title}`);
+    if (!task) throw new Error('需求创建失败');
+    addEvent(db, task.task_id, value.actor, 'TaskCreated', `创建需求：${task.title}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, task.task_id);
     refreshPages('/', '/tasks');
@@ -360,7 +360,7 @@ export async function initializeTaskContext(input: unknown) {
   const value = contextSchema.parse(input);
   const db = await databaseConnection();
   const before = fetchTask(db, value.taskId);
-  if (!before) throw new Error('Task not found');
+  if (!before) throw new Error('需求不存在');
   if (value.actor !== 'human' && value.actor !== 'backlog-agent') throw new Error(`${value.actor} cannot initialize context`);
   const changes: Partial<TaskState> & { item_type?: string; next_step?: string } = {
     agile_status: value.status || before.agile_status,
@@ -403,7 +403,7 @@ export async function addStory(input: unknown) {
   const value = storySchema.parse(input);
   const db = await databaseConnection();
   const task = fetchTask(db, value.taskId);
-  if (!task) throw new Error('Task not found');
+  if (!task) throw new Error('需求不存在');
   const nextIndex = ((db.prepare('SELECT COALESCE(MAX(story_index), 0) AS index_value FROM stories WHERE task_id = ?').get(value.taskId) as { index_value: number }).index_value || 0) + 1;
   const directory = `story-${String(nextIndex).padStart(3, '0')}`;
   const prospective = { ...task, total_stories: Math.max(task.total_stories, nextIndex) };
@@ -411,8 +411,8 @@ export async function addStory(input: unknown) {
   db.exec('BEGIN');
   try {
     db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, ?, ?, ?)').run(value.taskId, nextIndex, value.title, directory);
-    db.prepare('UPDATE tasks SET total_stories = ?, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?').run(prospective.total_stories, `已新增 Story-${nextIndex}，等待分析`, value.actor, value.taskId);
-    addEvent(db, value.taskId, value.actor, 'StoryAdded', `新增 Story-${nextIndex}：${value.title}`);
+    db.prepare('UPDATE tasks SET total_stories = ?, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?').run(prospective.total_stories, `已新增交付单元 ${nextIndex}，等待方案分析`, value.actor, value.taskId);
+    addEvent(db, value.taskId, value.actor, 'StoryAdded', `新增交付单元 ${nextIndex}：${value.title}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId);
     refreshPages(`/tasks/${value.taskId}`);
@@ -428,7 +428,7 @@ export async function answerQuestion(input: unknown) {
   const { taskId, questionId, answer } = answerSchema.parse(input);
   const db = await databaseConnection();
   const question = db.prepare('SELECT * FROM questions WHERE question_id = ? AND task_id = ?').get(questionId, taskId) as Question | undefined;
-  if (!question) throw new Error('Question not found');
+  if (!question) throw new Error('确认事项不存在');
   db.exec('BEGIN');
   try {
     db.prepare('UPDATE questions SET answer = ?, status = \'answered\', updated_at = CURRENT_TIMESTAMP WHERE question_id = ?').run(answer, questionId);
@@ -458,17 +458,17 @@ export async function addQuestion(input: unknown) {
   const value = questionSchema.parse(input);
   const db = await databaseConnection();
   const task = fetchTask(db, value.taskId);
-  if (!task) throw new Error('Task not found');
+  if (!task) throw new Error('需求不存在');
   const questionId = `Q-${randomUUID().slice(0, 8)}`;
   const defaultStoryIndex = value.kind === 'analysis' ? Math.min(task.total_stories, task.analysis_index + 1) : value.kind === 'test' ? Math.min(task.total_stories, task.test_index + 1) : null;
   const storyIndex = value.storyIndex || defaultStoryIndex;
   if (value.kind === 'analysis' || value.kind === 'test') {
-    if (!storyIndex) throw new Error(`${value.kind} 问题必须关联 Story；请先拆分 Story`);
+    if (!storyIndex) throw new Error(`${value.kind} 确认事项必须关联交付单元；请先完成交付拆分`);
     const story = db.prepare('SELECT * FROM stories WHERE task_id = ? AND story_index = ?').get(value.taskId, storyIndex) as Story | undefined;
-    if (!story && storyIndex > task.total_stories) throw new Error(`Story-${storyIndex} 不存在`);
+    if (!story && storyIndex > task.total_stories) throw new Error(`交付单元 ${storyIndex} 不存在`);
   } else if (storyIndex) {
     const story = db.prepare('SELECT * FROM stories WHERE task_id = ? AND story_index = ?').get(value.taskId, storyIndex) as Story | undefined;
-    if (!story && storyIndex > task.total_stories) throw new Error(`Story-${storyIndex} 不存在`);
+    if (!story && storyIndex > task.total_stories) throw new Error(`交付单元 ${storyIndex} 不存在`);
   }
   const relativePath = null;
 
@@ -491,7 +491,7 @@ export async function addQuestion(input: unknown) {
         WHERE task_id = ?
       `).run(agent, value.blockedReason || value.title, `等待人工回答：${value.title}`, value.actor, value.taskId);
     }
-    addEvent(db, value.taskId, value.actor, 'QuestionAdded', `新增问题：${value.title}`);
+    addEvent(db, value.taskId, value.actor, 'QuestionAdded', `新增确认事项：${value.title}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId);
     refreshPages('/', `/tasks/${value.taskId}`);
@@ -505,12 +505,12 @@ export async function addQuestion(input: unknown) {
 export async function releaseBlock(taskId: string) {
   const db = await databaseConnection();
   const task = fetchTask(db, taskId);
-  if (!task || task.agile_status !== 'blocked') throw new Error('Task is not blocked');
+  if (!task || task.agile_status !== 'blocked') throw new Error('需求当前不在待确认状态');
   const pendingQuestions = (db.prepare('SELECT COUNT(*) AS count FROM questions WHERE task_id = ? AND status = \'pending\'').get(taskId) as { count: number }).count;
-  if (pendingQuestions) throw new Error('仍有待回答问题，不能解除阻塞');
+  if (pendingQuestions) throw new Error('仍有未回答的确认事项，不能解除阻塞');
   const resumeStatus = task.resume_status;
-  if (!resumeStatus || resumeStatus === 'blocked') throw new Error('blocked Task 缺少有效 resume_status');
-  if (!task.current_subagent) throw new Error('blocked Task 缺少 current_subagent');
+  if (!resumeStatus || resumeStatus === 'blocked') throw new Error('待确认需求缺少可恢复状态');
+  if (!task.current_subagent) throw new Error('待确认需求缺少负责 Agent');
 
   let analysisApprovedIndex = task.analysis_approved_index;
   let reviewApproved = task.review_approved;
@@ -579,7 +579,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
 }) {
   const db = await databaseConnection();
   const before = fetchTask(db, taskId);
-  if (!before) throw new Error('Task not found');
+  if (!before) throw new Error('需求不存在');
   changes = Object.fromEntries(Object.entries(changes).filter(([, item]) => item !== undefined)) as typeof changes;
   const changed = Object.keys(changes);
   assertUpdate(before, actor, changes, changed);
@@ -591,7 +591,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
   }
   if (changes.dev_index !== undefined && changes.dev_index > before.dev_index) {
     const verification = verifyDevCommit(paths.root, taskId, changes.dev_index);
-    if (!verification.ok) throw new Error(`Story-${changes.dev_index} 代码尚未按要求提交：${verification.reason}`);
+    if (!verification.ok) throw new Error(`交付单元 ${changes.dev_index} 的代码尚未按要求提交：${verification.reason}`);
   }
   if (changes.agile_status === 'done' && !before.review_approved) throw new Error('review 尚未人工批准');
   if (['in dev', 'in review'].includes(prospective.agile_status)) {
@@ -659,9 +659,9 @@ export async function rewindTask(input: unknown) {
   const value = rewindSchema.parse(input);
   const db = await databaseConnection();
   const task = fetchTask(db, value.taskId);
-  if (!task) throw new Error('Task not found');
-  if (task.agile_status === 'blocked') throw new Error('请先解除阻塞再 rewind');
-  if (task.agile_status === 'done' || task.agile_status === 'cancelled') throw new Error('终态 Task 不能直接 rewind');
+  if (!task) throw new Error('需求不存在');
+  if (task.agile_status === 'blocked') throw new Error('请先完成确认再执行回退');
+  if (task.agile_status === 'done' || task.agile_status === 'cancelled') throw new Error('已结束需求不能直接回退');
   const permissions: Record<string, string[]> = {
     'analyst-agent': ['plan'],
     'dev-agent': ['analysis'],
@@ -685,10 +685,10 @@ export async function rewindTask(input: unknown) {
     totalStories = 0;
     approvedIndex = 0;
     nextStatus = occupied ? 'in dev' : 'in plan';
-    storyLabel = 'all stories';
+    storyLabel = '全部交付单元';
   } else {
-    if (task.total_stories <= 0) throw new Error('Story 拆分完成前不能 rewind 到 story 阶段');
-    if (!value.story || value.story < 1 || value.story > task.total_stories) throw new Error(`story 必须在 1-${task.total_stories} 之间`);
+    if (task.total_stories <= 0) throw new Error('交付拆分完成前不能回退到单元阶段');
+    if (!value.story || value.story < 1 || value.story > task.total_stories) throw new Error(`交付单元序号必须在 1-${task.total_stories} 之间`);
     const boundary = value.story - 1;
     if (value.to === 'analysis') {
       analysisIndex = Math.min(analysisIndex, boundary);
@@ -702,7 +702,7 @@ export async function rewindTask(input: unknown) {
       testIndex = Math.min(testIndex, boundary);
     }
     nextStatus = occupied || devIndex > 0 ? 'in dev' : 'ready for dev';
-    storyLabel = `story-${value.story}`;
+    storyLabel = `交付单元 ${value.story}`;
   }
   const prospective = { ...task, agile_status: nextStatus, analysis_index: analysisIndex, dev_index: devIndex, test_index: testIndex, total_stories: totalStories, analysis_approved_index: approvedIndex };
   assertState(prospective);
@@ -716,8 +716,8 @@ export async function rewindTask(input: unknown) {
           blocked_reason = NULL, resume_status = NULL, resume_pending = 0,
           last_actor = ?, completed_at = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
-    `).run(nextStatus, targetAgent, analysisIndex, devIndex, testIndex, totalStories, approvedIndex, value.reason || `rewind ${storyLabel} to ${value.to}`, value.actor, value.taskId);
-    addEvent(db, value.taskId, value.actor, 'TaskRewound', `rewind ${storyLabel} to ${value.to}`);
+    `).run(nextStatus, targetAgent, analysisIndex, devIndex, testIndex, totalStories, approvedIndex, value.reason || `回退 ${storyLabel} 到 ${value.to}`, value.actor, value.taskId);
+    addEvent(db, value.taskId, value.actor, 'TaskRewound', `回退 ${storyLabel} 到 ${value.to}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId, { createClearedBlock: true });
   } catch (error) {
@@ -733,10 +733,10 @@ export async function cancelTask(input: unknown) {
   const value = cancelSchema.parse(input);
   const db = await databaseConnection();
   const task = fetchTask(db, value.taskId);
-  if (!task) throw new Error('Task not found');
-  if (task.agile_status === 'done') throw new Error('done Task 不能取消');
+  if (!task) throw new Error('需求不存在');
+  if (task.agile_status === 'done') throw new Error('已完成需求不能取消');
   if (task.agile_status === 'cancelled') return;
-  if (occupiesCodeSlot(task) && !value.confirmCodeClean) throw new Error('Task 占用代码槽，请确认代码已清理后再取消');
+  if (occupiesCodeSlot(task) && !value.confirmCodeClean) throw new Error('需求占用代码槽，请确认代码已清理后再取消');
   db.exec('BEGIN');
   try {
     db.prepare(`
@@ -760,7 +760,7 @@ export async function cancelTask(input: unknown) {
 export async function pipelineForTask(taskId: string): Promise<Delegation[]> {
   const db = await databaseConnection();
   const task = fetchTask(db, taskId);
-  if (!task) throw new Error('Task not found');
+  if (!task) throw new Error('需求不存在');
   const otherActive = db.prepare(`${taskSelect} WHERE task_id != ?`).all(taskId) as Task[];
   const codeSlotAvailable = !otherActive.some(occupiesCodeSlot);
   const line = nextDelegation(task, codeSlotAvailable);
@@ -913,10 +913,10 @@ export async function createLoopDispatch(runId: string, options: { includeRunHea
   if (options.logDelegations !== false) {
     await appendLoopRunLog(runId, `[派发] 本轮生成 ${lines.length} 个 agent`);
     for (const [index, line] of lines.entries()) {
-      await appendLoopRunLog(runId, `[派发] #${index + 1} agent=${line.agent} pipeline=${line.pipeline} task=${line.taskId} story=${line.storyIndex ?? '-'} resource=${line.resource}`);
+      await appendLoopRunLog(runId, `[派发] #${index + 1} agent=${line.agent} flow=${line.pipeline} requirement=${line.taskId} unit=${line.storyIndex ?? '-'} resource=${line.resource}`);
       await appendLoopRunLog(runId, `[派发]      ${line.description}`);
     }
-    if (!lines.length) await appendLoopRunLog(runId, '[派发] 当前没有可执行委派，等待新 Task 或状态变化');
+    if (!lines.length) await appendLoopRunLog(runId, '[派发] 当前没有可执行步骤，等待新需求或状态变化');
   }
   return { runDir: 'database', delegations: lines };
 }

@@ -1,8 +1,9 @@
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
-import { AlertTriangle, CheckCircle2, Clock3, FileText, GitBranch, RotateCcw, SlidersHorizontal } from 'lucide-react';
+import { AlertTriangle, Check, CheckCircle2, Clock3, FileText, GitBranch, RotateCcw, SlidersHorizontal } from 'lucide-react';
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
+import { agentLabel, confirmationDecisionLabel, confirmationKindLabel, deliveryUnitLabel, documentKindLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
 import {
   addStoryAction,
   answerQuestionAction,
@@ -17,6 +18,25 @@ export const dynamic = 'force-dynamic';
 
 const statusOptions = ['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'done', 'blocked'];
 const agentOptions = ['backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent'];
+const taskSteps = [
+  { label: '需求整理', statuses: ['backlog', 'in repro'] },
+  { label: '交付拆分', statuses: ['in plan'] },
+  { label: '单元推进', statuses: ['ready for dev', 'in dev'] },
+  { label: '整体验收', statuses: ['in review'] },
+  { label: '完成', statuses: ['done'] },
+] as const;
+
+function stepDetail(task: { agile_status: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number }) {
+  if (task.agile_status === 'blocked') return `等待人工确认 · ${agentLabel(task.current_subagent)}`;
+  if (task.agile_status === 'backlog') return '正在收集上下文';
+  if (task.agile_status === 'in repro') return '正在复现并定位问题';
+  if (task.agile_status === 'in plan') return '正在拆分交付单元';
+  if (task.agile_status === 'ready for dev') return '准备逐个推进交付单元';
+  if (task.agile_status === 'in dev') return `分析 ${task.analysis_index}/${task.total_stories} · 实现 ${task.dev_index}/${task.total_stories} · 验证 ${task.test_index}/${task.total_stories}`;
+  if (task.agile_status === 'in review') return '正在进行整体验收';
+  if (task.agile_status === 'done') return '需求已完成交付';
+  return '需求已取消';
+}
 
 export default async function TaskDetail({ params }: { params: Promise<{ taskId: string }> }) {
   const { taskId } = await params;
@@ -25,31 +45,59 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const { task, stories, questions, documents, approvals, events } = detail;
   const pipeline = await pipelineForTask(taskId);
   const unansweredQuestions = questions.filter((question) => question.status !== 'answered');
+  const progressStatus = task.agile_status === 'blocked' ? task.resume_status || 'backlog' : task.agile_status;
+  const currentStep = taskSteps.findIndex((step) => step.statuses.some((status) => status === progressStatus));
 
   return <>
     <header className="task-header">
-      <Link className="crumb" href="/tasks">Task</Link>
+      <Link className="crumb" href="/tasks">需求</Link>
       <div className="task-title-row">
         <div>
           <p className="eyebrow">{task.task_id}</p>
           <h1>{task.title}</h1>
         </div>
-        <span className={`badge ${task.agile_status === 'blocked' ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{task.agile_status}</span>
+        <span className={`badge ${task.agile_status === 'blocked' ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{statusLabel(task.agile_status)}</span>
       </div>
       <div className="chips">
-        <span>{task.item_type}</span>
+        <span>{itemTypeLabel(task.item_type)}</span>
         <span>{task.priority || '未定级'}</span>
-        <span>{task.current_subagent || '未分配'}</span>
+        <span>{agentLabel(task.current_subagent)}</span>
         {task.link && <a href={task.link} target="_blank" rel="noreferrer">{task.link}</a>}
       </div>
     </header>
 
+    <section className={`card task-steps ${task.agile_status === 'blocked' ? 'blocked' : task.agile_status === 'done' ? 'done' : ''}`} aria-label="需求当前进度">
+      <div className="task-steps-head">
+        <strong>推进进度</strong>
+        <span>{Math.max(currentStep + 1, 1)} / {taskSteps.length}</span>
+      </div>
+      <ol>
+        {taskSteps.map((step, index) => {
+          const completed = task.agile_status === 'done' ? index <= currentStep : index < currentStep;
+          const current = index === currentStep;
+          return <li className={[completed ? 'completed' : '', current ? 'current' : ''].filter(Boolean).join(' ')} aria-current={current ? 'step' : undefined} key={step.label}>
+            <span className="step-marker">{completed ? <Check size={15}/> : index + 1}</span>
+            <span className="step-copy">
+              <strong>{step.label}</strong>
+            </span>
+          </li>;
+        })}
+      </ol>
+      <div className="task-step-caption">
+        <span className="caption-dot"/>
+        <div>
+          <small>{taskSteps[Math.max(currentStep, 0)]?.label}</small>
+          <strong>{stepDetail(task)}</strong>
+        </div>
+      </div>
+    </section>
+
     <section className="card task-summary">
       <div><small>分析</small><b>{task.analysis_index} / {task.total_stories}</b></div>
-      <div><small>开发</small><b>{task.dev_index} / {task.total_stories}</b></div>
-      <div><small>测试</small><b>{task.test_index} / {task.total_stories}</b></div>
+      <div><small>实现</small><b>{task.dev_index} / {task.total_stories}</b></div>
+      <div><small>验证</small><b>{task.test_index} / {task.total_stories}</b></div>
       <div><small>待确认</small><b>{unansweredQuestions.length}</b></div>
-      <div className="summary-wide"><small>下一步</small><p>{task.next_step || '—'}</p></div>
+      <div className="summary-wide"><small>下一步</small><p>{terminologyText(task.next_step) || '—'}</p></div>
       <div className="summary-wide"><small>文档</small><p>{documents.length} 个数据库文档</p></div>
     </section>
 
@@ -57,16 +105,16 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       <div className="task-main-column">
         <section className="task-section">
           <div className="section-head">
-            <h2>Story</h2>
-            <small>{stories.length ? `${stories.length} 个 Story` : '尚未拆分'}</small>
+            <h2>交付单元</h2>
+            <small>{stories.length ? `${stories.length} 个交付单元` : '尚未拆分'}</small>
           </div>
           <div className="card story-list">
-            {stories.length === 0 ? <div className="empty">尚未拆分 Story。</div> : stories.map((story) => <div className="story" key={story.story_index}>
+            {stories.length === 0 ? <div className="empty">尚未拆分交付单元。</div> : stories.map((story) => <div className="story" key={story.story_index}>
               <span className={story.story_index <= task.test_index ? 'done' : story.story_index <= task.dev_index ? 'active' : ''}>
                 {story.story_index <= task.test_index ? <CheckCircle2 size={16}/> : <Clock3 size={16}/>}
               </span>
               <div>
-                <strong>Story-{story.story_index} · {story.title}</strong>
+                <strong>{deliveryUnitLabel(story.story_index)} · {story.title}</strong>
                 <small>{story.directory || 'DB'}</small>
               </div>
               <em>{story.story_index <= task.test_index ? '测试完成' : story.story_index <= task.dev_index ? '等待测试' : story.story_index <= task.analysis_index ? '等待开发' : '等待分析'}</em>
@@ -74,30 +122,30 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           </div>
           <form action={addStoryAction} className="card form-panel inline-create">
             <input type="hidden" name="taskId" value={task.task_id}/>
-            <label>新增 Story<input name="title" required placeholder="Story 标题"/></label>
+            <label>新增交付单元<input name="title" required placeholder="描述可独立验收的最小业务闭环"/></label>
             <button className="button secondary" type="submit">添加</button>
           </form>
         </section>
 
         <section className="task-section">
           <div className="section-head">
-            <h2>Questions 与 Approval</h2>
-            <small>{questions.length} 个问题 · {approvals.length} 个 Approval</small>
+            <h2>确认事项</h2>
+            <small>{questions.length} 个事项 · {approvals.length} 条确认记录</small>
           </div>
           <div className="question-list">
             {questions.length === 0 ? <div className="card empty">当前没有待确认问题。</div> : questions.map((question, index) => <article className="question card" key={question.question_id}>
               <div className="question-title">
                 <AlertTriangle size={18}/>
                 <div>
-                  <p className="eyebrow">{question.kind.toUpperCase()} · {question.story_index ? `STORY-${question.story_index}` : 'TASK'}</p>
-                  <h3>{question.title}</h3>
-                  {question.source_agent && <small>来源：{question.source_agent}</small>}
+                  <p className="eyebrow">{confirmationKindLabel(question.kind)} · {deliveryUnitLabel(question.story_index)}</p>
+                  <h3>{terminologyText(question.title)}</h3>
+                  {question.source_agent && <small>来源：{agentLabel(question.source_agent)}</small>}
                 </div>
                 <span className={`badge ${question.status === 'answered' ? 'green' : 'amber'}`}>{question.status === 'answered' ? '已回答' : '待确认'}</span>
               </div>
-              <p>{question.question}</p>
-              {question.why && <p className="muted">为什么问：{question.why}</p>}
-              {question.recommendation && <div className="recommendation">推荐：{question.recommendation}</div>}
+              <p>{terminologyText(question.question)}</p>
+              {question.why && <p className="muted">为什么问：{terminologyText(question.why)}</p>}
+              {question.recommendation && <div className="recommendation">推荐：{terminologyText(question.recommendation)}</div>}
               {question.answer ? <p className="answer"><b>你的答复：</b>{question.answer}</p> : <form action={answerQuestionAction}>
                 <input type="hidden" name="taskId" value={task.task_id}/>
                 <input type="hidden" name="questionId" value={question.question_id}/>
@@ -108,86 +156,86 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           </div>
           {task.agile_status === 'blocked' && questions.every((question) => question.status === 'answered') && <form action={releaseBlockAction} className="release-block">
             <input type="hidden" name="taskId" value={task.task_id}/>
-            <button className="button success">解除阻塞并交回 {task.current_subagent}</button>
+            <button className="button success">解除阻塞并交回 {agentLabel(task.current_subagent)}</button>
           </form>}
         </section>
 
         <section className="task-section two-card-grid">
           <div>
-            <div className="section-head"><h2>Documents</h2><small>{documents.length} 个文档</small></div>
+            <div className="section-head"><h2>交付文档</h2><small>{documents.length} 个文档</small></div>
             <div className="card document-list">{documents.length === 0 ? <div className="empty">还没有数据库文档。</div> : documents.map((document) => <details key={document.document_id} className="document-item">
-              <summary><FileText size={15}/><span>{document.title}</span><small>{[document.kind, document.story_index ? `Story-${document.story_index}` : 'Task', document.source_agent || ''].filter(Boolean).join(' · ')}</small></summary>
+              <summary><FileText size={15}/><span>{terminologyText(document.title)}</span><small>{[documentKindLabel(document.kind), deliveryUnitLabel(document.story_index), agentLabel(document.source_agent)].filter(Boolean).join(' · ')}</small></summary>
               <pre>{document.content}</pre>
             </details>)}</div>
           </div>
           <div>
-            <div className="section-head"><h2>Approvals</h2><small>{approvals.length} 条记录</small></div>
-            <div className="card artifact-list">{approvals.length === 0 ? <div className="empty">还没有 Approval。</div> : approvals.map((approval) => <div key={approval.approval_id}><CheckCircle2 size={15}/><span>{approval.kind} · {approval.decision}</span><small>{approval.story_index ? `Story-${approval.story_index}` : 'Task'}</small></div>)}</div>
+            <div className="section-head"><h2>确认记录</h2><small>{approvals.length} 条记录</small></div>
+            <div className="card artifact-list">{approvals.length === 0 ? <div className="empty">还没有确认记录。</div> : approvals.map((approval) => <div key={approval.approval_id}><CheckCircle2 size={15}/><span>{confirmationKindLabel(approval.kind)} · {confirmationDecisionLabel(approval.decision)}</span><small>{deliveryUnitLabel(approval.story_index)}</small></div>)}</div>
           </div>
         </section>
 
         <section className="task-section">
           <div className="section-head"><h2>活动记录</h2><small>{events.length} 条</small></div>
-          <div className="card timeline">{events.length === 0 ? <div className="empty">暂无活动记录。</div> : events.map((event) => <div key={event.event_id}><span/><p><b>{event.actor}</b> · {event.summary}</p><small>{formatEventTime(event.created_at)}</small></div>)}</div>
+          <div className="card timeline">{events.length === 0 ? <div className="empty">暂无活动记录。</div> : events.map((event) => <div key={event.event_id}><span/><p><b>{agentLabel(event.actor)}</b> · {terminologyText(event.summary)}</p><small>{formatEventTime(event.created_at)}</small></div>)}</div>
         </section>
       </div>
 
       <aside className="task-action-column">
         <section className="card form-panel">
-          <h2><GitBranch size={15}/>Pipeline</h2>
+          <h2><GitBranch size={15}/>推进流程</h2>
           {pipeline.length === 0 ? <p className="muted">当前没有可派发步骤。</p> : pipeline.map((item) => <div className="pipeline-card" key={`${item.pipeline}-${item.storyIndex || 0}`}>
             <GitBranch size={16}/>
             <div>
-              <strong>{item.pipeline} · {item.agent}</strong>
-              <small>{item.storyIndex ? `Story-${item.storyIndex}` : 'Task 级'} · {item.resource}</small>
+              <strong>{flowLabel(item.pipeline)} · {agentLabel(item.agent)}</strong>
+              <small>{deliveryUnitLabel(item.storyIndex)} · {item.resource === 'browser' ? '浏览器' : '无需独占资源'}</small>
               <p>{item.description}</p>
             </div>
           </div>)}
         </section>
 
         <form action={initializeContextAction} className="card form-panel">
-          <h2>数据库上下文</h2>
+          <h2>需求上下文</h2>
           <input type="hidden" name="taskId" value={task.task_id}/>
           <div className="fields">
-            <label>类型<select name="kind" defaultValue={task.item_type}><option value="feature">feature</option><option value="bug">bug</option><option value="tech">tech</option><option value="intake">intake</option></select></label>
+            <label>类型<select name="kind" defaultValue={task.item_type}><option value="feature">功能需求</option><option value="bug">缺陷</option><option value="tech">技术改进</option><option value="intake">待梳理</option></select></label>
             <label>说明<input name="slug" placeholder="可选备注，不创建目录"/></label>
           </div>
           <div className="fields">
-            <label>状态<select name="status" defaultValue={task.agile_status === 'backlog' ? 'in plan' : task.agile_status}>{statusOptions.map((status) => <option value={status} key={status}>{status}</option>)}</select></label>
-            <label>Agent<select name="currentSubagent" defaultValue={task.current_subagent || 'story-splitter-agent'}>{agentOptions.map((agent) => <option value={agent} key={agent}>{agent}</option>)}</select></label>
+            <label>状态<select name="status" defaultValue={task.agile_status === 'backlog' ? 'in plan' : task.agile_status}>{statusOptions.map((status) => <option value={status} key={status}>{statusLabel(status)}</option>)}</select></label>
+            <label>Agent<select name="currentSubagent" defaultValue={task.current_subagent || 'story-splitter-agent'}>{agentOptions.map((agent) => <option value={agent} key={agent}>{agentLabel(agent)}</option>)}</select></label>
           </div>
-          <label>下一步<input name="nextStep" placeholder="例如：拆分 story"/></label>
-          <button className="button" type="submit">初始化 / 同步上下文</button>
+          <label>下一步<input name="nextStep" placeholder="例如：拆分交付单元"/></label>
+          <button className="button" type="submit">同步需求上下文</button>
         </form>
 
         <form action={transitionTaskAction} className="card form-panel">
           <h2><SlidersHorizontal size={15}/>状态流转</h2>
           <input type="hidden" name="taskId" value={task.task_id}/>
           <div className="fields">
-            <label>状态<select name="status" defaultValue={task.agile_status}>{statusOptions.map((status) => <option value={status} key={status}>{status}</option>)}</select></label>
-            <label>Agent<select name="currentSubagent" defaultValue={task.current_subagent || ''}><option value="">不修改</option>{agentOptions.map((agent) => <option value={agent} key={agent}>{agent}</option>)}</select></label>
+            <label>状态<select name="status" defaultValue={task.agile_status}>{statusOptions.map((status) => <option value={status} key={status}>{statusLabel(status)}</option>)}</select></label>
+            <label>Agent<select name="currentSubagent" defaultValue={task.current_subagent || ''}><option value="">不修改</option>{agentOptions.map((agent) => <option value={agent} key={agent}>{agentLabel(agent)}</option>)}</select></label>
           </div>
           <label>下一步<input name="nextStep" placeholder="更新 next_step"/></label>
           <button className="button secondary" type="submit">更新状态</button>
         </form>
 
         <form action={rewindTaskAction} className="card form-panel">
-          <h2><RotateCcw size={15}/>Rewind</h2>
+          <h2><RotateCcw size={15}/>回退</h2>
           <input type="hidden" name="taskId" value={task.task_id}/>
           <div className="fields">
-            <label>回退到<select name="to" defaultValue="analysis"><option value="plan">plan</option><option value="analysis">analysis</option><option value="dev">dev</option><option value="test">test</option></select></label>
-            <label>Story<input name="story" type="number" min="1" max={Math.max(task.total_stories, 1)} placeholder="需要 story"/></label>
+            <label>回退到<select name="to" defaultValue="analysis"><option value="plan">交付拆分</option><option value="analysis">方案分析</option><option value="dev">开发实现</option><option value="test">验证</option></select></label>
+            <label>交付单元<input name="story" type="number" min="1" max={Math.max(task.total_stories, 1)} placeholder="单元序号"/></label>
           </div>
           <label>原因<input name="reason" placeholder="为什么需要回退"/></label>
-          <button className="button secondary" type="submit">执行 Rewind</button>
+          <button className="button secondary" type="submit">执行回退</button>
         </form>
 
         <form action={cancelTaskAction} className="card form-panel danger-card">
-          <h2>取消 Task</h2>
+          <h2>取消需求</h2>
           <input type="hidden" name="taskId" value={task.task_id}/>
           <label>原因<input name="reason" required placeholder="重复、撤回或无效"/></label>
           <label className="checkbox"><input type="checkbox" name="confirmCodeClean"/>代码槽已清理</label>
-          <button className="button danger" type="submit">取消 Task</button>
+          <button className="button danger" type="submit">取消需求</button>
         </form>
       </aside>
     </div>

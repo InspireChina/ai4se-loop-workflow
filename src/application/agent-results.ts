@@ -15,7 +15,7 @@ import {
 
 const artifactKinds: Record<string, string> = {
   'backlog-agent': 'context',
-  'story-splitter-agent': 'story_split',
+  'story-splitter-agent': 'delivery_split',
   'analyst-agent': 'analysis',
   'repro-agent': 'repro',
   'dev-agent': 'dev_note',
@@ -33,19 +33,19 @@ function questionKind(agent: string) {
 async function saveArtifact(delegation: DelegationEnvelope, result: AgentResult) {
   let artifact = result.artifact;
   if (!artifact && delegation.agent === 'backlog-agent') artifact = {
-    title: 'Task 分类与上下文',
+    title: '需求分类与上下文',
     content: `${result.summary}\n\n- 分类：${result.classification || '未确定'}\n- 路由：${result.route || '未确定'}`,
   };
-  if (!artifact && delegation.agent === 'story-splitter-agent' && result.stories?.length) artifact = {
-    title: 'Story 拆分',
-    content: result.stories.map((story, index) => `${index + 1}. ${story.title}`).join('\n'),
+  if (!artifact && delegation.agent === 'story-splitter-agent' && result.deliveryUnits?.length) artifact = {
+    title: '交付单元拆分',
+    content: result.deliveryUnits.map((unit, index) => `${index + 1}. ${unit.title}`).join('\n'),
   };
   if (!artifact && delegation.agent === 'dev-agent') artifact = {
-    title: `Story-${delegation.storyIndex} 开发结果`,
+    title: `交付单元 ${delegation.storyIndex} 开发实现结果`,
     content: [result.summary, ...(result.tests || []).map((test) => `- ${test.passed ? '通过' : '失败'}：${test.command}${test.summary ? ` — ${test.summary}` : ''}`)].join('\n\n'),
   };
   if (!artifact && delegation.agent === 'test-agent') artifact = {
-    title: `Story-${delegation.storyIndex} 测试结果`,
+    title: `交付单元 ${delegation.storyIndex} 验证结果`,
     content: [`结论：${result.verdict || result.outcome}`, result.summary, ...(result.tests || []).map((test) => `- ${test.passed ? '通过' : '失败'}：${test.command}${test.summary ? ` — ${test.summary}` : ''}`)].join('\n\n'),
   };
   if (!artifact) return;
@@ -195,21 +195,21 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       return 'advanced' as const;
     }
     case 'story-splitter-agent': {
-      if (!result.stories?.length) throw new Error('story-splitter-agent 结果缺少 stories');
+      if (!result.deliveryUnits?.length) throw new Error('交付规划 Agent 结果缺少 deliveryUnits');
       const detail = await getTask(delegation.taskId);
-      if (!detail) throw new Error(`task not found: ${delegation.taskId}`);
-      if (detail.stories.length) throw new Error('当前 Task 已存在 Story，拒绝重复拆分');
-      for (const story of result.stories) await addStory({ taskId: delegation.taskId, actor, title: story.title });
+      if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
+      if (detail.stories.length) throw new Error('当前需求已存在交付单元，拒绝重复拆分');
+      for (const unit of result.deliveryUnits) await addStory({ taskId: delegation.taskId, actor, title: unit.title });
       await updateTask(delegation.taskId, actor, {
         agile_status: 'ready for dev',
         current_subagent: 'analyst-agent',
-        next_step: `已拆分 ${result.stories.length} 个 Story，等待逐个分析`,
+        next_step: `已拆分 ${result.deliveryUnits.length} 个交付单元，等待逐个进行方案分析`,
       });
       return 'advanced' as const;
     }
     case 'analyst-agent': {
       requireArtifact(result, delegation.agent);
-      if (!delegation.storyIndex) throw new Error('analyst-agent 缺少 storyIndex');
+      if (!delegation.storyIndex) throw new Error('方案分析 Agent 缺少交付单元序号');
       if (result.questions.length) {
         await saveQuestions(delegation, result);
         return 'blocked' as const;
@@ -218,8 +218,8 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         analysis_index: delegation.storyIndex,
         analysis_approved_index: delegation.storyIndex,
         next_step: delegation.pipeline === 'resume'
-          ? `Story-${delegation.storyIndex} 分析已按人工答复更新`
-          : `Story-${delegation.storyIndex} 分析完成，无待确认设计决策`,
+          ? `交付单元 ${delegation.storyIndex} 的方案已按人工答复更新`
+          : `交付单元 ${delegation.storyIndex} 的方案分析完成，无待确认设计决策`,
       });
       return 'advanced' as const;
     }
@@ -234,7 +234,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       return 'advanced' as const;
     }
     case 'dev-agent': {
-      if (!delegation.storyIndex) throw new Error('dev-agent 缺少 storyIndex');
+      if (!delegation.storyIndex) throw new Error('开发实现 Agent 缺少交付单元序号');
       await updateTask(delegation.taskId, actor, {
         agile_status: 'in dev',
         current_subagent: 'dev-agent',
@@ -244,10 +244,10 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       return 'advanced' as const;
     }
     case 'test-agent': {
-      if (!delegation.storyIndex || !result.verdict) throw new Error('test-agent 结果缺少 storyIndex 或 verdict');
+      if (!delegation.storyIndex || !result.verdict) throw new Error('验证 Agent 结果缺少交付单元序号或 verdict');
       if (result.verdict === 'passed') {
         const detail = await getTask(delegation.taskId);
-        if (!detail) throw new Error(`task not found: ${delegation.taskId}`);
+        if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
         const complete = delegation.storyIndex === detail.task.total_stories && detail.task.dev_index === detail.task.total_stories && detail.task.analysis_index === detail.task.total_stories;
         await updateTask(delegation.taskId, actor, {
           agile_status: complete ? 'in review' : 'in dev',
@@ -258,14 +258,14 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         return 'advanced' as const;
       }
       const target = result.rewindTo === 'analysis' ? 'analysis' : 'dev';
-      await rewindTask({ taskId: delegation.taskId, actor, to: target, story: result.rewindStory || delegation.storyIndex, reason: result.summary });
+      await rewindTask({ taskId: delegation.taskId, actor, to: target, story: result.rewindDeliveryUnit || delegation.storyIndex, reason: result.summary });
       return 'rewound' as const;
     }
     case 'review-agent': {
       requireArtifact(result, delegation.agent);
       if (result.verdict === 'changes_requested') {
         if (!result.rewindTo) throw new Error('review-agent 要求修改时必须给出 rewindTo');
-        await rewindTask({ taskId: delegation.taskId, actor, to: result.rewindTo, story: result.rewindStory, reason: result.summary });
+        await rewindTask({ taskId: delegation.taskId, actor, to: result.rewindTo, story: result.rewindDeliveryUnit, reason: result.summary });
         return 'rewound' as const;
       }
       if (result.verdict !== 'ready_for_approval') throw new Error('review-agent 结果缺少有效 verdict');
@@ -282,10 +282,10 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         taskId: delegation.taskId,
         actor,
         kind: 'review',
-        title: '确认 Task 最终交付',
-        question: '请确认当前 Task 的实现与验证结果是否可以完成交付。',
-        why: 'Task 完成需要最终人工批准。',
-        recommendation: '确认交付后完成 Task。',
+        title: '确认需求最终交付',
+        question: '请确认当前需求的实现与验证结果是否可以完成交付。',
+        why: '需求完成需要最终人工确认。',
+        recommendation: '确认交付后完成需求。',
         blockedReason: '等待最终交付批准',
         blockTask: true,
       });
@@ -333,7 +333,7 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
 
   try {
     const detail = await getTask(row.task_id);
-    if (!detail) throw new Error(`task not found: ${row.task_id}`);
+    if (!detail) throw new Error(`需求不存在：${row.task_id}`);
     const result = parseAgentResult(row.result_json);
     const delegation = envelopeFromTask(row, detail);
     const outcome = await applyResultEffects(delegation, result);

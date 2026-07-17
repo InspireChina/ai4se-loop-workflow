@@ -14,7 +14,7 @@ python scripts/loop/loopctl.py <command>
 python scripts/loop/loopctl.py paths
 ```
 
-Run 生命周期、Pipeline 派发和结束运行只由 Web App 与内部 Runner 管理。Runner 每次只启动一个 Agent，注入完整上下文并接收结构化 JSON；正常 Agent 不调用本 CLI。单个 agent 仍可在当前 delegation 内使用辅助 subagent 收集上下文。
+Loop 生命周期、推进步骤和结束运行只由 Web App 与内部 Runner 管理。Runner 每次只启动一个 Agent，注入完整需求上下文并接收结构化 JSON；正常 Agent 不调用本 CLI。单个 Agent 仍可在当前执行步骤内使用辅助 subagent 收集上下文。
 
 ## 人工维护与诊断命令
 
@@ -28,4 +28,6 @@ python scripts/loop/loopctl.py task-update TASK-id --actor analyst-agent --statu
 python scripts/loop/loopctl.py task-rewind TASK-id --actor human --to analysis --story 2
 ```
 
-不要直接改 SQLite。所有 Task 状态、游标、blocked、release 和 rewind 都通过 CLI 或 UI command。Agent 的运行过程不需要主动上报；Runner 会直接解析所选 CLI 的 stream-json / JSONL。
+不要直接改 SQLite。所有需求状态、进度、阻塞、恢复和回退都通过 CLI 或 UI 命令完成。Agent 的运行过程不需要主动上报；Runner 会直接解析所选 CLI 的 stream-json / JSONL。
+
+这里保留的 `task-*`、`story` 等命令参数只是维护接口和数据库兼容名，不是产品界面或 Agent 提示词中的术语。

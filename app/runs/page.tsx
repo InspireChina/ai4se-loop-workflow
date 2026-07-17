@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { Activity, LockKeyhole, Route, ScrollText } from 'lucide-react';
 import { formatEventTime } from '../../src/application/event-time';
 import { getRunStatus, listRecentEvents } from '../../src/application/tasks';
+import { agentLabel, terminologyText } from '../../src/domain/terminology';
 import { endLoopRunAction, startLoopRunAction } from '../actions';
 import LoopLogStream from '../loop-log-stream';
 
@@ -14,12 +15,12 @@ export default async function RunsPage() {
     <header>
       <p className="eyebrow">LOOP RUNS</p>
       <h1>运行面板</h1>
-      <p className="muted">这里展示每轮 loop 的实时运行日志。需要执行的 agent、dispatch 和状态变化都会写到日志里。</p>
+      <p className="muted">这里展示每轮 Loop 的实时运行日志，包括 Agent 执行、推进计划和状态变化。</p>
     </header>
 
     <section className="run-toolbar">
       <div>
-        <span className={`badge ${run?.active ? 'amber' : 'green'}`}>{run?.active ? 'running' : 'idle'}</span>
+        <span className={`badge ${run?.active ? 'amber' : 'green'}`}>{run?.active ? '运行中' : '已停止'}</span>
         <small>{run?.active ? `${run.owner} · pid ${run.pid ?? '启动中'}` : '当前没有运行中的 loop。'}</small>
       </div>
       {run?.active ? <form action={endLoopRunAction}>
@@ -49,8 +50,8 @@ export default async function RunsPage() {
       <div className="card run-event-list">
         {events.length === 0 ? <div className="empty">暂无事件。</div> : events.map((event) => <Link href={`/tasks/${event.task_id}`} className="run-event-row" key={event.event_id}>
           <Activity size={14}/>
-          <span><strong>{event.actor}</strong><small>{event.title}</small></span>
-          <em>{event.summary}</em>
+          <span><strong>{agentLabel(event.actor)}</strong><small>{event.title}</small></span>
+          <em>{terminologyText(event.summary)}</em>
           <small>{formatEventTime(event.created_at)}</small>
         </Link>)}
       </div>

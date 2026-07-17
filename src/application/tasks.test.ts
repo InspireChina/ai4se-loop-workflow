@@ -52,6 +52,7 @@ test('creates title-only and described Tasks without blocking delegation and ser
   const titleOnlyTaskId = await createTask({ title: 'Title only Task' });
   const blankDescriptionTaskId = await createTask({ title: 'Blank description Task', description: '   ' });
   const describedTaskId = await createTask({ title: 'Described Task', description: 'Keep this value for the next story.' });
+  assert.match(titleOnlyTaskId, /^REQ-/);
 
   const titleOnlyTask = await getTask(titleOnlyTaskId);
   const blankDescriptionTask = await getTask(blankDescriptionTaskId);
@@ -172,7 +173,7 @@ test('keeps agent analysis Questions displayable, answerable, and releasable wit
   assert.equal(question?.recommendation, 'Keep it public for this release.');
   assert.equal(question?.status, 'pending');
   assert.equal(detail?.approvals.find((item) => item.kind === 'analysis')?.decision, 'pending');
-  await assert.rejects(() => releaseBlock(taskId), /仍有待回答问题/);
+  await assert.rejects(() => releaseBlock(taskId), /仍有未回答的确认事项/);
 
   await answerQuestion({ taskId, questionId, answer: 'Keep it public.' });
   detail = await getTask(taskId);

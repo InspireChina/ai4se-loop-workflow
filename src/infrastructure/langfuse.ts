@@ -206,16 +206,16 @@ export function createLangfuseTelemetry(options: LangfuseTelemetryOptions = {}):
       const prompt = isEnabled(context) ? this.preparePrompt(context, attributes.prompt) : undefined;
       const metadata = sanitizeLangfuseValue({
         runToken: context.runToken ?? null,
-        taskId: context.taskId ?? null,
-        storyIndex: context.storyIndex ?? null,
-        pipeline: context.pipeline ?? null,
+        requirementId: context.taskId ?? null,
+        deliveryUnitIndex: context.storyIndex ?? null,
+        flow: context.pipeline ?? null,
         agent: context.agent ?? null,
         executor: attributes.executor,
         promptCaptured: Boolean(prompt),
         promptLength: attributes.prompt.length,
       }) as Record<string, unknown>;
       const trace = await this.withClient(context, (activeClient) => activeClient.trace?.({
-        name: 'loop.delegation',
+        name: 'loop.agent-execution',
         sessionId: context.runToken,
         metadata,
         ...(prompt ? { input: { prompt } } : {}),

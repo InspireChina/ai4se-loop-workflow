@@ -2,220 +2,182 @@
 
 ## 1. 统一语言
 
-V1 的产品术语沿用现有系统，不采用 prototype 的新术语替代已有概念。
-
-| 术语 | 含义 |
+| 产品术语 | 含义 |
 |---|---|
-| Task | `tasks` 表中的工作项，Feature、Bug、Tech 等均以 Task 进入 loop。 |
-| Story | Task 经 `story-splitter-agent` 拆出的可推进单元。 |
-| Agent | `backlog-agent`、`story-splitter-agent`、`analyst-agent`、`repro-agent`、`dev-agent`、`test-agent`、`review-agent`。 |
-| Pipeline | 根据 Task 状态和游标计算出的下一步委派。 |
-| Analysis / Dev / Test Index | Story 分别完成分析、开发、测试的顺序游标。 |
-| Blocked | Task 等待人工或外部信息的状态，不是 Agent 失败的同义词。 |
-| Question | Application 根据 Agent Result 创建的待确认问题。 |
-| Approval | analysis 问题解决状态与 review 人工门禁记录。 |
-| Document | Application 根据 Agent Result 写入的业务正文，例如 context、analysis、repro、test result、review。 |
-| Run | 一次本地持续 Loop；以 `runId` 关联日志，以 Runner PID 防止重复启动。 |
-| Code Slot | 无 worktree 时仅允许一个 Task 占用开发/评审相关代码工作区的限制。 |
+| 需求（Requirement） | 用户输入的完整目标，可能包含多个可独立交付的业务流程，是系统的流程聚合根。 |
+| 交付单元（Delivery Unit） | 从需求中拆出的最小可独立交付、验证的业务闭环，粒度应适合一个开发实现 Agent 在一次上下文中完成。 |
+| Agent 执行 | 应用为一个明确推进步骤启动一次 Agent CLI。 |
+| 推进流程 | 应用根据需求状态和进度计算出的下一组 Agent 执行步骤。 |
+| 确认事项 | Agent 无法从代码和已有上下文确定、必须由用户决策的信息。 |
+| 确认记录 | 对确认事项或整体验收给出的结构化结论。 |
+| 交付文档 | 需求梳理、方案分析、问题复现、验证结果和整体验收等正文。 |
+| Loop 运行 | 应用持续计算下一步、执行 Agent、保存结果并再次计算的本地循环。 |
+| 待确认 | 需求等待用户或外部信息，不等同于 Agent 执行失败。 |
+| 代码槽 | 本地单工作区中开发实现和整体验收写代码时的串行保护。 |
 
-## 2. Bounded Context
+标准推进过程：
 
-### 2.1 Task Management
+```text
+录入需求 → 需求梳理 → 交付拆分 → 单元推进（方案分析 → 开发实现 → 验证）→ 整体验收 → 完成
+```
 
-负责 Task 生命周期、Story 游标、状态迁移、回退和终止。
+交付单元必须以可验收的业务结果命名和拆分。不得把“数据库层”“接口层”“页面层”“测试层”分别作为交付单元；这些属于同一个业务闭环内部的实现工作。
 
-- Aggregate Root：`Task`
-- 内部实体：`Story`
-- 值对象：`TaskStatus`、`ItemType`、`Priority`、`PipelineProgress`
-- 关键命令：`CreateTask`、`TaskContextInit`、`AddStory`、`TaskUpdate`、`TaskRewind`、`TaskCancel`
+## 2. 限界上下文
 
-`Task` 是 V1 的唯一流程 aggregate root。Story 作为其内部实体存在，因为当前状态机必须在同一一致性边界内维护 Task 状态与三个 Story 游标。
+### 2.1 需求管理（Requirement Management）
 
-### 2.2 Loop Orchestration
+负责需求生命周期、交付单元进度、状态迁移、回退和取消。
 
-负责读取 Task 当前状态并生成委派计划；不直接修改 Task。
+- Aggregate Root：`Requirement`
+- 内部实体：`DeliveryUnit`
+- 值对象：`RequirementStatus`、`RequirementType`、`Priority`、`DeliveryProgress`
+- 关键命令：`CreateRequirement`、`InitializeRequirementContext`、`AddDeliveryUnit`、`AdvanceRequirement`、`RewindRequirement`、`CancelRequirement`
 
-- 模型：`Run`、`Delegation`
-- 关键命令：`RunBegin`、`PipelineAll`、`RunEnd`、`RunDelegation`
-- 依赖：Task Management 的只读状态与 Resource Management 的可用性
+需求是 V1 唯一的流程聚合根。交付单元属于需求的一致性边界，因为方案分析、开发实现和验证进度必须与需求状态在一个事务中保持一致。
 
-V1 的持续 loop 由 App runner 驱动。若本轮有委派，runner 通过 Agent Executor Port 按 delegation 逐个启动项目所选 CLI；每次执行只处理一个明确 pipeline agent。当前 agent 可以在本 delegation 内使用辅助 subagent 做上下文收集，但辅助 subagent 不参与 pipeline 调度。若没有委派，等待后继续重试。
+### 2.2 Loop 编排（Loop Orchestration）
 
-运行日志不由 Agent 主动上报。Agent Executor Adapter 直接解析 Cursor/Claude 的 stream-json 与 Codex JSONL，包括输出、工具事件、stderr 和退出码；Application command 成功后另外自动追加领域审计事件。
+负责读取需求当前事实、计算下一步并逐个执行 Agent；Agent 不负责决定整体流程。
 
-Loop Orchestration 同时负责 delegation 完成契约：analysis delegation 必须产生分析文档；返回设计决策问题时批量创建 Question 并阻塞，没有问题时直接推进相应游标。Runner 不自动补建 analysis 确认问题。
+- 模型：`LoopRun`、`AgentExecution`
+- 关键用例：开始运行、计算推进步骤、执行单个 Agent、应用结构化结果、结束运行
+- 依赖：需求管理的只读状态、资源管理的可用性、Agent Executor Port
 
-dev delegation 的业务完成以 Git commit 成功为前提。dev-agent 只修改代码和执行测试；Runner 负责提交当前 Story，Application 校验后推进 `dev_index`。无法从既有脏工作区中安全隔离改动时由流程进入 blocked。
+每次 Agent 执行只处理一个明确目标。当前 Agent 可使用辅助 subagent 收集局部上下文，但辅助 subagent 不参与整体调度，也不能推进其他交付单元。
 
-### 2.3 Question and Approval
+执行日志不由 Agent 主动上报。Agent Executor Adapter 直接解析 Cursor、Codex、Claude 的流式输出、工具调用、stderr 和退出码；Application 在命令成功后追加领域审计事件。
 
-负责人工确认点，但不重新定义 Task 工作流。
+Loop 的等待策略属于编排规则：本轮有 Agent 执行时，1 分钟后继续；没有可执行步骤时，5 分钟后重试。等待不产生额外 Agent 调用。
 
-- 模型：`Question`、`Approval`
-- 关键命令：`AddQuestion`、`AnswerQuestion`、`BlockRelease`
-- 依赖：Task Management
+### 2.3 确认管理（Confirmation Management）
 
-`Question` 的正文、推荐答案、用户答复都以 SQLite 为事实来源。Agent 不写 question 文档。`Approval` 表达 analysis 的 `pending/confirmed` 与 review 的 `pending/approved`。
+负责用户决策点，但不自行改变需求流程。
 
-### 2.4 Document Management
+- 模型：`ConfirmationItem`、`ConfirmationRecord`
+- 关键命令：创建确认事项、回答确认事项、解除待确认
+- 依赖：需求管理
 
-负责业务文档的结构化保存和读取，不拥有 Task 状态。
+确认事项的正文、建议和用户答复以 SQLite 为唯一事实来源。Agent 通过最终结构化 JSON 返回确认事项，不写旧的问题 Markdown。方案分析产生的确认事项全部回答后，流程恢复给原 Agent 更新方案；整体验收的确认记录是需求完成的人工门禁。
 
-- 模型：`Document`
+### 2.4 文档管理（Document Management）
+
+负责交付文档的结构化保存和读取，不拥有需求状态。
+
+- 模型：`DeliveryDocument`
 - 值对象：`DocumentKind`、`DocumentFormat`
-- 关键命令：`UpsertDocument`、`ListDocuments`、`GetDocument`
+- 关键命令：保存文档、查询文档
 
-Document 是替代旧工作目录 Markdown 的事实来源。Application 从结构化 Agent Result 写入；UI 直接从 `documents` 表展示正文。
+Application 从 Agent 的结构化结果写入文档，UI 直接读取数据库正文。目标代码库不生成 `.project`、Inbox 或流程 Markdown。
 
-### 2.5 Resource Management
+### 2.5 资源管理（Resource Management）
 
-负责展示和校验现有资源约束。
+负责解释并校验本地运行约束。
 
 - 模型：`CodeSlot`、`BrowserReservation`
-- 关键规则：一个 Code Slot；每轮最多一个 Browser 委派。
+- 关键规则：同一时间一个代码槽；每轮最多一个浏览器独占步骤
 
-V1 不增加新的资源调度器。这个 context 的职责是把当前约束从隐式 CLI 错误变成可解释的 UI 信息。
+代码槽繁忙不是待确认事项。需要写代码的步骤进入内部等待队列，释放后自动继续。开发实现 Agent 开始前若存在普通未提交改动，Runner 先创建 checkpoint commit，再执行并单独提交本交付单元；敏感文件仍会阻止自动提交。
 
-### 2.6 Project Configuration
+### 2.6 项目配置（Project Configuration）
 
-负责当前 workspace root。
+用户只配置工作区根目录和 Agent 执行器。工作区短 hash、应用数据目录和 SQLite 路径对普通用户不可见。
 
-- Aggregate Root：`Project`
-- 模型：`WorkspaceRoot`
-
-用户只需要设置工作区根目录。repo hash、数据库路径、app data 目录和运行模式对普通用户隐藏。
-
-当前 workspace root 属于应用级配置，存入 `data/loopwork.db`；Task、Document、Question、Run 和执行器选择仍存入当前 workspace 对应的项目数据库。切换工作区时必须确认当前项目没有活跃 Run。
+当前工作区根目录存入应用级 `data/loopwork.db`；每个工作区的需求、文档、确认事项、Loop 运行和执行器设置存入独立项目数据库。切换工作区前必须确认当前项目没有活跃 Loop 运行。
 
 ## 3. 领域关系
 
 ```mermaid
 classDiagram
-  class Task {
-    +taskId
-    +agileStatus
-    +currentSubagent
-    +analysisIndex
-    +devIndex
-    +testIndex
-    +totalStories
+  class Requirement {
+    +requirementId
+    +status
+    +currentAgent
+    +analysisProgress
+    +developmentProgress
+    +verificationProgress
     +block()
-    +releaseBlock()
+    +release()
     +rewind()
   }
-  class Story {
+  class DeliveryUnit {
     +index
     +title
   }
-  class Question {
-    +questionId
-    +kind
-    +status
-  }
-  class Approval {
-    +kind
-    +decision
-  }
-  class Document {
-    +documentId
-    +kind
-    +storyIndex
-    +format
-  }
-  class Run {
-    +runId
-    +runnerPid
-  }
-  class Delegation {
-    +pipeline
+  class ConfirmationItem
+  class ConfirmationRecord
+  class DeliveryDocument
+  class LoopRun
+  class AgentExecution {
+    +flow
     +agent
-    +storyIndex
-    +resource
+    +deliveryUnitIndex
   }
 
-  Task "1" *-- "0..*" Story
-  Task "1" --> "0..*" Question
-  Task "1" --> "0..*" Approval
-  Task "1" --> "0..*" Document
-  Story "1" --> "0..*" Question
-  Story "1" --> "0..*" Document
-  Run "1" --> "0..*" Delegation
-  Delegation --> Task
+  Requirement "1" *-- "0..*" DeliveryUnit
+  Requirement "1" --> "0..*" ConfirmationItem
+  Requirement "1" --> "0..*" ConfirmationRecord
+  Requirement "1" --> "0..*" DeliveryDocument
+  DeliveryUnit "1" --> "0..*" ConfirmationItem
+  DeliveryUnit "1" --> "0..*" DeliveryDocument
+  LoopRun "1" --> "0..*" AgentExecution
+  AgentExecution --> Requirement
 ```
 
-## 4. Task 不变量
+## 4. 需求不变量
 
-这些规则来自旧 loop 状态机，V1 的领域层和 Server Action 必须保持一致。
+1. `0 <= verification_progress <= development_progress <= analysis_progress <= total_delivery_units`。
+2. 等待单元推进时必须至少存在一个交付单元。
+3. 进入整体验收前，所有交付单元必须完成方案分析、开发实现和验证。
+4. 待确认状态必须记录当前责任 Agent 和原因。
+5. 方案分析恢复推进前，相关确认事项必须全部回答。
+6. 需求完成前必须存在整体验收的通过记录。
+7. 逆向流程只能通过统一回退命令，不能直接减少进度值。
+8. 从待确认恢复后，第一次执行必须交回原责任 Agent。
+9. 代码槽繁忙时自动排队，不能生成要求用户处理的确认事项。
+10. 每轮最多派发一个需要独占浏览器的 Agent 执行。
 
-1. `0 <= test_index <= dev_index <= analysis_index <= total_stories`。
-2. `ready for dev` 必须存在至少一个 Story。
-3. `in review` 时所有 Story 必须已完成 analysis、dev 和 test。
-4. `blocked` 必须有 `current_subagent` 和 `blocked_reason`。
-5. Story analysis 推进前，必须存在对应的人工 `confirmed` approval。
-6. Task 进入 `done` 前，必须存在 review 的 `approved` approval。
-7. 逆向流程只能通过 `task-rewind`；不允许由 UI 直接减少任何游标。
-8. 从 `blocked` 恢复只能通过 `block-release`；恢复后的第一次委派必须交回原 `current_subagent`。
-9. 已占用 Code Slot 的 Task，以及从开发/评审状态 blocked 的 Task，继续占用代码槽。
-10. 每轮派发最多出现一个 `resource=browser` 的 Delegation。
+## 5. Agent 与流程的责任边界
 
-## 5. 状态与命令责任
+| 决策 | 负责方 |
+|---|---|
+| 当前应执行哪个 Agent | 应用推进流程 |
+| 当前处理哪个交付单元 | 应用推进流程 |
+| 是否满足状态和进度不变量 | Application / Domain |
+| 需求如何拆成业务闭环 | 交付规划 Agent |
+| 单元方案与实现细节 | 方案分析 / 开发实现 Agent |
+| 测试是否通过 | 验证 Agent |
+| 整体需求是否可交付 | 整体验收 Agent + 用户确认记录 |
+| 工具调用、subagent 使用 | 当前 Agent |
+| 文档、确认事项和结果入库 | Application |
+| Git checkpoint 与交付提交 | Runner |
 
-| 命令 | 负责 context | 允许 actor / 来源 | 结果 |
-|---|---|---|---|
-| `CreateTask` | Task Management | human | 创建 backlog Task。 |
-| `TaskContextInit` | Task Management | backlog-agent / human | 初始化数据库上下文，不创建工作目录。 |
-| `AddStory` | Task Management | human / story-splitter-agent | 创建 Story 结构化记录。 |
-| `UpsertDocument` | Document Management | 当前责任 agent / human | 保存业务正文到 `documents` 表。 |
-| `TaskUpdate` | Task Management | 当前角色权限 | 正向推进或记录 blocked。 |
-| `TaskRewind` | Task Management | analyst/dev/test/review/human | 统一逆向游标与责任 agent。 |
-| `AddQuestion` | Question and Approval | 当前责任 agent / human | 校验 JSON 并创建 Question 记录。 |
-| `BlockRelease` | Question and Approval + Task Management | human | 确认全部问题已回答，恢复 Task 并设置 resume pending。 |
-| `RunBegin` / `RunEnd` | Loop Orchestration | UI / runner | 管理本地 Run 和 Runner 进程。 |
-| `PipelineAll` | Loop Orchestration | UI / runner | 只计算 Delegation，不改变 Task。 |
-| `RunDelegation` | Loop Orchestration | runner | 通过所选 Agent Executor 为单条 Delegation 启动一次 CLI。 |
+Agent 最终只返回结构化结果，不调用流程命令、不写运行日志、不直接操作 SQLite，也不自行推进状态。
 
-## 6. SQLite 表的职责
+## 6. SQLite 持久化映射
 
-| 表 | 职责 | V1 来源 |
-|---|---|---|
-| `tasks` | Task 当前事实与流程游标 | command 写入。 |
-| `loop_meta` | 当前 Run 和本地元数据 | runner / UI 写入。 |
-| `stories` | Story 的结构化索引 | `story-add`。 |
-| `documents` | 业务文档正文 | `document-upsert`。 |
-| `questions` | Question 事实来源 | `question-add` 和 UI 回答。 |
-| `approvals` | analysis/review 决策记录 | `question-add` / `block-release`。 |
-| `run_logs` | 持续 loop 的运行日志 | runner / agent 追加，运行面板增量读取。 |
-| `agent_results` | 每次 delegation 的结构化 Agent 原始结果 | Runner 写入，Application 解释。 |
-| `project_settings` | 当前项目的 Agent 执行器等设置 | UI command 写入。 |
-| 应用级 `app_settings` | 当前 workspace root | 项目设置 UI 写入；不承载 Task 业务数据。 |
-| `task_events` | 面向 UI 的审计时间线 | 成功 command 追加；不是 Event Sourcing。 |
+为避免一次高风险数据迁移，V1 暂时保留已有物理表名和列名。它们是基础设施兼容细节，不得出现在产品界面或 Agent Prompt 中。
 
-旧迁移中的兼容列可以保留为空值，但不参与 V1 运行语义。
+| 产品模型 | 当前物理实现 |
+|---|---|
+| Requirement | `tasks`，主键当前仍为 `task_id`；新 ID 使用 `REQ-` 前缀。 |
+| Delivery Unit | `stories`，序号列当前仍为 `story_index`。 |
+| Confirmation Item | `questions`。 |
+| Confirmation Record | `approvals`。 |
+| Delivery Document | `documents`。 |
+| Loop Run / logs | `loop_meta` / `run_logs`。 |
+| Agent Result | `agent_results`。 |
+| Project Configuration | 项目级 `project_settings` 与应用级 `app_settings`。 |
+| Audit Event | `task_events`，仅用于时间线，不做 Event Sourcing。 |
 
-## 7. 领域事件（审计用途）
+同理，`TaskCreated`、`StoryAdded`、`story-splitter-agent` 等稳定标识暂时可保留在内部协议中；对用户分别显示为“创建需求”“新增交付单元”“交付规划 Agent”。
 
-V1 仅追加审计事件，不以事件回放重建系统状态。
+## 7. 架构守则
 
-```text
-TaskCreated
-ContextInitialized
-StoryAdded
-TaskUpdated
-QuestionAdded
-QuestionAnswered
-BlockReleased
-DocumentUpserted
-TaskRewound
-TaskCancelled
-```
-
-事件应包含：发生时间、actor、Task ID、可选 Story index、command 名和变更摘要；不得复制附件或完整敏感内容。
-
-## 8. 架构守则
-
-- UI 不直接访问 SQLite。
-- Server Action 不写状态机判断；判断放在 application/domain 层。
-- domain 不 import Next、SQLite driver、React 或 `fs`。
-- infrastructure 只负责 SQLite migration、连接、Agent Executor Adapter、runner 进程和路径解析。
-- Agent 不读写旧工作文档或数据库；Runner 注入上下文，Application 解释结构化结果。
-- 每一个 UI 操作都映射到明确 application command 或只读查询，不能发明绕过既有规则的快捷入口。
+- UI 不直接访问 SQLite；所有写操作进入 Application command。
+- Server Action 不承载状态机判断；判断放在 application/domain 层。
+- domain 不依赖 Next、SQLite driver、React 或文件系统。
+- infrastructure 只负责数据库、迁移、执行器适配、Runner、Git 和路径解析。
+- Agent 不读写旧工作文档或数据库；Runner 注入上下文，Application 解释结果。
+- 每个 UI 操作必须映射到明确用例，不能绕过状态、确认和资源约束。
+- 产品统一语言与物理存储命名通过映射层隔离；新增界面和 Prompt 必须使用产品术语。

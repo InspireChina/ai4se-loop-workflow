@@ -29,7 +29,7 @@ export function prepareDevWorkspace(workspaceRoot: string, taskId: string, story
       return { ok: false, reason: `已有改动包含敏感文件，拒绝自动 checkpoint：${sensitive.join(', ')}`, checkpointCommit: '', head: '' };
     }
     git(['add', '-A'], workspaceRoot);
-    git(['commit', '-m', `chore(loop): checkpoint before ${taskId} Story-${storyIndex}`], workspaceRoot);
+    git(['commit', '-m', `chore(loop): checkpoint before ${taskId} Unit-${storyIndex}`], workspaceRoot);
     const remaining = git(['status', '--porcelain', '--untracked-files=all'], workspaceRoot);
     if (remaining) {
       return { ok: false, reason: 'checkpoint 提交后工作区仍有改动', checkpointCommit: '', head: '' };
@@ -55,7 +55,7 @@ export function commitDevStory(workspaceRoot: string, taskId: string, storyIndex
     const sensitive = sensitiveFiles(dirty);
     if (sensitive.length) return { ok: false, reason: `检测到敏感文件，拒绝提交：${sensitive.join(', ')}`, commit: '' };
     git(['add', '-A'], workspaceRoot);
-    git(['commit', '-m', `feat(${taskId}): Story-${storyIndex} 完成实现`], workspaceRoot);
+    git(['commit', '-m', `feat(${taskId}): Unit-${storyIndex} 完成实现`], workspaceRoot);
     return verifyDevCommit(workspaceRoot, taskId, storyIndex, gitHead(workspaceRoot));
   } catch (error) {
     try { git(['restore', '--staged', '.'], workspaceRoot); } catch { /* keep working tree changes for inspection */ }
@@ -65,8 +65,8 @@ export function commitDevStory(workspaceRoot: string, taskId: string, storyIndex
 
 function subjectMatches(subject: string, taskId: string, storyIndex: number) {
   const hasTask = subject.toLowerCase().includes(taskId.toLowerCase());
-  const hasStory = new RegExp(`\\bstory[- _]?${storyIndex}\\b`, 'i').test(subject);
-  return hasTask && hasStory;
+  const hasDeliveryUnit = new RegExp(`\\b(?:unit|story)[- _]?${storyIndex}\\b`, 'i').test(subject);
+  return hasTask && hasDeliveryUnit;
 }
 
 export function verifyDevCommit(workspaceRoot: string, taskId: string, storyIndex: number, expectedCommit?: string): DevCommitVerification {
@@ -76,7 +76,7 @@ export function verifyDevCommit(workspaceRoot: string, taskId: string, storyInde
     if (expectedCommit) {
       const subject = git(['show', '-s', '--format=%s', expectedCommit], workspaceRoot);
       if (!subjectMatches(subject, taskId, storyIndex)) {
-        return { ok: false, reason: `提交标题必须包含 ${taskId} 和 Story-${storyIndex}`, commit: subject };
+        return { ok: false, reason: `提交标题必须包含 ${taskId} 和 Unit-${storyIndex}`, commit: subject };
       }
       return { ok: true, reason: '', commit: subject };
     }
@@ -85,7 +85,7 @@ export function verifyDevCommit(workspaceRoot: string, taskId: string, storyInde
       const [, subject = ''] = line.split(/\t/, 2);
       return subjectMatches(subject, taskId, storyIndex);
     });
-    if (!match) return { ok: false, reason: `未找到包含 ${taskId} 和 Story-${storyIndex} 的提交`, commit: '' };
+    if (!match) return { ok: false, reason: `未找到包含 ${taskId} 和 Unit-${storyIndex} 的提交`, commit: '' };
     const [, subject = ''] = match.split(/\t/, 2);
     return { ok: true, reason: '', commit: subject };
   } catch (error) {

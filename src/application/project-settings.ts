@@ -10,7 +10,7 @@ export const AGENT_EXECUTOR_OPTIONS: ReadonlyArray<{
   label: string;
   description: string;
 }> = [
-  { id: 'cursor', label: 'Cursor', description: '使用 Cursor Agent CLI 执行每个 pipeline agent。' },
+  { id: 'cursor', label: 'Cursor', description: '使用 Cursor Agent CLI 执行每个推进步骤。' },
   { id: 'codex', label: 'Codex', description: '使用 Codex CLI 的非交互 JSON 模式执行。' },
   { id: 'claude', label: 'Claude', description: '使用 Claude Code CLI 的流式 JSON 模式执行。' },
 ];
@@ -79,7 +79,7 @@ function langfuseStatus(settings: Pick<LangfuseSettings, 'enabled' | 'publicKey'
   if (!Number.isFinite(settings.sampleRate) || settings.sampleRate < 0 || settings.sampleRate > 1) {
     return { status: 'invalid' as const, statusMessage: '采样率必须在 0 到 1 之间。' };
   }
-  return { status: 'enabled' as const, statusMessage: '已启用；新的 agent delegation 会创建 loop.delegation trace。' };
+  return { status: 'enabled' as const, statusMessage: '已启用；新的 Agent 执行会创建 loop.agent-execution trace。' };
 }
 
 async function readProjectSettings(keys: readonly string[]) {

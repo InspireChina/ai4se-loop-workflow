@@ -6,11 +6,22 @@ test('parses a structured agent result with role-specific fields', () => {
   const result = parseAgentResult(JSON.stringify({
     outcome: 'completed',
     summary: '拆分完成',
-    stories: [{ title: '创建表单' }, { title: '保存描述' }],
+    deliveryUnits: [{ title: '用户可以提交描述' }, { title: '用户可以查看已保存描述' }],
   }));
   assert.equal(result.outcome, 'completed');
-  assert.equal(result.stories?.length, 2);
+  assert.equal(result.deliveryUnits?.length, 2);
   assert.deepEqual(result.questions, []);
+});
+
+test('accepts legacy story fields while exposing delivery-unit terminology', () => {
+  const result = parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'legacy queued result',
+    stories: [{ title: 'Legacy unit' }],
+    rewindStory: 1,
+  }));
+  assert.equal(result.deliveryUnits?.[0]?.title, 'Legacy unit');
+  assert.equal(result.rewindDeliveryUnit, 1);
 });
 
 test('accepts a JSON markdown fence but rejects prose around JSON', () => {

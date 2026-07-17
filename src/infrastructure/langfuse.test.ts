@@ -54,7 +54,7 @@ test('creates a delegation trace with safe metadata and an opt-in prompt, then e
   await trace.end({ status: 'completed' });
   assert.equal(created.length, 1);
   assert.deepEqual(created[0].metadata, {
-    runToken: 'run-1', taskId: 'TASK-1', storyIndex: 1, pipeline: 'dev', agent: 'dev-agent', executor: 'codex', promptCaptured: true, promptLength: 33,
+    runToken: 'run-1', requirementId: 'TASK-1', deliveryUnitIndex: 1, flow: 'dev', agent: 'dev-agent', executor: 'codex', promptCaptured: true, promptLength: 33,
   });
   assert.deepEqual(created[0].input, { prompt: 'Authorization: [REDACTED]' });
   assert.deepEqual(updated, [{ metadata: { executionStatus: 'completed' } }]);

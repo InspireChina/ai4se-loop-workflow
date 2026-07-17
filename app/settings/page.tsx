@@ -9,16 +9,16 @@ export default async function SettingsPage() {
   const settings = await getAgentExecutorSettings();
   const langfuse = await getLangfuseSettings();
   return <>
-    <header><p className="eyebrow">PROJECT SETTINGS</p><h1>项目设置</h1><p className="muted">设置当前项目与执行 pipeline agent 的 CLI。</p></header>
+    <header><p className="eyebrow">PROJECT SETTINGS</p><h1>项目设置</h1><p className="muted">设置当前项目与执行推进流程的 Agent CLI。</p></header>
     <section className="settings-stack">
     <form action={changeWorkspaceRootAction} className="card settings">
-      <div><strong>当前项目</strong><p className="muted settings-description">切换后，Task、运行记录和项目设置会自动使用该 Repo 对应的独立数据库。</p></div>
+      <div><strong>当前项目</strong><p className="muted settings-description">切换后，需求、运行记录和项目设置会自动使用该代码库对应的独立数据库。</p></div>
       <div className="workspace-switch"><label>工作区根目录<input name="workspaceRoot" required defaultValue={paths.root} spellCheck={false}/></label><button className="button" type="submit">切换项目</button></div>
     </form>
     <form action={saveAgentExecutorAction} className="card settings">
       <fieldset className="executor-settings">
         <legend>Agent 执行器</legend>
-        <p className="muted">每条 delegation 仍然逐个执行，只切换底层使用的 CLI。所选 CLI 需要已在本机登录。</p>
+        <p className="muted">每次 Agent 执行仍然逐个进行，这里只切换底层使用的 CLI。所选 CLI 需要已在本机登录。</p>
         <div className="executor-options">
           {AGENT_EXECUTOR_OPTIONS.map((option) => <label className="executor-option" key={option.id}>
             <input type="radio" name="agentExecutor" value={option.id} defaultChecked={settings.executorId === option.id}/>
@@ -53,7 +53,7 @@ export default async function SettingsPage() {
         <span className="executor-icon"><Activity size={18}/></span>
         <div>
           <strong>可观测性 · Langfuse</strong>
-          <p className="muted settings-description">开启后，每个 agent delegation 会创建一个 <code>loop.delegation</code> trace，并记录工具调用、输出摘要和诊断事件。</p>
+          <p className="muted settings-description">开启后，每次 Agent 执行会创建一个 <code>loop.agent-execution</code> trace，并记录工具调用、输出摘要和诊断事件。</p>
         </div>
         <span className={`badge ${langfuse.status === 'enabled' ? 'green' : langfuse.status === 'disabled' ? 'blue' : 'amber'}`}>
           {langfuse.status === 'enabled' ? '已启用' : langfuse.status === 'disabled' ? '未启用' : '需配置'}

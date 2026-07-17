@@ -1,3 +1,5 @@
+import { agentLabel, deliveryUnitLabel, flowLabel } from '../domain/terminology';
+
 export type ParsedRunLog = {
   timestamp: string;
   kind: 'run' | 'dispatch' | 'agent' | 'tool' | 'executor' | 'error' | 'raw';
@@ -11,6 +13,9 @@ export type ParsedRunLog = {
 function parseMeta(text: string) {
   const meta: Record<string, string> = {};
   for (const match of text.matchAll(/(\w+)=("[^"]+"|\S+)/g)) meta[match[1]] = match[2].replace(/^"|"$/g, '');
+  meta.requirement ||= meta.task || '';
+  meta.unit ||= meta.story || '';
+  meta.flow ||= meta.pipeline || '';
   return meta;
 }
 
@@ -53,9 +58,9 @@ function toolNameLabel(tool: string) {
 
 function summarizeCommand(command: string) {
   if (!command) return '';
-  if (command.includes(' task-get ') || command.includes(' task-show ')) return '查询 Task 详情';
-  if (command.includes(' task-context-init ')) return '初始化数据库上下文';
-  if (command.includes(' task-update ')) return '更新 Task 状态';
+  if (command.includes(' task-get ') || command.includes(' task-show ')) return '查询需求详情';
+  if (command.includes(' task-context-init ')) return '初始化需求上下文';
+  if (command.includes(' task-update ')) return '更新需求状态';
   if (command.includes(' paths')) return '查看工作区路径配置';
   if (command.includes('--help')) return '查看 loopctl 可用命令';
   return compact(command);
@@ -132,19 +137,22 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
     return { ...base, kind: 'run', status: parsed.body.includes('结束') ? 'success' : 'running', title: parsed.body.includes('结束') ? '运行结束' : '运行状态', detail: parsed.body };
   }
   if (parsed.label === '派发') {
-    const title = parsed.body.startsWith('#') ? `派发给 ${meta.agent || 'Agent'}` : '生成派发计划';
-    return { ...base, kind: 'dispatch', status: 'info', title, detail: parsed.body };
+    const title = parsed.body.startsWith('#') ? `安排给 ${agentLabel(meta.agent)}` : '生成推进计划';
+    const detail = parsed.body.startsWith('#')
+      ? [meta.requirement, meta.unit && meta.unit !== '-' ? deliveryUnitLabel(Number(meta.unit)) : '', meta.flow ? flowLabel(meta.flow) : ''].filter(Boolean).join(' · ')
+      : parsed.body;
+    return { ...base, kind: 'dispatch', status: 'info', title, detail };
   }
   if (parsed.label === 'Agent') {
     const isComplete = parsed.body.startsWith('完成 ');
     const isStart = parsed.body.startsWith('开始 ');
     const isBlocked = parsed.body.startsWith('阻塞 ');
-    const title = isComplete ? `${meta.agent || 'Agent'} 完成` : isStart ? `${meta.agent || 'Agent'} 开始` : `${meta.agent || 'Agent'} 进展`;
+    const title = isComplete ? `${agentLabel(meta.agent)} 完成` : isStart ? `${agentLabel(meta.agent)} 开始` : `${agentLabel(meta.agent)} 进展`;
     const status = isComplete ? 'success' : isBlocked ? 'error' : 'running';
     return { ...base, kind: 'agent', status, title, detail: stripLogPrefix(parsed.body) };
   }
   if (parsed.label === '工具调用' || parsed.label === '工具结果') {
-    return { ...base, kind: 'tool', status: parsed.label === '工具结果' ? 'success' : 'running', title: `${meta.agent || 'Agent'} ${parsed.label}`, detail: stripLogPrefix(parsed.body) };
+    return { ...base, kind: 'tool', status: parsed.label === '工具结果' ? 'success' : 'running', title: `${agentLabel(meta.agent)} ${parsed.label}`, detail: stripLogPrefix(parsed.body) };
   }
   if (parsed.label === '执行器工具' || parsed.label === 'Cursor工具') {
     const detailBody = stripLogPrefix(parsed.body).replace(/^(?:调用|完成)：/, '');

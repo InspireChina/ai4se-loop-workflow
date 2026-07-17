@@ -1,0 +1,108 @@
+const statusLabels: Record<string, string> = {
+  backlog: '需求梳理',
+  'in repro': '问题复现',
+  'in plan': '交付拆分',
+  'ready for dev': '等待推进',
+  'in dev': '单元推进',
+  'in review': '整体验收',
+  done: '已完成',
+  cancelled: '已取消',
+  blocked: '待确认',
+};
+
+const agentLabels: Record<string, string> = {
+  human: '用户',
+  system: '系统',
+  'backlog-agent': '需求梳理 Agent',
+  'story-splitter-agent': '交付规划 Agent',
+  'analyst-agent': '方案分析 Agent',
+  'repro-agent': '问题复现 Agent',
+  'dev-agent': '开发实现 Agent',
+  'test-agent': '验证 Agent',
+  'review-agent': '整体验收 Agent',
+};
+
+const itemTypeLabels: Record<string, string> = {
+  feature: '功能需求',
+  bug: '缺陷',
+  tech: '技术改进',
+  intake: '待梳理',
+  other: '其他',
+};
+
+const flowLabels: Record<string, string> = {
+  backlog: '需求梳理',
+  repro: '问题复现',
+  split: '交付拆分',
+  analysis: '方案分析',
+  dev: '开发实现',
+  test: '验证',
+  review: '整体验收',
+  resume: '恢复推进',
+};
+
+const documentKindLabels: Record<string, string> = {
+  context: '需求上下文',
+  delivery_split: '交付拆分',
+  analysis: '方案分析',
+  repro: '问题复现',
+  dev_note: '开发记录',
+  test_result: '验证结果',
+  review: '整体验收',
+};
+
+const confirmationKindLabels: Record<string, string> = {
+  local: '需求级',
+  analysis: '方案分析',
+  test: '验证',
+  review: '整体验收',
+};
+
+const confirmationDecisionLabels: Record<string, string> = {
+  pending: '待确认',
+  confirmed: '已确认',
+  approved: '已通过',
+  rejected: '未通过',
+};
+
+export function statusLabel(status: string) {
+  return statusLabels[status] || status;
+}
+
+export function agentLabel(agent: string | null | undefined) {
+  return agent ? agentLabels[agent] || agent : '未分配';
+}
+
+export function itemTypeLabel(itemType: string) {
+  return itemTypeLabels[itemType] || itemType;
+}
+
+export function flowLabel(flow: string | null | undefined) {
+  return flow ? flowLabels[flow] || flow : '未指定流程';
+}
+
+export function documentKindLabel(kind: string) {
+  return documentKindLabels[kind] || kind;
+}
+
+export function confirmationKindLabel(kind: string) {
+  return confirmationKindLabels[kind] || kind;
+}
+
+export function confirmationDecisionLabel(decision: string) {
+  return confirmationDecisionLabels[decision] || decision;
+}
+
+export function deliveryUnitLabel(index: number | null | undefined) {
+  return index ? `交付单元 ${index}` : '需求级';
+}
+
+export function terminologyText(value: string | null | undefined) {
+  if (!value) return value || '';
+  return value
+    .replace(/\bStory-(\d+)\b/gi, '交付单元 $1')
+    .replace(/\bStories\b/gi, '交付单元')
+    .replace(/\bStory\b/gi, '交付单元')
+    .replace(/\bTask\b(?!-)/gi, '需求')
+    .replace(/\bApproval\b/gi, '确认记录');
+}

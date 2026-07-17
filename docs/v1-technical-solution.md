@@ -1,189 +1,192 @@
 # Loop Engineering UI：V1 技术方案
 
-## 1. 目标与边界
+## 1. 产品目标
 
-V1 的目标是把现有 Cursor Loop 的任务、Story、人工确认、运行日志和工作文档产品化为本地 UI。第一版不扩展流程能力，不引入远端服务；重点是把现有 loop 流程线上化、结构化、可观察。
+V1 把现有 Loop Engineering 流程产品化为一个本地模块化单体：用户录入“需求”，系统拆成适合一个开发实现 Agent 完成的“交付单元”，再持续完成方案分析、开发实现、验证和整体验收。
 
-V1 必须保留：
+V1 聚焦现有流程 UI 化、业务事实入库和执行过程可观察，不扩展为远程协作平台。
 
-- 当前状态机、角色权限、游标约束、代码槽、browser 限制、本地单 Runner、`blocked` / `block-release` / `task-rewind` 语义。
-- SQLite 作为本地持久化方案。
-- 可插拔 Agent Executor 作为执行入口，V1 支持 Cursor、Codex 与 Claude CLI。
-- 本地 workspace 仍是代码修改发生的位置。
+保留的能力：
 
-V1 明确不做：
+- SQLite 本地持久化和多代码库数据隔离。
+- Cursor、Codex、Claude 三种可插拔 Agent 执行器。
+- 本地代码工作区、Git checkpoint、自动交付提交。
+- 待确认、恢复、回退、取消、代码槽和浏览器资源约束。
+- CLI 流式日志解析和用户友好的运行面板。
 
-- 云端部署、多用户实时协作、远程文件存储。
-- Redis、独立 Worker、队列平台或新的异步任务系统。
-- 修改已有 Task / Story / Agent / Pipeline 术语。
-- 兼容旧 `.project` 数据。
+明确不做：
+
+- 云部署、多用户协作、远程文件存储。
+- Redis、消息队列、独立 Worker 或分布式租约。
+- 兼容旧 `.project`、Inbox 和流程 Markdown 数据。
+- 由 Agent 决定整体推进流程。
 
 ## 2. 总体架构
 
 ```mermaid
 flowchart LR
-  User["用户"] --> Web["Next.js UI\nReact + TypeScript"]
-  Web --> App["Server Action / Route Handler\n应用层与权限校验"]
-  App --> Domain["领域层\nTask / Story / Question / Document / Approval"]
-  App --> DB[("SQLite\napp data / repo hash / loop-ui.db")]
-  Runner["逐个执行 Runner"] --> App
-  Runner --> Executor["Agent Executor Port"]
-  Executor --> Agent["Cursor / Codex / Claude CLI\n每次只处理一个 delegation"]
-  Agent --> Result["Structured Agent Result"]
+  User["用户"] --> UI["Next.js UI"]
+  UI --> App["Application / Domain"]
+  App --> DB[("SQLite\n按工作区隔离")]
+  App --> Runner["本地持续 Runner"]
+  Runner --> Flow["推进流程计算"]
+  Flow --> Executor["Agent Executor Port"]
+  Executor --> CLI["Cursor / Codex / Claude CLI"]
+  CLI --> Repo["目标代码库"]
+  CLI --> Stream["JSON stream / JSONL"]
+  Stream --> Logs["日志标准化"]
+  CLI --> Result["结构化 Agent Result"]
   Result --> App
-  Agent --> Repo["Workspace Repo\n只做代码读写"]
 ```
 
-系统是本地模块化单体：Next.js 页面、Server Action、领域用例、SQLite 连接和 Agent runner 都在同一应用仓库中。业务事实只落 SQLite；目标 repo 只作为代码工作区，不再生成 `.project` 工作文件。
+Next.js 页面、Server Action、领域用例、SQLite、Runner 和执行器适配器位于同一仓库、同一应用边界。业务事实只进入 SQLite；目标代码库只保存产品代码和正常 Git 历史。
 
 ## 3. 技术选型
 
-| 层次 | V1 选择 | 说明 |
+| 层次 | 选择 | 说明 |
 |---|---|---|
-| 应用框架 | Next.js + React + TypeScript | 单进程承载页面、Server Action、领域用例和本地数据访问。 |
-| UI 组件 | lucide 图标 + 自定义 CSS | 直接实现产品界面，不依赖 prototype 代码。 |
-| 服务端入口 | Next.js Server Action / Route Handler + Zod | 表单和命令统一进入 application command。 |
+| 应用框架 | Next.js + React + TypeScript | 页面、服务端用例和本地数据访问组成一个大单体。 |
+| 输入校验 | Zod | UI command、设置和 Agent Result 共用明确 Schema。 |
 | 领域代码 | 纯 TypeScript | 不依赖 React、Next 或 SQLite driver。 |
-| 数据库 | SQLite | 应用级 `data/loopwork.db` 保存当前工作区；每个 workspace root 使用独立业务数据库：`data/<repo-root-short-hash>/loop-ui.db`。 |
-| SQLite 访问 | `better-sqlite3` | 本地同步事务模型简单可控。 |
-| 数据库迁移 | Umzug / 顺序 SQL migration | 应用级和项目级数据库都通过 `schema_migrations` 记录已执行 migration，提供类 Flyway 的顺序变更。 |
-| Agent 执行 | Agent Executor Port + Cursor/Codex/Claude Adapter | App 启动逐个执行 runner；runner 对每个 delegation 单独启动一次所选 CLI，并把不同 JSON 流标准化为用户友好日志。 |
-| 执行器设置 | SQLite `project_settings` | 每个 workspace 独立选择执行器，默认 Cursor；Codex 可从 GPT-5.6 Sol/Terra/Luna 三档模型中选择并设置 reasoning effort，CLI 认证仍使用各工具本机账号。 |
-| Agent 上下文与结果 | Runner 注入 + JSON Schema | Runner 注入完整 Task 上下文；Agent 只返回结构化结果，Application 负责持久化和状态推进。 |
+| 数据库 | SQLite + `better-sqlite3` | 本地事务简单，适合单机持续 Loop。 |
+| 数据库迁移 | Umzug + 顺序 SQL | `schema_migrations` 记录版本，提供类 Flyway 的迁移行为。 |
+| Agent 执行 | Agent Executor Port | Cursor、Codex、Claude Adapter 将各自流格式标准化。 |
+| 实时日志 | SQLite `run_logs` + SSE | Runner 写入，运行面板增量读取。 |
+| Git | 本地命令适配器 | checkpoint、交付单元提交和安全文件检查由 Runner 控制。 |
 
-代码仓库结构：
+仓库结构：
 
 ```text
-app/                    # Next 页面与 Server Actions
-src/domain/             # 状态机、权限和领域规则
-src/application/        # 用例、查询、命令、运行日志
-src/infrastructure/     # SQLite、migration、Agent Executor Adapter 与 runner
-migrations/             # 顺序 SQL migrations
-app-migrations/         # 应用级配置数据库 migrations
-scripts/loop/           # loopctl wrapper、runner 脚本
-data/                   # 应用本地运行数据，按 repo 根路径短 hash 分目录
-prototype/              # 历史资料与 prototype，不参与运行
+app/                    Next.js 页面、Route Handler 与 Server Actions
+src/domain/             领域规则、协议和统一术语映射
+src/application/        用例、查询、推进流程和日志解释
+src/infrastructure/     SQLite、迁移、执行器、Runner、Git
+migrations/             项目数据库顺序迁移
+app-migrations/         应用配置数据库顺序迁移
+scripts/loop/           Runner 与人工维护 CLI
+data/                   本地运行数据，按工作区短 hash 分目录
+prototype/              历史资料，不参与运行
 ```
 
 ## 4. 数据边界
 
-### 4.1 事实来源
+### 4.1 多代码库隔离
 
-| 信息 | 事实来源 | 说明 |
-|---|---|---|
-| Task 生命周期、游标、当前 agent、Run 状态 | SQLite `tasks` / `loop_meta` | 所有状态改变必须走 application command。 |
-| Story 列表 | SQLite `stories` | Application 根据 story-splitter 结构化结果创建，UI 直接展示。 |
-| 分析、复现、测试、review、上下文文档 | SQLite `documents` | Application 根据 Agent Result 写入，UI 可直接查看正文。 |
-| Questions 与用户答复 | SQLite `questions` | Application 根据 Agent Result 创建；用户在 UI 回答。 |
-| Approval | SQLite `approvals` | analysis 问题解决状态与 review 人工门禁记录。 |
-| 运行日志 | SQLite `run_logs` | runner 逐行写入，运行面板通过 SSE 按 `log_id` 增量读取。 |
-| 代码变更 | Workspace repo | dev-agent 仍在用户选择的 repo 中修改代码。 |
-| 当前 workspace root | SQLite `data/loopwork.db` | 应用级配置；设置页切换后立即选择对应项目数据库。 |
+用户只设置工作区根目录：
 
-### 4.2 Agent 执行边界
+- `data/loopwork.db` 保存当前工作区根目录。
+- `data/<repo-root-short-hash>/loop-ui.db` 保存该工作区的需求和运行数据。
+- 切换根目录后，应用自动选择对应数据库。
+- 短 hash、数据库路径和应用数据目录不出现在普通设置界面。
 
-App/runner 是唯一调度者。Runner 每次只取得一个 delegation，启动所选 CLI，应用结构化结果后重新读取数据库计算下一步：
+### 4.2 事实来源
 
-```text
-dispatch one -> executor.run -> parse Agent Result -> application command -> dispatch again
-```
+| 信息 | 事实来源 |
+|---|---|
+| 需求状态、进度、当前 Agent | SQLite `tasks` |
+| 交付单元 | SQLite `stories` |
+| 确认事项与用户答复 | SQLite `questions` |
+| 确认记录 | SQLite `approvals` |
+| 交付文档 | SQLite `documents` |
+| Loop 状态与运行日志 | SQLite `loop_meta` / `run_logs` |
+| Agent 原始结构化结果 | SQLite `agent_results` |
+| 代码变更 | 用户选择的目标代码库 |
 
-每次 CLI 只收到当前 delegation 的 `task_id`、`agent`、`pipeline`、`story_index` 和目标描述。Agent 不具备全量派发、创建或停止 Run 的 CLI 命令。
+`tasks`、`stories`、`story_index` 等是当前物理兼容名。产品界面、Agent Prompt 和新结果协议使用 Requirement / Delivery Unit（需求 / 交付单元）。V1 不为术语调整单独做破坏性数据库迁移。
 
-当前 agent 可以在本 delegation 内部使用辅助 subagent 做上下文收集或局部分析，但辅助 subagent 不能处理其他 delegation，不能推进 Task 状态；最终写库和状态更新仍由当前 agent 负责。
+## 5. 持续 Loop
 
-Runner 会校验关键 delegation 的完成契约。analyst 必须系统性遍历当前 Story 的设计决策树，并在一次结果中返回所有尚未解决的决策问题及推荐答案；能够从代码库查明的事实不得询问用户。存在问题时 Application 批量创建 Question 并阻塞 Task，全部回答后由 resume delegation 更新分析；没有问题时直接推进 `analysis_index`，流程不自动补建确认问题。
-
-dev-agent 只实现和测试，不暂存、不提交、不推进状态。Runner 在启动前检查工作区干净，完成后自动创建包含 Task/Story 标识的 Git commit；Application 校验提交后保存 dev note 并推进 `dev_index`。无法安全隔离时由流程创建阻塞问题。
-
-### 4.3 写入规则
-
-1. UI 和 runner 不能直接改 SQLite；必须通过 application command。Agent 完全不写数据库。
-2. Agent 不再写 `.project`、`90_questions.md`、`06_review.md` 或工作文档 Markdown。
-3. Runner 在 Prompt 中注入 Task、Story、Question、Document、Approval 和事件上下文。
-4. Agent 最终只返回符合统一 Schema 的 JSON；Application 保存 artifact、stories、questions 和 agent_results。
-5. 状态、游标、阻塞、恢复、review 人工门禁和 Git 提交都由流程控制。
-6. Runner 和 Agent 的运行日志写入 `run_logs` 表；运行面板不读取 run log 文件。
-   Agent 不调用日志命令；Runner 直接解析 CLI stream，Application 自动记录领域事件。
-7. 当前 workspace root 存在应用级 SQLite；业务数据库按 workspace root 短 hash 隔离。短 hash、数据库路径和 app data 目录对普通用户不可见。
-
-## 5. 维护命令边界
-
-`loopctl` 仅用于人工维护和诊断，不注入 Agent Prompt。正常 Pipeline 不依赖 Agent 调用任何命令。
-
-核心命令：
+Runner 的控制循环：
 
 ```text
-task-context
-story-add
-document-upsert
-document-list
-document-get
-question-add
-task-update
-task-rewind
-block-release
-run-status
+读取数据库 → 计算下一步 → 逐个执行 Agent → 应用结构化结果 → 再次计算
 ```
 
-示例：
+- 有可执行 Agent：全部逐个执行完成后，1 分钟后继续下一轮。
+- 无可执行 Agent：不启动 CLI，输出 0 个 Agent，5 分钟后重试。
+- 代码槽繁忙：步骤在应用内排队，释放后继续，不生成用户确认事项。
+- 用户确认未完成：需求保持待确认，其他可运行需求仍可继续。
+
+应用决定当前 Agent、推进阶段和交付单元。Agent 只负责当前目标，可以使用辅助 subagent 做上下文收集，但不能调度其他流程 Agent。
+
+## 6. Agent 执行协议
+
+每次 CLI 获得：
+
+- `requirement`：需求描述、状态和进度。
+- `currentDeliveryUnit` 与全部 `deliveryUnits`。
+- 已有交付文档、确认事项、确认记录和近期事件。
+- 当前 Agent、推进阶段、资源和明确目标。
+- 最终 JSON Schema 与角色约束。
+
+Agent 最终返回统一结构化 JSON，包含可选的：
+
+- `summary`、`outcome`。
+- `artifacts`：交付文档。
+- `deliveryUnits`：仅交付规划 Agent 创建。
+- `questions`：必须由用户确认的结构化事项。
+- `rewind` / `rewindDeliveryUnit`：需要回退时的建议。
+
+Application 负责校验结果、写入数据库和推进状态。Agent 不调用 `loopctl`，不写 `.project` 文档，不直接写 SQLite，也不主动写运行日志。
+
+## 7. 执行器与日志
+
+执行器命令：
 
 ```bash
-python scripts/loop/loopctl.py task-context --task-id TASK-id
-
-python scripts/loop/loopctl.py document-upsert --json '{
-  "taskId": "TASK-id",
-  "actor": "analyst-agent",
-  "kind": "analysis",
-  "storyIndex": 1,
-  "title": "Story-1 Analysis",
-  "format": "markdown",
-  "content": "分析正文"
-}'
-
-python scripts/loop/loopctl.py question-add --json '{
-  "taskId": "TASK-id",
-  "actor": "analyst-agent",
-  "kind": "analysis",
-  "storyIndex": 1,
-  "blockedReason": "等待用户确认业务规则",
-  "blockTask": true,
-  "questions": [
-    {
-      "title": "问题标题",
-      "question": "需要用户回答的具体问题",
-      "why": "为什么必须确认",
-      "recommendation": "建议答案，可为空"
-    }
-  ]
-}'
+cursor agent --print --output-format stream-json --force --workspace <workspace-root>
+codex exec --json -C <workspace-root> <prompt>
+claude --print --output-format stream-json <prompt>
 ```
 
-## 6. 页面与能力映射
+选择 Codex 时显示模型和思考强度设置；选择 Cursor 或 Claude 时隐藏 Codex 专属参数。Runner 直接解析各 CLI 的 stdout、stderr、工具事件和子过程，统一写入 `run_logs`，运行面板按层级显示：
 
-| 页面 | 展示内容 | 可执行操作 |
-|---|---|---|
-| 工作台 | blocked、近期事件、运行状态 | 打开 Task、进入运行面板。 |
-| Task 列表 | 状态、优先级、进度、当前 agent | 创建 Task、打开详情。 |
-| Task 详情 | Task 概览、Story、Questions、Documents、Approvals、事件 | 新增 Story、回答问题、解除阻塞、状态流转、rewind、cancel。 |
-| 运行面板 | 当前本地 Run、Agent 结构化日志 | 开始运行、结束运行、观察 pipeline 进展。 |
-| 项目设置 | 当前 workspace root、Agent 执行器 | 输入并切换工作区根目录；选择 Cursor、Codex 或 Claude。存在活跃 loop 时拒绝切换。 |
+```text
+Agent
+├── 思考与输出
+├── 工具调用
+└── 辅助 subagent
+    └── 工具调用
+```
 
-## 7. 迁移与实施顺序
+日志默认不自动抢夺用户滚动位置；用户可在友好视图与原始日志之间切换。诊断警告与真正执行错误分开展示。
 
-1. 使用 `data/loopwork.db` 保存当前 workspace root，使用 `data/<repo-root-short-hash>/loop-ui.db` 作为每个 workspace 的独立业务数据库。
-2. 使用 SQL migration 管理表结构。
-3. 保留旧 schema 中必要兼容列为空值，但新逻辑不再读写旧工作文件。
-4. 将 Questions 线上化到 `questions` 表。
-5. 将业务文档线上化到 `documents` 表，并扩展 agent 命令替代读写文件。
-6. 将运行日志线上化到 `run_logs` 表。
-7. 通过 Agent Executor Port 隔离 CLI 差异，使每次 CLI 只执行单个 delegation；内部辅助 subagent 只作为当前 agent 的上下文工具，不参与 pipeline 调度。
+## 8. Git 与代码槽
 
-## 8. V1 验收标准
+开发实现 Agent 只修改和验证代码。Runner 负责：
 
-- 切换 workspace root 后，使用独立 `data/<repo-hash>/loop-ui.db`。
-- 新建 Task 后可以进入持续 loop，并由外部 runner 逐个执行 pipeline agent。
-- Application 根据 Agent Result 创建的问题写入 `questions` 表，Task 详情页可展示和回答。
-- Application 根据 Agent Result 生成的分析、复现、测试、review 文档写入 `documents` 表，Task 详情页可查看正文。
-- 运行面板从 `run_logs` 表显示所选执行器的用户友好日志，能观察 agent、tool call、子过程和错误。
-- 任一 UI command 都不能绕过 actor 权限、游标、审批和代码槽约束。
+1. 检查敏感文件和工作区状态。
+2. 对既有普通未提交改动创建 checkpoint commit。
+3. 执行当前交付单元。
+4. 校验改动和测试结果。
+5. 创建包含 Requirement / Unit 标识的独立 commit。
+6. 成功提交后才推进开发进度。
+
+单代码槽用于避免两个写代码步骤同时修改同一工作区。它是本地串行队列，不是需要用户解除的租约或阻塞原因。
+
+## 9. 页面能力
+
+| 页面 | 核心内容与操作 |
+|---|---|
+| 工作台 | 需求概览、待确认、近期活动、Loop 状态。 |
+| 需求列表 | 状态、优先级、进度、当前 Agent；右上角浮窗创建需求。 |
+| 需求详情 | 顶部 Steps、交付单元、确认事项、文档、事件、推进流程和维护操作。 |
+| 运行面板 | 开始/停止 Loop，查看占满工作区的流式分层日志。 |
+| 项目设置 | 工作区根目录、执行器；Codex 被选中时显示模型和思考强度。 |
+
+顶部 Steps 固定为：
+
+```text
+需求整理 → 交付拆分 → 单元推进 → 整体验收 → 完成
+```
+
+## 10. 验收标准
+
+- 工作区切换后读写独立数据库，目标代码库不产生 Loop 数据目录。
+- 新建需求后能进入持续 Loop；没有工作时不启动 Agent。
+- 交付规划以端到端业务闭环生成交付单元，不按技术层拆分。
+- 方案分析、开发实现、验证按交付单元顺序推进，整体验收只执行一次。
+- Agent 产生的确认事项、文档和结果全部写入 SQLite 并可在详情页查看。
+- 开发实现完成后由 Runner 创建独立 Git commit；代码槽繁忙会自动排队。
+- 运行面板能观察 Agent、工具调用、辅助 subagent、警告和错误。
+- 任一 UI 命令都不能绕过状态、进度、确认和资源约束。

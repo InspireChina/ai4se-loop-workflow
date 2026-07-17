@@ -62,7 +62,7 @@ function stringifyValue(value: unknown) {
 }
 
 function meta(executor: AgentExecutorId, context: AgentExecutionContext) {
-  return `executor=${executor} agent=${context.agent} task=${context.taskId} story=${context.storyIndex ?? '-'} pipeline=${context.pipeline}`;
+  return `executor=${executor} agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline}`;
 }
 
 function toolNameFromCursor(event: Record<string, unknown>) {
@@ -78,12 +78,12 @@ function toolNameFromCursor(event: Record<string, unknown>) {
 
 function summarizeCommand(command: string) {
   if (!command) return '';
-  if (command.includes(' task-context ')) return '读取数据库 Task 上下文';
+  if (command.includes(' task-context ')) return '读取数据库需求上下文';
   if (command.includes(' document-list ')) return '列出数据库文档';
   if (command.includes(' document-get ')) return '读取数据库文档';
   if (command.includes(' document-upsert ')) return '保存数据库文档';
-  if (command.includes(' story-add ')) return '新增 Story';
-  if (command.includes(' task-update ')) return '更新 Task 状态';
+  if (command.includes(' story-add ')) return '新增交付单元';
+  if (command.includes(' task-update ')) return '更新需求状态';
   if (command.includes('--help')) return '查看命令帮助';
   return compact(command);
 }

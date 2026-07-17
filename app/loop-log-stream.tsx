@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import type { ParsedRunLog } from '../src/application/run-log';
+import { agentLabel, deliveryUnitLabel, flowLabel } from '../src/domain/terminology';
 
 type LogTreeNode = {
   id: string;
@@ -19,7 +20,7 @@ function shouldMergeEvent(previous: ParsedRunLog, next: ParsedRunLog) {
   if (previous.status !== 'info' || next.status !== 'info') return false;
   if (previous.title !== next.title) return false;
   if (previous.title !== 'Agent 思考' && previous.title !== 'Agent 输出') return false;
-  if (previous.meta.agent !== next.meta.agent || previous.meta.executor !== next.meta.executor || previous.meta.task !== next.meta.task || previous.meta.pipeline !== next.meta.pipeline) return false;
+  if (previous.meta.agent !== next.meta.agent || previous.meta.executor !== next.meta.executor || previous.meta.requirement !== next.meta.requirement || previous.meta.flow !== next.meta.flow) return false;
   return previous.detail.length + next.detail.length <= 5000;
 }
 
@@ -72,7 +73,7 @@ function shouldMergeNode(previous: LogTreeNode, next: LogTreeNode) {
   if (previous.status !== 'info' || next.status !== 'info') return false;
   if (previous.title !== next.title) return false;
   if (previous.title !== 'Agent 思考' && previous.title !== 'Agent 输出') return false;
-  if (previous.meta.agent !== next.meta.agent || previous.meta.executor !== next.meta.executor || previous.meta.task !== next.meta.task || previous.meta.pipeline !== next.meta.pipeline) return false;
+  if (previous.meta.agent !== next.meta.agent || previous.meta.executor !== next.meta.executor || previous.meta.requirement !== next.meta.requirement || previous.meta.flow !== next.meta.flow) return false;
   return previous.detail.length + next.detail.length <= 5000;
 }
 
@@ -120,7 +121,7 @@ export function buildLogTree(events: ParsedRunLog[]) {
     }
     const node: LogTreeNode = {
       id: `agent-${agent}-${index}`,
-      title: agent,
+      title: agentLabel(agent),
       detail: seed?.detail || 'Agent 运行中',
       status: seed?.status || 'running',
       kind: 'agent',
@@ -191,7 +192,8 @@ function formatTime(timestamp: string) {
 }
 
 function metaText(meta: Record<string, string>) {
-  return [meta.agent, meta.task, meta.pipeline, meta.tool].filter(Boolean).join(' · ');
+  const unit = meta.unit && meta.unit !== '-' ? deliveryUnitLabel(Number(meta.unit)) : '';
+  return [meta.agent ? agentLabel(meta.agent) : '', meta.requirement, unit, meta.flow ? flowLabel(meta.flow) : '', meta.tool].filter(Boolean).join(' · ');
 }
 
 function LogLeaf({ node }: { node: LogTreeNode }) {
@@ -260,7 +262,7 @@ export default function LoopLogStream({ runId }: { runId: string }) {
       <button type="button" className="text-toggle" onClick={() => setShowRaw((value) => !value)}>{showRaw ? '友好视图' : '原始日志'}</button>
     </div>
     {showRaw ? <pre>{rawContent ? reverseRawLog(rawContent) : 'waiting for app log...\n'}</pre> : <div className="friendly-log tree-log">
-      {events.length === 0 ? <p className="friendly-empty">等待 pipeline 进展...</p> : buildLogTree(events).map((node) => <LogNodeView node={node} key={node.id}/>)}
+      {events.length === 0 ? <p className="friendly-empty">等待推进流程更新...</p> : buildLogTree(events).map((node) => <LogNodeView node={node} key={node.id}/>)}
     </div>}
   </div>;
 }

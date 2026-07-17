@@ -33,7 +33,7 @@ test('runner commits a cleanly isolated dev story', () => {
   const result = commitDevStory(cwd, 'TASK-1234', 2, head);
   assert.equal(result.ok, true);
   assert.match(result.commit, /TASK-1234/);
-  assert.match(result.commit, /Story-2/);
+  assert.match(result.commit, /Unit-2/);
   assert.equal(git(cwd, 'status', '--porcelain'), '');
 });
 
@@ -43,7 +43,7 @@ test('runner checkpoints a dirty workspace before dev starts', () => {
   const result = prepareDevWorkspace(cwd, 'TASK-1234', 3);
   assert.equal(result.ok, true);
   assert.equal(result.checkpointCommit, gitHead(cwd));
-  assert.match(git(cwd, 'log', '-1', '--pretty=%s'), /checkpoint before TASK-1234 Story-3/);
+  assert.match(git(cwd, 'log', '-1', '--pretty=%s'), /checkpoint before TASK-1234 Unit-3/);
   assert.equal(git(cwd, 'status', '--porcelain'), '');
 });
 
@@ -79,5 +79,5 @@ test('verification can find a story commit after later commits', () => {
   const verification = verifyDevCommit(cwd, 'TASK-1234', 2);
   assert.equal(verification.ok, true);
   assert.match(verification.commit, /TASK-1234/);
-  assert.match(verification.commit, /Story-2/);
+  assert.match(verification.commit, /Unit-2/);
 });

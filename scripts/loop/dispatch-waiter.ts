@@ -29,7 +29,7 @@ async function main() {
     await appendLoopRunLog(runId, `[运行] 第 ${attempt} 次重试派发`);
     const dispatch = await createLoopDispatch(runId, { includeRunHeader: false });
     if (dispatch.delegations.length > 0) {
-      await appendLoopRunLog(runId, `[运行] 重试发现 ${dispatch.delegations.length} 个 agent，启动逐个执行 runner`);
+      await appendLoopRunLog(runId, `[运行] 重试发现 ${dispatch.delegations.length} 个 Agent，启动逐个执行器`);
       await startAgentRun(runId);
       return;
     }
