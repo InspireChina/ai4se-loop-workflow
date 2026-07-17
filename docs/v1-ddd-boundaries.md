@@ -76,7 +76,7 @@ Loop 的等待策略属于编排规则：本轮有 Agent 执行时，1 分钟后
 - 模型：`VerificationRun`、`VerificationEvidence`、`ClosureReport`、`ClosureAcknowledgement`
 - 关键命令：执行 Harness、记录证据、生成结卡报告、确认已阅读当前报告
 
-Harness 按 resolved Slice Spec 执行 allowlist 命令，并把每条结果绑定到验收标准、规格版本和代码 Commit。失败自动回退，不请求人工裁决。Review Agent 只汇总最终事实，不能阻塞、提问或回退；报告生成后进入 `ready_to_close` 并释放代码槽。用户只确认已阅读当前报告版本。
+Harness 以与 Agent 相同的 bypass 权限执行 resolved Slice Spec 中的命令，并把每条结果绑定到验收标准、规格版本和代码 Commit。失败自动回退，不请求人工裁决。Review Agent 只汇总最终事实，不能阻塞、提问或回退；报告生成后进入 `ready_to_close` 并释放代码槽。用户只确认已阅读当前报告版本。
 
 ### 2.5 文档管理（Document Management）
 
