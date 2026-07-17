@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
 import crossSpawn from 'cross-spawn';
-import { extractAgentFinalText, parseAgentTelemetryStderr, parseAgentTelemetryStdout, type AgentExecutionContext, type AgentExecutionOptions, type AgentExecutor } from './agent-executor';
+import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, parseAgentTelemetryStderr, parseAgentTelemetryStdoutEvents, type AgentExecutionContext, type AgentExecutionOptions, type AgentExecutor, type AgentTelemetryEvent } from './agent-executor';
 import type { LangfuseTelemetry } from './langfuse';
 
 export type DelegationExecutionInput = {
@@ -29,25 +29,35 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   const spawn = input.spawn ?? crossSpawn;
   const args = executor.buildArgs(prompt, workspaceRoot, executionOptions);
   const telemetryContext = { ...context, runToken: runId };
-  const trace = await telemetry.startDelegationTrace(telemetryContext, { executor: executor.id, prompt });
+  const trace = await telemetry.startDelegationTrace(telemetryContext, {
+    executor: executor.id,
+    prompt,
+    model: executionOptions.model,
+    reasoningEffort: executionOptions.reasoningEffort,
+  });
   let lastOutputAt = Date.now();
   let timedOut = false;
   let logQueue = Promise.resolve();
+  let telemetryQueue = Promise.resolve();
+  let telemetrySequence = 0;
   let traceStatus: 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'execution_error' = 'execution_error';
   let terminalExitCode: number | null | undefined;
   let executionFailed = false;
   let finalText = '';
+  const finalTextAccumulator = createAgentFinalTextAccumulator(executor.id);
+  const metricsAccumulator = createAgentRunMetricsAccumulator(executor.id);
 
   const enqueueLog = (message: string | null) => {
     if (!message) return;
     logQueue = logQueue.catch(() => undefined).then(async () => { await appendLog(message); }).catch(() => undefined);
   };
-  const enqueueTelemetry = (event: ReturnType<typeof parseAgentTelemetryStdout>) => {
-    if (event) void trace.event(event);
+  const enqueueTelemetry = (event: AgentTelemetryEvent | null) => {
+    if (!event) return;
+    const sequenced = { ...event, sequence: ++telemetrySequence };
+    telemetryQueue = telemetryQueue.catch(() => undefined).then(async () => { await trace.event(sequenced); }).catch(() => undefined);
   };
 
   try {
-    await trace.event({ name: 'loop.agent.lifecycle', executor: executor.id, phase: 'started', summary: 'Agent CLI started' });
     await appendLog(`[Agent] 开始 agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - ${description}`);
     await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - 启动 ${executor.label} CLI：${executor.formatCommand(workspaceRoot, executionOptions)}`);
     const child: ChildProcess = spawn(executor.command, args, {
@@ -67,8 +77,9 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       stdoutBuffer = lines.pop() || '';
       for (const line of lines.filter(Boolean)) {
         enqueueLog(executor.parseStdout(line, context));
-        enqueueTelemetry(parseAgentTelemetryStdout(executor.id, line));
-        finalText = extractAgentFinalText(executor.id, line) || finalText;
+        for (const event of parseAgentTelemetryStdoutEvents(executor.id, line)) enqueueTelemetry(event);
+        finalTextAccumulator.ingest(line);
+        metricsAccumulator.ingest(line);
       }
     });
     child.stderr?.on('data', (chunk: Buffer) => {
@@ -108,22 +119,26 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     }
     if (stdoutBuffer.trim()) {
       enqueueLog(executor.parseStdout(stdoutBuffer, context));
-      enqueueTelemetry(parseAgentTelemetryStdout(executor.id, stdoutBuffer));
-      finalText = extractAgentFinalText(executor.id, stdoutBuffer) || finalText;
+      for (const event of parseAgentTelemetryStdoutEvents(executor.id, stdoutBuffer)) enqueueTelemetry(event);
+      finalTextAccumulator.ingest(stdoutBuffer);
+      metricsAccumulator.ingest(stdoutBuffer);
     }
     if (stderrBuffer.trim()) {
       enqueueLog(executor.parseStderr(stderrBuffer, context));
       enqueueTelemetry(parseAgentTelemetryStderr(executor.id, stderrBuffer));
     }
     await logQueue;
+    await telemetryQueue;
+    finalText = finalTextAccumulator.value();
     await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - ${executor.label} CLI 已退出 code=${terminalExitCode ?? 'signal'}`);
     if (terminalExitCode && terminalExitCode !== 0) await appendLog(`[错误] ${context.agent} 执行失败 code=${terminalExitCode}`);
     else await appendLog(`[Agent] 完成 agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - 处理完成`);
     traceStatus = timedOut ? 'timed_out' : executionFailed ? 'execution_error' : terminalExitCode === 0 ? 'completed' : terminalExitCode === null ? 'cancelled' : 'failed';
     return { exitCode: terminalExitCode ?? 1, finalText };
   } finally {
-    await trace.event({ name: 'loop.agent.lifecycle', executor: executor.id, phase: 'completed', summary: `Agent CLI ${traceStatus}`, output: { exitCode: terminalExitCode ?? null, timedOut } });
-    await trace.end({ status: traceStatus });
+    await telemetryQueue;
+    finalText = finalText || finalTextAccumulator.value();
+    await trace.end({ status: traceStatus, output: finalText, exitCode: terminalExitCode ?? null, timedOut, metrics: metricsAccumulator.value() });
     await telemetry.flush();
   }
 }

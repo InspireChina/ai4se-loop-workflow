@@ -18,16 +18,33 @@ function fixtureExecutor(id: AgentExecutor['id'], program: string): AgentExecuto
 function recordedTelemetry() {
   const traces: Array<Record<string, unknown>> = [];
   const events: Array<Record<string, unknown>> = [];
+  const agentSpans: Array<Record<string, unknown>> = [];
+  const toolSpans: Array<Record<string, unknown>> = [];
+  const agentEnds: Array<Record<string, unknown>> = [];
+  const toolEnds: Array<Record<string, unknown>> = [];
   const updates: Array<Record<string, unknown>> = [];
   let flushes = 0;
   const client: LangfuseClient = {
     trace: (attributes) => {
       traces.push(attributes);
-      return { event: (attributes) => { events.push(attributes); }, update: (attributes) => { updates.push(attributes); } };
+      return {
+        update: (attributes) => { updates.push(attributes); },
+        span: (attributes) => {
+          agentSpans.push(attributes);
+          return {
+            event: (event) => { events.push(event); },
+            span: (tool) => {
+              toolSpans.push(tool);
+              return { end: (end) => { toolEnds.push(end ?? {}); } };
+            },
+            end: (end) => { agentEnds.push(end ?? {}); },
+          };
+        },
+      };
     },
     flushAsync: async () => { flushes += 1; },
   };
-  return { traces, events, updates, get flushes() { return flushes; }, telemetry: createLangfuseTelemetry({ env: credentials, createClient: () => client }) };
+  return { traces, events, agentSpans, toolSpans, agentEnds, toolEnds, updates, get flushes() { return flushes; }, telemetry: createLangfuseTelemetry({ env: credentials, createClient: () => client }) };
 }
 
 async function run(executor: AgentExecutor, telemetry = recordedTelemetry().telemetry, overrides: Partial<Parameters<typeof executeDelegation>[0]> = {}) {
@@ -42,20 +59,24 @@ async function run(executor: AgentExecutor, telemetry = recordedTelemetry().tele
 
 test('records one safe delegation trace and normalized Cursor, Codex, and Claude events while preserving local logs', async () => {
   const fixtures: Array<[AgentExecutor['id'], string]> = [
-    ['cursor', 'console.log(JSON.stringify({type:"tool_call",tool_call:{ShellToolCall:{args:{command:"echo cursor"}}}})); console.log(JSON.stringify({type:"result",result:"done"}));'],
-    ['codex', 'console.log(JSON.stringify({type:"item.started",item:{type:"command_execution",command:"echo codex"}})); console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}));'],
-    ['claude', 'console.log(JSON.stringify({type:"assistant",message:{content:[{type:"tool_use",name:"Bash",input:{command:"echo claude"}}]}})); console.log(JSON.stringify({type:"result",result:"done"}));'],
+    ['cursor', 'console.log(JSON.stringify({type:"tool_call",subtype:"started",call_id:"c1",tool_call:{ShellToolCall:{args:{command:"echo cursor"}}}})); console.log(JSON.stringify({type:"tool_call",subtype:"completed",call_id:"c1",tool_call:{ShellToolCall:{result:{success:{exitCode:0,stdout:"ok"}}}}})); console.log(JSON.stringify({type:"assistant",message:{content:[{type:"text",text:"done"}]}})); console.log(JSON.stringify({type:"result",result:"earlier done"}));'],
+    ['codex', 'console.log(JSON.stringify({type:"item.started",item:{id:"c1",type:"command_execution",command:"echo codex"}})); console.log(JSON.stringify({type:"item.completed",item:{id:"c1",type:"command_execution",command:"echo codex",exit_code:0,aggregated_output:"ok"}})); console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}));'],
+    ['claude', 'console.log(JSON.stringify({type:"assistant",message:{content:[{type:"tool_use",id:"c1",name:"Bash",input:{command:"echo claude"}}]}})); console.log(JSON.stringify({type:"user",message:{content:[{type:"tool_result",tool_use_id:"c1",content:"ok"}]}})); console.log(JSON.stringify({type:"result",result:"done"}));'],
   ];
   for (const [id, program] of fixtures) {
     const record = recordedTelemetry();
     const { result, logs } = await run(fixtureExecutor(id, program), record.telemetry);
     assert.deepEqual(result, { exitCode: 0, finalText: 'done' });
     assert.equal(record.traces.length, 1);
-    assert.deepEqual(record.traces[0].metadata, { runToken: 'run-story-4', requirementId: 'TASK-4', deliveryUnitIndex: 4, flow: 'resume', agent: 'dev-agent', executor: id, promptCaptured: true, promptLength: 50 });
-    assert.ok(record.events.some((event) => event.name === 'loop.agent.lifecycle'));
-    assert.ok(record.events.some((event) => event.name === 'loop.agent.tool'));
-    assert.ok(record.events.some((event) => event.name === 'loop.agent.output'));
-    assert.deepEqual(record.updates.at(-1), { metadata: { executionStatus: 'completed' } });
+    assert.deepEqual(record.traces[0].metadata, { runToken: 'run-story-4', requirementId: 'TASK-4', deliveryUnitIndex: 4, flow: 'resume', agent: 'dev-agent', operation: 'resume', node: 'dev-agent', executor: id, configuredModel: null, reasoningEffort: null, usageAvailable: false, promptCaptured: true, promptLength: 50 });
+    assert.equal(record.traces[0].name, 'loop.resume');
+    assert.equal(record.agentSpans[0].name, 'agent.dev-agent');
+    assert.equal(record.toolSpans.length, 1);
+    assert.match(String(record.toolSpans[0].name), /^tool\./);
+    assert.equal(record.toolEnds.length, 1);
+    assert.equal(record.agentEnds.length, 1);
+    assert.equal(record.agentEnds[0].output, 'done');
+    assert.deepEqual(record.updates.at(-1), { output: 'done', metadata: { executionStatus: 'completed' } });
     assert.equal(record.flushes, 1);
     assert.ok(logs.some((line) => line.startsWith('stdout:')));
   }
@@ -72,7 +93,7 @@ test('maps non-zero, spawn error, timeout, and signal exits without telemetry af
     const record = recordedTelemetry();
     const { result, logs } = await run(item.executor, record.telemetry, item.name === 'timeout' ? { maxRuntimeMs: 25, idleTimeoutMs: 500 } : {});
     assert.notEqual(result.exitCode, 0, item.name);
-    assert.deepEqual(record.updates.at(-1), { metadata: { executionStatus: item.expected } }, item.name);
+    assert.deepEqual(record.updates.at(-1), { output: { exitCode: item.name === 'non-zero' ? 7 : null, timedOut: item.name === 'timeout' }, metadata: { executionStatus: item.expected } }, item.name);
     assert.ok(logs.length > 0, item.name);
   }
 });
@@ -93,7 +114,7 @@ test('telemetry initialization, event/update, network, and bounded flush failure
 
   const record = recordedTelemetry();
   await run(fixtureExecutor('codex', 'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}))'), record.telemetry);
-  assert.doesNotMatch(JSON.stringify({ traces: record.traces, events: record.events, updates: record.updates }), /definitely-not-a-real-secret/);
+  assert.doesNotMatch(JSON.stringify({ traces: record.traces, events: record.events, agentSpans: record.agentSpans, toolSpans: record.toolSpans, agentEnds: record.agentEnds, toolEnds: record.toolEnds, updates: record.updates }), /definitely-not-a-real-secret/);
 
   const disabled = createLangfuseTelemetry({ env: {} });
   const disabledResult = await run(fixtureExecutor('codex', 'process.exit(0)'), disabled);

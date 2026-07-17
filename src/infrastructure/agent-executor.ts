@@ -12,11 +12,20 @@ export type AgentExecutionOptions = {
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
 };
 
+export type AgentRunMetrics = {
+  model?: string;
+  usage?: Record<string, unknown>;
+  totalCostUsd?: number;
+  durationMs?: number;
+};
+
 export type AgentTelemetryEvent = {
   name: 'loop.agent.tool' | 'loop.agent.output' | 'loop.agent.diagnostic';
   phase?: 'started' | 'completed';
   executor: AgentExecutorId;
   tool?: string;
+  toolCallId?: string;
+  sequence?: number;
   summary?: string;
   input?: unknown;
   output?: unknown;
@@ -36,27 +45,92 @@ export type AgentExecutor = {
 
 /** Returns provider-neutral final assistant text when a stream record contains it. */
 export function extractAgentFinalText(executor: AgentExecutorId, line: string) {
+  return finalTextCandidate(executor, line)?.text ?? null;
+}
+
+type FinalTextCandidate = { text: string; priority: number };
+
+function finalTextCandidate(executor: AgentExecutorId, line: string): FinalTextCandidate | null {
   try {
     const event = JSON.parse(line) as Record<string, unknown>;
     if (executor === 'codex') {
       const item = event.item as Record<string, unknown> | undefined;
-      return event.type === 'item.completed' && item?.type === 'agent_message' ? stringifyValue(item.text) || null : null;
+      const text = event.type === 'item.completed' && item?.type === 'agent_message' ? stringifyValue(item.text) : '';
+      return text ? { text, priority: 30 } : null;
     }
-    if (executor === 'claude') return event.type === 'result' && !event.is_error ? stringifyValue(event.result) || null : null;
-    if (event.type === 'result' || event.subtype === 'result' || event.subtype === 'success') return stringifyValue(event.result || event.text || event.message) || null;
+    if (executor === 'claude') {
+      if (event.type === 'result' && !event.is_error) {
+        const text = stringifyValue(event.result);
+        return text ? { text, priority: 30 } : null;
+      }
+      if (event.type !== 'assistant') return null;
+      const text = claudeContentBlocks(event).filter((block) => block.type === 'text').map((block) => stringifyValue(block.text)).join('');
+      return text ? { text, priority: 10 } : null;
+    }
     if (event.type === 'assistant') {
       const content = (event.message as Record<string, unknown> | undefined)?.content;
-      if (!Array.isArray(content)) return stringifyValue(event.text) || null;
+      if (!Array.isArray(content)) {
+        const text = stringifyValue(event.text);
+        return text ? { text, priority: 30 } : null;
+      }
       const text = content
         .filter((item) => (item as Record<string, unknown>).type === 'text')
         .map((item) => stringifyValue((item as Record<string, unknown>).text))
         .join('');
-      return text || null;
+      return text ? { text, priority: 30 } : null;
+    }
+    if (event.type === 'result' || event.subtype === 'result' || event.subtype === 'success') {
+      const text = stringifyValue(event.result || event.text || event.message);
+      // Cursor's aggregate result can repeat every earlier assistant message. Prefer the
+      // last complete assistant message when both are present.
+      return text ? { text, priority: 20 } : null;
     }
     return null;
   } catch {
     return null;
   }
+}
+
+/** Keeps the best complete provider message without treating JSONL deltas as messages. */
+export function createAgentFinalTextAccumulator(executor: AgentExecutorId) {
+  let selected: FinalTextCandidate | null = null;
+  return {
+    ingest(line: string) {
+      const candidate = finalTextCandidate(executor, line);
+      if (candidate && (!selected || candidate.priority >= selected.priority)) selected = candidate;
+    },
+    value() { return selected?.text ?? ''; },
+  };
+}
+
+/** Collects aggregate CLI metrics without pretending they are one model generation. */
+export function createAgentRunMetricsAccumulator(executor: AgentExecutorId) {
+  let metrics: AgentRunMetrics = {};
+  return {
+    ingest(line: string) {
+      try {
+        const event = JSON.parse(line) as Record<string, unknown>;
+        const usage = event.usage;
+        if (usage && typeof usage === 'object' && !Array.isArray(usage)) metrics.usage = usage as Record<string, unknown>;
+        const model = stringifyValue(event.model || event.model_name || event.modelName);
+        if (model) metrics.model = model;
+        const cost = event.total_cost_usd ?? event.totalCostUsd;
+        if (typeof cost === 'number' && Number.isFinite(cost)) metrics.totalCostUsd = cost;
+        const duration = event.duration_ms ?? event.durationMs;
+        if (typeof duration === 'number' && Number.isFinite(duration)) metrics.durationMs = duration;
+
+        if (executor === 'claude' && event.modelUsage && typeof event.modelUsage === 'object' && !Array.isArray(event.modelUsage)) {
+          const modelUsage = event.modelUsage as Record<string, unknown>;
+          const models = Object.keys(modelUsage);
+          if (!metrics.model && models.length === 1) metrics.model = models[0];
+          metrics.usage = metrics.usage ?? { modelUsage };
+        }
+      } catch {
+        // Malformed provider output is handled as a diagnostic by the telemetry parser.
+      }
+    },
+    value(): AgentRunMetrics { return { ...metrics }; },
+  };
 }
 
 function compact(value: string, limit = 1600) {
@@ -80,6 +154,7 @@ function toolNameFromCursor(event: Record<string, unknown>) {
   const payload = key ? toolCall?.[key] as Record<string, unknown> | undefined : undefined;
   return {
     tool: key ? key.replace(/ToolCall$/, '') : stringifyValue(event.tool || event.name || 'unknown'),
+    toolCallId: stringifyValue(event.call_id || event.callId || payload?.id || (payload?.args as Record<string, unknown> | undefined)?.toolCallId),
     args: payload?.args as Record<string, unknown> | undefined,
     result: payload?.result as Record<string, unknown> | undefined,
   };
@@ -210,12 +285,7 @@ function parseClaudeStdout(line: string, context: AgentExecutionContext) {
   }
 }
 
-function telemetryOutput(executor: AgentExecutorId, summary: string): AgentTelemetryEvent | null {
-  const compacted = compact(summary, 500);
-  return compacted ? { name: 'loop.agent.output', executor, summary: compacted } : null;
-}
-
-function telemetryDiagnostic(executor: AgentExecutorId, summary: string, level: 'WARNING' | 'ERROR' = 'ERROR'): AgentTelemetryEvent {
+function telemetryDiagnostic(executor: AgentExecutorId, summary: string, level: 'DEFAULT' | 'WARNING' | 'ERROR' = 'ERROR'): AgentTelemetryEvent {
   return { name: 'loop.agent.diagnostic', executor, summary: compact(summary, 500), level };
 }
 
@@ -224,13 +294,22 @@ export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: strin
   try {
     const event = JSON.parse(line) as Record<string, unknown>;
     if (executor === 'cursor') {
-      const { tool, args, result } = toolNameFromCursor(event);
+      const { tool, toolCallId, args, result } = toolNameFromCursor(event);
       if (String(event.type) === 'tool_call' || event.tool_call) {
         const completed = String(event.subtype) === 'completed';
-        return { name: 'loop.agent.tool', executor, tool, phase: completed ? 'completed' : 'started', summary: completed ? summarizeResult(result) : summarizeCommand(stringifyValue(args?.command)) || stringifyValue(args?.description), ...(completed ? { output: result } : { input: args }) };
+        return {
+          name: 'loop.agent.tool', executor, tool, toolCallId: toolCallId || undefined,
+          phase: completed ? 'completed' : 'started',
+          summary: completed ? summarizeResult(result) : summarizeCommand(stringifyValue(args?.command)) || stringifyValue(args?.description),
+          level: completed && result?.error ? 'ERROR' : 'DEFAULT',
+          ...(completed ? { output: result } : { input: args }),
+        };
       }
       if (event.type === 'user' || event.type === 'system') return null;
-      return telemetryOutput(executor, stringifyValue(event.text || event.message || event.delta || event.content || event.result));
+      if (event.type === 'error' || event.subtype === 'error') return telemetryDiagnostic(executor, stringifyValue(event.message || event.error || line));
+      // Assistant chunks, deltas, reasoning and aggregate result records are coalesced by
+      // createAgentFinalTextAccumulator and written once when the Agent span ends.
+      return null;
     }
     if (executor === 'codex') {
       const type = String(event.type || '');
@@ -240,29 +319,84 @@ export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: strin
         const completed = type === 'item.completed';
         const tool = itemType === 'command_execution' ? 'shell' : stringifyValue(item.name || itemType);
         const detail = itemType === 'command_execution' ? summarizeCommand(stringifyValue(item.command)) : stringifyValue(item.arguments || item.changes || item.query);
-        return { name: 'loop.agent.tool', executor, tool, phase: completed ? 'completed' : 'started', summary: completed ? compact(stringifyValue(item.aggregated_output || item.result || item.exit_code), 500) : compact(detail, 500), ...(completed ? { output: item.aggregated_output || item.result || item.exit_code } : { input: item.arguments || item.command || item.changes || item.query }) };
+        const failed = completed && (item.status === 'failed' || (typeof item.exit_code === 'number' && item.exit_code !== 0));
+        return {
+          name: 'loop.agent.tool', executor, tool,
+          toolCallId: stringifyValue(item.id || item.call_id || item.callId) || undefined,
+          phase: completed ? 'completed' : 'started',
+          summary: completed ? compact(stringifyValue(item.aggregated_output || item.result || item.exit_code), 500) : compact(detail, 500),
+          level: failed ? 'ERROR' : 'DEFAULT',
+          ...(completed ? { output: item.aggregated_output ?? item.result ?? item.exit_code } : { input: item.arguments || item.command || item.changes || item.query }),
+        };
       }
       if (type === 'error' || type === 'turn.failed') return telemetryDiagnostic(executor, stringifyValue(event.message || event.error || line));
-      if (itemType === 'agent_message' || itemType === 'reasoning') return telemetryOutput(executor, stringifyValue(item?.text));
+      if (itemType === 'agent_message' || itemType === 'reasoning') return null;
       return null;
     }
     const type = String(event.type || '');
     if (type === 'assistant') {
       const blocks = claudeContentBlocks(event);
       const toolUse = blocks.find((block) => block.type === 'tool_use');
-      if (toolUse) return { name: 'loop.agent.tool', executor, tool: stringifyValue(toolUse.name), phase: 'started', summary: summarizeCommand(stringifyValue((toolUse.input as Record<string, unknown> | undefined)?.command)), input: toolUse.input };
-      return telemetryOutput(executor, blocks.map((block) => stringifyValue(block.text)).filter(Boolean).join(''));
+      if (toolUse) return {
+        name: 'loop.agent.tool', executor, tool: stringifyValue(toolUse.name),
+        toolCallId: stringifyValue(toolUse.id) || undefined,
+        phase: 'started', summary: summarizeCommand(stringifyValue((toolUse.input as Record<string, unknown> | undefined)?.command)), input: toolUse.input,
+      };
+      return null;
     }
     if (type === 'user') {
       const toolResult = claudeContentBlocks(event).find((block) => block.type === 'tool_result');
-      if (toolResult) return { name: 'loop.agent.tool', executor, tool: stringifyValue(toolResult.tool_use_id || 'tool'), phase: 'completed', summary: compact(stringifyValue(toolResult.content), 500), output: toolResult.content };
+      if (toolResult) return {
+        name: 'loop.agent.tool', executor, tool: 'tool', toolCallId: stringifyValue(toolResult.tool_use_id) || undefined,
+        phase: 'completed', summary: compact(stringifyValue(toolResult.content), 500), output: toolResult.content,
+        level: toolResult.is_error ? 'ERROR' : 'DEFAULT',
+      };
     }
     if (type === 'result' && event.is_error) return telemetryDiagnostic(executor, stringifyValue(event.result || event.error || line));
-    if (type === 'result') return telemetryOutput(executor, stringifyValue(event.result));
+    if (type === 'result') return null;
     return null;
   } catch {
-    return telemetryOutput(executor, line);
+    return telemetryDiagnostic(executor, line, 'DEFAULT');
   }
+}
+
+/** A Claude stream record may contain several parallel tool blocks. Preserve all of them. */
+export function parseAgentTelemetryStdoutEvents(executor: AgentExecutorId, line: string): AgentTelemetryEvent[] {
+  if (executor !== 'claude') {
+    const event = parseAgentTelemetryStdout(executor, line);
+    return event ? [event] : [];
+  }
+  try {
+    const record = JSON.parse(line) as Record<string, unknown>;
+    const blocks = claudeContentBlocks(record);
+    if (record.type === 'assistant') {
+      const tools = blocks.filter((block) => block.type === 'tool_use');
+      if (tools.length) return tools.map((toolUse) => ({
+        name: 'loop.agent.tool', executor,
+        tool: stringifyValue(toolUse.name),
+        toolCallId: stringifyValue(toolUse.id) || undefined,
+        phase: 'started',
+        summary: summarizeCommand(stringifyValue((toolUse.input as Record<string, unknown> | undefined)?.command)),
+        input: toolUse.input,
+      }));
+    }
+    if (record.type === 'user') {
+      const results = blocks.filter((block) => block.type === 'tool_result');
+      if (results.length) return results.map((toolResult) => ({
+        name: 'loop.agent.tool', executor,
+        tool: 'tool',
+        toolCallId: stringifyValue(toolResult.tool_use_id) || undefined,
+        phase: 'completed',
+        summary: compact(stringifyValue(toolResult.content), 500),
+        output: toolResult.content,
+        level: toolResult.is_error ? 'ERROR' : 'DEFAULT',
+      }));
+    }
+  } catch {
+    // The provider-neutral fallback below records malformed stdout as a diagnostic.
+  }
+  const event = parseAgentTelemetryStdout(executor, line);
+  return event ? [event] : [];
 }
 
 export function parseAgentTelemetryStderr(executor: AgentExecutorId, line: string): AgentTelemetryEvent | null {
@@ -270,7 +404,8 @@ export function parseAgentTelemetryStderr(executor: AgentExecutorId, line: strin
   if (!text) return null;
   if (executor === 'codex' && (/^Reading additional input from stdin\.\.\.$/.test(text) || /codex_core_skills::loader: ignoring interface\.icon_(?:small|large)/.test(text))) return null;
   const error = /(?:^|\s)(?:ERROR|FATAL|PANIC)(?:\s|:)/i.test(text) || /^Error:/i.test(text);
-  return telemetryDiagnostic(executor, text, error ? 'ERROR' : 'WARNING');
+  const warning = /(?:^|\s)WARN(?:ING)?(?:\s|:)/i.test(text);
+  return telemetryDiagnostic(executor, text, error ? 'ERROR' : warning ? 'WARNING' : 'DEFAULT');
 }
 
 function stderrLog(executor: AgentExecutorId, context: AgentExecutionContext, line: string) {

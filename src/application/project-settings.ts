@@ -79,7 +79,7 @@ function langfuseStatus(settings: Pick<LangfuseSettings, 'enabled' | 'publicKey'
   if (!Number.isFinite(settings.sampleRate) || settings.sampleRate < 0 || settings.sampleRate > 1) {
     return { status: 'invalid' as const, statusMessage: '采样率必须在 0 到 1 之间。' };
   }
-  return { status: 'enabled' as const, statusMessage: '已启用；新的 Agent 执行会创建 loop.agent-execution trace。' };
+  return { status: 'enabled' as const, statusMessage: '已启用；新的 Agent 执行会创建按 flow 命名的 Langfuse trace。' };
 }
 
 async function readProjectSettings(keys: readonly string[]) {

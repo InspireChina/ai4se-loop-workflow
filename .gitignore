@@ -9,6 +9,9 @@ node_modules/
 .project/_loop/*.db-*
 .project/_loop/runs/
 data/
+.ai/runs/
+__pycache__/
+*.pyc
 
 # operating system files
 .DS_Store

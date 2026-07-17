@@ -7,6 +7,7 @@ const MAX_TEXT_LENGTH = 4_096;
 // `runToken` is an execution correlation ID, not an authentication token. It must remain
 // queryable in Langfuse while actual credential-bearing token fields are redacted.
 const SENSITIVE_KEY = /(?:api[-_]?key|secret|password|passphrase|authorization|cookie|credential|access[-_]?token|refresh[-_]?token|^(?!runToken$).*token)/i;
+const TOKEN_COUNT_KEY = /(?:^|[_-])tokens?$|Tokens$/;
 
 export type TelemetryContext = {
   runToken?: string;
@@ -26,29 +27,53 @@ type LangfuseTracePayload = {
   name: string;
   sessionId?: string;
   metadata: Record<string, unknown>;
-  input?: Record<string, unknown>;
+  input?: unknown;
+  output?: unknown;
+  tags?: string[];
 };
 
 type LangfuseTraceClient = {
-  update?: (attributes: Pick<LangfuseTracePayload, 'metadata'>) => unknown;
-  event?: (attributes: LangfuseEventPayload) => unknown;
+  update?: (attributes: Partial<LangfuseTracePayload>) => unknown;
+  event?: (attributes: LangfuseObservationPayload) => LangfuseObservationClient | unknown;
+  span?: (attributes: LangfuseObservationPayload) => LangfuseSpanClient;
 };
 
-type LangfuseEventPayload = {
+type LangfuseObservationPayload = {
   name: string;
   metadata?: Record<string, unknown>;
-  input?: Record<string, unknown>;
-  output?: Record<string, unknown>;
+  input?: unknown;
+  output?: unknown;
   level?: 'DEFAULT' | 'WARNING' | 'ERROR';
+  statusMessage?: string;
+};
+
+type LangfuseObservationClient = {
+  event?: (attributes: LangfuseObservationPayload) => unknown;
+  span?: (attributes: LangfuseObservationPayload) => LangfuseSpanClient;
+};
+
+type LangfuseSpanClient = LangfuseObservationClient & {
+  end?: (attributes?: Omit<LangfuseObservationPayload, 'name' | 'input'>) => unknown;
 };
 
 export type DelegationTraceAttributes = {
   executor: string;
   prompt: string;
+  model?: string;
+  reasoningEffort?: string;
 };
 
 export type DelegationTraceEndAttributes = {
   status: 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'execution_error';
+  output?: string;
+  exitCode?: number | null;
+  timedOut?: boolean;
+  metrics?: {
+    model?: string;
+    usage?: Record<string, unknown>;
+    totalCostUsd?: number;
+    durationMs?: number;
+  };
 };
 
 export type DelegationTelemetryEvent = {
@@ -56,6 +81,8 @@ export type DelegationTelemetryEvent = {
   phase?: 'started' | 'completed';
   executor: string;
   tool?: string;
+  toolCallId?: string;
+  sequence?: number;
   summary?: string;
   input?: unknown;
   output?: unknown;
@@ -137,26 +164,45 @@ function stableSample(context: TelemetryContext, sampleRate: number) {
   return (hash >>> 0) / 0x1_0000_0000 < sampleRate;
 }
 
-function redactText(value: string) {
-  const truncated = value.length > MAX_TEXT_LENGTH ? `${value.slice(0, MAX_TEXT_LENGTH)}…[TRUNCATED]` : value;
+function redactText(value: string, maxTextLength = MAX_TEXT_LENGTH) {
+  const truncated = value.length > maxTextLength ? `${value.slice(0, maxTextLength)}…[TRUNCATED]` : value;
   return truncated
     .replace(/(\b(?:api[-_]?key|secret|password|passphrase|authorization|cookie|credential|access[-_]?token|refresh[-_]?token|token))\s*([:=])\s*((?:(?:Bearer|Basic)\s+)?[^\s,;"']+)/gi, `$1$2 ${REDACTED}`)
     .replace(/\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+/gi, '$&'.split(/\s+/)[0] + ' ' + REDACTED)
     .replace(/\b(?:sk|pk)-[A-Za-z0-9_-]{6,}\b/g, REDACTED);
 }
 
-export function sanitizeLangfuseValue(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
-  if (typeof value === 'string') return redactText(value);
+function sanitizeWithLimit(value: unknown, maxTextLength: number, depth = 0, seen = new WeakSet<object>()): unknown {
+  if (typeof value === 'string') return redactText(value, maxTextLength);
   if (value === null || typeof value !== 'object') return value;
   if (depth >= MAX_DEPTH) return '[TRUNCATED_DEPTH]';
   if (seen.has(value)) return '[CIRCULAR]';
   seen.add(value);
-  if (Array.isArray(value)) return value.slice(0, MAX_ITEMS).map((item) => sanitizeLangfuseValue(item, depth + 1, seen));
+  if (Array.isArray(value)) return value.slice(0, MAX_ITEMS).map((item) => sanitizeWithLimit(item, maxTextLength, depth + 1, seen));
   const result: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value).slice(0, MAX_ITEMS)) {
-    result[key] = SENSITIVE_KEY.test(key) ? REDACTED : sanitizeLangfuseValue(item, depth + 1, seen);
+    const numericTokenCount = typeof item === 'number' && TOKEN_COUNT_KEY.test(key);
+    result[key] = SENSITIVE_KEY.test(key) && !numericTokenCount ? REDACTED : sanitizeWithLimit(item, maxTextLength, depth + 1, seen);
   }
   return result;
+}
+
+export function sanitizeLangfuseValue(value: unknown): unknown {
+  return sanitizeWithLimit(value, MAX_TEXT_LENGTH);
+}
+
+function sanitizeFinalOutput(value: unknown) {
+  return sanitizeWithLimit(value, 64 * 1024);
+}
+
+function observationSegment(value: string | undefined, fallback: string) {
+  const normalized = (value || fallback).trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '');
+  return normalized || fallback;
+}
+
+function structuredOutput(value: string | undefined) {
+  if (!value) return undefined;
+  try { return JSON.parse(value) as unknown; } catch { return value; }
 }
 
 async function withTimeout(operation: Promise<unknown>, timeoutMs: number) {
@@ -210,34 +256,145 @@ export function createLangfuseTelemetry(options: LangfuseTelemetryOptions = {}):
         deliveryUnitIndex: context.storyIndex ?? null,
         flow: context.pipeline ?? null,
         agent: context.agent ?? null,
+        operation: context.pipeline ?? null,
+        node: context.agent ?? null,
         executor: attributes.executor,
+        configuredModel: attributes.model ?? null,
+        reasoningEffort: attributes.reasoningEffort ?? null,
+        usageAvailable: false,
         promptCaptured: Boolean(prompt),
         promptLength: attributes.prompt.length,
       }) as Record<string, unknown>;
       const trace = await this.withClient(context, (activeClient) => activeClient.trace?.({
-        name: 'loop.agent-execution',
+        name: `loop.${observationSegment(context.pipeline, 'agent-execution')}`,
         sessionId: context.runToken,
         metadata,
+        tags: [context.agent, context.pipeline, attributes.executor].filter((value): value is string => Boolean(value)),
         ...(prompt ? { input: { prompt } } : {}),
       }));
       if (!trace?.update) return noOpTrace;
+      const agentSpan = await this.safe(() => trace.span?.({
+        name: `agent.${observationSegment(context.agent, 'unknown')}`,
+        metadata: sanitizeLangfuseValue({
+          executor: attributes.executor,
+          operation: context.pipeline ?? null,
+          node: context.agent ?? null,
+          configuredModel: attributes.model ?? null,
+          reasoningEffort: attributes.reasoningEffort ?? null,
+          usageAvailable: false,
+        }) as Record<string, unknown>,
+      }));
+      const parent: LangfuseObservationClient = agentSpan ?? trace;
+      const toolSpans = new Map<string, { span: LangfuseSpanClient; tool: string }>();
+      const anonymousTools = new Map<string, string[]>();
+      let anonymousToolSequence = 0;
+      let finalOutput: string | undefined;
+
+      const openToolKey = (attributes: DelegationTelemetryEvent) => {
+        if (attributes.toolCallId) return attributes.toolCallId;
+        const tool = observationSegment(attributes.tool, 'unknown');
+        const key = `anonymous:${tool}:${++anonymousToolSequence}`;
+        const queue = anonymousTools.get(tool) ?? [];
+        queue.push(key);
+        anonymousTools.set(tool, queue);
+        return key;
+      };
+      const completedToolKey = (attributes: DelegationTelemetryEvent) => {
+        if (attributes.toolCallId) return attributes.toolCallId;
+        const tool = observationSegment(attributes.tool, 'unknown');
+        const queue = anonymousTools.get(tool);
+        return queue?.shift() ?? `orphan:${tool}:${++anonymousToolSequence}`;
+      };
+
       return {
         event: async (attributes) => {
-          await this.safe(() => trace.event?.({
-            name: attributes.name,
-            metadata: sanitizeLangfuseValue({
-              executor: attributes.executor,
-              phase: attributes.phase ?? null,
-              tool: attributes.tool ?? null,
-              summary: attributes.summary ?? null,
-            }) as Record<string, unknown>,
-            ...(attributes.input === undefined ? {} : { input: sanitizeLangfuseValue({ value: attributes.input }) as Record<string, unknown> }),
-            ...(attributes.output === undefined ? {} : { output: sanitizeLangfuseValue({ value: attributes.output }) as Record<string, unknown> }),
+          if (attributes.name === 'loop.agent.output') {
+            finalOutput = typeof attributes.output === 'string' ? attributes.output : attributes.summary;
+            return;
+          }
+          if (attributes.name === 'loop.agent.lifecycle') return;
+          if (attributes.name === 'loop.agent.diagnostic') {
+            await this.safe(() => parent.event?.({
+              name: 'agent.diagnostic',
+              metadata: sanitizeLangfuseValue({ executor: attributes.executor, sequence: attributes.sequence ?? null }) as Record<string, unknown>,
+              output: sanitizeLangfuseValue(attributes.summary ?? ''),
+              level: attributes.level ?? 'DEFAULT',
+              ...(attributes.level && attributes.level !== 'DEFAULT' && attributes.summary ? { statusMessage: redactText(attributes.summary, 1_000) } : {}),
+            }));
+            return;
+          }
+
+          const tool = observationSegment(attributes.tool, 'unknown');
+          if (attributes.phase === 'started') {
+            const key = openToolKey(attributes);
+            await this.safe(() => {
+              const span = parent.span?.({
+                name: `tool.${tool}`,
+                metadata: sanitizeLangfuseValue({ executor: attributes.executor, toolCallId: key, sequence: attributes.sequence ?? null }) as Record<string, unknown>,
+                ...(attributes.input === undefined ? {} : { input: sanitizeLangfuseValue(attributes.input) }),
+                level: attributes.level ?? 'DEFAULT',
+              });
+              if (span) toolSpans.set(key, { span, tool });
+            });
+            return;
+          }
+
+          const key = completedToolKey(attributes);
+          let open = toolSpans.get(key);
+          if (!open) {
+            await this.safe(() => {
+              const span = parent.span?.({
+                name: `tool.${tool}`,
+                metadata: sanitizeLangfuseValue({ executor: attributes.executor, toolCallId: key, orphanCompletion: true, sequence: attributes.sequence ?? null }) as Record<string, unknown>,
+              });
+              if (span) open = { span, tool };
+            });
+          }
+          if (!open) return;
+          toolSpans.delete(key);
+          const toolOutput = attributes.output === undefined ? attributes.summary : attributes.output;
+          await this.safe(() => open!.span.end?.({
+            metadata: sanitizeLangfuseValue({ completionSequence: attributes.sequence ?? null }) as Record<string, unknown>,
+            ...(toolOutput === undefined ? {} : { output: sanitizeLangfuseValue(toolOutput) }),
             level: attributes.level ?? 'DEFAULT',
+            ...(attributes.level && attributes.level !== 'DEFAULT' && attributes.summary ? { statusMessage: redactText(attributes.summary, 1_000) } : {}),
           }));
         },
-        end: async ({ status }) => {
-          await this.safe(() => trace.update?.({ metadata: sanitizeLangfuseValue({ executionStatus: status }) as Record<string, unknown> }));
+        end: async ({ status, output, exitCode, timedOut, metrics }) => {
+          const result = structuredOutput(output || finalOutput);
+          const level = status === 'completed' ? 'DEFAULT' : 'ERROR';
+          for (const [key, open] of toolSpans) {
+            await this.safe(() => open.span.end?.({
+              level: 'ERROR',
+              statusMessage: `Agent ended before tool completion (${status})`,
+              metadata: sanitizeLangfuseValue({ toolCallId: key, incomplete: true }) as Record<string, unknown>,
+            }));
+          }
+          toolSpans.clear();
+          const terminalOutput = result === undefined ? { exitCode: exitCode ?? null, timedOut: Boolean(timedOut) } : result;
+          await this.safe(() => agentSpan?.end?.({
+            output: sanitizeFinalOutput(terminalOutput),
+            metadata: sanitizeLangfuseValue({
+              executionStatus: status,
+              exitCode: exitCode ?? null,
+              timedOut: Boolean(timedOut),
+              ...(metrics?.model ? { reportedModel: metrics.model } : {}),
+              ...(metrics?.usage ? { usageAvailable: true, reportedUsage: metrics.usage } : {}),
+              ...(metrics?.totalCostUsd !== undefined ? { totalCostUsd: metrics.totalCostUsd } : {}),
+              ...(metrics?.durationMs !== undefined ? { providerDurationMs: metrics.durationMs } : {}),
+            }) as Record<string, unknown>,
+            level,
+            ...(status === 'completed' ? {} : { statusMessage: status }),
+          }));
+          await this.safe(() => trace.update?.({
+            output: sanitizeFinalOutput(terminalOutput),
+            metadata: sanitizeLangfuseValue({
+              executionStatus: status,
+              ...(metrics?.model ? { reportedModel: metrics.model } : {}),
+              ...(metrics?.usage ? { usageAvailable: true } : {}),
+              ...(metrics?.totalCostUsd !== undefined ? { totalCostUsd: metrics.totalCostUsd } : {}),
+            }) as Record<string, unknown>,
+          }));
         },
       };
     },

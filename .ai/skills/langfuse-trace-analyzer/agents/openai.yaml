@@ -1,0 +1,4 @@
+interface:
+  display_name: "Langfuse Trace 分析"
+  short_description: "拉取单个 Langfuse trace 并检查业务期望偏差"
+  default_prompt: "请分析这个 Langfuse trace，并指出与业务期望不一致的地方。"

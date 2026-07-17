@@ -18,9 +18,12 @@ test('sampling handles boundaries and is stable for a context', () => {
   assert.equal(telemetry.isEnabled(context), telemetry.isEnabled(context));
 });
 
-test('sanitizes sensitive keys, tokens, nested values, and oversized text', () => {
-  const sanitized = sanitizeLangfuseValue({ authorization: 'Bearer abcdefghijkl', nested: { password: 'hello' }, text: 'token=abc123 Bearer abcdefghijkl sk-abcdefghi' }) as Record<string, unknown>;
+test('sanitizes credentials and oversized text while retaining numeric token usage', () => {
+  const sanitized = sanitizeLangfuseValue({ authorization: 'Bearer abcdefghijkl', accessToken: 'secret', input_tokens: 12, outputTokens: 4, nested: { password: 'hello' }, text: 'token=abc123 Bearer abcdefghijkl sk-abcdefghi' }) as Record<string, unknown>;
   assert.equal(sanitized.authorization, '[REDACTED]');
+  assert.equal(sanitized.accessToken, '[REDACTED]');
+  assert.equal(sanitized.input_tokens, 12);
+  assert.equal(sanitized.outputTokens, 4);
   assert.deepEqual(sanitized.nested, { password: '[REDACTED]' });
   assert.match(String(sanitized.text), /\[REDACTED\]/);
   assert.match(String(sanitizeLangfuseValue('x'.repeat(5_000))), /\[TRUNCATED\]/);
@@ -50,14 +53,16 @@ test('creates a delegation trace with safe metadata and an opt-in prompt, then e
       return { update: (attributes) => { updated.push(attributes); } };
     } }),
   });
-  const trace = await telemetry.startDelegationTrace(context, { executor: 'codex', prompt: 'Authorization: Bearer abcdefghijk' });
+  const trace = await telemetry.startDelegationTrace(context, { executor: 'codex', prompt: 'Authorization: Bearer abcdefghijk', model: 'gpt-test', reasoningEffort: 'high' });
   await trace.end({ status: 'completed' });
   assert.equal(created.length, 1);
   assert.deepEqual(created[0].metadata, {
-    runToken: 'run-1', requirementId: 'TASK-1', deliveryUnitIndex: 1, flow: 'dev', agent: 'dev-agent', executor: 'codex', promptCaptured: true, promptLength: 33,
+    runToken: 'run-1', requirementId: 'TASK-1', deliveryUnitIndex: 1, flow: 'dev', agent: 'dev-agent', operation: 'dev', node: 'dev-agent', executor: 'codex', configuredModel: 'gpt-test', reasoningEffort: 'high', usageAvailable: false, promptCaptured: true, promptLength: 33,
   });
+  assert.equal(created[0].name, 'loop.dev');
+  assert.deepEqual(created[0].tags, ['dev-agent', 'dev', 'codex']);
   assert.deepEqual(created[0].input, { prompt: 'Authorization: [REDACTED]' });
-  assert.deepEqual(updated, [{ metadata: { executionStatus: 'completed' } }]);
+  assert.deepEqual(updated, [{ output: { exitCode: null, timedOut: false }, metadata: { executionStatus: 'completed' } }]);
 });
 
 test('does not create a trace or send a prompt when prompt capture is disabled', async () => {
@@ -68,23 +73,46 @@ test('does not create a trace or send a prompt when prompt capture is disabled',
   assert.equal(traced, 1);
 });
 
-test('records structured lifecycle and tool events using the existing delegation trace', async () => {
+test('records one paired tool span and readable diagnostics without metadata summaries or value wrappers', async () => {
+  const agentSpans: Array<Record<string, unknown>> = [];
+  const toolSpans: Array<Record<string, unknown>> = [];
+  const toolEnds: Array<Record<string, unknown>> = [];
+  const agentEnds: Array<Record<string, unknown>> = [];
   const events: Array<Record<string, unknown>> = [];
+  const updates: Array<Record<string, unknown>> = [];
   const telemetry = createLangfuseTelemetry({
     env: credentials,
-    createClient: () => ({ trace: () => ({ update: () => undefined, event: (attributes) => { events.push(attributes); } }) }),
+    createClient: () => ({ trace: () => ({
+      update: (attributes) => { updates.push(attributes); },
+      span: (attributes) => {
+        agentSpans.push(attributes);
+        return {
+          event: (event) => { events.push(event); },
+          span: (tool) => {
+            toolSpans.push(tool);
+            return { end: (end) => { toolEnds.push(end ?? {}); } };
+          },
+          end: (end) => { agentEnds.push(end ?? {}); },
+        };
+      },
+    }) }),
   });
   const trace = await telemetry.startDelegationTrace(context, { executor: 'codex', prompt: 'private' });
-  await trace.event({ name: 'loop.agent.tool', executor: 'codex', tool: 'shell', phase: 'started', input: { authorization: 'Bearer private-token' } });
+  await trace.event({ name: 'loop.agent.tool', executor: 'codex', tool: 'shell', toolCallId: 'call-1', sequence: 1, phase: 'started', input: { authorization: 'Bearer private-token' } });
+  await trace.event({ name: 'loop.agent.tool', executor: 'codex', tool: 'shell', toolCallId: 'call-1', sequence: 2, phase: 'completed', summary: 'exit=0', output: { exitCode: 0 } });
   await trace.event({ name: 'loop.agent.diagnostic', executor: 'codex', summary: 'WARNING: retry', level: 'WARNING' });
-  assert.equal(events.length, 2);
-  assert.deepEqual(events[0], {
-    name: 'loop.agent.tool',
-    metadata: { executor: 'codex', phase: 'started', tool: 'shell', summary: null },
-    input: { value: { authorization: '[REDACTED]' } },
+  await trace.end({ status: 'completed', output: '{"outcome":"completed"}', exitCode: 0, timedOut: false });
+  assert.equal(agentSpans[0].name, 'agent.dev-agent');
+  assert.deepEqual(toolSpans[0], {
+    name: 'tool.shell',
+    metadata: { executor: 'codex', toolCallId: 'call-1', sequence: 1 },
+    input: { authorization: '[REDACTED]' },
     level: 'DEFAULT',
   });
-  assert.equal(events[1].level, 'WARNING');
+  assert.deepEqual(toolEnds[0], { metadata: { completionSequence: 2 }, output: { exitCode: 0 }, level: 'DEFAULT' });
+  assert.deepEqual(events[0], { name: 'agent.diagnostic', metadata: { executor: 'codex', sequence: null }, output: 'WARNING: retry', level: 'WARNING', statusMessage: 'WARNING: retry' });
+  assert.deepEqual(agentEnds[0].output, { outcome: 'completed' });
+  assert.deepEqual(updates.at(-1), { output: { outcome: 'completed' }, metadata: { executionStatus: 'completed' } });
 });
 
 test('swallows client initialization errors', async () => {
