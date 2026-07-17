@@ -10,6 +10,7 @@ import {
   answerQuestionAction,
   cancelTaskAction,
   initializeContextAction,
+  releaseBlockAction,
   submitClarificationAnswersAction,
   rewindTaskAction,
   transitionTaskAction,
@@ -259,6 +260,13 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             </div>
           </div>)}
         </section>
+
+        {task.agile_status === 'blocked' && task.run_state === 'system_blocked' && <form action={releaseBlockAction} className="card form-panel release-block">
+          <h2><AlertTriangle size={15}/>系统阻塞</h2>
+          <p className="muted">{terminologyText(task.blocked_reason) || '本次执行被系统暂停。解除后将从已保存的执行结果继续。'}</p>
+          <input type="hidden" name="taskId" value={task.task_id}/>
+          <button className="button success" type="submit">解除系统阻塞并继续</button>
+        </form>}
 
         <form action={initializeContextAction} className="card form-panel">
           <h2>需求上下文</h2>
