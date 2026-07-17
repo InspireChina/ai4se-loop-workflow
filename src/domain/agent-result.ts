@@ -46,9 +46,57 @@ export const agentResultSchema = z.object({
 
 export type AgentResult = z.infer<typeof agentResultSchema>;
 
+function extractJsonObjects(text: string) {
+  const objects: string[] = [];
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (start < 0) {
+      if (character === '{') {
+        start = index;
+        depth = 1;
+      }
+      continue;
+    }
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') inString = true;
+    else if (character === '{') depth += 1;
+    else if (character === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        objects.push(text.slice(start, index + 1));
+        start = -1;
+      }
+    }
+  }
+  return objects;
+}
+
 export function parseAgentResult(text: string) {
   const trimmed = text.trim();
-  const fenced = trimmed.match(/```(?:json)?\s*([\s\S]*?)\s*```/i)?.[1];
-  const candidate = fenced || trimmed;
-  return agentResultSchema.parse(JSON.parse(candidate));
+  if (!trimmed) throw new Error('Agent 最终回复为空');
+
+  const candidates = [
+    trimmed,
+    ...Array.from(trimmed.matchAll(/```json\s*([\s\S]*?)\s*```/gi), (match) => match[1].trim()).reverse(),
+    ...extractJsonObjects(trimmed).reverse(),
+  ].filter((candidate, index, all) => candidate && all.indexOf(candidate) === index);
+
+  let firstError: unknown;
+  for (const candidate of candidates) {
+    try {
+      return agentResultSchema.parse(JSON.parse(candidate));
+    } catch (error) {
+      firstError ??= error;
+    }
+  }
+  throw firstError;
 }

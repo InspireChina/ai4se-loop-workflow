@@ -44,6 +44,15 @@ export function extractAgentFinalText(executor: AgentExecutorId, line: string) {
     }
     if (executor === 'claude') return event.type === 'result' && !event.is_error ? stringifyValue(event.result) || null : null;
     if (event.type === 'result' || event.subtype === 'result' || event.subtype === 'success') return stringifyValue(event.result || event.text || event.message) || null;
+    if (event.type === 'assistant') {
+      const content = (event.message as Record<string, unknown> | undefined)?.content;
+      if (!Array.isArray(content)) return stringifyValue(event.text) || null;
+      const text = content
+        .filter((item) => (item as Record<string, unknown>).type === 'text')
+        .map((item) => stringifyValue((item as Record<string, unknown>).text))
+        .join('');
+      return text || null;
+    }
     return null;
   } catch {
     return null;

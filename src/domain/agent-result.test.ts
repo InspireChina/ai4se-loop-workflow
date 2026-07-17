@@ -24,9 +24,24 @@ test('accepts legacy story fields while exposing delivery-unit terminology', () 
   assert.equal(result.rewindDeliveryUnit, 1);
 });
 
-test('accepts a JSON markdown fence but rejects prose around JSON', () => {
+test('accepts structured JSON wrapped by common Agent formatting mistakes', () => {
   assert.equal(parseAgentResult('```json\n{"outcome":"completed","summary":"ok"}\n```').summary, 'ok');
-  assert.throws(() => parseAgentResult('结果如下：{"outcome":"completed","summary":"ok"}'));
+  assert.equal(parseAgentResult('结果如下：{"outcome":"completed","summary":"ok"}').summary, 'ok');
+  assert.equal(parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'artifact contains a fenced block',
+    artifact: { title: 'Delegation', content: '```md\n## Delegation notes\n```' },
+  })).artifact?.title, 'Delegation');
+  assert.equal(parseAgentResult([
+    '```md',
+    '## Delegation notes',
+    '这不是 JSON。',
+    '```',
+    '```json',
+    '{"outcome":"completed","summary":"recovered"}',
+    '```',
+  ].join('\n')).summary, 'recovered');
+  assert.throws(() => parseAgentResult('只有说明文字，没有结构化结果'));
 });
 
 test('rejects invalid workflow values', () => {

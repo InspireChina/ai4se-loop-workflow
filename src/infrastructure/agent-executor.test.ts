@@ -39,6 +39,7 @@ test('extracts final assistant text from every executor stream', () => {
   const result = '{"outcome":"completed","summary":"ok"}';
   assert.equal(extractAgentFinalText('codex', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: result } })), result);
   assert.equal(extractAgentFinalText('cursor', JSON.stringify({ type: 'result', subtype: 'success', result })), result);
+  assert.equal(extractAgentFinalText('cursor', JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: result }] } })), result);
   assert.equal(extractAgentFinalText('claude', JSON.stringify({ type: 'result', is_error: false, result })), result);
   assert.equal(extractAgentFinalText('codex', JSON.stringify({ type: 'item.completed', item: { type: 'reasoning', text: 'thinking' } })), null);
 });
