@@ -1,3 +1,6 @@
+import { existsSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, extname, join, resolve, win32 } from 'node:path';
 import type { AgentExecutorId } from '../domain/agent-executor';
 
 export type AgentExecutionContext = {
@@ -19,6 +22,8 @@ export type AgentRunMetrics = {
   durationMs?: number;
 };
 
+export type AgentEnvironment = Record<string, string | undefined>;
+
 export type AgentTelemetryEvent = {
   name: 'loop.agent.tool' | 'loop.agent.output' | 'loop.agent.diagnostic';
   phase?: 'started' | 'completed';
@@ -36,12 +41,92 @@ export type AgentExecutor = {
   id: AgentExecutorId;
   label: string;
   command: string;
+  prefixArgs?: string[];
+  env?: AgentEnvironment;
   promptMode: 'argument' | 'stdin';
   buildArgs(prompt: string, workspaceRoot: string, options?: AgentExecutionOptions): string[];
   formatCommand(workspaceRoot: string, options?: AgentExecutionOptions): string;
   parseStdout(line: string, context: AgentExecutionContext): string | null;
   parseStderr(line: string, context: AgentExecutionContext): string | null;
 };
+
+type CursorLaunchOptions = {
+  platform?: NodeJS.Platform;
+  env?: AgentEnvironment;
+  home?: string;
+};
+
+export type CursorAgentLaunch = {
+  command: string;
+  prefixArgs: string[];
+  env: AgentEnvironment;
+  viaBundledNode: boolean;
+};
+
+function cursorVersionRootCandidates(env: AgentEnvironment, home: string) {
+  const roots = [
+    env.CURSOR_AGENT_HOME ? join(env.CURSOR_AGENT_HOME, 'versions') : '',
+    env.LOCALAPPDATA ? join(env.LOCALAPPDATA, 'cursor-agent', 'versions') : '',
+    env.APPDATA ? join(env.APPDATA, 'cursor-agent', 'versions') : '',
+    join(home, '.local', 'share', 'cursor-agent', 'versions'),
+  ];
+  const configuredCli = env.CURSOR_CLI;
+  if (configuredCli && /[\\/]/.test(configuredCli)) {
+    roots.unshift(resolve(dirname(configuredCli), '..', 'share', 'cursor-agent', 'versions'));
+  }
+  return [...new Set(roots.filter(Boolean))];
+}
+
+function latestCursorBundle(roots: string[]) {
+  for (const root of roots) {
+    if (!existsSync(root)) continue;
+    let versions: string[] = [];
+    try { versions = readdirSync(root).sort((a, b) => b.localeCompare(a, undefined, { numeric: true })); } catch { continue; }
+    for (const version of versions) {
+      const directory = join(root, version);
+      const node = join(directory, 'node.exe');
+      const script = join(directory, 'index.js');
+      if (existsSync(node) && existsSync(script)) return { node, script };
+    }
+  }
+  return null;
+}
+
+/** Bypasses cursor-agent.cmd on Windows so long prompts do not hit cmd.exe's 8191 character limit. */
+export function resolveCursorAgentLaunch(options: CursorLaunchOptions = {}): CursorAgentLaunch {
+  const platform = options.platform ?? process.platform;
+  const env = options.env ?? process.env;
+  if (platform !== 'win32') {
+    return { command: env.CURSOR_CLI || 'cursor-agent', prefixArgs: [], env: {}, viaBundledNode: false };
+  }
+
+  const overrideNode = env.CURSOR_AGENT_NODE?.trim();
+  const overrideScript = env.CURSOR_AGENT_SCRIPT?.trim();
+  if (Boolean(overrideNode) !== Boolean(overrideScript)) {
+    throw new Error('Windows Cursor Agent 直启配置不完整：CURSOR_AGENT_NODE 与 CURSOR_AGENT_SCRIPT 必须同时设置');
+  }
+  const bundle = overrideNode && overrideScript
+    ? { node: overrideNode, script: overrideScript }
+    : latestCursorBundle(cursorVersionRootCandidates(env, options.home ?? homedir()));
+  if (!bundle || !existsSync(bundle.node) || !existsSync(bundle.script)) {
+    const configured = env.CURSOR_CLI;
+    if (configured && !['.cmd', '.bat', '.ps1'].includes(extname(configured).toLowerCase())) {
+      return { command: configured, prefixArgs: [], env: {}, viaBundledNode: false };
+    }
+    throw new Error('Windows 无法定位 Cursor Agent bundled Node；请设置 CURSOR_AGENT_NODE 与 CURSOR_AGENT_SCRIPT');
+  }
+  const cacheRoot = env.LOCALAPPDATA || env.TEMP || dirname(bundle.node);
+  const cacheDirectory = platform === 'win32' ? win32.join(cacheRoot, 'cursor-compile-cache') : join(cacheRoot, 'cursor-compile-cache');
+  return {
+    command: bundle.node,
+    prefixArgs: [bundle.script],
+    env: {
+      CURSOR_INVOKED_AS: 'cursor-agent',
+      NODE_COMPILE_CACHE: env.NODE_COMPILE_CACHE || cacheDirectory,
+    },
+    viaBundledNode: true,
+  };
+}
 
 /** Returns provider-neutral final assistant text when a stream record contains it. */
 export function extractAgentFinalText(executor: AgentExecutorId, line: string) {
@@ -418,14 +503,7 @@ function stderrLog(executor: AgentExecutorId, context: AgentExecutionContext, li
   return `[${label}] ${meta(executor, context)} - ${text}`;
 }
 
-const executors: Record<AgentExecutorId, AgentExecutor> = {
-  cursor: {
-    id: 'cursor', label: 'Cursor', command: process.env.CURSOR_CLI || 'cursor-agent', promptMode: 'argument',
-    buildArgs: (prompt) => ['--print', '--output-format', 'stream-json', '--force', prompt],
-    formatCommand: (workspace) => `cursor-agent --print --output-format stream-json --force (cwd=${workspace})`,
-    parseStdout: parseCursorStdout,
-    parseStderr: (line, context) => stderrLog('cursor', context, line),
-  },
+const executors: Omit<Record<AgentExecutorId, AgentExecutor>, 'cursor'> = {
   codex: {
     id: 'codex', label: 'Codex', command: process.env.CODEX_CLI || 'codex', promptMode: 'stdin',
     buildArgs: (_prompt, workspace, options) => [
@@ -452,6 +530,17 @@ const executors: Record<AgentExecutorId, AgentExecutor> = {
   },
 };
 
+function cursorExecutor(): AgentExecutor {
+  const launch = resolveCursorAgentLaunch();
+  return {
+    id: 'cursor', label: 'Cursor', command: launch.command, prefixArgs: launch.prefixArgs, env: launch.env, promptMode: 'argument',
+    buildArgs: (prompt) => ['--print', '--output-format', 'stream-json', '--force', prompt],
+    formatCommand: (workspace) => `cursor-agent --print --output-format stream-json --force (${launch.viaBundledNode ? 'via=node ' : ''}cwd=${workspace})`,
+    parseStdout: parseCursorStdout,
+    parseStderr: (line, context) => stderrLog('cursor', context, line),
+  };
+}
+
 export function getAgentExecutor(id: AgentExecutorId) {
-  return executors[id];
+  return id === 'cursor' ? cursorExecutor() : executors[id];
 }

@@ -1,6 +1,6 @@
 import type { ChildProcess } from 'node:child_process';
 import crossSpawn from 'cross-spawn';
-import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, parseAgentTelemetryStderr, parseAgentTelemetryStdoutEvents, type AgentExecutionContext, type AgentExecutionOptions, type AgentExecutor, type AgentTelemetryEvent } from './agent-executor';
+import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, parseAgentTelemetryStderr, parseAgentTelemetryStdoutEvents, type AgentEnvironment, type AgentExecutionContext, type AgentExecutionOptions, type AgentExecutor, type AgentTelemetryEvent } from './agent-executor';
 import type { LangfuseTelemetry } from './langfuse';
 
 export type DelegationExecutionInput = {
@@ -20,6 +20,14 @@ export type DelegationExecutionInput = {
 
 export type DelegationExecutionResult = { exitCode: number; finalText: string };
 
+export function buildAgentProcessLaunch(executor: AgentExecutor, prompt: string, workspaceRoot: string, executionOptions: AgentExecutionOptions, baseEnv: AgentEnvironment = process.env) {
+  return {
+    command: executor.command,
+    args: [...(executor.prefixArgs || []), ...executor.buildArgs(prompt, workspaceRoot, executionOptions)],
+    env: { ...baseEnv, ...(executor.env || {}) },
+  };
+}
+
 /**
  * Runs one already-dispatched delegation. Telemetry is deliberately best-effort:
  * every client failure is contained by the facade and cannot change this result.
@@ -27,7 +35,7 @@ export type DelegationExecutionResult = { exitCode: number; finalText: string };
 export async function executeDelegation(input: DelegationExecutionInput): Promise<DelegationExecutionResult> {
   const { runId, prompt, workspaceRoot, executor, executionOptions, context, description, telemetry, appendLog, maxRuntimeMs, idleTimeoutMs } = input;
   const spawn = input.spawn ?? crossSpawn;
-  const args = executor.buildArgs(prompt, workspaceRoot, executionOptions);
+  const launch = buildAgentProcessLaunch(executor, prompt, workspaceRoot, executionOptions);
   const telemetryContext = { ...context, runToken: runId };
   const trace = await telemetry.startDelegationTrace(telemetryContext, {
     executor: executor.id,
@@ -60,9 +68,9 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   try {
     await appendLog(`[Agent] 开始 agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - ${description}`);
     await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - 启动 ${executor.label} CLI：${executor.formatCommand(workspaceRoot, executionOptions)}`);
-    const child: ChildProcess = spawn(executor.command, args, {
+    const child: ChildProcess = spawn(launch.command, launch.args, {
       cwd: workspaceRoot,
-      env: process.env,
+      env: launch.env as NodeJS.ProcessEnv,
       stdio: [executor.promptMode === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });

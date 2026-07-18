@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, extractAgentFinalText, getAgentExecutor, parseAgentTelemetryStderr, parseAgentTelemetryStdout, parseAgentTelemetryStdoutEvents } from './agent-executor';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, extractAgentFinalText, getAgentExecutor, parseAgentTelemetryStderr, parseAgentTelemetryStdout, parseAgentTelemetryStdoutEvents, resolveCursorAgentLaunch } from './agent-executor';
 
 test('normalizes Cursor tool calls without retaining raw log lines', () => {
   const event = parseAgentTelemetryStdout('cursor', JSON.stringify({
@@ -105,4 +108,36 @@ test('uses the native Cursor Agent CLI with the workspace supplied as cwd', () =
   assert.equal(args.includes('--workspace'), false);
   assert.equal(args.includes('--trust'), false);
   assert.match(executor.formatCommand('C:\\Users\\developer\\project'), /^cursor-agent .*\(cwd=C:\\Users\\developer\\project\)$/);
+});
+
+test('launches Cursor through its bundled Node on Windows instead of cursor-agent.cmd', () => {
+  const home = mkdtempSync(join(tmpdir(), 'loopwork-cursor-agent-'));
+  const version = join(home, '.local', 'share', 'cursor-agent', 'versions', '2026.07.18-test');
+  mkdirSync(version, { recursive: true });
+  writeFileSync(join(version, 'node.exe'), 'fixture');
+  writeFileSync(join(version, 'index.js'), 'fixture');
+
+  const launch = resolveCursorAgentLaunch({
+    platform: 'win32', home,
+    env: { LOCALAPPDATA: String.raw`C:\Users\dev\AppData\Local`, CURSOR_CLI: 'cursor-agent.cmd' },
+  });
+
+  assert.equal(launch.command, join(version, 'node.exe'));
+  assert.deepEqual(launch.prefixArgs, [join(version, 'index.js')]);
+  assert.equal(launch.env.CURSOR_INVOKED_AS, 'cursor-agent');
+  assert.equal(launch.env.NODE_COMPILE_CACHE, String.raw`C:\Users\dev\AppData\Local\cursor-compile-cache`);
+  assert.equal(launch.viaBundledNode, true);
+});
+
+test('supports explicit Windows Cursor bundled Node paths and rejects partial configuration', () => {
+  const root = mkdtempSync(join(tmpdir(), 'loopwork-cursor-override-'));
+  const node = join(root, 'node.exe');
+  const script = join(root, 'index.js');
+  writeFileSync(node, 'fixture');
+  writeFileSync(script, 'fixture');
+
+  const launch = resolveCursorAgentLaunch({ platform: 'win32', home: root, env: { CURSOR_AGENT_NODE: node, CURSOR_AGENT_SCRIPT: script } });
+  assert.equal(launch.command, node);
+  assert.deepEqual(launch.prefixArgs, [script]);
+  assert.throws(() => resolveCursorAgentLaunch({ platform: 'win32', home: root, env: { CURSOR_AGENT_NODE: node } }), /必须同时设置/);
 });

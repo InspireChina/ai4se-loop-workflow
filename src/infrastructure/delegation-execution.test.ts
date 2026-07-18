@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createLangfuseTelemetry, type LangfuseClient } from './langfuse';
-import { executeDelegation } from './delegation-execution';
+import { buildAgentProcessLaunch, executeDelegation } from './delegation-execution';
 import type { AgentExecutor } from './agent-executor';
 
 const credentials = { LANGFUSE_ENABLED: 'true', LANGFUSE_PUBLIC_KEY: 'pk-test', LANGFUSE_SECRET_KEY: 'sk-test', LANGFUSE_BASE_URL: 'https://langfuse.invalid', LANGFUSE_CAPTURE_PROMPTS: 'true' };
@@ -14,6 +14,24 @@ function fixtureExecutor(id: AgentExecutor['id'], program: string): AgentExecuto
     parseStdout: (line) => `stdout:${line}`, parseStderr: (line) => `stderr:${line}`,
   };
 }
+
+test('prepends executor launch arguments and merges executor environment', () => {
+  const executor: AgentExecutor = {
+    id: 'cursor', label: 'Cursor fixture', command: 'node.exe', promptMode: 'argument',
+    prefixArgs: ['index.js'],
+    env: { CURSOR_INVOKED_AS: 'cursor-agent', NODE_COMPILE_CACHE: 'C:\\cache' },
+    buildArgs: (prompt) => ['--print', prompt],
+    formatCommand: () => 'cursor-agent via=node',
+    parseStdout: () => null,
+    parseStderr: () => null,
+  };
+  const launch = buildAgentProcessLaunch(executor, 'a'.repeat(15_000), 'C:\\workspace', {}, { PATH: 'fixture-path' });
+
+  assert.equal(launch.command, 'node.exe');
+  assert.equal(launch.args[0], 'index.js');
+  assert.equal(launch.args.at(-1)?.length, 15_000);
+  assert.deepEqual(launch.env, { PATH: 'fixture-path', CURSOR_INVOKED_AS: 'cursor-agent', NODE_COMPILE_CACHE: 'C:\\cache' });
+});
 
 function recordedTelemetry() {
   const traces: Array<Record<string, unknown>> = [];
