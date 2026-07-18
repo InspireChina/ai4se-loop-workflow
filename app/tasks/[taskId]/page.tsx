@@ -4,6 +4,7 @@ import { AlertTriangle, Check, CheckCircle2, Clock3, FileText, GitBranch, Rotate
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
 import { agentLabel, confirmationKindLabel, deliveryUnitLabel, documentKindLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
+import { MarkdownContent } from '../../../src/ui/markdown-content';
 import {
   acknowledgeClosureAction,
   addStoryAction,
@@ -233,7 +234,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         {(task.agile_status === 'ready_to_close' || closureAcknowledgements.length > 0) && <section className="task-section">
           <div className="section-head"><h2>结卡报告</h2><small>版本 {task.review_revision}</small></div>
           <div className="card document-list">
-            {reviewDocument ? <div className="document-item"><pre>{reviewDocument.content}</pre></div> : <div className="empty">结卡报告不可用，请重新运行 Review Agent。</div>}
+            {reviewDocument ? <div className="document-item"><MarkdownContent content={reviewDocument.content}/></div> : <div className="empty">结卡报告不可用，请重新运行 Review Agent。</div>}
           </div>
           {task.agile_status === 'ready_to_close' && reviewDocument && <form action={acknowledgeClosureAction} className="release-block">
             <input type="hidden" name="taskId" value={task.task_id}/>
