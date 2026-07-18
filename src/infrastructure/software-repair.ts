@@ -7,7 +7,9 @@ import { paths } from './database';
 import { gitHead } from './git';
 
 function git(args: string[], cwd = paths.appRoot, timeout = 60_000) {
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout, maxBuffer: 20 * 1024 * 1024 }).trim();
+  // Porcelain status uses the leading columns as data. Removing leading whitespace
+  // turns ` M src/file.ts` into `M src/file.ts` and corrupts the first path below.
+  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout, maxBuffer: 20 * 1024 * 1024 }).trimEnd();
 }
 
 function safeJobId(jobId: string) {
