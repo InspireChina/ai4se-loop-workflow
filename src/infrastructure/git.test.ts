@@ -32,9 +32,20 @@ test('runner commits a cleanly isolated dev story', () => {
   writeFileSync(join(cwd, 'feature.ts'), 'export const ready = true;\n');
   const result = commitDevStory(cwd, 'TASK-1234', 2, head);
   assert.equal(result.ok, true);
-  assert.match(result.commit, /TASK-1234/);
-  assert.match(result.commit, /Unit-2/);
+  assert.equal(result.changed, true);
+  assert.equal(result.commit, gitHead(cwd));
   assert.equal(git(cwd, 'status', '--porcelain'), '');
+});
+
+test('runner accepts a completed dev walkthrough without creating an empty commit', () => {
+  const cwd = repository();
+  const head = gitHead(cwd);
+  const result = commitDevStory(cwd, 'TASK-1234', 2, head);
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, false);
+  assert.equal(result.commit, head);
+  assert.match(result.reason, /无需产生新代码/);
+  assert.equal(git(cwd, 'rev-list', '--count', 'HEAD'), '1');
 });
 
 test('runner checkpoints a dirty workspace before dev starts', () => {
@@ -78,6 +89,5 @@ test('verification can find a story commit after later commits', () => {
 
   const verification = verifyDevCommit(cwd, 'TASK-1234', 2);
   assert.equal(verification.ok, true);
-  assert.match(verification.commit, /TASK-1234/);
-  assert.match(verification.commit, /Unit-2/);
+  assert.equal(verification.commit, result.commit);
 });

@@ -4,6 +4,7 @@ export type DevCommitVerification = {
   ok: boolean;
   reason: string;
   commit: string;
+  changed: boolean;
 };
 
 function git(args: string[], workspaceRoot: string) {
@@ -47,19 +48,19 @@ export function commitDevStory(workspaceRoot: string, taskId: string, storyIndex
     const currentHead = gitHead(workspaceRoot);
     const dirty = git(['status', '--porcelain', '--untracked-files=all'], workspaceRoot);
     if (currentHead !== headBefore) {
-      if (dirty) return { ok: false, reason: 'Agent 修改了 Git 历史且仍有未提交改动，拒绝自动提交', commit: '' };
+      if (dirty) return { ok: false, reason: 'Agent 修改了 Git 历史且仍有未提交改动，拒绝自动提交', commit: '', changed: false };
       const verification = verifyDevCommit(workspaceRoot, taskId, storyIndex, currentHead);
-      return verification.ok ? verification : { ...verification, reason: `Agent 创建了不可接受的提交：${verification.reason}` };
+      return verification.ok ? { ...verification, changed: true } : { ...verification, reason: `Agent 创建了不可接受的提交：${verification.reason}` };
     }
-    if (!dirty) return { ok: false, reason: 'Agent 没有产生代码变更', commit: '' };
+    if (!dirty) return { ok: true, reason: '现有实现已满足当前交付单元，无需产生新代码', commit: currentHead, changed: false };
     const sensitive = sensitiveFiles(dirty);
-    if (sensitive.length) return { ok: false, reason: `检测到敏感文件，拒绝提交：${sensitive.join(', ')}`, commit: '' };
+    if (sensitive.length) return { ok: false, reason: `检测到敏感文件，拒绝提交：${sensitive.join(', ')}`, commit: '', changed: false };
     git(['add', '-A'], workspaceRoot);
     git(['commit', '-m', `feat(${taskId}): Unit-${storyIndex} 完成实现`], workspaceRoot);
-    return verifyDevCommit(workspaceRoot, taskId, storyIndex, gitHead(workspaceRoot));
+    return { ...verifyDevCommit(workspaceRoot, taskId, storyIndex, gitHead(workspaceRoot)), changed: true };
   } catch (error) {
     try { git(['restore', '--staged', '.'], workspaceRoot); } catch { /* keep working tree changes for inspection */ }
-    return { ok: false, reason: `自动提交失败：${error instanceof Error ? error.message : String(error)}`, commit: '' };
+    return { ok: false, reason: `自动提交失败：${error instanceof Error ? error.message : String(error)}`, commit: '', changed: false };
   }
 }
 
@@ -72,23 +73,23 @@ function subjectMatches(subject: string, taskId: string, storyIndex: number) {
 export function verifyDevCommit(workspaceRoot: string, taskId: string, storyIndex: number, expectedCommit?: string): DevCommitVerification {
   try {
     const dirty = git(['status', '--porcelain', '--untracked-files=all'], workspaceRoot);
-    if (dirty) return { ok: false, reason: '工作区仍有未提交改动', commit: '' };
+    if (dirty) return { ok: false, reason: '工作区仍有未提交改动', commit: '', changed: false };
     if (expectedCommit) {
       const subject = git(['show', '-s', '--format=%s', expectedCommit], workspaceRoot);
       if (!subjectMatches(subject, taskId, storyIndex)) {
-        return { ok: false, reason: `提交标题必须包含 ${taskId} 和 Unit-${storyIndex}`, commit: subject };
+        return { ok: false, reason: `提交标题必须包含 ${taskId} 和 Unit-${storyIndex}`, commit: expectedCommit, changed: false };
       }
-      return { ok: true, reason: '', commit: subject };
+      return { ok: true, reason: '', commit: expectedCommit, changed: true };
     }
     const commits = git(['log', '--all', '--format=%H%x09%s'], workspaceRoot);
     const match = commits.split(/\r?\n/).find((line) => {
       const [, subject = ''] = line.split(/\t/, 2);
       return subjectMatches(subject, taskId, storyIndex);
     });
-    if (!match) return { ok: false, reason: `未找到包含 ${taskId} 和 Unit-${storyIndex} 的提交`, commit: '' };
-    const [, subject = ''] = match.split(/\t/, 2);
-    return { ok: true, reason: '', commit: subject };
+    if (!match) return { ok: false, reason: `未找到包含 ${taskId} 和 Unit-${storyIndex} 的提交`, commit: '', changed: false };
+    const [commit = ''] = match.split(/\t/, 2);
+    return { ok: true, reason: '', commit, changed: true };
   } catch (error) {
-    return { ok: false, reason: `无法验证 Git commit：${error instanceof Error ? error.message : String(error)}`, commit: '' };
+    return { ok: false, reason: `无法验证 Git commit：${error instanceof Error ? error.message : String(error)}`, commit: '', changed: false };
   }
 }

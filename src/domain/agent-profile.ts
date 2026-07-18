@@ -10,7 +10,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 2;
+export const AGENT_PROMPT_SEED_REVISION = 3;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'backlog-agent': {
@@ -122,17 +122,17 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
   },
   'dev-agent': {
     label: '开发实现 Agent',
-    description: '只实现当前最小开发单元并运行必要测试。',
+    description: '走查当前最小开发单元，补齐缺失实现并运行必要测试。',
     prompt: [
       '# 角色目标',
-      '严格按当前 resolved Slice Spec 实现一个最小交付单元，使代码变化与验收条件一一对应，并保持未授权能力不变。',
+      '严格按当前 resolved Slice Spec 走查一个最小交付单元。若现有实现已经满足规格，确认事实并完成验证即可；若仍有缺口，只补齐与验收条件对应的最小改动，并保持未授权能力不变。',
       '',
       '# 输入优先级',
       '以当前 Slice Spec、用户决策事实和 Harness Core Contract 为约束；以现有代码和测试为实现上下文。若历史文档与 resolved spec 冲突，以当前 spec 为准并在结果中指出。',
       '',
       '# 工作步骤',
-      '1. 开始修改前读取当前单元的 goal、scope、behaviors、decisions、acceptance criteria、verification plan 和 change budget。',
-      '2. 定位最小修改面，复用项目既有抽象、错误处理、命名和测试模式；不要凭偏好引入新的架构层或依赖。',
+      '1. 读取当前单元的 goal、scope、behaviors、decisions、acceptance criteria、verification plan 和 change budget，并先检查现有实现与证据。',
+      '2. 逐条走查 acceptance criteria。现有实现已覆盖时不要为了制造 diff 重写代码、修改文档或创建空变更；存在缺口时再定位最小修改面，复用项目既有抽象、错误处理、命名和测试模式。',
       '3. 先处理会影响接口或数据语义的核心行为，再补齐必要的失败路径、边界条件和用户反馈。',
       '4. 为新增或修复行为增加与风险相称的确定性测试。Bug 修复应保留能够证明原问题的回归测试。',
       '5. 执行与改动直接相关的测试，再执行项目要求的回归检查；记录真实命令、通过状态和有意义的结果摘要。',
@@ -145,7 +145,7 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '不得创建或修改密钥、凭据和环境变量文件；不得绕过类型检查、删除失败测试、降低验证强度或用硬编码掩盖失败；不得顺带重构无关模块。',
       '',
       '# 完成条件',
-      '只有实现覆盖当前 spec、必要测试真实通过、变更保持在预算内且不存在已知未报告失败时，才返回 completed。结果必须提供准确 summary、changedFiles 和 tests；实现取舍与残余风险写入 artifact。',
+      '只有现有或本轮补齐的实现覆盖当前 spec、必要测试真实通过、任何变更保持在预算内且不存在已知未报告失败时，才返回 completed。无须改动时 changedFiles 可以为空，但 summary 和 artifact 必须明确说明走查依据；有改动时必须准确列出 changedFiles。实现取舍与残余风险写入 artifact。',
     ].join('\n'),
   },
   'test-agent': {

@@ -250,8 +250,15 @@ async function processDurableResult(attempt: ExecutionAttempt, delegation: Deleg
       const commit = commitDevStory(paths.root, delegation.taskId, delegation.storyIndex!, attempt.base_commit || '');
       if (!commit.ok) throw new Error(`开发实现 Agent 代码提交失败：${commit.reason}`);
       codeCommit = commit.commit;
-      await recordExecutionReceipt(attempt.execution_id, 'code_commit', codeCommit, { taskId: delegation.taskId, storyIndex: delegation.storyIndex });
-      await appendLoopRunLog(runId, `[运行] Runner 已提交${deliveryUnitLabel(delegation.storyIndex)}：${codeCommit}`);
+      await recordExecutionReceipt(attempt.execution_id, 'code_commit', codeCommit, {
+        taskId: delegation.taskId,
+        storyIndex: delegation.storyIndex,
+        mode: commit.changed ? 'committed' : 'reviewed_existing',
+        reason: commit.reason,
+      });
+      await appendLoopRunLog(runId, commit.changed
+        ? `[运行] Runner 已提交${deliveryUnitLabel(delegation.storyIndex)}：${codeCommit.slice(0, 10)}`
+        : `[运行] 开发实现 Agent 已完成现有实现走查，无需新增代码；验证基线=${codeCommit.slice(0, 10)}`);
     }
     await markExecutionStage(attempt.execution_id, 'verifying');
     harnessVerification = await runHarnessVerification(delegation.taskId, delegation.storyIndex!, codeCommit, attempt.execution_id);
