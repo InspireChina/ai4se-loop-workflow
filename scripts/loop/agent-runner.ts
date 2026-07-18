@@ -95,6 +95,8 @@ async function buildPrompt(delegation: DelegationEnvelope) {
   const exposeUnitIndex = <T extends { story_index: number | null }>(items: T[]) => items.map(({ story_index, ...item }) => ({ ...item, delivery_unit_index: story_index }));
   const relevantVerificationRuns = relevant(full.verificationRuns);
   const relevantVerificationIds = new Set(relevantVerificationRuns.map((run) => run.verification_id));
+  const relevantDocuments = relevant(full.documents);
+  const relevantDocumentIds = new Set(relevantDocuments.map((document) => document.document_id));
   const taskContext = {
     requirement: {
       requirementId: full.task.task_id,
@@ -106,7 +108,8 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     },
     currentDeliveryUnit: relevantStory ? { index: relevantStory.story_index, title: relevantStory.title } : null,
     deliveryUnits: full.stories.map((unit) => ({ index: unit.story_index, title: unit.title })),
-    documents: exposeUnitIndex(relevant(full.documents)),
+    documents: exposeUnitIndex(relevantDocuments),
+    documentComments: full.documentComments.filter((comment) => relevantDocumentIds.has(comment.document_id)),
     sliceSpecs: exposeUnitIndex(relevant(full.storySpecs)).map((item) => ({ ...item, spec_json: JSON.parse(item.spec_json) })),
     verificationRuns: exposeUnitIndex(relevantVerificationRuns),
     verificationEvidence: full.verificationEvidence.filter((evidence) => relevantVerificationIds.has(evidence.verification_id)),

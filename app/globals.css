@@ -201,6 +201,29 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .document-item summary span{overflow-wrap:anywhere}
 .document-item summary small{margin:0;text-align:right}
 .document-item pre{margin:0 12px 12px;max-height:420px}
+.artifact-document{border-top:1px solid var(--line)}
+.artifact-preview{background:#fff;cursor:text}
+.artifact-preview::selection,.artifact-preview *::selection{background:#cfe0ff;color:#17233a}
+.artifact-source{margin:0;border-top:1px solid var(--line)}
+.artifact-source summary{padding:9px 18px;color:var(--muted);font-size:11px}
+.artifact-source pre{margin:0 18px 14px;font-size:11px}
+.artifact-feedback{border-top:1px solid var(--line);padding:16px 18px;background:#fafbfc}
+.artifact-feedback-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:12px}
+.artifact-feedback-head strong{display:flex;align-items:center;gap:6px;font-size:13px}
+.artifact-feedback-head small{display:block;margin-top:4px}
+.artifact-comment-form{display:grid;gap:9px}
+.artifact-comment-form textarea{min-height:72px;margin:0;background:#fff}
+.artifact-comment-form>.button{justify-self:start}
+.comment-anchor{display:flex;align-items:flex-start;gap:7px;margin:0;padding:9px 11px;border-left:3px solid #9db9eb;border-radius:0 6px 6px 0;background:#eef4ff;color:#526075;font-size:12px;line-height:1.5}
+.comment-anchor svg{flex:none;margin-top:2px}
+.comment-anchor span{display:-webkit-box;overflow:hidden;-webkit-box-orient:vertical;-webkit-line-clamp:4;white-space:pre-wrap}
+.file-anchor{margin:0}
+.artifact-comments{display:grid;gap:8px;margin-top:14px;padding-top:14px;border-top:1px solid var(--line)}
+.artifact-comment{padding:11px 12px;border:1px solid var(--line);border-radius:7px;background:#fff}
+.artifact-comment.resolved{background:#f5faf7;border-color:#cfe5d7}
+.artifact-comment-meta{display:flex;justify-content:space-between;gap:10px;margin-bottom:8px;color:#59667a;font-size:11px}
+.artifact-comment-meta small{margin:0;text-align:right}
+.artifact-comment>p{margin:9px 0 3px;font-size:13px;line-height:1.55;white-space:pre-wrap}
 .markdown-content{padding:18px 20px;color:var(--ink);font-size:14px;line-height:1.7;overflow-wrap:anywhere}
 .markdown-content>:first-child{margin-top:0}
 .markdown-content>:last-child{margin-bottom:0}
@@ -363,4 +386,6 @@ main{padding:28px 20px}
 .task-title-row{display:block}
 .page-header{align-items:stretch}
 .story em{white-space:normal}
+.artifact-feedback-head,.artifact-comment-meta{display:grid}
+.artifact-comment-meta small{text-align:left}
 }

@@ -158,6 +158,8 @@ Runner 按 `Core Contract → Role Prompt → Durable Memory → recent daily me
 
 Evolution Evaluator 是主执行后的 best-effort 旁路：它运行在独立 evaluator 目录，只输出受 Zod 校验的 observation JSON。观察首先进入 daily memory 与去重 occurrence 表；只有 `occurrence >= 3`、`distinct requirements >= 2`、`confidence >= 0.75` 且通过安全规则时才提升。Memory 直接形成新 revision；Prompt 形成 candidate，并只由带匹配 `evolution_candidate_id` 的真实 execution attempt 消耗三次 Canary。失败立即回滚，成功三次才激活。Evaluator 失败不改变主执行结果。
 
+数据库文档以 Markdown 预览呈现，并允许文件级或选区级评论。评论保存文档 revision、引用原文和渲染文本偏移；文档更新只增加 revision，不改写历史锚点。Runner 把当前交付单元的评论放进 Agent task context；Evolution Evaluator 另外读取该 Agent 全局尚未分析的评论，并通过 `evidenceCommentIds` 显式关联 observation。成功评估后评论才转为 analyzed，评估失败继续保留为 pending。评论只是高价值证据，仍受跨需求阈值、Prompt candidate 和 Canary 约束。
+
 ## 8. 软件自维护与结构化日志
 
 `run_logs` 继续服务 UI 实时流，`runtime_events` 采用 OpenTelemetry 风格字段保存机器证据：event timestamp、observed timestamp、trace/run、span/execution、event name、component、stage、severity number/text、attributes 和 exception。所有正文、异常 message 与 stack 在入库前执行长度限制和 secret redaction。

@@ -4,7 +4,7 @@ import { AlertTriangle, Check, CheckCircle2, Clock3, FileText, GitBranch, Rotate
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
 import { agentLabel, confirmationKindLabel, deliveryUnitLabel, documentKindLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
-import { MarkdownContent } from '../../../src/ui/markdown-content';
+import { ArtifactDocument } from './artifact-document';
 import {
   acknowledgeClosureAction,
   addStoryAction,
@@ -47,11 +47,12 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const { taskId } = await params;
   const detail = await getTask(taskId);
   if (!detail) notFound();
-  const { task, stories, storySpecs, questions, documents, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events } = detail;
+  const { task, stories, storySpecs, questions, documents, documentComments, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events } = detail;
   const pipeline = await pipelineForTask(taskId);
   const unansweredQuestions = questions.filter((question) => question.status === 'pending');
   const waitingForAnswers = task.run_state === 'waiting_for_answers';
   const reviewDocument = task.review_document_id ? documents.find((document) => document.document_id === task.review_document_id) : null;
+  const deliveryDocuments = documents.filter((document) => document.document_id !== reviewDocument?.document_id);
   const progressStatus = task.agile_status === 'blocked' ? task.resume_status || 'backlog' : task.agile_status;
   const currentStep = taskSteps.findIndex((step) => step.statuses.some((status) => status === progressStatus));
   const currentSpecs = storySpecs.filter((spec) => spec.status !== 'superseded');
@@ -223,10 +224,17 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
 
         <section className="task-section">
           <div>
-            <div className="section-head"><h2>交付文档</h2><small>{documents.length} 个文档</small></div>
-            <div className="card document-list">{documents.length === 0 ? <div className="empty">还没有数据库文档。</div> : documents.map((document) => <details key={document.document_id} className="document-item">
+            <div className="section-head"><h2>交付文档</h2><small>{deliveryDocuments.length} 个文档 · {documentComments.filter((comment) => comment.status === 'open').length} 条待处理评论</small></div>
+            <div className="card document-list">{deliveryDocuments.length === 0 ? <div className="empty">还没有数据库文档。</div> : deliveryDocuments.map((document) => <details key={document.document_id} className="document-item">
               <summary><FileText size={15}/><span>{terminologyText(document.title)}</span><small>{[documentKindLabel(document.kind), deliveryUnitLabel(document.story_index), agentLabel(document.source_agent)].filter(Boolean).join(' · ')}</small></summary>
-              <pre>{document.content}</pre>
+              <ArtifactDocument
+                taskId={task.task_id}
+                documentId={document.document_id}
+                content={document.content}
+                format={document.format}
+                revision={document.revision}
+                comments={documentComments.filter((comment) => comment.document_id === document.document_id)}
+              />
             </details>)}</div>
           </div>
         </section>
@@ -234,7 +242,14 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         {(task.agile_status === 'ready_to_close' || closureAcknowledgements.length > 0) && <section className="task-section">
           <div className="section-head"><h2>结卡报告</h2><small>版本 {task.review_revision}</small></div>
           <div className="card document-list">
-            {reviewDocument ? <div className="document-item"><MarkdownContent content={reviewDocument.content}/></div> : <div className="empty">结卡报告不可用，请重新运行 Review Agent。</div>}
+            {reviewDocument ? <div className="document-item"><ArtifactDocument
+              taskId={task.task_id}
+              documentId={reviewDocument.document_id}
+              content={reviewDocument.content}
+              format={reviewDocument.format}
+              revision={reviewDocument.revision}
+              comments={documentComments.filter((comment) => comment.document_id === reviewDocument.document_id)}
+            /></div> : <div className="empty">结卡报告不可用，请重新运行 Review Agent。</div>}
           </div>
           {task.agile_status === 'ready_to_close' && reviewDocument && <form action={acknowledgeClosureAction} className="release-block">
             <input type="hidden" name="taskId" value={task.task_id}/>

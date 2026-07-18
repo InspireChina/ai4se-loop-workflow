@@ -8,6 +8,7 @@ export const evolutionObservationSchema = z.object({
   target: z.enum(['daily', 'memory', 'prompt']),
   confidence: z.number().min(0).max(1),
   reusable: z.boolean(),
+  evidenceCommentIds: z.array(z.string().uuid()).max(20).default([]),
 });
 
 export const evolutionResultSchema = z.object({

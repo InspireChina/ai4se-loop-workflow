@@ -45,6 +45,83 @@ test('updates an existing task-level document instead of inserting a duplicate N
 
 });
 
+test('anchors file comments to document revisions and supplies them to Agent evolution', async () => {
+  const { addDocumentComment, createTask, getTask, resolveDocumentComment, upsertDocument } = await import('./tasks');
+  const { applyEvolutionResult, beginEvolutionRun } = await import('./agent-evolution');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Artifact feedback evidence' });
+  const documentId = await upsertDocument({
+    taskId,
+    kind: 'final_review',
+    title: 'Review report',
+    content: '# Result\n\nThe first version needs a clearer boundary.',
+    actor: 'review-agent',
+  });
+  const commentId = await addDocumentComment({
+    taskId,
+    documentId,
+    anchorType: 'selection',
+    quotedText: 'needs a clearer boundary',
+    startOffset: 25,
+    endOffset: 49,
+    content: 'State the boundary explicitly and preserve this convention in future reports.',
+  });
+
+  await upsertDocument({
+    taskId,
+    kind: 'final_review',
+    title: 'Review report',
+    content: '# Result\n\nThe boundary is now explicit.',
+    actor: 'review-agent',
+  });
+  let detail = await getTask(taskId);
+  assert.equal(detail?.documents[0].revision, 2);
+  assert.equal(detail?.documentComments[0].document_revision, 1);
+  assert.equal(detail?.documentComments[0].quoted_text, 'needs a clearer boundary');
+  assert.equal(detail?.documentComments[0].status, 'open');
+
+  await resolveDocumentComment({ taskId, commentId });
+  db.prepare(`
+    INSERT INTO execution_attempts(
+      execution_id, run_id, task_id, agent, pipeline, delegation_key,
+      attempt, status, input_hash, input_json
+    ) VALUES('execution-comment-evolution', 'run-comment-evolution', ?, 'review-agent', 'review', 'comment-evolution', 1, 'applied', 'comment-hash', '{}')
+  `).run(taskId);
+  const evidence = {
+    executionId: 'execution-comment-evolution',
+    taskId,
+    storyIndex: null,
+    agentId: 'review-agent',
+    attempt: 1,
+    promptVersion: 1,
+    result: { outcome: 'completed', summary: 'The review report was revised.' },
+    applicationOutcome: 'advanced',
+    diagnostics: [],
+  };
+  const run = await beginEvolutionRun(evidence);
+  assert.match(run?.prompt || '', new RegExp(commentId));
+  assert.match(run?.prompt || '', /State the boundary explicitly/);
+  await applyEvolutionResult(run!.evolutionId, evidence, {
+    summary: 'The human feedback was retained as execution evidence.',
+    observations: [{
+      fingerprint: 'state-review-boundaries-explicitly',
+      category: 'output-contract',
+      summary: 'Review reports should state important product boundaries explicitly',
+      guidance: 'When a report relies on a product boundary, state that boundary directly instead of leaving it implicit.',
+      target: 'daily',
+      confidence: 0.8,
+      reusable: false,
+      evidenceCommentIds: [commentId],
+    }],
+  });
+
+  detail = await getTask(taskId);
+  assert.equal(detail?.documentComments[0].status, 'resolved');
+  assert.equal(detail?.documentComments[0].evolution_status, 'analyzed');
+  assert.equal((db.prepare('SELECT COUNT(*) AS count FROM agent_observation_comment_evidence WHERE comment_id = ?').get(commentId) as { count: number }).count, 1);
+});
+
 test('creates title-only and described Tasks without blocking delegation and serializes description into agent context', async () => {
   const { createTask, getTaskContext, getTask, pipelineAllEnvelopes, pipelineForTask, toJsonlEnvelope } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');

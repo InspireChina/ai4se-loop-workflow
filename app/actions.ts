@@ -5,6 +5,7 @@ import { normalizeWorkspaceRoot, setAgentExecutorSettings, setLangfuseSettings, 
 import { rollbackAgentPrompt, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
 import { setSoftwareMaintenanceSettings } from '../src/application/software-maintenance';
 import {
+  addDocumentComment,
   addStory,
   acknowledgeClosure,
   answerQuestion,
@@ -16,6 +17,7 @@ import {
   getRunStatus,
   initializeTaskContext,
   releaseBlock,
+  resolveDocumentComment,
   submitClarificationAnswers,
   rewindTask,
   transitionTask,
@@ -138,6 +140,26 @@ export async function endLoopRunAction(formData: FormData) {
 export async function answerQuestionAction(formData: FormData) {
   await answerQuestion({ taskId: formData.get('taskId'), questionId: formData.get('questionId'), answer: formData.get('answer') });
   redirect(`/tasks/${formData.get('taskId')}`);
+}
+
+export async function addDocumentCommentAction(formData: FormData) {
+  const taskId = String(formData.get('taskId'));
+  await addDocumentComment({
+    taskId,
+    documentId: formData.get('documentId'),
+    anchorType: formData.get('anchorType') || 'file',
+    quotedText: formData.get('quotedText') || undefined,
+    startOffset: formData.get('startOffset') || undefined,
+    endOffset: formData.get('endOffset') || undefined,
+    content: formData.get('content'),
+  });
+  redirect(`/tasks/${taskId}`);
+}
+
+export async function resolveDocumentCommentAction(formData: FormData) {
+  const taskId = String(formData.get('taskId'));
+  await resolveDocumentComment({ taskId, commentId: formData.get('commentId') });
+  redirect(`/tasks/${taskId}`);
 }
 
 export async function releaseBlockAction(formData: FormData) {

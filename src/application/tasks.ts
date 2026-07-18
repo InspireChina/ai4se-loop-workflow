@@ -47,7 +47,25 @@ export type Document = {
   title: string;
   content: string;
   format: string;
+  revision: number;
   source_agent: string | null;
+  created_at: string;
+  updated_at: string;
+};
+export type DocumentComment = {
+  comment_id: string;
+  document_id: string;
+  task_id: string;
+  document_revision: number;
+  agent_id: string | null;
+  anchor_type: 'file' | 'selection';
+  quoted_text: string | null;
+  start_offset: number | null;
+  end_offset: number | null;
+  content: string;
+  status: 'open' | 'resolved';
+  evolution_status: 'pending' | 'analyzed';
+  resolved_at: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -223,6 +241,7 @@ export async function getTask(taskId: string) {
   const storySpecs = db.prepare('SELECT * FROM story_specs WHERE task_id = ? ORDER BY story_index, revision').all(taskId) as StorySpec[];
   const questions = db.prepare('SELECT * FROM questions WHERE task_id = ? ORDER BY created_at').all(taskId) as Question[];
   const documents = db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[];
+  const documentComments = db.prepare('SELECT * FROM document_comments WHERE task_id = ? ORDER BY created_at').all(taskId) as DocumentComment[];
   const closureAcknowledgements = db.prepare('SELECT * FROM closure_acknowledgements WHERE task_id = ? ORDER BY review_revision').all(taskId) as ClosureAcknowledgement[];
   const verificationRuns = db.prepare('SELECT * FROM verification_runs WHERE task_id = ? ORDER BY started_at, verification_id').all(taskId) as VerificationRun[];
   const verificationEvidence = db.prepare(`
@@ -240,7 +259,7 @@ export async function getTask(taskId: string) {
     ORDER BY created_at, execution_id
   `).all(taskId) as ExecutionAttemptView[];
   const events = db.prepare('SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at DESC').all(taskId) as Event[];
-  return { task, stories, storySpecs, questions, documents, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events };
+  return { task, stories, storySpecs, questions, documents, documentComments, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events };
 }
 
 export async function getTaskContext(taskId: string) {
@@ -279,6 +298,7 @@ export async function upsertDocument(input: unknown) {
             content = ?,
             format = ?,
             source_agent = ?,
+            revision = revision + 1,
             updated_at = CURRENT_TIMESTAMP
         WHERE document_id = ?
       `).run(title, value.content, value.format, value.actor, documentId);
@@ -306,6 +326,75 @@ export async function listDocuments(taskId: string) {
 export async function getDocument(taskId: string, kind: string, storyIndex?: number | null) {
   const db = await databaseConnection();
   return db.prepare('SELECT * FROM documents WHERE task_id = ? AND kind = ? AND story_index IS ?').get(taskId, kind, storyIndex || null) as Document | undefined;
+}
+
+const documentCommentSchema = z.object({
+  taskId: z.string().min(1),
+  documentId: z.string().min(1),
+  anchorType: z.enum(['file', 'selection']).default('file'),
+  quotedText: z.string().trim().max(4000).optional().nullable(),
+  startOffset: z.coerce.number().int().nonnegative().optional().nullable(),
+  endOffset: z.coerce.number().int().nonnegative().optional().nullable(),
+  content: z.string().trim().min(1).max(4000),
+});
+
+export async function addDocumentComment(input: unknown) {
+  const value = documentCommentSchema.parse(input);
+  const db = await databaseConnection();
+  const document = db.prepare('SELECT * FROM documents WHERE document_id = ? AND task_id = ?').get(value.documentId, value.taskId) as Document | undefined;
+  if (!document) throw new Error('文档不存在');
+  const hasSelection = value.anchorType === 'selection' && Boolean(value.quotedText);
+  if (value.anchorType === 'selection' && !hasSelection) throw new Error('选区评论必须包含引用内容');
+  if (value.startOffset != null && value.endOffset != null && value.endOffset < value.startOffset) throw new Error('评论选区无效');
+  const commentId = randomUUID();
+  db.transaction(() => {
+    db.prepare(`
+      INSERT INTO document_comments(
+        comment_id, document_id, task_id, document_revision, agent_id,
+        anchor_type, quoted_text, start_offset, end_offset, content
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      commentId,
+      document.document_id,
+      document.task_id,
+      document.revision,
+      document.source_agent,
+      value.anchorType,
+      hasSelection ? value.quotedText : null,
+      hasSelection ? value.startOffset ?? null : null,
+      hasSelection ? value.endOffset ?? null : null,
+      value.content,
+    );
+    addEvent(db, value.taskId, 'human', 'DocumentCommented', `评论文档：${document.title}`);
+  })();
+  refreshPages(`/tasks/${value.taskId}`);
+  return commentId;
+}
+
+const resolveDocumentCommentSchema = z.object({
+  taskId: z.string().min(1),
+  commentId: z.string().min(1),
+});
+
+export async function resolveDocumentComment(input: unknown) {
+  const value = resolveDocumentCommentSchema.parse(input);
+  const db = await databaseConnection();
+  const comment = db.prepare(`
+    SELECT comment.comment_id, document.title
+    FROM document_comments comment
+    JOIN documents document ON document.document_id = comment.document_id
+    WHERE comment.comment_id = ? AND comment.task_id = ?
+  `).get(value.commentId, value.taskId) as { comment_id: string; title: string } | undefined;
+  if (!comment) throw new Error('评论不存在');
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE document_comments
+      SET status = 'resolved', evolution_status = 'pending', resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+      WHERE comment_id = ?
+    `).run(value.commentId);
+    addEvent(db, value.taskId, 'human', 'DocumentCommentResolved', `解决文档评论：${comment.title}`);
+  })();
+  refreshPages(`/tasks/${value.taskId}`);
 }
 
 const createTaskSchema = z.object({
