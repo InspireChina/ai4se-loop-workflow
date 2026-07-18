@@ -2,14 +2,15 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, lstatSync, mkdirSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, relative, resolve } from 'node:path';
+import { isAbsolute, join, posix, relative, resolve, sep, win32 } from 'node:path';
 import { paths } from './database';
 import { gitHead } from './git';
 
 function git(args: string[], cwd = paths.appRoot, timeout = 60_000) {
   // Porcelain status uses the leading columns as data. Removing leading whitespace
   // turns ` M src/file.ts` into `M src/file.ts` and corrupts the first path below.
-  return execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout, maxBuffer: 20 * 1024 * 1024 }).trimEnd();
+  const platformArgs = process.platform === 'win32' ? ['-c', 'core.longpaths=true', ...args] : args;
+  return execFileSync('git', platformArgs, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], timeout, maxBuffer: 20 * 1024 * 1024 }).trimEnd();
 }
 
 function safeJobId(jobId: string) {
@@ -17,12 +18,29 @@ function safeJobId(jobId: string) {
   return jobId;
 }
 
+function shortJobId(jobId: string) {
+  return createHash('sha256').update(safeJobId(jobId)).digest('hex').slice(0, 12);
+}
+
+function worktreeRootFor(platform: NodeJS.Platform, temporaryDirectory: string, repoHash: string) {
+  const path = platform === 'win32' ? win32 : posix;
+  return platform === 'win32'
+    ? path.join(temporaryDirectory, 'lwm', repoHash.slice(0, 8))
+    : path.join(temporaryDirectory, 'loopwork-software-maintenance', repoHash);
+}
+
+function repairWorktreePathFor(platform: NodeJS.Platform, temporaryDirectory: string, repoHash: string, jobId: string) {
+  const path = platform === 'win32' ? win32 : posix;
+  const jobDirectory = platform === 'win32' ? shortJobId(jobId) : safeJobId(jobId);
+  return path.join(worktreeRootFor(platform, temporaryDirectory, repoHash), jobDirectory);
+}
+
 function worktreeRoot() {
-  return join(tmpdir(), 'loopwork-software-maintenance', paths.repoHash);
+  return worktreeRootFor(process.platform, tmpdir(), paths.repoHash);
 }
 
 export function repairWorktreePath(jobId: string) {
-  return join(worktreeRoot(), safeJobId(jobId));
+  return repairWorktreePathFor(process.platform, tmpdir(), paths.repoHash, jobId);
 }
 
 export function repairBranchName(jobId: string) {
@@ -73,7 +91,8 @@ function untrackedLineCount(worktree: string, files: string[]) {
   let count = 0;
   for (const file of files) {
     const path = resolve(worktree, file);
-    if (!path.startsWith(`${resolve(worktree)}/`) || !existsSync(path) || !lstatSync(path).isFile()) continue;
+    const child = relative(resolve(worktree), path);
+    if (!child || child === '..' || child.startsWith(`..${sep}`) || isAbsolute(child) || !existsSync(path) || !lstatSync(path).isFile()) continue;
     try { count += readFileSync(path, 'utf8').split(/\r?\n/).length; } catch { count += 500; }
   }
   return count;
@@ -200,4 +219,6 @@ export function relativeToApp(path: string) {
 
 export const softwareRepairInternals = {
   isProtectedPath: (path: string) => protectedPath.test(path) || sensitivePath.test(path),
+  worktreeRootFor,
+  repairWorktreePathFor,
 };

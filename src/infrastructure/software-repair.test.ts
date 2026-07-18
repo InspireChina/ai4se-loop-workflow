@@ -47,3 +47,20 @@ test('preserves the first character of the first modified worktree path', () => 
   assert.deepEqual(changes.files, ['src/example.ts']);
   assert.equal(changes.ok, true);
 });
+
+test('uses a short deterministic maintenance worktree path on Windows', () => {
+  const temporaryDirectory = String.raw`C:\Users\cloud-desktop-user\AppData\Local\Temp`;
+  const jobId = '4b564fe2-897c-4ea5-96db-1e98889f92f4';
+  const first = softwareRepairInternals.repairWorktreePathFor('win32', temporaryDirectory, '8a8d0af77c1b', jobId);
+  const second = softwareRepairInternals.repairWorktreePathFor('win32', temporaryDirectory, '8a8d0af77c1b', jobId);
+
+  assert.equal(first, second);
+  assert.match(first, /\\lwm\\8a8d0af7\\[a-f0-9]{12}$/);
+  assert.ok(first.length < temporaryDirectory.length + 40, first);
+  assert.equal(first.includes(jobId), false);
+});
+
+test('keeps descriptive maintenance worktree paths on non-Windows systems', () => {
+  const path = softwareRepairInternals.repairWorktreePathFor('darwin', '/tmp', '8a8d0af77c1b', 'job-123');
+  assert.equal(path, '/tmp/loopwork-software-maintenance/8a8d0af77c1b/job-123');
+});
