@@ -11,6 +11,22 @@ test('parses a structured agent result with role-specific fields', () => {
   assert.equal(result.outcome, 'completed');
   assert.equal(result.deliveryUnits?.length, 2);
   assert.deepEqual(result.questions, []);
+  assert.deepEqual(result.runtimeInputs, []);
+});
+
+test('parses generic runtime information requests independently from product questions', () => {
+  const result = parseAgentResult(JSON.stringify({
+    outcome: 'needs_input',
+    summary: 'The repository hook requires delivery metadata.',
+    runtimeInputs: [{
+      title: '补充交付单元卡号',
+      question: '本次提交应关联哪个交付单元卡号？',
+      why: '仓库 commit-msg hook 要求该字段。',
+      recommendation: '没有关联卡号时请确认使用仓库约定的占位值。',
+    }],
+  }));
+  assert.equal(result.questions.length, 0);
+  assert.equal(result.runtimeInputs[0]?.title, '补充交付单元卡号');
 });
 
 test('accepts legacy story fields while exposing delivery-unit terminology', () => {

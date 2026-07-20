@@ -122,68 +122,6 @@ test('anchors file comments to document revisions and supplies them to Agent evo
   assert.equal((db.prepare('SELECT COUNT(*) AS count FROM agent_observation_comment_evidence WHERE comment_id = ?').get(commentId) as { count: number }).count, 1);
 });
 
-test('collects Git commit input without blocking the Task and remembers a repository template', async () => {
-  const { createTask, getTask } = await import('./tasks');
-  const {
-    GIT_COMMIT_TEMPLATE_SETTING,
-    answerGitCommitInput,
-    gitCommitMessageFor,
-    listGitCommitResolutionRequests,
-    markGitCommitInputApplied,
-    requestGitCommitInput,
-  } = await import('./git-commit-recovery');
-  const { completeExecution, recoverNextExecutionAttempt } = await import('./executions');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-  const taskId = await createTask({ title: 'Recover a repository commit policy' });
-  const executionId = 'execution-git-input-recovery';
-  db.prepare(`
-    INSERT INTO execution_attempts(
-      execution_id, run_id, task_id, story_index, agent, pipeline, delegation_key,
-      attempt, status, input_hash, input_json, result_json
-    ) VALUES(?, 'run-git-input-recovery', ?, 1, 'dev-agent', 'dev', ?, 1, 'output_received', 'git-input-hash', '{}', '{"outcome":"completed","summary":"done"}')
-  `).run(executionId, taskId, `key-${executionId}`);
-  const requestId = await requestGitCommitInput({
-    taskId,
-    storyIndex: 1,
-    operation: 'delivery',
-    attemptedMessage: `feat(${taskId}): Unit-1 完成实现`,
-    errorOutput: 'commit-msg rejected the title',
-    executionId,
-  });
-
-  let detail = await getTask(taskId);
-  assert.equal(detail?.task.run_state, 'waiting_for_git_input');
-  assert.notEqual(detail?.task.agile_status, 'blocked');
-  assert.equal((await listGitCommitResolutionRequests(taskId))[0].status, 'pending');
-  assert.equal(await recoverNextExecutionAttempt(), undefined);
-
-  try {
-    await answerGitCommitInput({
-      taskId,
-      requestId,
-      commitMessage: `[landi] #N/A feat: ${taskId} Unit-1 完成实现`,
-      rememberTemplate: true,
-      messageTemplate: '[landi] #{externalId} {type}: {taskId} Unit-{unit} {description}',
-    });
-    detail = await getTask(taskId);
-    assert.equal(detail?.task.run_state, 'runnable');
-    assert.equal((await recoverNextExecutionAttempt())?.execution_id, executionId);
-
-    const answered = await gitCommitMessageFor(taskId, 1, 'delivery');
-    assert.equal(answered.source, 'answer');
-    assert.match(answered.message, /^\[landi\] #N\/A feat:/);
-    await markGitCommitInputApplied(answered.requestId);
-
-    const remembered = await gitCommitMessageFor(taskId, 2, 'checkpoint');
-    assert.equal(remembered.source, 'repository_template');
-    assert.match(remembered.message, new RegExp(`^\\[landi\\] #N/A chore: ${taskId} Unit-2 checkpoint`));
-    await completeExecution(executionId);
-  } finally {
-    db.prepare('DELETE FROM project_settings WHERE setting_key = ?').run(GIT_COMMIT_TEMPLATE_SETTING);
-  }
-});
-
 test('creates title-only and described Tasks without blocking delegation and serializes description into agent context', async () => {
   const { createTask, getTaskContext, getTask, pipelineAllEnvelopes, pipelineForTask, toJsonlEnvelope } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
@@ -371,8 +309,8 @@ test('acknowledges the current review report as read without an approval decisio
   await assert.rejects(() => acknowledgeClosure({ taskId, reviewRevision: 1 }), /没有等待阅读/);
 });
 
-test('versions Slice Specs, resolves answered decisions, and stores Harness evidence', async () => {
-  const { addQuestion, answerQuestion, getTask, saveStorySpec } = await import('./tasks');
+test('versions Slice Specs, advances Dev without requiring a commit, and stores Harness evidence', async () => {
+  const { addQuestion, answerQuestion, getTask, saveStorySpec, updateTask } = await import('./tasks');
   const { runHarnessVerification } = await import('./verifications');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -419,9 +357,17 @@ test('versions Slice Specs, resolves answered decisions, and stores Harness evid
   assert.equal(first.revision, 1);
   assert.equal(second.revision, 2);
 
-  const outcome = await runHarnessVerification(taskId, 1, 'test-commit', 'test-execution-spec');
+  db.prepare("UPDATE tasks SET analysis_index = 1, spec_resolved_index = 1, current_subagent = 'dev-agent' WHERE task_id = ?").run(taskId);
+  await updateTask(taskId, 'dev-agent', {
+    agile_status: 'in dev',
+    current_subagent: 'dev-agent',
+    dev_index: 1,
+    next_step: '现有实现已经满足规格，无须创建 commit',
+  });
+
+  const outcome = await runHarnessVerification(taskId, 1, undefined, 'test-execution-spec');
   assert.equal(outcome.passed, true);
-  const repeated = await runHarnessVerification(taskId, 1, 'test-commit', 'test-execution-spec');
+  const repeated = await runHarnessVerification(taskId, 1, undefined, 'test-execution-spec');
   assert.equal(repeated.verificationId, outcome.verificationId);
 
   const detail = await getTask(taskId);
@@ -430,6 +376,152 @@ test('versions Slice Specs, resolves answered decisions, and stores Harness evid
   assert.equal(detail?.verificationRuns.length, 1);
   assert.equal(detail?.verificationEvidence[0]?.criterion_id, 'AC-1');
   assert.equal(detail?.verificationEvidence[0]?.passed, 1);
+  assert.equal(detail?.verificationRuns[0]?.code_commit, null);
+});
+
+test('lets Dev and Test request runtime information and resume the same delivery unit', async () => {
+  const { applyAgentResult } = await import('./agent-results');
+  const { beginEvolutionRun } = await import('./agent-evolution');
+  const { parseAgentResult } = await import('../domain/agent-result');
+  const {
+    answerRuntimeInput,
+    getTask,
+    pipelineForTask,
+    submitRuntimeInputs,
+  } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  const taskId = 'TASK-runtime-input-resume';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, total_stories, spec_resolved_index, work_dir
+    ) VALUES(?, 'Runtime input resume', 'feature', 'ready for dev', 'analyst-agent', 1, 1, 1, '')
+  `).run(taskId);
+  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Runtime-aware unit', 'story-001')").run(taskId);
+  db.prepare(`
+    INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json)
+    VALUES('SPEC-runtime-input', ?, 1, 1, 'resolved', '{}')
+  `).run(taskId);
+
+  const addExecution = (executionId: string, agent: string, pipeline: string) => db.prepare(`
+    INSERT INTO execution_attempts(
+      execution_id, run_id, task_id, story_index, agent, pipeline, delegation_key,
+      attempt, status, input_hash, input_json
+    ) VALUES(?, 'run-runtime-input', ?, 1, ?, ?, ?, 1, 'output_received', ?, '{}')
+  `).run(executionId, taskId, agent, pipeline, `key-${executionId}`, `hash-${executionId}`);
+  const envelope = (agent: 'dev-agent' | 'test-agent', pipeline: string) => ({
+    taskId,
+    pipeline,
+    agent,
+    storyIndex: 1,
+    resource: agent === 'test-agent' ? 'browser' as const : 'none' as const,
+    description: 'runtime input test',
+    title: 'Runtime input resume',
+    taskDescription: null,
+    itemType: 'feature',
+    priority: '',
+    link: '',
+    externalId: '',
+    externalStatus: '',
+    agileStatus: agent === 'dev-agent' ? 'ready for dev' : 'in dev',
+    currentSubagent: agent,
+    resumePending: 0,
+    specResolvedIndex: 1,
+    runState: 'runnable',
+    closureStatus: 'none',
+    reviewRevision: 0,
+    reviewDocumentId: '',
+    lastActor: '',
+    analysisIndex: 1,
+    devIndex: agent === 'dev-agent' ? 0 : 1,
+    testIndex: 0,
+    totalStories: 1,
+    nextStep: '',
+    blockedReason: '',
+    owner: '',
+    evidence: '',
+    risk: '',
+  });
+
+  addExecution('execution-runtime-dev-request', 'dev-agent', 'dev');
+  await applyAgentResult('run-runtime-input', envelope('dev-agent', 'dev'), parseAgentResult(JSON.stringify({
+    outcome: 'needs_input',
+    summary: 'Commit hook requires a delivery card number.',
+    runtimeInputs: [{
+      title: '交付单元卡号',
+      question: '本次提交应关联哪个交付单元卡号？',
+      why: '仓库 commit-msg hook 要求该字段。',
+      recommendation: '无关联项时确认仓库允许的占位值。',
+    }],
+  })), { executionId: 'execution-runtime-dev-request' });
+
+  let detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'ready for dev');
+  assert.equal(detail?.task.run_state, 'waiting_for_runtime_input');
+  assert.equal(detail?.task.current_subagent, 'dev-agent');
+  assert.equal(detail?.runtimeInputs[0]?.status, 'pending');
+  await answerRuntimeInput({ taskId, requestId: detail!.runtimeInputs[0].request_id, answer: '#N/A' });
+  await submitRuntimeInputs(taskId);
+  assert.deepEqual((await pipelineForTask(taskId))[0], {
+    taskId,
+    pipeline: 'resume',
+    agent: 'dev-agent',
+    storyIndex: 1,
+    resource: 'none',
+    description: '读取人工输入，并安全恢复需求推进',
+  });
+
+  addExecution('execution-runtime-dev-resume', 'dev-agent', 'resume');
+  await applyAgentResult('run-runtime-input', envelope('dev-agent', 'resume'), parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'Implementation completed using the supplied repository metadata.',
+    changedFiles: [],
+  })), { executionId: 'execution-runtime-dev-resume' });
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.dev_index, 1);
+  assert.equal(detail?.runtimeInputs[0]?.status, 'resolved');
+  assert.equal(detail?.runtimeInputs[0]?.resolved_execution_id, 'execution-runtime-dev-resume');
+  const evolution = await beginEvolutionRun({
+    executionId: 'execution-runtime-dev-resume',
+    taskId,
+    storyIndex: 1,
+    agentId: 'dev-agent',
+    attempt: 1,
+    promptVersion: 1,
+    result: { outcome: 'completed', summary: 'Resumed successfully.' },
+    applicationOutcome: 'advanced',
+    diagnostics: [],
+  });
+  assert.match(evolution?.prompt || '', /交付单元卡号/);
+  assert.match(evolution?.prompt || '', /#N\/A/);
+
+  addExecution('execution-runtime-test-request', 'test-agent', 'test');
+  await applyAgentResult('run-runtime-input', envelope('test-agent', 'test'), parseAgentResult(JSON.stringify({
+    outcome: 'needs_input',
+    summary: 'A target test environment is required.',
+    runtimeInputs: [{ title: '测试环境', question: '应在哪个已配置环境执行黑盒验证？' }],
+  })), { executionId: 'execution-runtime-test-request' });
+  detail = await getTask(taskId);
+  const testInput = detail!.runtimeInputs.find((input) => input.source_agent === 'test-agent')!;
+  assert.equal(detail?.task.run_state, 'waiting_for_runtime_input');
+  await answerRuntimeInput({ taskId, requestId: testInput.request_id, answer: '使用本地预览环境。' });
+  await submitRuntimeInputs(taskId);
+  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'test-agent');
+  assert.equal((await pipelineForTask(taskId))[0]?.pipeline, 'resume');
+
+  addExecution('execution-runtime-test-resume', 'test-agent', 'resume');
+  await applyAgentResult('run-runtime-input', envelope('test-agent', 'resume'), parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'Black-box verification passed.',
+    verdict: 'passed',
+    tests: [{ command: 'npm test', passed: true }],
+  })), { executionId: 'execution-runtime-test-resume' });
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.test_index, 1);
+  assert.equal(detail?.task.agile_status, 'in review');
+  assert.equal(detail?.runtimeInputs.find((input) => input.source_agent === 'test-agent')?.status, 'resolved');
 });
 
 test('persists execution input before work and recovers output without rerunning the Agent', async () => {
@@ -480,7 +572,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 3);
+  assert.equal(original.profile.prompt_seed_revision, 5);
   assert.ok(original.currentPrompt.content.length > 800);
   assert.match(original.currentPrompt.content, /# 角色目标/);
   assert.match(original.currentPrompt.content, /# 完成条件/);
@@ -498,7 +590,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
   await ensureAgentRuntimeWorkspace();
   const upgradedSeed = await getAgentProfile('backlog-agent');
-  assert.equal(upgradedSeed.profile.prompt_seed_revision, 3);
+  assert.equal(upgradedSeed.profile.prompt_seed_revision, 5);
   assert.equal(upgradedSeed.currentPrompt.source, 'seed');
   assert.ok(upgradedSeed.currentPrompt.version > 1);
   assert.match(upgradedSeed.currentPrompt.content, /# 输入与证据优先级/);
@@ -521,7 +613,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const preservedHumanPrompt = await getAgentProfile('dev-agent');
   assert.equal(preservedHumanPrompt.currentPrompt.version, promptVersion);
   assert.equal(preservedHumanPrompt.currentPrompt.source, 'human');
-  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 3);
+  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 5);
 
   const localPrompt = `${promptContent}\n- 本地文件修改也必须形成版本。`;
   writeFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), localPrompt);

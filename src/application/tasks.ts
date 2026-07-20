@@ -3,7 +3,6 @@ import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { sliceSpecSchema } from '../domain/agent-result';
 import { databaseConnection, paths } from '../infrastructure/database';
-import { verifyDevCommit } from '../infrastructure/git';
 import { isRunProcessAlive, readRunPid } from '../infrastructure/run-process';
 import { toUtcIsoString } from './event-time';
 import { recordLoopLogEventInDb } from './runtime-events';
@@ -90,6 +89,23 @@ export type Question = {
   resolved_at: string | null;
   created_at: string;
   updated_at: string;
+};
+export type RuntimeInputRequest = {
+  request_id: string;
+  task_id: string;
+  story_index: number | null;
+  source_agent: string;
+  title: string;
+  question: string;
+  why: string | null;
+  recommendation: string | null;
+  answer: string | null;
+  status: 'pending' | 'answered' | 'resolved' | 'superseded';
+  source_execution_id: string | null;
+  resolved_execution_id: string | null;
+  created_at: string;
+  updated_at: string;
+  resolved_at: string | null;
 };
 export type ClosureAcknowledgement = { acknowledgement_id: string; task_id: string; review_document_id: string; review_revision: number; acknowledged_by: string; acknowledged_at: string };
 export type VerificationRun = { verification_id: string; task_id: string; story_index: number; spec_revision: number; code_commit: string | null; status: string; started_at: string; finished_at: string | null };
@@ -240,6 +256,7 @@ export async function getTask(taskId: string) {
   const stories = db.prepare('SELECT * FROM stories WHERE task_id = ? ORDER BY story_index').all(taskId) as Story[];
   const storySpecs = db.prepare('SELECT * FROM story_specs WHERE task_id = ? ORDER BY story_index, revision').all(taskId) as StorySpec[];
   const questions = db.prepare('SELECT * FROM questions WHERE task_id = ? ORDER BY created_at').all(taskId) as Question[];
+  const runtimeInputs = db.prepare('SELECT * FROM runtime_input_requests WHERE task_id = ? ORDER BY created_at').all(taskId) as RuntimeInputRequest[];
   const documents = db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[];
   const documentComments = db.prepare('SELECT * FROM document_comments WHERE task_id = ? ORDER BY created_at').all(taskId) as DocumentComment[];
   const closureAcknowledgements = db.prepare('SELECT * FROM closure_acknowledgements WHERE task_id = ? ORDER BY review_revision').all(taskId) as ClosureAcknowledgement[];
@@ -259,7 +276,7 @@ export async function getTask(taskId: string) {
     ORDER BY created_at, execution_id
   `).all(taskId) as ExecutionAttemptView[];
   const events = db.prepare('SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at DESC').all(taskId) as Event[];
-  return { task, stories, storySpecs, questions, documents, documentComments, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events };
+  return { task, stories, storySpecs, questions, runtimeInputs, documents, documentComments, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events };
 }
 
 export async function getTaskContext(taskId: string) {
@@ -618,6 +635,145 @@ export async function answerQuestion(input: unknown) {
   refreshPages(`/tasks/${taskId}`, '/');
 }
 
+const runtimeInputSchema = z.object({
+  taskId: z.string().min(1),
+  storyIndex: z.coerce.number().int().positive().optional().nullable(),
+  sourceAgent: z.enum(['backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent']),
+  title: z.string().min(1).max(200),
+  question: z.string().min(1).max(4000),
+  why: z.string().max(1000).optional().nullable(),
+  recommendation: z.string().max(2000).optional().nullable(),
+  sourceExecutionId: z.string().min(1).optional().nullable(),
+});
+
+export async function addRuntimeInputRequest(input: unknown) {
+  const value = runtimeInputSchema.parse(input);
+  const db = await databaseConnection();
+  const task = fetchTask(db, value.taskId);
+  if (!task) throw new Error('需求不存在');
+  if (value.storyIndex) {
+    const story = db.prepare('SELECT 1 FROM stories WHERE task_id = ? AND story_index = ?').get(value.taskId, value.storyIndex);
+    if (!story) throw new Error(`交付单元 ${value.storyIndex} 不存在`);
+  }
+  const requestId = `RI-${randomUUID().slice(0, 8)}`;
+  db.exec('BEGIN');
+  try {
+    db.prepare(`
+      INSERT INTO runtime_input_requests(
+        request_id, task_id, story_index, source_agent, title, question, why,
+        recommendation, source_execution_id
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      requestId, value.taskId, value.storyIndex || null, value.sourceAgent,
+      value.title, value.question, value.why || null, value.recommendation || null,
+      value.sourceExecutionId || null,
+    );
+    db.prepare(`
+      UPDATE tasks
+      SET run_state = 'waiting_for_runtime_input', current_subagent = ?,
+          resume_pending = 0, blocked_reason = ?, next_step = ?, last_actor = ?,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ?
+    `).run(
+      value.sourceAgent,
+      value.title,
+      `等待补充运行信息：${value.title}`,
+      value.sourceAgent,
+      value.taskId,
+    );
+    addEvent(db, value.taskId, value.sourceAgent, 'RuntimeInputRequested', `请求运行信息：${value.title}`);
+    db.exec('COMMIT');
+    await syncTaskFiles(db, value.taskId);
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  refreshPages('/', `/tasks/${value.taskId}`);
+  return requestId;
+}
+
+const runtimeInputAnswerSchema = z.object({
+  taskId: z.string().min(1),
+  requestId: z.string().min(1),
+  answer: z.string().min(1).max(4000),
+});
+
+export async function answerRuntimeInput(input: unknown) {
+  const value = runtimeInputAnswerSchema.parse(input);
+  const db = await databaseConnection();
+  const request = db.prepare(`
+    SELECT * FROM runtime_input_requests WHERE request_id = ? AND task_id = ?
+  `).get(value.requestId, value.taskId) as RuntimeInputRequest | undefined;
+  if (!request) throw new Error('运行信息请求不存在');
+  if (request.status !== 'pending') throw new Error('运行信息请求已经处理');
+  db.exec('BEGIN');
+  try {
+    db.prepare(`
+      UPDATE runtime_input_requests
+      SET answer = ?, status = 'answered', updated_at = CURRENT_TIMESTAMP
+      WHERE request_id = ?
+    `).run(value.answer, value.requestId);
+    addEvent(db, value.taskId, 'human', 'RuntimeInputAnswered', `回答了运行信息「${request.title}」。`);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  refreshPages('/', `/tasks/${value.taskId}`);
+}
+
+export async function submitRuntimeInputs(taskId: string) {
+  const db = await databaseConnection();
+  const task = fetchTask(db, taskId);
+  if (!task || task.run_state !== 'waiting_for_runtime_input') throw new Error('需求当前不在等待运行信息状态');
+  if (!task.current_subagent) throw new Error('运行信息请求缺少负责 Agent');
+  const pending = (db.prepare(`
+    SELECT COUNT(*) AS count FROM runtime_input_requests
+    WHERE task_id = ? AND status = 'pending'
+  `).get(taskId) as { count: number }).count;
+  if (pending) throw new Error('仍有未回答的运行信息，不能继续执行');
+  const answered = (db.prepare(`
+    SELECT COUNT(*) AS count FROM runtime_input_requests
+    WHERE task_id = ? AND status = 'answered'
+  `).get(taskId) as { count: number }).count;
+  if (!answered) throw new Error('没有可提交的运行信息回答');
+  db.exec('BEGIN');
+  try {
+    db.prepare(`
+      UPDATE tasks
+      SET run_state = 'runnable', resume_pending = 1, blocked_reason = NULL,
+          next_step = ?, last_actor = 'human', updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ?
+    `).run(`运行信息已补充，交回 ${task.current_subagent} 从当前阶段继续`, taskId);
+    addEvent(db, taskId, 'human', 'RuntimeInputsSubmitted', `提交运行信息回答，交回 ${task.current_subagent}。`);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  refreshPages('/', `/tasks/${taskId}`);
+}
+
+export async function resolveRuntimeInputs(input: {
+  taskId: string;
+  storyIndex: number | null;
+  sourceAgent: string;
+  resolvedExecutionId?: string;
+}) {
+  const db = await databaseConnection();
+  const result = db.prepare(`
+    UPDATE runtime_input_requests
+    SET status = 'resolved', resolved_execution_id = ?, resolved_at = CURRENT_TIMESTAMP,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE task_id = ? AND story_index IS ? AND source_agent = ? AND status = 'answered'
+  `).run(input.resolvedExecutionId || null, input.taskId, input.storyIndex, input.sourceAgent);
+  if (result.changes) {
+    addEvent(db, input.taskId, input.sourceAgent as Actor, 'RuntimeInputsResolved', `已使用 ${result.changes} 条运行信息继续执行。`);
+    refreshPages('/', `/tasks/${input.taskId}`);
+  }
+  return result.changes;
+}
+
 const questionSchema = z.object({
   taskId: z.string().min(1),
   storyIndex: z.coerce.number().int().positive().optional().nullable(),
@@ -736,7 +892,7 @@ export async function releaseBlock(taskId: string) {
     WHERE task_id != ? AND (
       agile_status = 'in dev'
       OR (agile_status = 'blocked' AND resume_status = 'in dev')
-      OR run_state = 'waiting_for_git_input'
+      OR (run_state = 'waiting_for_runtime_input' AND current_subagent = 'dev-agent')
     )
     LIMIT 1
   `).get(taskId) as Task | undefined;
@@ -795,13 +951,12 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
     if (!resolvedSpec) throw new Error(`交付单元 ${changes.analysis_index} 缺少 resolved Slice Spec`);
   }
   if (changes.dev_index !== undefined && changes.dev_index > before.dev_index) {
-    const recorded = db.prepare(`
-      SELECT code_commit FROM execution_attempts
-      WHERE task_id = ? AND story_index = ? AND agent = 'dev-agent' AND code_commit IS NOT NULL
-      ORDER BY created_at DESC, execution_id DESC LIMIT 1
-    `).get(taskId, changes.dev_index) as { code_commit: string } | undefined;
-    const verification = verifyDevCommit(paths.root, taskId, changes.dev_index, recorded?.code_commit);
-    if (!verification.ok) throw new Error(`交付单元 ${changes.dev_index} 的代码尚未按要求提交：${verification.reason}`);
+    const resolvedSpec = db.prepare(`
+      SELECT 1 FROM story_specs
+      WHERE task_id = ? AND story_index = ? AND status = 'resolved'
+      LIMIT 1
+    `).get(taskId, changes.dev_index);
+    if (!resolvedSpec) throw new Error(`交付单元 ${changes.dev_index} 缺少 resolved Slice Spec`);
   }
   if (changes.agile_status === 'done' && before.closure_status !== 'acknowledged') throw new Error('当前版本的结卡报告尚未阅读');
   if (prospective.agile_status === 'in dev') {
@@ -810,7 +965,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
       WHERE task_id != ? AND (
         agile_status = 'in dev'
         OR (agile_status='blocked' AND resume_status = 'in dev')
-        OR run_state = 'waiting_for_git_input'
+        OR (run_state = 'waiting_for_runtime_input' AND current_subagent = 'dev-agent')
       )
       LIMIT 1
     `).get(taskId) as Task | undefined;

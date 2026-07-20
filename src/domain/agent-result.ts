@@ -20,6 +20,13 @@ const questionSchema = z.object({
   dependsOn: z.array(z.string().min(1).max(240)).max(50).optional().default([]),
 });
 
+const runtimeInputSchema = z.object({
+  title: z.string().min(1).max(200),
+  question: z.string().min(1).max(4000),
+  why: z.string().max(1000).optional().default(''),
+  recommendation: z.string().max(2000).optional().default(''),
+});
+
 const deliveryUnitSchema = z.object({ title: z.string().min(1).max(200) });
 
 export const sliceSpecSchema = z.object({
@@ -65,6 +72,7 @@ export const agentResultSchema = z.object({
   summary: z.string().min(1).max(4000),
   artifact: artifactSchema.optional(),
   questions: z.array(questionSchema).max(50).optional().default([]),
+  runtimeInputs: z.array(runtimeInputSchema).max(50).optional().default([]),
   classification: z.enum(['feature', 'bug', 'tech', 'intake', 'other']).optional(),
   route: z.enum(['plan', 'repro']).optional(),
   deliveryUnits: z.array(deliveryUnitSchema).max(50).optional(),

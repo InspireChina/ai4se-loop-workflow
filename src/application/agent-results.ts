@@ -4,10 +4,12 @@ import type { Actor } from '../domain/task';
 import { databaseConnection } from '../infrastructure/database';
 import {
   addQuestion,
+  addRuntimeInputRequest,
   addStory,
   CodeSlotBusyError,
   getTask,
   rewindTask,
+  resolveRuntimeInputs,
   saveStorySpec,
   updateTask,
   upsertDocument,
@@ -88,6 +90,18 @@ async function saveQuestions(delegation: DelegationEnvelope, result: AgentResult
   }
 }
 
+async function saveRuntimeInputs(delegation: DelegationEnvelope, result: AgentResult, sourceExecutionId?: string) {
+  for (const input of result.runtimeInputs) {
+    await addRuntimeInputRequest({
+      taskId: delegation.taskId,
+      storyIndex: delegation.storyIndex,
+      sourceAgent: delegation.agent,
+      ...input,
+      sourceExecutionId: sourceExecutionId || null,
+    });
+  }
+}
+
 async function recordResult(runId: string, delegation: DelegationEnvelope, result: AgentResult, codeCommit?: string, executionId?: string) {
   const db = await databaseConnection();
   if (executionId) {
@@ -126,6 +140,7 @@ type QueuedAgentResult = {
   pipeline: string;
   outcome: string;
   result_json: string;
+  execution_id: string | null;
 };
 
 function envelopeFromTask(row: QueuedAgentResult, detail: NonNullable<Awaited<ReturnType<typeof getTask>>>): DelegationEnvelope {
@@ -179,7 +194,7 @@ async function ensureCodeSlotForDelegation(delegation: DelegationEnvelope, resul
       AND (
         agile_status = 'in dev'
         OR (agile_status = 'blocked' AND resume_status = 'in dev')
-        OR run_state = 'waiting_for_git_input'
+        OR (run_state = 'waiting_for_runtime_input' AND current_subagent = 'dev-agent')
       )
     LIMIT 1
   `).get(delegation.taskId) as { task_id: string } | undefined;
@@ -198,15 +213,23 @@ export async function blockDelegation(delegation: DelegationEnvelope, reason: st
 
 type ApplyOutcome = 'advanced' | 'blocked' | 'rewound';
 
-async function applyResultEffects(delegation: DelegationEnvelope, result: AgentResult, sourceResultId?: string): Promise<ApplyOutcome> {
+async function applyResultEffects(delegation: DelegationEnvelope, result: AgentResult, sourceResultId?: string, sourceExecutionId?: string): Promise<ApplyOutcome> {
   await ensureCodeSlotForDelegation(delegation, result);
   const artifactDocumentId = await saveArtifact(delegation, result);
 
+  if (result.questions.length && delegation.agent !== 'analyst-agent') {
+    throw new Error(`${delegation.agent} 不允许创建产品澄清问题；运行所需信息请使用 runtimeInputs`);
+  }
+  if (result.questions.length && result.runtimeInputs.length) throw new Error('同一次结果不能混合产品澄清问题和运行信息请求');
+  if (result.runtimeInputs.length) {
+    if (result.outcome !== 'needs_input') throw new Error('包含 runtimeInputs 时 outcome 必须为 needs_input');
+    await saveRuntimeInputs(delegation, result, sourceExecutionId);
+    return 'blocked' as const;
+  }
   if (result.outcome !== 'completed' && !(delegation.agent === 'analyst-agent' && result.questions.length)) {
     await blockDelegation(delegation, result.summary);
     return 'blocked' as const;
   }
-  if (result.questions.length && delegation.agent !== 'analyst-agent') throw new Error(`${delegation.agent} 不允许创建人工澄清问题`);
 
   const actor = delegation.agent as Actor;
   switch (delegation.agent) {
@@ -333,7 +356,15 @@ export async function applyAgentResult(runId: string, delegation: DelegationEnve
   if (recorded.applicationStatus === 'failed') throw new Error('该 execution attempt 的 Agent 结果此前应用失败，拒绝重复产生副作用');
   const resultId = recorded.resultId;
   try {
-    const outcome = await applyResultEffects(delegation, result, resultId);
+    const outcome = await applyResultEffects(delegation, result, resultId, options.executionId);
+    if (result.outcome === 'completed') {
+      await resolveRuntimeInputs({
+        taskId: delegation.taskId,
+        storyIndex: delegation.storyIndex,
+        sourceAgent: delegation.agent,
+        resolvedExecutionId: options.executionId,
+      });
+    }
     await markApplication(resultId, 'applied', null, outcome);
     return outcome;
   } catch (error) {
@@ -355,7 +386,7 @@ export type QueuedApplicationResult =
 export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationResult> {
   const db = await databaseConnection();
   const row = db.prepare(`
-    SELECT ar.result_id, ar.run_id, ar.task_id, ar.story_index, ar.agent, ar.pipeline, ar.outcome, ar.result_json
+    SELECT ar.result_id, ar.run_id, ar.task_id, ar.story_index, ar.agent, ar.pipeline, ar.outcome, ar.result_json, ar.execution_id
     FROM agent_results ar
     JOIN tasks t ON t.task_id = ar.task_id
     WHERE ar.application_status = 'pending'
@@ -370,7 +401,15 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
     if (!detail) throw new Error(`需求不存在：${row.task_id}`);
     const result = parseAgentResult(row.result_json);
     const delegation = envelopeFromTask(row, detail);
-    const outcome = await applyResultEffects(delegation, result, row.result_id);
+    const outcome = await applyResultEffects(delegation, result, row.result_id, row.execution_id || undefined);
+    if (result.outcome === 'completed') {
+      await resolveRuntimeInputs({
+        taskId: row.task_id,
+        storyIndex: row.story_index,
+        sourceAgent: row.agent,
+        resolvedExecutionId: row.execution_id || undefined,
+      });
+    }
     await markApplication(row.result_id, 'applied');
     const execution = db.prepare('SELECT execution_id FROM agent_results WHERE result_id = ?').get(row.result_id) as { execution_id: string | null } | undefined;
     if (execution?.execution_id) {

@@ -137,14 +137,10 @@ export async function beginExecutionAttempt(input: {
 export async function recoverNextExecutionAttempt() {
   const db = await databaseConnection();
   return db.prepare(`
-    SELECT attempt.* FROM execution_attempts attempt
-    WHERE attempt.status IN ('output_received', 'verifying', 'applying')
-      AND attempt.result_json IS NOT NULL
-      AND NOT EXISTS (
-        SELECT 1 FROM git_commit_resolution_requests request
-        WHERE request.execution_id = attempt.execution_id AND request.status = 'pending'
-      )
-    ORDER BY attempt.created_at, attempt.execution_id
+    SELECT * FROM execution_attempts
+    WHERE status IN ('output_received', 'verifying', 'applying')
+      AND result_json IS NOT NULL
+    ORDER BY created_at, execution_id
     LIMIT 1
   `).get() as ExecutionAttempt | undefined;
 }

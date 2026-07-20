@@ -3,18 +3,18 @@ import Link from 'next/link';
 import { AlertTriangle, Check, CheckCircle2, Clock3, FileText, GitBranch, RotateCcw, SlidersHorizontal } from 'lucide-react';
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
-import { GIT_COMMIT_TEMPLATE_PLACEHOLDERS, listGitCommitResolutionRequests } from '../../../src/application/git-commit-recovery';
 import { agentLabel, confirmationKindLabel, deliveryUnitLabel, documentKindLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
 import { ArtifactDocument } from './artifact-document';
 import {
   acknowledgeClosureAction,
   addStoryAction,
-  answerGitCommitInputAction,
   answerQuestionAction,
+  answerRuntimeInputAction,
   cancelTaskAction,
   initializeContextAction,
   releaseBlockAction,
   submitClarificationAnswersAction,
+  submitRuntimeInputsAction,
   rewindTaskAction,
   transitionTaskAction,
 } from '../../actions';
@@ -33,7 +33,7 @@ const taskSteps = [
 ] as const;
 
 function stepDetail(task: { agile_status: string; run_state: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number }) {
-  if (task.run_state === 'waiting_for_git_input') return '等待补充仓库要求的 Git 提交信息';
+  if (task.run_state === 'waiting_for_runtime_input') return `等待补充运行信息 · ${agentLabel(task.current_subagent)}`;
   if (task.agile_status === 'blocked') return `系统异常已暂停 · ${agentLabel(task.current_subagent)}`;
   if (task.agile_status === 'backlog') return '正在收集上下文';
   if (task.agile_status === 'in repro') return '正在复现并定位问题';
@@ -50,13 +50,12 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const { taskId } = await params;
   const detail = await getTask(taskId);
   if (!detail) notFound();
-  const gitCommitRequests = await listGitCommitResolutionRequests(taskId);
-  const { task, stories, storySpecs, questions, documents, documentComments, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events } = detail;
+  const { task, stories, storySpecs, questions, runtimeInputs, documents, documentComments, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events } = detail;
   const pipeline = await pipelineForTask(taskId);
   const unansweredQuestions = questions.filter((question) => question.status === 'pending');
   const waitingForAnswers = task.run_state === 'waiting_for_answers';
-  const waitingForGitInput = task.run_state === 'waiting_for_git_input';
-  const pendingGitRequest = gitCommitRequests.find((request) => request.status === 'pending');
+  const unansweredRuntimeInputs = runtimeInputs.filter((input) => input.status === 'pending');
+  const waitingForRuntimeInput = task.run_state === 'waiting_for_runtime_input';
   const reviewDocument = task.review_document_id ? documents.find((document) => document.document_id === task.review_document_id) : null;
   const deliveryDocuments = documents.filter((document) => document.document_id !== reviewDocument?.document_id);
   const progressStatus = task.agile_status === 'blocked' ? task.resume_status || 'backlog' : task.agile_status;
@@ -71,7 +70,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           <p className="eyebrow">{task.task_id}</p>
           <h1>{task.title}</h1>
         </div>
-        <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers || waitingForGitInput ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForGitInput ? '等待 Git 信息' : waitingForAnswers ? '等待澄清' : statusLabel(task.agile_status)}</span>
+        <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待澄清' : statusLabel(task.agile_status)}</span>
       </div>
       <div className="chips">
         <span>{itemTypeLabel(task.item_type)}</span>
@@ -112,6 +111,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       <div><small>实现</small><b>{task.dev_index} / {task.total_stories}</b></div>
       <div><small>验证</small><b>{task.test_index} / {task.total_stories}</b></div>
       <div><small>待回答澄清</small><b>{unansweredQuestions.length}</b></div>
+      <div><small>待补充运行信息</small><b>{unansweredRuntimeInputs.length}</b></div>
       <div className="summary-wide"><small>下一步</small><p>{terminologyText(task.next_step) || '—'}</p></div>
       <div className="summary-wide"><small>文档</small><p>{documents.length} 个数据库文档</p></div>
     </section>
@@ -190,6 +190,39 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               </details>)}
             </>}
           </div>
+        </section>
+
+        <section className="task-section">
+          <div className="section-head">
+            <h2>运行信息</h2>
+            <small>{runtimeInputs.length} 个请求</small>
+          </div>
+          <div className="question-list">
+            {runtimeInputs.length === 0 ? <div className="card empty">当前没有 Agent 等待补充运行信息。</div> : runtimeInputs.map((input) => <article className="question card" key={input.request_id}>
+              <div className="question-title">
+                <AlertTriangle size={18}/>
+                <div>
+                  <p className="eyebrow">运行信息 · {deliveryUnitLabel(input.story_index)}</p>
+                  <h3>{terminologyText(input.title)}</h3>
+                  <small>来源：{agentLabel(input.source_agent)}</small>
+                </div>
+                <span className={`badge ${input.status === 'answered' || input.status === 'resolved' ? 'green' : 'amber'}`}>{input.status === 'resolved' ? '已用于恢复' : input.status === 'answered' ? '已回答' : input.status === 'superseded' ? '已失效' : '待回答'}</span>
+              </div>
+              <p>{terminologyText(input.question)}</p>
+              {input.why && <p className="muted">为什么需要：{terminologyText(input.why)}</p>}
+              {input.recommendation && <div className="recommendation">建议：{terminologyText(input.recommendation)}</div>}
+              {input.answer ? <p className="answer"><b>你的答复：</b>{input.answer}</p> : input.status === 'pending' && <form action={answerRuntimeInputAction}>
+                <input type="hidden" name="taskId" value={task.task_id}/>
+                <input type="hidden" name="requestId" value={input.request_id}/>
+                <textarea name="answer" required placeholder="填写继续当前执行所需的非敏感运行信息…"/>
+                <button className="button" type="submit">保存答复</button>
+              </form>}
+            </article>)}
+          </div>
+          {waitingForRuntimeInput && unansweredRuntimeInputs.length === 0 && <form action={submitRuntimeInputsAction} className="release-block">
+            <input type="hidden" name="taskId" value={task.task_id}/>
+            <button className="button success">提交全部运行信息并交回 {agentLabel(task.current_subagent)}</button>
+          </form>}
         </section>
 
         <section className="task-section">
@@ -282,26 +315,6 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             </div>
           </div>)}
         </section>
-
-        {waitingForGitInput && pendingGitRequest && <form action={answerGitCommitInputAction} className="card form-panel git-input-card">
-          <h2><GitBranch size={15}/>补充 Git 提交信息</h2>
-          <p className="muted">仓库拒绝了 Runner 生成的{pendingGitRequest.operation === 'checkpoint' ? '开发前 checkpoint' : '交付'}提交。补充后会从提交阶段继续，不会重新运行 Dev Agent。</p>
-          <input type="hidden" name="taskId" value={task.task_id}/>
-          <input type="hidden" name="requestId" value={pendingGitRequest.request_id}/>
-          <label>本次合规提交标题
-            <textarea name="commitMessage" required defaultValue={pendingGitRequest.attempted_message}/>
-          </label>
-          <details>
-            <summary>查看仓库返回的错误</summary>
-            <pre>{pendingGitRequest.error_output}</pre>
-          </details>
-          <label className="checkbox"><input type="checkbox" name="rememberTemplate"/>记住该仓库的提交标题模板</label>
-          <label>仓库提交标题模板
-            <input name="messageTemplate" placeholder="例如：[name] #{externalId} {type}: {description}"/>
-            <small className="muted">可用变量：{GIT_COMMIT_TEMPLATE_PLACEHOLDERS.join('、')}。勾选记住时必填。</small>
-          </label>
-          <button className="button success" type="submit">保存并从 Git 提交继续</button>
-        </form>}
 
         {task.agile_status === 'blocked' && task.run_state === 'system_blocked' && <form action={releaseBlockAction} className="card form-panel release-block">
           <h2><AlertTriangle size={15}/>系统阻塞</h2>

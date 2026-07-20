@@ -4,12 +4,12 @@ import { redirect } from 'next/navigation';
 import { normalizeWorkspaceRoot, setAgentExecutorSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
 import { rollbackAgentPrompt, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
 import { setSoftwareMaintenanceSettings } from '../src/application/software-maintenance';
-import { answerGitCommitInput } from '../src/application/git-commit-recovery';
 import {
   addDocumentComment,
   addStory,
   acknowledgeClosure,
   answerQuestion,
+  answerRuntimeInput,
   beginRun,
   cancelTask,
   createLoopDispatch,
@@ -20,6 +20,7 @@ import {
   releaseBlock,
   resolveDocumentComment,
   submitClarificationAnswers,
+  submitRuntimeInputs,
   rewindTask,
   transitionTask,
 } from '../src/application/tasks';
@@ -143,6 +144,15 @@ export async function answerQuestionAction(formData: FormData) {
   redirect(`/tasks/${formData.get('taskId')}`);
 }
 
+export async function answerRuntimeInputAction(formData: FormData) {
+  await answerRuntimeInput({
+    taskId: formData.get('taskId'),
+    requestId: formData.get('requestId'),
+    answer: formData.get('answer'),
+  });
+  redirect(`/tasks/${formData.get('taskId')}`);
+}
+
 export async function addDocumentCommentAction(formData: FormData) {
   const taskId = String(formData.get('taskId'));
   await addDocumentComment({
@@ -168,20 +178,13 @@ export async function releaseBlockAction(formData: FormData) {
   redirect(`/tasks/${formData.get('taskId')}`);
 }
 
-export async function answerGitCommitInputAction(formData: FormData) {
-  const taskId = String(formData.get('taskId'));
-  await answerGitCommitInput({
-    taskId,
-    requestId: formData.get('requestId'),
-    commitMessage: formData.get('commitMessage'),
-    rememberTemplate: formData.get('rememberTemplate') === 'on',
-    messageTemplate: formData.get('messageTemplate') || '',
-  });
-  redirect(`/tasks/${taskId}`);
-}
-
 export async function submitClarificationAnswersAction(formData: FormData) {
   await submitClarificationAnswers(String(formData.get('taskId')));
+  redirect(`/tasks/${formData.get('taskId')}`);
+}
+
+export async function submitRuntimeInputsAction(formData: FormData) {
+  await submitRuntimeInputs(String(formData.get('taskId')));
   redirect(`/tasks/${formData.get('taskId')}`);
 }
 
