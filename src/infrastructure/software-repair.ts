@@ -141,7 +141,7 @@ function statusPaths(worktree: string) {
   });
 }
 
-const protectedPath = /^(?:\.git(?:\/|$)|\.env(?:\.|$)|data\/|node_modules\/|migrations\/|app-migrations\/|package(?:-lock)?\.json$|(?:pnpm-lock\.yaml|yarn\.lock)$|tsconfig\.json$|next\.config\.[^/]+$|scripts\/loop\/maintenance-runner\.ts$|src\/application\/(?:software-maintenance|runtime-events)\.ts$|src\/infrastructure\/(?:software-repair|maintenance-runner)\.ts$)/i;
+const protectedPath = /^(?:\.git(?:\/|$)|\.env(?:\.|$)|data\/|node_modules\/|migrations\/|app-migrations\/|package(?:-lock)?\.json$|(?:pnpm-lock\.yaml|yarn\.lock)$|tsconfig\.json$|next\.config\.[^/]+$|scripts\/loop\/(?:maintenance-runner\.ts|submit-agent-result\.mjs)$|src\/application\/(?:software-maintenance|runtime-events)\.ts$|src\/infrastructure\/(?:agent-result-channel|software-repair|maintenance-runner)\.ts$)/i;
 const sensitivePath = /(^|\/)(?:credentials?|secrets?)(?:\.[^/]*)?$/i;
 
 function untrackedLineCount(worktree: string, files: string[]) {

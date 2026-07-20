@@ -218,7 +218,7 @@ classDiagram
 | Prompt / Memory 版本与自动演化 | Agent Configuration；Harness 约束提升与回滚 |
 | Loop Engineering 自身缺陷诊断 | Software Maintenance Agent 提议；Git/Harness 决定候选与落地 |
 
-Agent 最终只返回结构化结果，不调用流程命令、不写运行日志、不直接操作 SQLite，也不自行推进状态。
+Agent 通过 Runner 为当前 execution 注入的 `submit-agent-result --input <result.json>` 命令提交结构化 Result Receipt，不调用流程命令、不写运行日志、不直接操作 SQLite，也不自行推进状态。普通最终回复不再承担控制面协议；未调用结果命令时，Runner 仅为旧执行器兼容而尝试解析最终文本 JSON。
 
 ## 6. SQLite 持久化映射
 

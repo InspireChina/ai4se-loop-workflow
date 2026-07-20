@@ -126,6 +126,7 @@ async function processJob(job: SoftwareMaintenanceJob) {
     }),
     maxRuntimeMs: Number(process.env.SOFTWARE_MAINTENANCE_TIMEOUT_MS || 20 * 60_000),
     idleTimeoutMs: Number(process.env.SOFTWARE_MAINTENANCE_IDLE_TIMEOUT_MS || 5 * 60_000),
+    resultKind: 'maintenance',
   });
   if (execution.exitCode !== 0) throw new Error(`Maintenance Agent CLI 退出码 ${execution.exitCode}`);
   if (!mainRepositorySnapshotMatches(mainSnapshot)) {
@@ -135,7 +136,8 @@ async function processJob(job: SoftwareMaintenanceJob) {
     await maintenanceLog(job, '应用主仓库快照在 Maintenance Agent 执行期间发生变化，候选已拒绝', 'ERROR');
     return;
   }
-  const result = parseSoftwareMaintenanceResult(execution.finalText);
+  const result = parseSoftwareMaintenanceResult(execution.submittedResult || execution.finalText);
+  if (!execution.submittedResult) await maintenanceLog(job, 'Maintenance Agent 未调用 submit-agent-result，已兼容读取最终文本', 'WARN');
   await updateSoftwareMaintenanceJob(job.job_id, {
     incidentFingerprint: result.fingerprint,
     summary: result.summary,

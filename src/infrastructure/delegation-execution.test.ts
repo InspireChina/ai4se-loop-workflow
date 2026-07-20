@@ -119,6 +119,24 @@ test('uses and cleans a prompt file during file-reference execution', async () =
   assert.equal(existsSync(referencedFile), false);
 });
 
+test('captures a CLI-submitted result independently from the Agent final message and cleans the channel', async () => {
+  const program = [
+    'const fs = require("node:fs");',
+    'const resultPath = process.env.LOOP_AGENT_RESULT_PATH;',
+    'const protocol = process.env.LOOP_AGENT_RESULT_PROTOCOL;',
+    'const kind = process.env.LOOP_AGENT_RESULT_KIND;',
+    'fs.writeFileSync(resultPath, JSON.stringify({protocol,kind,result:{outcome:"completed",summary:"tool receipt"}}));',
+    'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:resultPath}}));',
+  ].join('');
+
+  const { result } = await run(fixtureExecutor('codex', program), recordedTelemetry().telemetry, { resultKind: 'flow' });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.submittedResult, JSON.stringify({ outcome: 'completed', summary: 'tool receipt' }));
+  assert.equal(result.resultSubmissionError, null);
+  assert.equal(existsSync(result.finalText), false);
+});
+
 test('records one safe delegation trace and normalized Cursor, Codex, and Claude events while preserving local logs', async () => {
   const fixtures: Array<[AgentExecutor['id'], string]> = [
     ['cursor', 'console.log(JSON.stringify({type:"tool_call",subtype:"started",call_id:"c1",tool_call:{ShellToolCall:{args:{command:"echo cursor"}}}})); console.log(JSON.stringify({type:"tool_call",subtype:"completed",call_id:"c1",tool_call:{ShellToolCall:{result:{success:{exitCode:0,stdout:"ok"}}}}})); console.log(JSON.stringify({type:"assistant",message:{content:[{type:"text",text:"done"}]}})); console.log(JSON.stringify({type:"result",result:"earlier done"}));'],

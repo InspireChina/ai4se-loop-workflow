@@ -21,8 +21,10 @@ test('protects the self-repair engine, migrations, runtime data, and secrets fro
     'tsconfig.json',
     'next.config.ts',
     'scripts/loop/maintenance-runner.ts',
+    'scripts/loop/submit-agent-result.mjs',
     'src/application/software-maintenance.ts',
     'src/application/runtime-events.ts',
+    'src/infrastructure/agent-result-channel.ts',
     'src/infrastructure/software-repair.ts',
     'config/secrets.json',
   ]) assert.equal(softwareRepairInternals.isProtectedPath(path), true, path);

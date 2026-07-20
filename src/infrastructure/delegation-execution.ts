@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import crossSpawn from 'cross-spawn';
 import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, parseAgentTelemetryStderr, parseAgentTelemetryStdoutEvents, type AgentEnvironment, type AgentExecutionContext, type AgentExecutionOptions, type AgentExecutor, type AgentTelemetryEvent } from './agent-executor';
+import { agentResultChannelEnv, createAgentResultChannel, readAgentResultChannel, removeAgentResultChannel, type AgentResultChannel, type AgentResultKind } from './agent-result-channel';
 import type { LangfuseTelemetry } from './langfuse';
 
 export type DelegationExecutionInput = {
@@ -18,10 +19,16 @@ export type DelegationExecutionInput = {
   appendLog: (message: string) => Promise<unknown>;
   maxRuntimeMs: number;
   idleTimeoutMs: number;
+  resultKind?: AgentResultKind;
   spawn?: typeof crossSpawn;
 };
 
-export type DelegationExecutionResult = { exitCode: number; finalText: string };
+export type DelegationExecutionResult = {
+  exitCode: number;
+  finalText: string;
+  submittedResult?: string | null;
+  resultSubmissionError?: string | null;
+};
 
 type TemporaryPrompt = { directory: string; file: string; reference: string };
 
@@ -80,7 +87,10 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   let terminalExitCode: number | null | undefined;
   let executionFailed = false;
   let finalText = '';
+  let submittedResult: string | null = null;
+  let resultSubmissionError: string | null = null;
   let temporaryPrompt: TemporaryPrompt | null = null;
+  let resultChannel: AgentResultChannel | null = null;
   const finalTextAccumulator = createAgentFinalTextAccumulator(executor.id);
   const metricsAccumulator = createAgentRunMetricsAccumulator(executor.id);
 
@@ -96,8 +106,12 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
 
   try {
     temporaryPrompt = executor.promptMode === 'file-reference' ? createTemporaryPrompt(prompt) : null;
+    resultChannel = input.resultKind ? createAgentResultChannel(input.resultKind) : null;
     const invocationPrompt = temporaryPrompt?.reference ?? prompt;
-    const launch = buildAgentProcessLaunch(executor, invocationPrompt, workspaceRoot, executionOptions);
+    const launch = buildAgentProcessLaunch(executor, invocationPrompt, workspaceRoot, executionOptions, {
+      ...process.env,
+      ...(resultChannel ? agentResultChannelEnv(resultChannel) : {}),
+    });
     await appendLog(`[Agent] 开始 agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - ${description}`);
     await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - 启动 ${executor.label} CLI：${executor.formatCommand(workspaceRoot, executionOptions)}`);
     const child: ChildProcess = spawn(launch.command, launch.args, {
@@ -170,19 +184,33 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     await logQueue;
     await telemetryQueue;
     finalText = finalTextAccumulator.value();
+    if (resultChannel) {
+      try {
+        submittedResult = readAgentResultChannel(resultChannel);
+        if (submittedResult) await appendLog('[结果通道] Agent 已通过 submit-agent-result 提交结构化结果');
+      } catch (error) {
+        resultSubmissionError = error instanceof Error ? error.message : String(error);
+        await appendLog(`[结果通道] 提交内容无效，将尝试兼容最终文本：${resultSubmissionError}`);
+      }
+    }
     await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - ${executor.label} CLI 已退出 code=${terminalExitCode ?? 'signal'}`);
     if (terminalExitCode && terminalExitCode !== 0) await appendLog(`[错误] ${context.agent} 执行失败 code=${terminalExitCode}`);
     else await appendLog(`[Agent] 完成 agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - 处理完成`);
     traceStatus = timedOut ? 'timed_out' : executionFailed ? 'execution_error' : terminalExitCode === 0 ? 'completed' : terminalExitCode === null ? 'cancelled' : 'failed';
-    return { exitCode: terminalExitCode ?? 1, finalText };
+    return {
+      exitCode: terminalExitCode ?? 1,
+      finalText,
+      ...(input.resultKind ? { submittedResult, resultSubmissionError } : {}),
+    };
   } finally {
     try {
       await telemetryQueue;
       finalText = finalText || finalTextAccumulator.value();
-      await trace.end({ status: traceStatus, output: finalText, exitCode: terminalExitCode ?? null, timedOut, metrics: metricsAccumulator.value() });
+      await trace.end({ status: traceStatus, output: submittedResult || finalText, exitCode: terminalExitCode ?? null, timedOut, metrics: metricsAccumulator.value() });
       await telemetry.flush();
     } finally {
       removeTemporaryPrompt(temporaryPrompt);
+      removeAgentResultChannel(resultChannel);
     }
   }
 }

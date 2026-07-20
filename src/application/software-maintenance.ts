@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { revalidatePath } from 'next/cache';
 import { databaseConnection, paths } from '../infrastructure/database';
 import { gitHead } from '../infrastructure/git';
@@ -216,7 +217,8 @@ export function buildSoftwareMaintenancePrompt(job: SoftwareMaintenanceJob, even
     '若确认是 Loop 自身 bug，只修复一个最小、可复现的软件维护单元。先读取相关代码和测试；不要顺带重构。',
     '禁止修改 .env、data、node_modules、.git、migrations、app-migrations，以及 software-maintenance/runtime-events/self-repair runner 自身。',
     '不要 git add、commit、cherry-pick、worktree、reset 或 checkout。Harness 会独立检查、测试、提交和应用。',
-    '可以运行针对性只读诊断和测试。最终回复必须只包含合法 JSON。',
+    '可以运行针对性只读诊断和测试。完成后把结果写入临时 JSON 文件并调用专用结果命令；普通最终回复只需说明已提交，只有命令不可用时才用最终文本 JSON fallback。',
+    `提交命令：node ${JSON.stringify(join(paths.appRoot, 'scripts', 'loop', 'submit-agent-result.mjs'))} --input <temporary-result-json-path> --consume`,
     '',
     `Maintenance Job: ${job.job_id}`,
     `Trigger: ${job.trigger_kind}`,
@@ -226,7 +228,7 @@ export function buildSoftwareMaintenancePrompt(job: SoftwareMaintenanceJob, even
     '结构化运行证据：',
     JSON.stringify(evidence, null, 2),
     '',
-    '返回结构：',
+    '结果结构：',
     JSON.stringify({
       outcome: 'no_issue | fixed | not_repairable',
       fingerprint: 'stable-kebab-case-incident-key',

@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
+import { join } from 'node:path';
 import { getAgentExecutorSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
 import { enqueueSoftwareMaintenance } from '../../src/application/software-maintenance';
 import { clearRuntimeEventContext, recordRuntimeEvent, recordRuntimeException, setRuntimeEventContext } from '../../src/application/runtime-events';
@@ -153,8 +154,11 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     '完整需求上下文：',
     JSON.stringify(taskContext, null, 2),
     '',
-    '# Output Contract',
-    '最终回复必须只包含一个合法 JSON 对象，不要使用 Markdown fence，不要添加解释。通用结构如下；不属于当前角色的字段可以省略：',
+    '# Result Submission Contract',
+    '完成当前步骤后，把结果写入一个临时 JSON 文件，再调用下面的专用命令提交。Runner 只把提交内容作为状态机输入；你的普通最终回复可以简短说明已经提交，不需要重复 JSON。',
+    `提交命令：node ${JSON.stringify(join(paths.appRoot, 'scripts', 'loop', 'submit-agent-result.mjs'))} --input <temporary-result-json-path> --consume`,
+    '只把 --consume 用于你为本次提交创建的临时 JSON；提交成功后命令会删除该文件。不要直接写 LOOP_AGENT_RESULT_PATH，也不要通过数据库或 loopctl 提交结果。若执行环境确实无法调用提交命令，才在最终回复中输出同一 JSON 对象作为兼容 fallback。',
+    '结果 JSON 结构如下；不属于当前角色的字段可以省略：',
     JSON.stringify({
       outcome: 'completed | needs_input | failed',
       summary: '本步骤简要结论',
@@ -244,6 +248,7 @@ async function runDelegation(delegation: DelegationEnvelope, prompt: string, exe
     },
     maxRuntimeMs,
     idleTimeoutMs,
+    resultKind: 'flow',
   });
   return { ...execution, diagnostics };
 }
@@ -313,9 +318,11 @@ async function runEvolutionEvaluator(
       appendLog: (message) => appendLoopRunLog(runId, message),
       maxRuntimeMs: Number(process.env.EVOLUTION_EVALUATOR_TIMEOUT_MS || 5 * 60 * 1000),
       idleTimeoutMs: Number(process.env.EVOLUTION_EVALUATOR_IDLE_TIMEOUT_MS || 2 * 60 * 1000),
+      resultKind: 'evolution',
     });
     if (execution.exitCode !== 0) throw new Error(`Evaluator CLI 退出码 ${execution.exitCode}`);
-    const result = parseEvolutionResult(execution.finalText);
+    const result = parseEvolutionResult(execution.submittedResult || execution.finalText);
+    if (!execution.submittedResult) await appendLoopRunLog(runId, '[结果通道] Evolution Evaluator 未调用 submit-agent-result，已兼容读取最终文本');
     await applyEvolutionResult(evolution.evolutionId, evidence, result);
     await appendLoopRunLog(runId, `[演化] ${agentLabel(evidence.agentId)} 产生 ${result.observations.length} 条结构化观察`);
   } catch (error) {
@@ -451,9 +458,12 @@ async function main() {
 
   let result;
   try {
-    result = parseAgentResult(execution.finalText);
+    const resultText = execution.submittedResult || execution.finalText;
+    result = parseAgentResult(resultText);
+    if (!execution.submittedResult) await appendLoopRunLog(runId, '[结果通道] Agent 未调用 submit-agent-result，已兼容读取最终文本');
   } catch (error) {
-    const reason = `Agent 未返回合法结构化结果：${error instanceof Error ? error.message : String(error)}`;
+    const channelReason = execution.resultSubmissionError ? `；结果通道错误：${execution.resultSubmissionError}` : '';
+    const reason = `Agent 未通过结果命令或最终文本返回合法结构化结果：${error instanceof Error ? error.message : String(error)}${channelReason}`;
     await handleExecutionFailure(durable.attempt, delegation, reason, true);
     await scheduleNextLoop();
     return;

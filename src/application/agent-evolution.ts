@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isFlowAgentId, type FlowAgentId } from '../domain/agent-profile';
 import { evolutionObservationSchema, evolutionResultSchema, type EvolutionResult } from '../domain/agent-evolution';
-import { databaseConnection, hash } from '../infrastructure/database';
+import { databaseConnection, hash, paths } from '../infrastructure/database';
 import {
   agentProfileInternals,
   agentRuntimeRoot,
@@ -61,7 +61,9 @@ export function buildEvolutionPrompt(evidence: EvolutionEvidence) {
     '执行证据：',
     JSON.stringify(evidence, null, 2),
     '',
-    '只返回合法 JSON：',
+    '完成分析后，把下面结构写入临时 JSON 文件，并调用专用结果命令提交。普通最终回复只需简短说明已提交；只有命令不可用时才用最终文本 JSON fallback。',
+    `提交命令：node ${JSON.stringify(join(paths.appRoot, 'scripts', 'loop', 'submit-agent-result.mjs'))} --input <temporary-result-json-path> --consume`,
+    '结果结构：',
     JSON.stringify({
       summary: '本轮是否产生可复用经验',
       observations: [{
