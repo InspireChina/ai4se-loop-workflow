@@ -153,7 +153,6 @@ async function processJob(job: SoftwareMaintenanceJob) {
       });
       return;
     }
-    removeRepairWorktree(job.job_id, true);
     await updateSoftwareMaintenanceJob(job.job_id, { status: 'no_issue', changedFilesJson: '[]', finished: true });
     await maintenanceLog(job, `检查完成，无自动修复：${result.summary}`);
     return;
@@ -207,8 +206,14 @@ async function processJob(job: SoftwareMaintenanceJob) {
     error: application.applied ? null : application.reason,
     finished: application.applied,
   });
-  removeRepairWorktree(job.job_id, application.applied);
   await maintenanceLog(job, application.applied ? `修复已自动落地：${commit}` : `修复已验证并等待安全窗口：${application.reason}`, application.applied ? 'INFO' : 'WARN');
+}
+
+async function finalizeJobWorkspace(job: SoftwareMaintenanceJob) {
+  const db = await databaseConnection();
+  const current = db.prepare('SELECT status FROM software_maintenance_jobs WHERE job_id = ?').get(job.job_id) as { status: SoftwareMaintenanceJob['status'] } | undefined;
+  const cleanup = removeRepairWorktree(job.job_id, current?.status !== 'verified');
+  if (!cleanup.ok) await maintenanceLog(job, `维护 worktree 收尾未完成：${cleanup.errors.join('；')}`, 'WARN');
 }
 
 async function main() {
@@ -223,6 +228,9 @@ async function main() {
       await updateSoftwareMaintenanceJob(job.job_id, {
         status: 'failed', error: error instanceof Error ? error.message : String(error), finished: true,
       });
+    } finally {
+      try { await finalizeJobWorkspace(job); }
+      catch (error) { await maintenanceLog(job, `维护 worktree 收尾检查失败：${error instanceof Error ? error.message : String(error)}`, 'WARN'); }
     }
   }
 }

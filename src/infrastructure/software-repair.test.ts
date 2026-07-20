@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -63,4 +63,35 @@ test('uses a short deterministic maintenance worktree path on Windows', () => {
 test('keeps descriptive maintenance worktree paths on non-Windows systems', () => {
   const path = softwareRepairInternals.repairWorktreePathFor('darwin', '/tmp', '8a8d0af77c1b', 'job-123');
   assert.equal(path, '/tmp/loopwork-software-maintenance/8a8d0af77c1b/job-123');
+});
+
+test('creates and removes one maintenance worktree without globally pruning unrelated metadata', (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), 'loopwork-repair-repo-'));
+  const root = mkdtempSync(join(tmpdir(), 'loopwork-repair-worktrees-'));
+  const worktree = join(root, 'current-job');
+  t.after(() => {
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  });
+  git(cwd, 'init');
+  git(cwd, 'config', 'user.email', 'loopwork@example.invalid');
+  git(cwd, 'config', 'user.name', 'LoopWork Test');
+  git(cwd, 'config', 'commit.gpgsign', 'false');
+  writeFileSync(join(cwd, 'README.md'), 'maintenance fixture\n');
+  git(cwd, 'add', '.');
+  git(cwd, 'commit', '-m', 'initial');
+  const unrelated = join(cwd, '.git', 'worktrees', 'unrelated-stale-entry');
+  mkdirSync(join(cwd, '.git', 'worktrees'), { recursive: true });
+  writeFileSync(unrelated, 'not a worktree directory');
+
+  softwareRepairInternals.createRepairWorktreeAt(cwd, root, worktree, 'loop-maintenance/current-job', 'HEAD', 'darwin');
+
+  assert.equal(existsSync(worktree), true);
+  assert.equal(existsSync(unrelated), true);
+  assert.match(git(cwd, 'worktree', 'list', '--porcelain'), /branch refs\/heads\/loop-maintenance\/current-job/);
+
+  const cleanup = softwareRepairInternals.removeWorktreePath(cwd, worktree, 'darwin');
+  assert.deepEqual(cleanup, { ok: true, errors: [] });
+  assert.equal(existsSync(worktree), false);
+  assert.equal(existsSync(unrelated), true);
 });

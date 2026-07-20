@@ -39,6 +39,74 @@ function worktreeRoot() {
   return worktreeRootFor(process.platform, tmpdir(), paths.repoHash);
 }
 
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function retryWindowsFilesystemOperation<T>(operation: () => T, platform = process.platform) {
+  const delays = platform === 'win32' ? [0, 100, 250, 500] : [0];
+  let lastError: unknown;
+  for (const delay of delays) {
+    if (delay) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+    try { return operation(); } catch (error) { lastError = error; }
+  }
+  throw lastError;
+}
+
+function worktreeMetadataPath(repoRoot: string, worktree: string, platform = process.platform) {
+  const commonDirectory = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], repoRoot);
+  const path = platform === 'win32' ? win32 : posix;
+  return join(commonDirectory, 'worktrees', path.basename(worktree));
+}
+
+function removeWorktreePath(repoRoot: string, worktree: string, platform = process.platform) {
+  const errors: string[] = [];
+  if (existsSync(worktree)) {
+    try {
+      retryWindowsFilesystemOperation(() => git(['worktree', 'remove', '--force', worktree], repoRoot, 120_000), platform);
+    } catch (gitError) {
+      try {
+        retryWindowsFilesystemOperation(() => rmSync(worktree, { recursive: true, force: true }), platform);
+      } catch (filesystemError) {
+        errors.push(`无法删除维护工作目录：${errorMessage(filesystemError)}；Git 原始错误：${errorMessage(gitError)}`);
+      }
+    }
+  }
+
+  // If Git removal failed after deleting files, remove only this job's deterministic
+  // administrative directory. A global `worktree prune` lets one inaccessible stale
+  // entry block every later maintenance job on Windows.
+  let metadata = '';
+  try { metadata = worktreeMetadataPath(repoRoot, worktree, platform); }
+  catch (error) { errors.push(`无法定位维护 worktree 元数据：${errorMessage(error)}`); }
+  if (metadata) {
+    try {
+      retryWindowsFilesystemOperation(() => rmSync(metadata, { recursive: true, force: true }), platform);
+    } catch (error) {
+      errors.push(`无法删除维护 worktree 元数据 ${metadata}：${errorMessage(error)}`);
+    }
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+function createRepairWorktreeAt(repoRoot: string, root: string, worktree: string, branch: string, baseCommit: string, platform = process.platform) {
+  mkdirSync(root, { recursive: true, mode: 0o700 });
+  const cleanup = removeWorktreePath(repoRoot, worktree, platform);
+  if (!cleanup.ok || existsSync(worktree)) {
+    throw new Error(`无法清理当前维护 worktree：${cleanup.errors.join('；') || worktree}`);
+  }
+  try { git(['branch', '-D', branch], repoRoot); }
+  catch (error) {
+    if (gitBranchExists(repoRoot, branch)) throw new Error(`无法清理当前维护分支 ${branch}：${errorMessage(error)}`);
+  }
+  git(['worktree', 'add', '-b', branch, worktree, baseCommit], repoRoot, 120_000);
+}
+
+function gitBranchExists(repoRoot: string, branch: string) {
+  try { git(['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], repoRoot); return true; }
+  catch { return false; }
+}
+
 export function repairWorktreePath(jobId: string) {
   return repairWorktreePathFor(process.platform, tmpdir(), paths.repoHash, jobId);
 }
@@ -60,18 +128,7 @@ export function createRepairWorktree(jobId: string, baseCommit: string) {
   const root = worktreeRoot();
   const worktree = repairWorktreePath(jobId);
   const branch = repairBranchName(jobId);
-  mkdirSync(root, { recursive: true, mode: 0o700 });
-  if (existsSync(worktree)) {
-    try {
-      if (gitHead(worktree) === baseCommit) {
-        return { worktree, branch };
-      }
-    } catch { /* stale path is removed below */ }
-    rmSync(worktree, { recursive: true, force: true });
-  }
-  try { git(['branch', '-D', branch]); } catch { /* first attempt */ }
-  git(['worktree', 'prune']);
-  git(['worktree', 'add', '-b', branch, worktree, baseCommit], paths.appRoot, 120_000);
+  createRepairWorktreeAt(paths.appRoot, root, worktree, branch, baseCommit);
   return { worktree, branch };
 }
 
@@ -204,13 +261,17 @@ export function applyRepairCandidate(commit: string) {
 
 export function removeRepairWorktree(jobId: string, deleteBranch = false) {
   const worktree = repairWorktreePath(jobId);
-  if (existsSync(worktree)) {
-    try { git(['worktree', 'remove', '--force', worktree], paths.appRoot, 120_000); }
-    catch { rmSync(worktree, { recursive: true, force: true }); }
-  }
+  const cleanup = removeWorktreePath(paths.appRoot, worktree);
   if (deleteBranch) {
-    try { git(['branch', '-D', repairBranchName(jobId)], paths.appRoot); } catch { /* already gone */ }
+    try { git(['branch', '-D', repairBranchName(jobId)], paths.appRoot); }
+    catch (error) {
+      if (gitBranchExists(paths.appRoot, repairBranchName(jobId))) {
+        cleanup.errors.push(`无法删除维护分支 ${repairBranchName(jobId)}：${errorMessage(error)}`);
+        cleanup.ok = false;
+      }
+    }
   }
+  return cleanup;
 }
 
 export function relativeToApp(path: string) {
@@ -221,4 +282,6 @@ export const softwareRepairInternals = {
   isProtectedPath: (path: string) => protectedPath.test(path) || sensitivePath.test(path),
   worktreeRootFor,
   repairWorktreePathFor,
+  createRepairWorktreeAt,
+  removeWorktreePath,
 };
