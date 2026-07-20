@@ -178,7 +178,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
         dependencies: [],
         changeBudget: { capabilities: ['允许改变的能力'], paths: ['允许影响的路径'] },
       } : undefined,
-      verdict: delegation.agent === 'review-agent' ? 'report_ready' : 'passed | failed',
+      verdict: delegation.agent === 'review-agent' ? 'report_ready | changes_requested' : 'passed | failed',
       rewindTo: 'plan | analysis | dev | test',
       rewindDeliveryUnit: delegation.storyIndex,
       changedFiles: ['文件路径'],

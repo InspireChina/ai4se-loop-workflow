@@ -14,6 +14,7 @@ import {
   initializeContextAction,
   releaseBlockAction,
   submitClarificationAnswersAction,
+  submitClosureFeedbackAction,
   submitRuntimeInputsAction,
   rewindTaskAction,
   transitionTaskAction,
@@ -57,6 +58,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const unansweredRuntimeInputs = runtimeInputs.filter((input) => input.status === 'pending');
   const waitingForRuntimeInput = task.run_state === 'waiting_for_runtime_input';
   const reviewDocument = task.review_document_id ? documents.find((document) => document.document_id === task.review_document_id) : null;
+  const openReviewComments = documentComments.filter((comment) => comment.agent_id === 'review-agent' && comment.status === 'open');
   const deliveryDocuments = documents.filter((document) => document.document_id !== reviewDocument?.document_id);
   const progressStatus = task.agile_status === 'blocked' ? task.resume_status || 'backlog' : task.agile_status;
   const currentStep = taskSteps.findIndex((step) => step.statuses.some((status) => status === progressStatus));
@@ -288,9 +290,15 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               format={reviewDocument.format}
               revision={reviewDocument.revision}
               comments={documentComments.filter((comment) => comment.document_id === reviewDocument.document_id)}
+              allowManualResolve={false}
             /></div> : <div className="empty">结卡报告不可用，请重新运行 Review Agent。</div>}
           </div>
-          {task.agile_status === 'ready_to_close' && reviewDocument && <form action={acknowledgeClosureAction} className="release-block">
+          {task.agile_status === 'ready_to_close' && reviewDocument && openReviewComments.length > 0 && <form action={submitClosureFeedbackAction} className="release-block">
+            <input type="hidden" name="taskId" value={task.task_id}/>
+            <p className="muted">当前报告有 {openReviewComments.length} 条待处理评论。提交后 Review Agent 会判断直接修订报告，或回退到需要补做的阶段；后续仍会生成新报告供你再次评论或确认。</p>
+            <button className="button" type="submit">提交评论并继续处理</button>
+          </form>}
+          {task.agile_status === 'ready_to_close' && reviewDocument && openReviewComments.length === 0 && <form action={acknowledgeClosureAction} className="release-block">
             <input type="hidden" name="taskId" value={task.task_id}/>
             <input type="hidden" name="reviewRevision" value={task.review_revision}/>
             <button className="button success">我已阅读结卡报告并关闭需求</button>

@@ -309,6 +309,210 @@ test('acknowledges the current review report as read without an approval decisio
   await assert.rejects(() => acknowledgeClosure({ taskId, reviewRevision: 1 }), /没有等待阅读/);
 });
 
+test('requires Review to consume closure comments and asks the user to confirm the revised report', async () => {
+  const { applyAgentResult } = await import('./agent-results');
+  const { parseAgentResult } = await import('../domain/agent-result');
+  const {
+    acknowledgeClosure,
+    addDocumentComment,
+    getTask,
+    pipelineForTask,
+    resolveDocumentComment,
+    submitClosureFeedback,
+  } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = 'TASK-closure-feedback-loop';
+  const documentId = 'DOC-closure-feedback-v1';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index,
+      run_state, closure_status, review_revision, review_document_id, work_dir
+    ) VALUES(?, 'Closure feedback loop', 'feature', 'ready_to_close', NULL, 1, 1, 1, 1, 1, 'idle', 'awaiting_read', 1, ?, '')
+  `).run(taskId, documentId);
+  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Compatibility behavior', 'story-001')").run(taskId);
+  db.prepare(`
+    INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json)
+    VALUES('SPEC-closure-feedback', ?, 1, 1, 'resolved', '{}')
+  `).run(taskId);
+  db.prepare(`
+    INSERT INTO documents(document_id, task_id, kind, title, content, source_agent)
+    VALUES(?, ?, 'review_v1', '结卡报告 v1', '遗漏了一个重要限制。', 'review-agent')
+  `).run(documentId, taskId);
+  const commentId = await addDocumentComment({
+    taskId,
+    documentId,
+    anchorType: 'file',
+    content: '旧接口现在已经无法使用，这不是报告表述问题，请修复兼容性实现并重新验证。',
+  });
+
+  await assert.rejects(
+    () => acknowledgeClosure({ taskId, reviewRevision: 1 }),
+    /还有 1 条未处理评论/,
+  );
+  await assert.rejects(
+    () => resolveDocumentComment({ taskId, commentId }),
+    /必须提交给 Review Agent 处理/,
+  );
+  await submitClosureFeedback(taskId);
+  let detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'in review');
+  assert.equal(detail?.task.current_subagent, 'review-agent');
+  assert.equal(detail?.task.run_state, 'runnable');
+  assert.equal(detail?.task.review_revision, 1);
+  assert.equal(detail?.task.review_document_id, null);
+  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'review-agent');
+
+  const delegation = {
+    taskId,
+    pipeline: 'review',
+    agent: 'review-agent',
+    storyIndex: null,
+    resource: 'none' as const,
+    description: '根据用户评论更新结卡报告',
+    title: 'Closure feedback loop',
+    taskDescription: null,
+    itemType: 'feature',
+    priority: '',
+    link: '',
+    externalId: '',
+    externalStatus: '',
+    agileStatus: 'in review',
+    currentSubagent: 'review-agent',
+    resumePending: 0,
+    specResolvedIndex: 1,
+    runState: 'runnable',
+    closureStatus: 'none',
+    reviewRevision: 1,
+    reviewDocumentId: '',
+    lastActor: 'human',
+    analysisIndex: 1,
+    devIndex: 1,
+    testIndex: 1,
+    totalStories: 1,
+    nextStep: '根据评论更新报告',
+    blockedReason: '',
+    owner: '',
+    evidence: '',
+    risk: '',
+  };
+  await applyAgentResult('run-closure-feedback', delegation, parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: '用户评论揭示兼容性实现缺陷，需要回到开发阶段修复。',
+    artifact: {
+      title: '结卡评论处理与回流',
+      content: '评论指出旧接口不可用；现有实现证据确认需要回到开发阶段修复交付单元 1。',
+    },
+    verdict: 'changes_requested',
+    rewindTo: 'dev',
+    rewindDeliveryUnit: 1,
+  })));
+
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'in dev');
+  assert.equal(detail?.task.current_subagent, 'dev-agent');
+  assert.equal(detail?.task.dev_index, 0);
+  assert.equal(detail?.task.test_index, 0);
+  assert.equal(detail?.task.review_revision, 1);
+  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.status, 'open');
+
+  await applyAgentResult('run-closure-feedback-dev', {
+    ...delegation,
+    pipeline: 'dev',
+    agent: 'dev-agent',
+    storyIndex: 1,
+    description: '修复用户在结卡评论中指出的兼容性问题',
+    agileStatus: 'in dev',
+    currentSubagent: 'dev-agent',
+    devIndex: 0,
+    testIndex: 0,
+  }, parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: '已恢复旧接口兼容性。',
+    changedFiles: ['src/compatibility.ts'],
+    tests: [{ command: 'npm test', passed: true }],
+  })));
+  await applyAgentResult('run-closure-feedback-test', {
+    ...delegation,
+    pipeline: 'test',
+    agent: 'test-agent',
+    storyIndex: 1,
+    resource: 'browser',
+    description: '重新验证兼容性行为',
+    agileStatus: 'in dev',
+    currentSubagent: 'test-agent',
+    devIndex: 1,
+    testIndex: 0,
+  }, parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: '旧接口兼容性验证通过。',
+    verdict: 'passed',
+    tests: [{ command: 'npm test', passed: true }],
+  })));
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'in review');
+  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.status, 'open');
+
+  await applyAgentResult('run-closure-feedback-review-v2', {
+    ...delegation,
+    description: '在修复和重新验证后生成新版结卡报告',
+    agileStatus: 'in review',
+    lastActor: 'test-agent',
+  }, parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: '实现已修复并重新验证，生成新版结卡报告。',
+    artifact: {
+      title: '结卡报告 v2',
+      content: '## 兼容性\n\n旧接口兼容性已经恢复并通过重新验证。\n\n## 评论处理\n\n用户指出的实现问题已修复。',
+    },
+    verdict: 'report_ready',
+  })));
+
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'ready_to_close');
+  assert.equal(detail?.task.closure_status, 'awaiting_read');
+  assert.equal(detail?.task.review_revision, 2);
+  assert.notEqual(detail?.task.review_document_id, documentId);
+  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.status, 'resolved');
+  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.evolution_status, 'pending');
+  assert.equal(detail?.closureAcknowledgements.length, 0);
+
+  await acknowledgeClosure({ taskId, reviewRevision: 2 });
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'done');
+  assert.equal(detail?.closureAcknowledgements[0]?.review_revision, 2);
+});
+
+test('clears stale delivery units when Review feedback routes back to planning', async () => {
+  const { getTask, pipelineForTask, rewindTask } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = 'TASK-review-rewind-plan';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+    ) VALUES(?, 'Review replan', 'feature', 'in review', 'review-agent', 1, 1, 1, 1, 1, '')
+  `).run(taskId);
+  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Old boundary', 'story-001')").run(taskId);
+  db.prepare(`
+    INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json)
+    VALUES('SPEC-review-replan', ?, 1, 1, 'resolved', '{}')
+  `).run(taskId);
+
+  await rewindTask({ taskId, actor: 'review-agent', to: 'plan', reason: '用户评论要求重新划分交付边界' });
+  const detail = await getTask(taskId);
+  assert.equal(detail?.task.total_stories, 0);
+  assert.equal(detail?.task.analysis_index, 0);
+  assert.equal(detail?.task.dev_index, 0);
+  assert.equal(detail?.task.test_index, 0);
+  assert.equal(detail?.stories.length, 0);
+  assert.equal(detail?.storySpecs.length, 0);
+  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'story-splitter-agent');
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id = ?").run(taskId);
+});
+
 test('versions Slice Specs, advances Dev without requiring a commit, and stores Harness evidence', async () => {
   const { addQuestion, answerQuestion, getTask, saveStorySpec, updateTask } = await import('./tasks');
   const { runHarnessVerification } = await import('./verifications');
@@ -572,7 +776,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 5);
+  assert.equal(original.profile.prompt_seed_revision, 6);
   assert.ok(original.currentPrompt.content.length > 800);
   assert.match(original.currentPrompt.content, /# 角色目标/);
   assert.match(original.currentPrompt.content, /# 完成条件/);
@@ -590,7 +794,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
   await ensureAgentRuntimeWorkspace();
   const upgradedSeed = await getAgentProfile('backlog-agent');
-  assert.equal(upgradedSeed.profile.prompt_seed_revision, 5);
+  assert.equal(upgradedSeed.profile.prompt_seed_revision, 6);
   assert.equal(upgradedSeed.currentPrompt.source, 'seed');
   assert.ok(upgradedSeed.currentPrompt.version > 1);
   assert.match(upgradedSeed.currentPrompt.content, /# 输入与证据优先级/);
@@ -613,7 +817,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const preservedHumanPrompt = await getAgentProfile('dev-agent');
   assert.equal(preservedHumanPrompt.currentPrompt.version, promptVersion);
   assert.equal(preservedHumanPrompt.currentPrompt.source, 'human');
-  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 5);
+  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 6);
 
   const localPrompt = `${promptContent}\n- 本地文件修改也必须形成版本。`;
   writeFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), localPrompt);

@@ -19,6 +19,7 @@ export function ArtifactDocument({
   format,
   revision,
   comments,
+  allowManualResolve = true,
 }: {
   taskId: string;
   documentId: string;
@@ -26,6 +27,7 @@ export function ArtifactDocument({
   format: string;
   revision: number;
   comments: DocumentComment[];
+  allowManualResolve?: boolean;
 }) {
   const previewRef = useRef<HTMLDivElement>(null);
   const [anchor, setAnchor] = useState<SelectionAnchor | null>(null);
@@ -83,7 +85,7 @@ export function ArtifactDocument({
           </div>
           {comment.quoted_text && <blockquote className="comment-anchor"><Quote size={13}/><span>{comment.quoted_text}</span></blockquote>}
           <p>{comment.content}</p>
-          {comment.status === 'open' && <form action={resolveDocumentCommentAction}>
+          {comment.status === 'open' && allowManualResolve && <form action={resolveDocumentCommentAction}>
             <input type="hidden" name="taskId" value={taskId}/>
             <input type="hidden" name="commentId" value={comment.comment_id}/>
             <button className="text-button" type="submit"><Check size={13}/>标记已解决</button>

@@ -397,12 +397,16 @@ export async function resolveDocumentComment(input: unknown) {
   const value = resolveDocumentCommentSchema.parse(input);
   const db = await databaseConnection();
   const comment = db.prepare(`
-    SELECT comment.comment_id, document.title
+    SELECT comment.comment_id, comment.document_id, comment.agent_id, document.title
     FROM document_comments comment
     JOIN documents document ON document.document_id = comment.document_id
     WHERE comment.comment_id = ? AND comment.task_id = ?
-  `).get(value.commentId, value.taskId) as { comment_id: string; title: string } | undefined;
+  `).get(value.commentId, value.taskId) as { comment_id: string; document_id: string; agent_id: string | null; title: string } | undefined;
   if (!comment) throw new Error('评论不存在');
+  const task = fetchTask(db, value.taskId);
+  if (task?.agile_status === 'ready_to_close' && comment.agent_id === 'review-agent') {
+    throw new Error('结卡报告的评论必须提交给 Review Agent 处理，不能直接标记为已解决');
+  }
   db.transaction(() => {
     db.prepare(`
       UPDATE document_comments
@@ -1027,6 +1031,11 @@ export async function acknowledgeClosure(input: unknown) {
   const task = fetchTask(db, value.taskId);
   if (!task || task.agile_status !== 'ready_to_close' || task.closure_status !== 'awaiting_read') throw new Error('需求当前没有等待阅读的结卡报告');
   if (task.review_revision !== value.reviewRevision || !task.review_document_id) throw new Error('结卡报告版本已变化，请阅读最新版本');
+  const openComments = (db.prepare(`
+    SELECT COUNT(*) AS count FROM document_comments
+    WHERE task_id = ? AND agent_id = 'review-agent' AND status = 'open'
+  `).get(value.taskId) as { count: number }).count;
+  if (openComments) throw new Error(`当前结卡报告还有 ${openComments} 条未处理评论，请先提交给 Review Agent 更新报告`);
   db.exec('BEGIN');
   try {
     db.prepare(`
@@ -1048,6 +1057,61 @@ export async function acknowledgeClosure(input: unknown) {
     throw error;
   }
   refreshPages('/', '/tasks', `/tasks/${value.taskId}`);
+}
+
+export async function submitClosureFeedback(taskId: string) {
+  const db = await databaseConnection();
+  const task = fetchTask(db, taskId);
+  if (!task || task.agile_status !== 'ready_to_close' || task.closure_status !== 'awaiting_read' || !task.review_document_id) {
+    throw new Error('需求当前没有可提交反馈的结卡报告');
+  }
+  const openComments = (db.prepare(`
+    SELECT COUNT(*) AS count FROM document_comments
+    WHERE task_id = ? AND agent_id = 'review-agent' AND status = 'open'
+  `).get(taskId) as { count: number }).count;
+  if (!openComments) throw new Error('当前结卡报告没有待处理评论');
+  const prospective: TaskState = {
+    ...task,
+    agile_status: 'in review',
+    current_subagent: 'review-agent',
+    run_state: 'runnable',
+    closure_status: 'none',
+    review_document_id: null,
+    closure_acknowledged_at: null,
+  };
+  assertState(prospective);
+  db.exec('BEGIN');
+  try {
+    db.prepare(`
+      UPDATE tasks
+      SET agile_status = 'in review', current_subagent = 'review-agent', run_state = 'runnable',
+          closure_status = 'none', review_document_id = NULL, closure_acknowledged_at = NULL,
+          resume_pending = 0, next_step = ?, last_actor = 'human', completed_at = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ?
+    `).run(`已提交 ${openComments} 条结卡评论，等待 Review Agent 判断修订报告或回退前序阶段`, taskId);
+    addEvent(db, taskId, 'human', 'ClosureFeedbackSubmitted', `提交 ${openComments} 条结卡评论，等待 Review Agent 处理。`);
+    db.exec('COMMIT');
+    await syncTaskFiles(db, taskId);
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+  refreshPages('/', '/tasks', `/tasks/${taskId}`);
+}
+
+export async function resolveReviewFeedback(taskId: string, currentReviewDocumentId: string) {
+  const db = await databaseConnection();
+  const result = db.prepare(`
+    UPDATE document_comments
+    SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE task_id = ? AND agent_id = 'review-agent' AND document_id != ? AND status = 'open'
+  `).run(taskId, currentReviewDocumentId);
+  if (result.changes) {
+    addEvent(db, taskId, 'review-agent', 'ClosureFeedbackResolved', `新版结卡报告已处理 ${result.changes} 条评论。`);
+    refreshPages(`/tasks/${taskId}`);
+  }
+  return result.changes;
 }
 
 const rewindSchema = z.object({
@@ -1111,6 +1175,14 @@ export async function rewindTask(input: unknown) {
   assertState(prospective);
   db.exec('BEGIN');
   try {
+    if (value.to === 'plan') {
+      db.prepare(`
+        UPDATE questions
+        SET status = 'superseded', updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ? AND status IN ('pending', 'answered', 'resolved')
+      `).run(value.taskId);
+      db.prepare('DELETE FROM stories WHERE task_id = ?').run(value.taskId);
+    }
     db.prepare(`
       UPDATE tasks
       SET agile_status = ?, current_subagent = ?, analysis_index = ?, dev_index = ?,

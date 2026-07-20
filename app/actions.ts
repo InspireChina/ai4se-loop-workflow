@@ -20,6 +20,7 @@ import {
   releaseBlock,
   resolveDocumentComment,
   submitClarificationAnswers,
+  submitClosureFeedback,
   submitRuntimeInputs,
   rewindTask,
   transitionTask,
@@ -193,6 +194,11 @@ export async function acknowledgeClosureAction(formData: FormData) {
     taskId: formData.get('taskId'),
     reviewRevision: formData.get('reviewRevision'),
   });
+  redirect(`/tasks/${formData.get('taskId')}`);
+}
+
+export async function submitClosureFeedbackAction(formData: FormData) {
+  await submitClosureFeedback(String(formData.get('taskId')));
   redirect(`/tasks/${formData.get('taskId')}`);
 }
 

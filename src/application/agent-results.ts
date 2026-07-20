@@ -10,6 +10,7 @@ import {
   getTask,
   rewindTask,
   resolveRuntimeInputs,
+  resolveReviewFeedback,
   saveStorySpec,
   updateTask,
   upsertDocument,
@@ -56,7 +57,9 @@ async function saveArtifact(delegation: DelegationEnvelope, result: AgentResult)
   if (delegation.agent === 'review-agent') {
     const detail = await getTask(delegation.taskId);
     if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
-    kind = `review_v${detail.task.review_revision + 1}`;
+    kind = result.verdict === 'changes_requested'
+      ? `review_feedback_v${detail.task.review_revision}`
+      : `review_v${detail.task.review_revision + 1}`;
   }
   return upsertDocument({
     taskId: delegation.taskId,
@@ -329,10 +332,24 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     }
     case 'review-agent': {
       requireArtifact(result, delegation.agent);
-      if (result.verdict !== 'report_ready') throw new Error('Review Agent 必须返回 verdict=report_ready');
       if (!artifactDocumentId) throw new Error('Review Agent 结卡报告未保存');
       const detail = await getTask(delegation.taskId);
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
+      if (result.verdict === 'changes_requested') {
+        const openFeedback = detail.documentComments.filter((comment) => comment.agent_id === 'review-agent' && comment.status === 'open');
+        if (!openFeedback.length) throw new Error('Review Agent 只能根据尚未处理的结卡评论发起流程回退');
+        if (!result.rewindTo) throw new Error('Review Agent 请求修改时必须提供 rewindTo');
+        if (result.rewindTo !== 'plan' && !result.rewindDeliveryUnit) throw new Error('Review Agent 回退单元阶段时必须提供 rewindDeliveryUnit');
+        await rewindTask({
+          taskId: delegation.taskId,
+          actor,
+          to: result.rewindTo,
+          story: result.rewindTo === 'plan' ? undefined : result.rewindDeliveryUnit,
+          reason: result.summary,
+        });
+        return 'rewound' as const;
+      }
+      if (result.verdict !== 'report_ready') throw new Error('Review Agent 必须返回 verdict=report_ready 或 changes_requested');
       const reviewRevision = detail.task.review_revision + 1;
       await updateTask(delegation.taskId, actor, {
         agile_status: 'ready_to_close',
@@ -343,6 +360,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         review_document_id: artifactDocumentId,
         next_step: `结卡报告 v${reviewRevision} 已生成，等待用户阅读并关闭需求`,
       });
+      await resolveReviewFeedback(delegation.taskId, artifactDocumentId);
       return 'advanced' as const;
     }
     default:

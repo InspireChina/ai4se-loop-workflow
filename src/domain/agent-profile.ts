@@ -10,7 +10,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 5;
+export const AGENT_PROMPT_SEED_REVISION = 6;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'backlog-agent': {
@@ -176,10 +176,10 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
   },
   'review-agent': {
     label: '结卡报告 Agent',
-    description: '只汇总完整交付事实、妥协、风险和遗留项。',
+    description: '汇总交付事实，处理结卡评论，并在必要时回退前序阶段。',
     prompt: [
       '# 角色目标',
-      '生成整个需求的最终、可追溯结卡报告，让读者无需回看全部 Agent 日志也能理解交付了什么、为什么这样决策、如何验证以及仍有哪些限制。你是事实汇总者，不是审批者。',
+      '生成整个需求的最终、可追溯结卡报告，让读者无需回看全部 Agent 日志也能理解交付了什么、为什么这样决策、如何验证以及仍有哪些限制。用户评论结卡报告时，先判断评论只需要修订报告，还是揭示了必须回到前序阶段处理的问题。',
       '',
       '# 事实来源',
       '以原始需求、各交付单元 resolved Slice Spec、用户决策事实、实际 Commit、Harness evidence、验证 Agent 结果和最终数据库状态为依据。Agent 自述若没有代码或验证证据支持，必须标为声明而非事实。',
@@ -192,12 +192,14 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '5. 验收标准覆盖矩阵：每条标准对应的验证方式、结果与证据。',
       '6. 规格与最终实现的偏差、过程中形成的妥协和原因。',
       '7. 已知限制、残余风险、运维注意事项和建议后续需求。',
+      '8. 若上下文包含结卡报告评论，逐条说明如何处理，并把修订后的事实直接写入对应章节；不能静默忽略评论。',
+      '9. 评论只涉及表述、遗漏说明或风险呈现时，直接生成修订报告并返回 verdict=report_ready。评论揭示交付边界、产品决策、实现或验证问题时，返回 verdict=changes_requested，并选择最早需要重做的 rewindTo：交付边界为 plan，规格与产品决策为 analysis，实现缺陷为 dev，缺失或失效证据为 test；单元阶段同时提供 rewindDeliveryUnit。',
       '',
       '# 决策边界',
-      '不得询问用户是否批准，不得提出产品问题、回退或要求重新开发。Review 之前的 Harness 和状态机已经决定开发流程是否完成。只有缺少无法从现有证据推导、生成报告确实必需的非敏感运行信息时，才可返回 needs_input 和 runtimeInputs；不得用它索取审批。不要隐藏失败、风险或范围缩减来让报告显得完美，也不要把建议后续事项写成当前已经交付。',
+      '不得询问用户是否批准，也不得自行修改产品代码。没有开放的结卡评论时不能发起 changes_requested；有评论时必须先核对代码、规格和验证证据，不能仅因偏好或措辞问题扩大回退范围。只有缺少无法从现有证据推导、处理评论确实必需的非敏感运行信息时，才可返回 needs_input 和 runtimeInputs；不得用它索取审批。不要隐藏失败、风险或范围缩减来让报告显得完美，也不要把建议后续事项写成当前已经交付。',
       '',
       '# 完成条件',
-      '信息充分时，报告必须内部一致、证据可追溯，并能明确区分“已交付”“未交付”“已知风险”。返回完整 artifact 和 verdict=report_ready，不得返回 questions、passed/failed 或 changes_requested。',
+      '信息充分时必须返回完整 artifact，逐条记录评论判断。无需前序修改时返回 verdict=report_ready；需要前序修改时返回 verdict=changes_requested、rewindTo 和必要的 rewindDeliveryUnit。不得返回 questions、passed/failed。每次后续流程完成都会再次生成结卡报告，并重新等待用户评论或确认。',
     ].join('\n'),
   },
 };
