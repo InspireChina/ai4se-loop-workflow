@@ -1117,6 +1117,248 @@ test('generates exception fingerprint', async () => {
   assert.doesNotMatch(se.exception_message, /super-secret-123/);
 });
 
+test('evidence-window: loads events by event_from_id..event_to_id window in ascending order', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { recordRuntimeEventInDb } = await import('./runtime-events');
+  const { loadMaintenanceEvidence } = await import('./software-maintenance');
+  const db = await databaseConnection();
+
+  const ids: number[] = [];
+  db.transaction(() => {
+    for (let i = 0; i < 10; i++) {
+      ids.push(recordRuntimeEventInDb(db, {
+        eventName: `test.window.${i}`, component: 'test', body: `window event ${i}`,
+      }));
+    }
+  })();
+
+  const events = await loadMaintenanceEvidence({
+    event_from_id: ids[2], event_to_id: ids[6],
+    trigger_run_id: null, trigger_execution_id: null,
+  } as Parameters<typeof loadMaintenanceEvidence>[0]);
+
+  assert.equal(events.length, 5);
+  assert.deepEqual(events.map((e) => e.event_id), ids.slice(2, 7));
+  for (let i = 1; i < events.length; i++) {
+    assert.ok(events[i].event_id > events[i - 1].event_id, 'events should be in ascending order');
+  }
+});
+
+test('self-referential: filters out component=software-maintenance events from evidence', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { clearRuntimeEventContext, recordRuntimeEventInDb, setRuntimeEventContext } = await import('./runtime-events');
+  const { loadMaintenanceEvidence } = await import('./software-maintenance');
+  const db = await databaseConnection();
+  const runId = 'self-ref-test-run';
+
+  setRuntimeEventContext({ runId });
+  try {
+    const normalIds: number[] = [];
+    db.transaction(() => {
+      for (let i = 0; i < 3; i++) {
+        normalIds.push(recordRuntimeEventInDb(db, {
+          eventName: `test.normal.${i}`, component: 'loop-runner', body: `normal event ${i}`,
+        }));
+      }
+      for (let i = 0; i < 2; i++) {
+        recordRuntimeEventInDb(db, {
+          eventName: 'loop.software_maintenance.check', component: 'software-maintenance', body: `maintenance event ${i}`,
+        });
+      }
+    })();
+
+    const events = await loadMaintenanceEvidence({
+      event_from_id: 0, event_to_id: Number.MAX_SAFE_INTEGER,
+      trigger_run_id: runId, trigger_execution_id: null,
+    } as Parameters<typeof loadMaintenanceEvidence>[0]);
+
+    assert.equal(events.length, 3);
+    assert.deepEqual(events.map((e) => e.event_id), normalIds);
+    for (const e of events) {
+      assert.notEqual(e.component, 'software-maintenance');
+    }
+  } finally {
+    clearRuntimeEventContext();
+  }
+});
+
+test('evidence-limit: truncates to 500 events when window exceeds limit', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { loadMaintenanceEvidence } = await import('./software-maintenance');
+  const db = await databaseConnection();
+
+  const insert = db.prepare(`
+    INSERT INTO runtime_events(timestamp, observed_at, event_name, component, severity_text, severity_number, body, attributes_json)
+    VALUES(datetime('now'), datetime('now'), 'test.limit', 'test', 'INFO', 9, ?, '{}')
+  `);
+  db.transaction(() => {
+    for (let i = 0; i < 600; i++) {
+      insert.run(`limit event ${i}`);
+    }
+  })();
+
+  const events = await loadMaintenanceEvidence({
+    event_from_id: 0, event_to_id: Number.MAX_SAFE_INTEGER,
+    trigger_run_id: null, trigger_execution_id: null,
+  } as Parameters<typeof loadMaintenanceEvidence>[0]);
+
+  assert.equal(events.length, 500);
+  for (let i = 1; i < events.length; i++) {
+    assert.ok(events[i].event_id > events[i - 1].event_id, 'events should be in ascending order');
+  }
+});
+
+test('fallback-evidence: falls back to run_id when window query returns empty', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { loadMaintenanceEvidence } = await import('./software-maintenance');
+  const db = await databaseConnection();
+  const runId = 'fallback-evidence-run';
+
+  const ids: number[] = [];
+  const insert = db.prepare(`
+    INSERT INTO runtime_events(timestamp, observed_at, run_id, event_name, component, severity_text, severity_number, body, attributes_json)
+    VALUES(datetime('now'), datetime('now'), ?, 'test.fallback', 'loop-runner', 'INFO', 9, ?, '{}')
+  `);
+  db.transaction(() => {
+    for (let i = 0; i < 50; i++) {
+      const info = insert.run(runId, `fallback event ${i}`);
+      ids.push(Number(info.lastInsertRowid));
+    }
+  })();
+
+  const events = await loadMaintenanceEvidence({
+    event_from_id: 999_999, event_to_id: 999_999,
+    trigger_run_id: runId, trigger_execution_id: null,
+  } as Parameters<typeof loadMaintenanceEvidence>[0]);
+
+  assert.equal(events.length, 50);
+  assert.deepEqual(events.map((e) => e.event_id), ids);
+  for (let i = 1; i < events.length; i++) {
+    assert.ok(events[i].event_id > events[i - 1].event_id, 'events should be in ascending order');
+  }
+});
+
+test('settings-gate: skips non-manual enqueue when software_maintenance_enabled is false', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { enqueueSoftwareMaintenance } = await import('./software-maintenance');
+  const db = await databaseConnection();
+
+  db.prepare(`UPDATE project_settings SET setting_value = 'false' WHERE setting_key = 'software_maintenance_enabled'`).run();
+  try {
+    const nonManual = await enqueueSoftwareMaintenance({ triggerKind: 'execution_finally' });
+    assert.equal(nonManual, null);
+    const manual = await enqueueSoftwareMaintenance({ triggerKind: 'manual' });
+    assert.ok(manual, 'manual trigger should bypass enabled check');
+    assert.match(manual!, /^[a-f0-9-]{36}$/);
+  } finally {
+    db.prepare(`UPDATE project_settings SET setting_value = 'true' WHERE setting_key = 'software_maintenance_enabled'`).run();
+  }
+});
+
+test('prompt-build: maps RuntimeEventRow fields to stable JSON evidence structure including exception', async () => {
+  const { buildSoftwareMaintenancePrompt } = await import('./software-maintenance');
+  const job = {
+    job_id: 'test-job-id',
+    trigger_kind: 'execution_finally',
+    severity_text: 'INFO',
+    base_commit: null,
+  } as Parameters<typeof buildSoftwareMaintenancePrompt>[0];
+
+  const event = {
+    event_id: 42,
+    timestamp: '2026-07-20T10:00:00.000Z',
+    run_id: 'test-run',
+    execution_id: 'test-exec',
+    task_id: 'test-task',
+    agent_id: 'dev-agent',
+    event_name: 'loop.exception.fatal',
+    component: 'loop-runner',
+    stage: 'verifying',
+    severity_text: 'FATAL',
+    body: 'something broke',
+    attributes_json: JSON.stringify({ key: 'value', nested: { a: 1 } }),
+    exception_type: 'TypeError',
+    exception_message: 'cannot read property X',
+    exception_stack: 'at foo (bar.ts:10:5)',
+    exception_fingerprint: 'abc123def456',
+  };
+
+  const prompt = buildSoftwareMaintenancePrompt(job, [event]);
+  assert.ok(prompt.includes('结构化运行证据'), 'prompt should contain evidence section');
+
+  const evidenceMatch = prompt.match(/结构化运行证据：\n(\[[\s\S]*?\])\n\n结果结构：/);
+  assert.ok(evidenceMatch, 'prompt should contain a JSON evidence array');
+  const evidence = JSON.parse(evidenceMatch![1]);
+
+  assert.equal(evidence.length, 1);
+  const e = evidence[0];
+  assert.equal(e.id, 42);
+  assert.equal(e.timestamp, '2026-07-20T10:00:00.000Z');
+  assert.equal(e.eventName, 'loop.exception.fatal');
+  assert.equal(e.component, 'loop-runner');
+  assert.equal(e.stage, 'verifying');
+  assert.equal(e.severity, 'FATAL');
+  assert.equal(e.runId, 'test-run');
+  assert.equal(e.executionId, 'test-exec');
+  assert.equal(e.taskId, 'test-task');
+  assert.equal(e.agentId, 'dev-agent');
+  assert.equal(e.body, 'something broke');
+  assert.deepEqual(e.attributes, { key: 'value', nested: { a: 1 } });
+  assert.ok(e.exception);
+  assert.equal(e.exception.type, 'TypeError');
+  assert.equal(e.exception.message, 'cannot read property X');
+  assert.equal(e.exception.stack, 'at foo (bar.ts:10:5)');
+  assert.equal(e.exception.fingerprint, 'abc123def456');
+
+  const jobLine = prompt.includes('test-job-id');
+  assert.ok(jobLine, 'prompt should include job id');
+});
+
+test('prompt-build: falls back to empty attributes object on parse failure', async () => {
+  const { buildSoftwareMaintenancePrompt } = await import('./software-maintenance');
+  const job = {
+    job_id: 'test-job-id', trigger_kind: 'execution_finally' as const,
+    severity_text: 'INFO' as const, base_commit: null,
+  } as Parameters<typeof buildSoftwareMaintenancePrompt>[0];
+
+  const event = {
+    event_id: 1, timestamp: '2026-01-01T00:00:00.000Z',
+    run_id: null, execution_id: null, task_id: null, agent_id: null,
+    event_name: 'test', component: 'test', stage: null,
+    severity_text: 'INFO', body: 'test',
+    attributes_json: 'not-valid-json{{{',
+    exception_type: null, exception_message: null,
+    exception_stack: null, exception_fingerprint: null,
+  };
+
+  const prompt = buildSoftwareMaintenancePrompt(job, [event]);
+  const evidenceMatch = prompt.match(/结构化运行证据：\n(\[[\s\S]*?\])\n\n结果结构：/);
+  assert.ok(evidenceMatch);
+  const evidence = JSON.parse(evidenceMatch![1]);
+  assert.deepEqual(evidence[0].attributes, {});
+  assert.equal(evidence[0].exception, null);
+});
+
+test('prompt-build: includes security contract and result schema', async () => {
+  const { buildSoftwareMaintenancePrompt } = await import('./software-maintenance');
+  const job = {
+    job_id: 'test-job-id', trigger_kind: 'runner_error' as const,
+    severity_text: 'FATAL' as const, base_commit: 'abc1234',
+  } as Parameters<typeof buildSoftwareMaintenancePrompt>[0];
+
+  const prompt = buildSoftwareMaintenancePrompt(job, []);
+  assert.ok(prompt.includes('Software Maintenance Agent'), 'prompt should address maintenance agent');
+  assert.ok(prompt.includes('禁止修改'), 'prompt should include safety constraints');
+  assert.ok(prompt.includes('提交命令'), 'prompt should include submission command');
+  assert.ok(prompt.includes('test-job-id'), 'prompt should include job id');
+  assert.ok(prompt.includes('runner_error'), 'prompt should include trigger kind');
+  assert.ok(prompt.includes('FATAL'), 'prompt should include severity');
+  assert.ok(prompt.includes('abc1234'), 'prompt should include base commit');
+  assert.ok(prompt.includes('outcome') && prompt.includes('no_issue'), 'prompt should include result schema');
+  assert.ok(prompt.includes('fingerprint'), 'prompt should include fingerprint field in schema');
+  assert.ok(prompt.includes('insufficient_evidence'), 'prompt should include insufficient_evidence classification');
+});
+
 test('truncates long body', async () => {
   const { sanitizeRuntimeText } = await import('./runtime-events');
 

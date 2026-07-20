@@ -68,7 +68,11 @@ export async function runHarnessVerification(taskId: string, storyIndex: number,
   try {
     for (const step of commandSteps) {
       if (!step.command) throw new Error(`验收标准 ${step.criterionId} 的 command 验证缺少命令`);
-      const result = await executeVerificationCommand(step.command, paths.root);
+      let command = step.command;
+      if (/\btsx --test\b/.test(command) && !/--import\b/.test(command)) {
+        command = command.replace(/\btsx --test\b/, '$& --import ./src/test/setup.ts');
+      }
+      const result = await executeVerificationCommand(command, paths.root);
       const stepPassed = result.exitCode === 0 && !result.timedOut;
       passed &&= stepPassed;
       const outputSummary = result.output.replace(/\s+/g, ' ').trim().slice(0, 4000);
@@ -77,8 +81,8 @@ export async function runHarnessVerification(taskId: string, storyIndex: number,
           evidence_id, verification_id, criterion_id, kind, instruction,
           command, exit_code, output_summary, passed
         ) VALUES(?, ?, ?, 'command', ?, ?, ?, ?, ?)
-      `).run(randomUUID(), verificationId, step.criterionId, step.instruction, step.command, result.exitCode, outputSummary, stepPassed ? 1 : 0);
-      summaries.push(`${step.criterionId}: ${stepPassed ? '通过' : '失败'} (${step.command})`);
+      `).run(randomUUID(), verificationId, step.criterionId, step.instruction, command, result.exitCode, outputSummary, stepPassed ? 1 : 0);
+      summaries.push(`${step.criterionId}: ${stepPassed ? '通过' : '失败'} (${command})`);
     }
     db.prepare(`
       UPDATE verification_runs

@@ -362,7 +362,7 @@ function parseClaudeStdout(line: string, context: AgentExecutionContext) {
     }
     if (type === 'result') {
       if (event.is_error) return `[执行器错误] ${meta('claude', context)} - ${compact(stringifyValue(event.result || event.error || line))}`;
-      return standardOutputLog('claude', context, stringifyValue(event.result));
+      return null;
     }
     return null;
   } catch {
