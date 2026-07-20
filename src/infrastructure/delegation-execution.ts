@@ -1,4 +1,7 @@
 import type { ChildProcess } from 'node:child_process';
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import crossSpawn from 'cross-spawn';
 import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, parseAgentTelemetryStderr, parseAgentTelemetryStdoutEvents, type AgentEnvironment, type AgentExecutionContext, type AgentExecutionOptions, type AgentExecutor, type AgentTelemetryEvent } from './agent-executor';
 import type { LangfuseTelemetry } from './langfuse';
@@ -20,6 +23,32 @@ export type DelegationExecutionInput = {
 
 export type DelegationExecutionResult = { exitCode: number; finalText: string };
 
+type TemporaryPrompt = { directory: string; file: string; reference: string };
+
+export function createTemporaryPrompt(prompt: string): TemporaryPrompt {
+  const directory = mkdtempSync(join(tmpdir(), 'lwp-'));
+  const file = join(directory, 'prompt.md');
+  try {
+    try { chmodSync(directory, 0o700); } catch { /* Windows ACLs are managed by the user profile. */ }
+    writeFileSync(file, prompt, { encoding: 'utf8', mode: 0o600 });
+    const reference = [
+      '本次任务的完整指令保存在一个 UTF-8 文件中。',
+      '你必须先使用文件读取工具完整读取该文件，再严格执行文件中的全部指令。不要只总结文件，也不要修改或删除文件。',
+      `指令文件路径：${file}`,
+      `PROMPT_FILE=${JSON.stringify(file)}`,
+    ].join('\n');
+    return { directory, file, reference };
+  } catch (error) {
+    try { rmSync(directory, { recursive: true, force: true }); } catch { /* preserve the original write failure */ }
+    throw error;
+  }
+}
+
+export function removeTemporaryPrompt(prompt: TemporaryPrompt | null) {
+  if (!prompt) return;
+  try { rmSync(prompt.directory, { recursive: true, force: true }); } catch { /* best-effort cleanup after the CLI exits */ }
+}
+
 export function buildAgentProcessLaunch(executor: AgentExecutor, prompt: string, workspaceRoot: string, executionOptions: AgentExecutionOptions, baseEnv: AgentEnvironment = process.env) {
   return {
     command: executor.command,
@@ -35,7 +64,6 @@ export function buildAgentProcessLaunch(executor: AgentExecutor, prompt: string,
 export async function executeDelegation(input: DelegationExecutionInput): Promise<DelegationExecutionResult> {
   const { runId, prompt, workspaceRoot, executor, executionOptions, context, description, telemetry, appendLog, maxRuntimeMs, idleTimeoutMs } = input;
   const spawn = input.spawn ?? crossSpawn;
-  const launch = buildAgentProcessLaunch(executor, prompt, workspaceRoot, executionOptions);
   const telemetryContext = { ...context, runToken: runId };
   const trace = await telemetry.startDelegationTrace(telemetryContext, {
     executor: executor.id,
@@ -52,6 +80,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   let terminalExitCode: number | null | undefined;
   let executionFailed = false;
   let finalText = '';
+  let temporaryPrompt: TemporaryPrompt | null = null;
   const finalTextAccumulator = createAgentFinalTextAccumulator(executor.id);
   const metricsAccumulator = createAgentRunMetricsAccumulator(executor.id);
 
@@ -66,6 +95,9 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   };
 
   try {
+    temporaryPrompt = executor.promptMode === 'file-reference' ? createTemporaryPrompt(prompt) : null;
+    const invocationPrompt = temporaryPrompt?.reference ?? prompt;
+    const launch = buildAgentProcessLaunch(executor, invocationPrompt, workspaceRoot, executionOptions);
     await appendLog(`[Agent] 开始 agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - ${description}`);
     await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - 启动 ${executor.label} CLI：${executor.formatCommand(workspaceRoot, executionOptions)}`);
     const child: ChildProcess = spawn(launch.command, launch.args, {
@@ -144,9 +176,13 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     traceStatus = timedOut ? 'timed_out' : executionFailed ? 'execution_error' : terminalExitCode === 0 ? 'completed' : terminalExitCode === null ? 'cancelled' : 'failed';
     return { exitCode: terminalExitCode ?? 1, finalText };
   } finally {
-    await telemetryQueue;
-    finalText = finalText || finalTextAccumulator.value();
-    await trace.end({ status: traceStatus, output: finalText, exitCode: terminalExitCode ?? null, timedOut, metrics: metricsAccumulator.value() });
-    await telemetry.flush();
+    try {
+      await telemetryQueue;
+      finalText = finalText || finalTextAccumulator.value();
+      await trace.end({ status: traceStatus, output: finalText, exitCode: terminalExitCode ?? null, timedOut, metrics: metricsAccumulator.value() });
+      await telemetry.flush();
+    } finally {
+      removeTemporaryPrompt(temporaryPrompt);
+    }
   }
 }

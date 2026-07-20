@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createLangfuseTelemetry, type LangfuseClient } from './langfuse';
-import { buildAgentProcessLaunch, executeDelegation } from './delegation-execution';
+import { buildAgentProcessLaunch, createTemporaryPrompt, executeDelegation, removeTemporaryPrompt } from './delegation-execution';
 import type { AgentExecutor } from './agent-executor';
 
 const credentials = { LANGFUSE_ENABLED: 'true', LANGFUSE_PUBLIC_KEY: 'pk-test', LANGFUSE_SECRET_KEY: 'sk-test', LANGFUSE_BASE_URL: 'https://langfuse.invalid', LANGFUSE_CAPTURE_PROMPTS: 'true' };
@@ -31,6 +32,21 @@ test('prepends executor launch arguments and merges executor environment', () =>
   assert.equal(launch.args[0], 'index.js');
   assert.equal(launch.args.at(-1)?.length, 15_000);
   assert.deepEqual(launch.env, { PATH: 'fixture-path', CURSOR_INVOKED_AS: 'cursor-agent', NODE_COMPILE_CACHE: 'C:\\cache' });
+});
+
+test('stores long prompts in a private temporary file and passes only a short reference', () => {
+  const original = '完整任务上下文\n'.repeat(4_000);
+  const temporary = createTemporaryPrompt(original);
+  try {
+    assert.equal(readFileSync(temporary.file, 'utf8'), original);
+    assert.match(temporary.reference, /必须先使用文件读取工具完整读取/);
+    assert.match(temporary.reference, /PROMPT_FILE=/);
+    assert.ok(temporary.reference.length < 1_000, `reference length=${temporary.reference.length}`);
+    assert.equal(temporary.reference.includes(original.slice(0, 100)), false);
+  } finally {
+    removeTemporaryPrompt(temporary);
+  }
+  assert.equal(existsSync(temporary.directory), false);
 });
 
 function recordedTelemetry() {
@@ -74,6 +90,34 @@ async function run(executor: AgentExecutor, telemetry = recordedTelemetry().tele
   });
   return { result, logs };
 }
+
+test('uses and cleans a prompt file during file-reference execution', async () => {
+  let referencedFile = '';
+  const program = [
+    'const fs = require("node:fs");',
+    'const match = process.argv[1].match(/^PROMPT_FILE=(.+)$/m);',
+    'const file = JSON.parse(match[1]);',
+    'const text = fs.readFileSync(file, "utf8");',
+    'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text}}));',
+  ].join('');
+  const executor: AgentExecutor = {
+    id: 'codex', label: 'File prompt fixture', command: process.execPath, promptMode: 'file-reference',
+    buildArgs: (reference) => {
+      referencedFile = JSON.parse(reference.match(/^PROMPT_FILE=(.+)$/m)![1]);
+      return ['-e', program, reference];
+    },
+    formatCommand: () => 'node file fixture',
+    parseStdout: () => null,
+    parseStderr: () => null,
+  };
+  const original = '需要从临时文件读取的完整 Prompt '.repeat(1_000);
+
+  const { result } = await run(executor, recordedTelemetry().telemetry, { prompt: original });
+
+  assert.equal(result.finalText, original);
+  assert.ok(referencedFile);
+  assert.equal(existsSync(referencedFile), false);
+});
 
 test('records one safe delegation trace and normalized Cursor, Codex, and Claude events while preserving local logs', async () => {
   const fixtures: Array<[AgentExecutor['id'], string]> = [

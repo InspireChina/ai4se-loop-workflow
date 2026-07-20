@@ -107,6 +107,7 @@ test('uses the native Cursor Agent wrapper outside Windows with the workspace su
   assert.equal(args.includes('agent'), false);
   assert.equal(args.includes('--workspace'), false);
   assert.equal(args.includes('--trust'), false);
+  assert.equal(executor.promptMode, 'file-reference');
   assert.match(executor.formatCommand('C:\\Users\\developer\\project'), /^cursor-agent .*\(cwd=C:\\Users\\developer\\project\)$/);
 });
 

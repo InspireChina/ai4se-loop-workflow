@@ -43,7 +43,7 @@ export type AgentExecutor = {
   command: string;
   prefixArgs?: string[];
   env?: AgentEnvironment;
-  promptMode: 'argument' | 'stdin';
+  promptMode: 'argument' | 'stdin' | 'file-reference';
   buildArgs(prompt: string, workspaceRoot: string, options?: AgentExecutionOptions): string[];
   formatCommand(workspaceRoot: string, options?: AgentExecutionOptions): string;
   parseStdout(line: string, context: AgentExecutionContext): string | null;
@@ -533,7 +533,7 @@ const executors: Omit<Record<AgentExecutorId, AgentExecutor>, 'cursor'> = {
 function cursorExecutor(): AgentExecutor {
   const launch = resolveCursorAgentLaunch();
   return {
-    id: 'cursor', label: 'Cursor', command: launch.command, prefixArgs: launch.prefixArgs, env: launch.env, promptMode: 'argument',
+    id: 'cursor', label: 'Cursor', command: launch.command, prefixArgs: launch.prefixArgs, env: launch.env, promptMode: 'file-reference',
     buildArgs: (prompt) => ['--print', '--output-format', 'stream-json', '--force', prompt],
     formatCommand: (workspace) => `cursor-agent --print --output-format stream-json --force (${launch.viaBundledNode ? 'via=node ' : ''}cwd=${workspace})`,
     parseStdout: parseCursorStdout,
