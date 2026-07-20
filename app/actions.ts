@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { normalizeWorkspaceRoot, setAgentExecutorSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
 import { rollbackAgentPrompt, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
 import { setSoftwareMaintenanceSettings } from '../src/application/software-maintenance';
+import { answerGitCommitInput } from '../src/application/git-commit-recovery';
 import {
   addDocumentComment,
   addStory,
@@ -165,6 +166,18 @@ export async function resolveDocumentCommentAction(formData: FormData) {
 export async function releaseBlockAction(formData: FormData) {
   await releaseBlock(String(formData.get('taskId')));
   redirect(`/tasks/${formData.get('taskId')}`);
+}
+
+export async function answerGitCommitInputAction(formData: FormData) {
+  const taskId = String(formData.get('taskId'));
+  await answerGitCommitInput({
+    taskId,
+    requestId: formData.get('requestId'),
+    commitMessage: formData.get('commitMessage'),
+    rememberTemplate: formData.get('rememberTemplate') === 'on',
+    messageTemplate: formData.get('messageTemplate') || '',
+  });
+  redirect(`/tasks/${taskId}`);
 }
 
 export async function submitClarificationAnswersAction(formData: FormData) {

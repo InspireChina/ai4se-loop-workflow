@@ -733,7 +733,11 @@ export async function releaseBlock(taskId: string) {
   assertState(prospective);
   const active = db.prepare(`
     ${taskSelect}
-    WHERE task_id != ? AND (agile_status = 'in dev' OR (agile_status = 'blocked' AND resume_status = 'in dev'))
+    WHERE task_id != ? AND (
+      agile_status = 'in dev'
+      OR (agile_status = 'blocked' AND resume_status = 'in dev')
+      OR run_state = 'waiting_for_git_input'
+    )
     LIMIT 1
   `).get(taskId) as Task | undefined;
   if (active && resumeStatus === 'in dev') throw new Error(`代码槽已被 ${active.task_id} 占用`);
@@ -791,14 +795,23 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
     if (!resolvedSpec) throw new Error(`交付单元 ${changes.analysis_index} 缺少 resolved Slice Spec`);
   }
   if (changes.dev_index !== undefined && changes.dev_index > before.dev_index) {
-    const verification = verifyDevCommit(paths.root, taskId, changes.dev_index);
+    const recorded = db.prepare(`
+      SELECT code_commit FROM execution_attempts
+      WHERE task_id = ? AND story_index = ? AND agent = 'dev-agent' AND code_commit IS NOT NULL
+      ORDER BY created_at DESC, execution_id DESC LIMIT 1
+    `).get(taskId, changes.dev_index) as { code_commit: string } | undefined;
+    const verification = verifyDevCommit(paths.root, taskId, changes.dev_index, recorded?.code_commit);
     if (!verification.ok) throw new Error(`交付单元 ${changes.dev_index} 的代码尚未按要求提交：${verification.reason}`);
   }
   if (changes.agile_status === 'done' && before.closure_status !== 'acknowledged') throw new Error('当前版本的结卡报告尚未阅读');
   if (prospective.agile_status === 'in dev') {
     const active = db.prepare(`
       ${taskSelect}
-      WHERE task_id != ? AND (agile_status = 'in dev' OR (agile_status='blocked' AND resume_status = 'in dev'))
+      WHERE task_id != ? AND (
+        agile_status = 'in dev'
+        OR (agile_status='blocked' AND resume_status = 'in dev')
+        OR run_state = 'waiting_for_git_input'
+      )
       LIMIT 1
     `).get(taskId) as Task | undefined;
     if (active) throw new CodeSlotBusyError(active.task_id);

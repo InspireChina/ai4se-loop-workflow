@@ -1,6 +1,6 @@
 export const ACTORS = ['human', 'system', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent'] as const;
 export const TASK_STATUSES = ['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'ready_to_close', 'done', 'cancelled', 'blocked'] as const;
-export const RUN_STATES = ['runnable', 'waiting_for_answers', 'system_blocked', 'idle'] as const;
+export const RUN_STATES = ['runnable', 'waiting_for_answers', 'waiting_for_git_input', 'system_blocked', 'idle'] as const;
 export type Actor = typeof ACTORS[number];
 export type TaskStatus = typeof TASK_STATUSES[number];
 export type RunState = typeof RUN_STATES[number];
@@ -117,7 +117,9 @@ export function assertActorCanCreate(actor: Actor, status: TaskStatus, currentSu
 }
 
 export function occupiesCodeSlot(task: TaskState) {
-  return task.agile_status === 'in dev' || (task.agile_status === 'blocked' && task.resume_status === 'in dev');
+  return task.run_state === 'waiting_for_git_input'
+    || task.agile_status === 'in dev'
+    || (task.agile_status === 'blocked' && task.resume_status === 'in dev');
 }
 
 export type Delegation = { taskId: string; pipeline: string; agent: string; storyIndex: number | null; resource: 'none' | 'browser'; description: string };

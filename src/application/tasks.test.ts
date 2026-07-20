@@ -122,6 +122,68 @@ test('anchors file comments to document revisions and supplies them to Agent evo
   assert.equal((db.prepare('SELECT COUNT(*) AS count FROM agent_observation_comment_evidence WHERE comment_id = ?').get(commentId) as { count: number }).count, 1);
 });
 
+test('collects Git commit input without blocking the Task and remembers a repository template', async () => {
+  const { createTask, getTask } = await import('./tasks');
+  const {
+    GIT_COMMIT_TEMPLATE_SETTING,
+    answerGitCommitInput,
+    gitCommitMessageFor,
+    listGitCommitResolutionRequests,
+    markGitCommitInputApplied,
+    requestGitCommitInput,
+  } = await import('./git-commit-recovery');
+  const { completeExecution, recoverNextExecutionAttempt } = await import('./executions');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Recover a repository commit policy' });
+  const executionId = 'execution-git-input-recovery';
+  db.prepare(`
+    INSERT INTO execution_attempts(
+      execution_id, run_id, task_id, story_index, agent, pipeline, delegation_key,
+      attempt, status, input_hash, input_json, result_json
+    ) VALUES(?, 'run-git-input-recovery', ?, 1, 'dev-agent', 'dev', ?, 1, 'output_received', 'git-input-hash', '{}', '{"outcome":"completed","summary":"done"}')
+  `).run(executionId, taskId, `key-${executionId}`);
+  const requestId = await requestGitCommitInput({
+    taskId,
+    storyIndex: 1,
+    operation: 'delivery',
+    attemptedMessage: `feat(${taskId}): Unit-1 完成实现`,
+    errorOutput: 'commit-msg rejected the title',
+    executionId,
+  });
+
+  let detail = await getTask(taskId);
+  assert.equal(detail?.task.run_state, 'waiting_for_git_input');
+  assert.notEqual(detail?.task.agile_status, 'blocked');
+  assert.equal((await listGitCommitResolutionRequests(taskId))[0].status, 'pending');
+  assert.equal(await recoverNextExecutionAttempt(), undefined);
+
+  try {
+    await answerGitCommitInput({
+      taskId,
+      requestId,
+      commitMessage: `[landi] #N/A feat: ${taskId} Unit-1 完成实现`,
+      rememberTemplate: true,
+      messageTemplate: '[landi] #{externalId} {type}: {taskId} Unit-{unit} {description}',
+    });
+    detail = await getTask(taskId);
+    assert.equal(detail?.task.run_state, 'runnable');
+    assert.equal((await recoverNextExecutionAttempt())?.execution_id, executionId);
+
+    const answered = await gitCommitMessageFor(taskId, 1, 'delivery');
+    assert.equal(answered.source, 'answer');
+    assert.match(answered.message, /^\[landi\] #N\/A feat:/);
+    await markGitCommitInputApplied(answered.requestId);
+
+    const remembered = await gitCommitMessageFor(taskId, 2, 'checkpoint');
+    assert.equal(remembered.source, 'repository_template');
+    assert.match(remembered.message, new RegExp(`^\\[landi\\] #N/A chore: ${taskId} Unit-2 checkpoint`));
+    await completeExecution(executionId);
+  } finally {
+    db.prepare('DELETE FROM project_settings WHERE setting_key = ?').run(GIT_COMMIT_TEMPLATE_SETTING);
+  }
+});
+
 test('creates title-only and described Tasks without blocking delegation and serializes description into agent context', async () => {
   const { createTask, getTaskContext, getTask, pipelineAllEnvelopes, pipelineForTask, toJsonlEnvelope } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');

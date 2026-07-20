@@ -16,6 +16,7 @@
 | 交付文档 | 需求梳理、方案分析、问题复现、验证结果和整体验收等正文。 |
 | Loop 运行 | 应用持续计算下一步、执行 Agent、保存结果并再次计算的本地循环。 |
 | 等待回答 | 需求在原 Agile 状态等待产品决策，`run_state=waiting_for_answers`。 |
+| 等待 Git 信息 | 目标仓库提交策略拒绝 Runner 生成的标题且缺少可推导信息，`run_state=waiting_for_git_input`；回答后只恢复 Git 副作用。 |
 | 系统阻塞 | 自动恢复耗尽或执行环境异常，`run_state=system_blocked`；不伪装成人工决策。 |
 | 代码槽 | 本地单工作区中开发实现写代码时的串行保护。 |
 | Agent Profile | 某个流程 Agent 当前生效的 Prompt、Memory、版本与演化策略。 |
@@ -193,6 +194,8 @@ classDiagram
 15. 主 Runner 的 finally 只能持久化维护任务，不能同步修改代码或等待 Maintenance Agent。
 16. runtime event 在持久化前必须脱敏，并保留 run/execution correlation、severity 和稳定异常 fingerprint。
 17. 软件修复候选只能在独立 worktree 生成；变更预算、保护路径、test/build 和 clean baseline 缺一不可。
+18. Git 提交策略失败必须保留 checkpoint/Agent 输出并优先进入可交互恢复；只有无法通过合规标题恢复时才进入系统阻塞。
+19. 等待 Git 信息期间必须继续占用代码槽；提交追踪以 execution receipt 和 commit 哈希为准，不依赖目标仓库标题包含内部需求编号。
 
 ## 5. Agent 与流程的责任边界
 

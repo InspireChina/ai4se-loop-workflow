@@ -5,6 +5,8 @@ export type DevCommitVerification = {
   reason: string;
   commit: string;
   changed: boolean;
+  needsInput?: boolean;
+  attemptedMessage?: string;
 };
 
 function git(args: string[], workspaceRoot: string) {
@@ -21,7 +23,18 @@ function sensitiveFiles(status: string) {
     .filter((file) => /(^|\/)(\.env(?:\.[^/]*)?|credentials?(?:\.[^/]*)?|secrets?(?:\.[^/]*)?)(\/|$)/i.test(file));
 }
 
-export function prepareDevWorkspace(workspaceRoot: string, taskId: string, storyIndex: number) {
+function commandErrorText(error: unknown) {
+  if (!(error instanceof Error)) return String(error);
+  const detail = error as Error & { stderr?: string | Buffer; stdout?: string | Buffer };
+  return [error.message, detail.stderr?.toString(), detail.stdout?.toString()].filter(Boolean).join('\n').trim();
+}
+
+export function isGitCommitPolicyFailure(error: unknown) {
+  const message = commandErrorText(error);
+  return /(?:commit[- ]msg|commitlint|commit message|commit 消息|提交信息|提交消息|message format|消息格式|subject.*(?:format|pattern)|header.*(?:format|pattern)|husky.*commit-msg)/i.test(message);
+}
+
+export function prepareDevWorkspace(workspaceRoot: string, taskId: string, storyIndex: number, commitMessage = `chore(loop): checkpoint before ${taskId} Unit-${storyIndex}`) {
   try {
     const dirty = git(['status', '--porcelain', '--untracked-files=all'], workspaceRoot);
     if (!dirty) return { ok: true, reason: '', checkpointCommit: '', head: gitHead(workspaceRoot) };
@@ -30,7 +43,7 @@ export function prepareDevWorkspace(workspaceRoot: string, taskId: string, story
       return { ok: false, reason: `已有改动包含敏感文件，拒绝自动 checkpoint：${sensitive.join(', ')}`, checkpointCommit: '', head: '' };
     }
     git(['add', '-A'], workspaceRoot);
-    git(['commit', '-m', `chore(loop): checkpoint before ${taskId} Unit-${storyIndex}`], workspaceRoot);
+    git(['commit', '-m', commitMessage], workspaceRoot);
     const remaining = git(['status', '--porcelain', '--untracked-files=all'], workspaceRoot);
     if (remaining) {
       return { ok: false, reason: 'checkpoint 提交后工作区仍有改动', checkpointCommit: '', head: '' };
@@ -39,11 +52,18 @@ export function prepareDevWorkspace(workspaceRoot: string, taskId: string, story
     return { ok: true, reason: '', checkpointCommit: head, head };
   } catch (error) {
     try { git(['restore', '--staged', '.'], workspaceRoot); } catch { /* preserve workspace changes for inspection */ }
-    return { ok: false, reason: `无法创建开发前 checkpoint：${error instanceof Error ? error.message : String(error)}`, checkpointCommit: '', head: '' };
+    return {
+      ok: false,
+      reason: `无法创建开发前 checkpoint：${commandErrorText(error)}`,
+      checkpointCommit: '',
+      head: '',
+      needsInput: isGitCommitPolicyFailure(error),
+      attemptedMessage: commitMessage,
+    };
   }
 }
 
-export function commitDevStory(workspaceRoot: string, taskId: string, storyIndex: number, headBefore: string) {
+export function commitDevStory(workspaceRoot: string, taskId: string, storyIndex: number, headBefore: string, commitMessage = `feat(${taskId}): Unit-${storyIndex} 完成实现`) {
   try {
     const currentHead = gitHead(workspaceRoot);
     const dirty = git(['status', '--porcelain', '--untracked-files=all'], workspaceRoot);
@@ -56,11 +76,18 @@ export function commitDevStory(workspaceRoot: string, taskId: string, storyIndex
     const sensitive = sensitiveFiles(dirty);
     if (sensitive.length) return { ok: false, reason: `检测到敏感文件，拒绝提交：${sensitive.join(', ')}`, commit: '', changed: false };
     git(['add', '-A'], workspaceRoot);
-    git(['commit', '-m', `feat(${taskId}): Unit-${storyIndex} 完成实现`], workspaceRoot);
+    git(['commit', '-m', commitMessage], workspaceRoot);
     return { ...verifyDevCommit(workspaceRoot, taskId, storyIndex, gitHead(workspaceRoot)), changed: true };
   } catch (error) {
     try { git(['restore', '--staged', '.'], workspaceRoot); } catch { /* keep working tree changes for inspection */ }
-    return { ok: false, reason: `自动提交失败：${error instanceof Error ? error.message : String(error)}`, commit: '', changed: false };
+    return {
+      ok: false,
+      reason: `自动提交失败：${commandErrorText(error)}`,
+      commit: '',
+      changed: false,
+      needsInput: isGitCommitPolicyFailure(error),
+      attemptedMessage: commitMessage,
+    };
   }
 }
 
@@ -75,10 +102,7 @@ export function verifyDevCommit(workspaceRoot: string, taskId: string, storyInde
     const dirty = git(['status', '--porcelain', '--untracked-files=all'], workspaceRoot);
     if (dirty) return { ok: false, reason: '工作区仍有未提交改动', commit: '', changed: false };
     if (expectedCommit) {
-      const subject = git(['show', '-s', '--format=%s', expectedCommit], workspaceRoot);
-      if (!subjectMatches(subject, taskId, storyIndex)) {
-        return { ok: false, reason: `提交标题必须包含 ${taskId} 和 Unit-${storyIndex}`, commit: expectedCommit, changed: false };
-      }
+      git(['cat-file', '-e', `${expectedCommit}^{commit}`], workspaceRoot);
       return { ok: true, reason: '', commit: expectedCommit, changed: true };
     }
     const commits = git(['log', '--all', '--format=%H%x09%s'], workspaceRoot);

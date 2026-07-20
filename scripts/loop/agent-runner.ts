@@ -14,6 +14,12 @@ import {
 } from '../../src/application/agent-evolution';
 import { applyAgentResult, applyNextQueuedAgentResult, blockDelegation } from '../../src/application/agent-results';
 import {
+  GitCommitInputRequiredError,
+  gitCommitMessageFor,
+  markGitCommitInputApplied,
+  requestGitCommitInput,
+} from '../../src/application/git-commit-recovery';
+import {
   beginExecutionAttempt,
   completeExecution,
   failExecution,
@@ -250,9 +256,14 @@ async function processDurableResult(attempt: ExecutionAttempt, delegation: Deleg
   let harnessVerification: HarnessVerificationOutcome | null = null;
   if (delegation.agent === 'dev-agent' && result.outcome === 'completed') {
     if (!codeCommit) {
-      const commit = commitDevStory(paths.root, delegation.taskId, delegation.storyIndex!, attempt.base_commit || '');
-      if (!commit.ok) throw new Error(`开发实现 Agent 代码提交失败：${commit.reason}`);
+      const commitInput = await gitCommitMessageFor(delegation.taskId, delegation.storyIndex!, 'delivery');
+      const commit = commitDevStory(paths.root, delegation.taskId, delegation.storyIndex!, attempt.base_commit || '', commitInput.message);
+      if (!commit.ok && commit.needsInput) {
+        throw new GitCommitInputRequiredError('delivery', commit.attemptedMessage || commitInput.message, commit.reason, commitInput.requestId);
+      }
+      if (!commit.ok) throw new Error(`Runner 交付代码提交失败：${commit.reason}`);
       codeCommit = commit.commit;
+      await markGitCommitInputApplied(commitInput.requestId);
       await recordExecutionReceipt(attempt.execution_id, 'code_commit', codeCommit, {
         taskId: delegation.taskId,
         storyIndex: delegation.storyIndex,
@@ -286,6 +297,21 @@ async function processDurableResult(attempt: ExecutionAttempt, delegation: Deleg
     await appendLoopRunLog(runId, `[验证] 已自动回退${deliveryUnitLabel(delegation.storyIndex)}到开发实现，不需要人工裁决`);
   }
   return { outcome, harnessVerification };
+}
+
+async function handleGitCommitInputRequired(error: unknown, delegation: DelegationEnvelope, executionId?: string | null) {
+  if (!(error instanceof GitCommitInputRequiredError) || !delegation.storyIndex) return false;
+  await requestGitCommitInput({
+    taskId: delegation.taskId,
+    storyIndex: delegation.storyIndex,
+    operation: error.operation,
+    attemptedMessage: error.attemptedMessage,
+    errorOutput: error.detail,
+    executionId: executionId || null,
+    sourceRequestId: error.sourceRequestId,
+  });
+  await appendLoopRunLog(runId, `[Git] 仓库拒绝自动提交，已等待用户补充合规提交标题；不会重新运行 ${agentLabel(delegation.agent)}`);
+  return true;
 }
 
 async function runEvolutionEvaluator(
@@ -371,6 +397,10 @@ async function main() {
         diagnostics: [],
       }, executor, executionOptions);
     } catch (error) {
+      if (await handleGitCommitInputRequired(error, snapshot.delegation, recoverable.execution_id)) {
+        await scheduleNextLoop();
+        return;
+      }
       const reason = `恢复 execution attempt 失败：${error instanceof Error ? error.message : String(error)}`;
       await handleExecutionFailure(recoverable, snapshot.delegation, reason, false);
     }
@@ -406,13 +436,28 @@ async function main() {
 
   let headBefore = '';
   if (delegation.agent === 'dev-agent') {
-    const preparation = prepareDevWorkspace(paths.root, delegation.taskId, delegation.storyIndex!);
+    const checkpointInput = await gitCommitMessageFor(delegation.taskId, delegation.storyIndex!, 'checkpoint');
+    const preparation = prepareDevWorkspace(paths.root, delegation.taskId, delegation.storyIndex!, checkpointInput.message);
     if (!preparation.ok) {
+      if (preparation.needsInput) {
+        await requestGitCommitInput({
+          taskId: delegation.taskId,
+          storyIndex: delegation.storyIndex!,
+          operation: 'checkpoint',
+          attemptedMessage: preparation.attemptedMessage || checkpointInput.message,
+          errorOutput: preparation.reason,
+          sourceRequestId: checkpointInput.requestId,
+        });
+        await appendLoopRunLog(runId, '[Git] 仓库拒绝开发前 checkpoint，已等待用户补充合规提交标题；Dev Agent 尚未启动');
+        await scheduleNextLoop();
+        return;
+      }
       await blockDelegation(delegation, preparation.reason);
       await appendLoopRunLog(runId, `[错误] ${agentLabel(delegation.agent)} 未启动：${preparation.reason}`);
       await scheduleNextLoop();
       return;
     }
+    await markGitCommitInputApplied(checkpointInput.requestId);
     if (preparation.checkpointCommit) {
       await appendLoopRunLog(runId, `[运行] Runner 已保存开发前工作区 checkpoint：${preparation.checkpointCommit}`);
     }
@@ -443,6 +488,10 @@ async function main() {
     try {
       await processDurableResult(durable.attempt, delegation, parseAgentResult(durable.attempt.result_json));
     } catch (error) {
+      if (await handleGitCommitInputRequired(error, delegation, durable.attempt.execution_id)) {
+        await scheduleNextLoop();
+        return;
+      }
       await handleExecutionFailure(durable.attempt, delegation, error instanceof Error ? error.message : String(error), false);
     }
     await scheduleNextLoop();
@@ -486,6 +535,10 @@ async function main() {
     if (error instanceof CodeSlotBusyError) {
       await failExecution(durable.attempt.execution_id, error.message, false);
       await appendLoopRunLog(runId, `[运行] ${agentLabel(delegation.agent)} 结果已进入队列，等待 ${error.ownerTaskId} 释放代码槽`);
+      await scheduleNextLoop();
+      return;
+    }
+    if (await handleGitCommitInputRequired(error, delegation, durable.attempt.execution_id)) {
       await scheduleNextLoop();
       return;
     }

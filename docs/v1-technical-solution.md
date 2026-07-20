@@ -123,6 +123,7 @@ Runner 的控制循环：
 - 无可执行 Agent：不启动 CLI，输出 0 个 Agent，5 分钟后重试。
 - 代码槽繁忙：步骤在应用内排队，释放后继续，不生成用户确认事项。
 - 产品澄清未完成：`run_state=waiting_for_answers`，Agile 状态不被改成 blocked；其他需求继续运行。
+- Git 提交策略异常：保留工作区和 execution output，进入 `run_state=waiting_for_git_input`；补充合规标题后只重试 Git 阶段，仓库级模板可在后续提交复用。
 - 执行异常：最多自动尝试三次，耗尽后进入 `run_state=system_blocked`。
 
 应用决定当前 Agent、推进阶段和交付单元。Agent 只负责当前目标，可以使用辅助 subagent 做上下文收集，但不能调度其他流程 Agent。
@@ -208,8 +209,10 @@ Agent
 2. 对既有普通未提交改动创建 checkpoint commit。
 3. 执行当前交付单元。
 4. 按已解决 Slice Spec 的 verification plan 运行 Harness，保存命令、退出码和输出证据。
-5. 创建包含 Requirement / Unit 标识的独立 commit，并保存幂等收据。
+5. 创建独立 commit，并通过 commit 哈希与 execution receipt 保存幂等追踪；目标仓库标题不必包含内部 Requirement / Unit 标识。
 6. Harness 失败时自动回退开发；通过后才推进开发进度。
+
+checkpoint 或交付 commit 被 `commit-msg` / commitlint 等策略拒绝时，Runner 展示仓库错误并请求一个合规的完整标题。回答只恢复 Git 副作用，不重新运行 Dev Agent；用户可选择保存带受控变量的仓库级标题模板。
 
 单代码槽用于避免两个写代码步骤同时修改同一工作区。它是本地串行队列，不是需要用户解除的租约或阻塞原因。
 

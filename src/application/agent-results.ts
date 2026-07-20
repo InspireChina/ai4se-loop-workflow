@@ -179,6 +179,7 @@ async function ensureCodeSlotForDelegation(delegation: DelegationEnvelope, resul
       AND (
         agile_status = 'in dev'
         OR (agile_status = 'blocked' AND resume_status = 'in dev')
+        OR run_state = 'waiting_for_git_input'
       )
     LIMIT 1
   `).get(delegation.taskId) as { task_id: string } | undefined;

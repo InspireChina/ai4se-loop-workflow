@@ -3,11 +3,13 @@ import Link from 'next/link';
 import { AlertTriangle, Check, CheckCircle2, Clock3, FileText, GitBranch, RotateCcw, SlidersHorizontal } from 'lucide-react';
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
+import { GIT_COMMIT_TEMPLATE_PLACEHOLDERS, listGitCommitResolutionRequests } from '../../../src/application/git-commit-recovery';
 import { agentLabel, confirmationKindLabel, deliveryUnitLabel, documentKindLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
 import { ArtifactDocument } from './artifact-document';
 import {
   acknowledgeClosureAction,
   addStoryAction,
+  answerGitCommitInputAction,
   answerQuestionAction,
   cancelTaskAction,
   initializeContextAction,
@@ -30,7 +32,8 @@ const taskSteps = [
   { label: '完成', statuses: ['done'] },
 ] as const;
 
-function stepDetail(task: { agile_status: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number }) {
+function stepDetail(task: { agile_status: string; run_state: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number }) {
+  if (task.run_state === 'waiting_for_git_input') return '等待补充仓库要求的 Git 提交信息';
   if (task.agile_status === 'blocked') return `系统异常已暂停 · ${agentLabel(task.current_subagent)}`;
   if (task.agile_status === 'backlog') return '正在收集上下文';
   if (task.agile_status === 'in repro') return '正在复现并定位问题';
@@ -47,10 +50,13 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const { taskId } = await params;
   const detail = await getTask(taskId);
   if (!detail) notFound();
+  const gitCommitRequests = await listGitCommitResolutionRequests(taskId);
   const { task, stories, storySpecs, questions, documents, documentComments, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events } = detail;
   const pipeline = await pipelineForTask(taskId);
   const unansweredQuestions = questions.filter((question) => question.status === 'pending');
   const waitingForAnswers = task.run_state === 'waiting_for_answers';
+  const waitingForGitInput = task.run_state === 'waiting_for_git_input';
+  const pendingGitRequest = gitCommitRequests.find((request) => request.status === 'pending');
   const reviewDocument = task.review_document_id ? documents.find((document) => document.document_id === task.review_document_id) : null;
   const deliveryDocuments = documents.filter((document) => document.document_id !== reviewDocument?.document_id);
   const progressStatus = task.agile_status === 'blocked' ? task.resume_status || 'backlog' : task.agile_status;
@@ -65,7 +71,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           <p className="eyebrow">{task.task_id}</p>
           <h1>{task.title}</h1>
         </div>
-        <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForAnswers ? '等待澄清' : statusLabel(task.agile_status)}</span>
+        <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers || waitingForGitInput ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForGitInput ? '等待 Git 信息' : waitingForAnswers ? '等待澄清' : statusLabel(task.agile_status)}</span>
       </div>
       <div className="chips">
         <span>{itemTypeLabel(task.item_type)}</span>
@@ -276,6 +282,26 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             </div>
           </div>)}
         </section>
+
+        {waitingForGitInput && pendingGitRequest && <form action={answerGitCommitInputAction} className="card form-panel git-input-card">
+          <h2><GitBranch size={15}/>补充 Git 提交信息</h2>
+          <p className="muted">仓库拒绝了 Runner 生成的{pendingGitRequest.operation === 'checkpoint' ? '开发前 checkpoint' : '交付'}提交。补充后会从提交阶段继续，不会重新运行 Dev Agent。</p>
+          <input type="hidden" name="taskId" value={task.task_id}/>
+          <input type="hidden" name="requestId" value={pendingGitRequest.request_id}/>
+          <label>本次合规提交标题
+            <textarea name="commitMessage" required defaultValue={pendingGitRequest.attempted_message}/>
+          </label>
+          <details>
+            <summary>查看仓库返回的错误</summary>
+            <pre>{pendingGitRequest.error_output}</pre>
+          </details>
+          <label className="checkbox"><input type="checkbox" name="rememberTemplate"/>记住该仓库的提交标题模板</label>
+          <label>仓库提交标题模板
+            <input name="messageTemplate" placeholder="例如：[name] #{externalId} {type}: {description}"/>
+            <small className="muted">可用变量：{GIT_COMMIT_TEMPLATE_PLACEHOLDERS.join('、')}。勾选记住时必填。</small>
+          </label>
+          <button className="button success" type="submit">保存并从 Git 提交继续</button>
+        </form>}
 
         {task.agile_status === 'blocked' && task.run_state === 'system_blocked' && <form action={releaseBlockAction} className="card form-panel release-block">
           <h2><AlertTriangle size={15}/>系统阻塞</h2>
