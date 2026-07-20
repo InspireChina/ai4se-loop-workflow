@@ -120,8 +120,9 @@ export async function enqueueSoftwareMaintenance(input: {
     ? db.prepare(`
         SELECT severity_text FROM runtime_events
         WHERE run_id = ? AND event_id BETWEEN ? AND ?
+          AND (? IS NULL OR execution_id = ? OR execution_id IS NULL)
         ORDER BY severity_number DESC, event_id DESC LIMIT 1
-      `).get(input.runId, input.eventFromId || 0, eventTo) as { severity_text: RuntimeEventSeverity } | undefined
+      `).get(input.runId, input.eventFromId || 0, eventTo, input.executionId, input.executionId) as { severity_text: RuntimeEventSeverity } | undefined
     : undefined;
   const jobId = randomUUID();
   db.prepare(`

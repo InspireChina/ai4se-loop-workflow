@@ -992,3 +992,173 @@ test('correlates and redacts structured runtime events before queuing a durable 
     clearRuntimeEventContext();
   }
 });
+
+test('infers event metadata from message prefix', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { recordLoopLogEventInDb } = await import('./runtime-events');
+  const db = await databaseConnection();
+  const runId = 'run-prefix-inference';
+
+  const cases = [
+    { message: '[执行器工具] call tool', eventName: 'loop.agent.tool', component: 'agent-executor', severity: 'INFO' },
+    { message: '[执行器错误] tool failed', eventName: 'loop.agent.error', component: 'agent-executor', severity: 'ERROR' },
+    { message: '[执行器输出] result', eventName: 'loop.agent.output', component: 'agent-executor', severity: 'INFO' },
+    { message: '[验证] test passed', eventName: 'loop.verification', component: 'harness', severity: 'INFO' },
+    { message: '[演化] prompt updated', eventName: 'loop.agent_evolution', component: 'agent-evolution', severity: 'INFO' },
+    { message: '[维护] check started', eventName: 'loop.software_maintenance', component: 'software-maintenance', severity: 'INFO' },
+    { message: '[错误] something broke', eventName: 'loop.error', component: 'loop-runner', severity: 'ERROR' },
+    { message: '[恢复] retry succeeded', eventName: 'loop.recovery', component: 'loop-runner', severity: 'INFO' },
+    { message: '[派发] task assigned', eventName: 'loop.dispatch', component: 'orchestrator', severity: 'INFO' },
+    { message: '[执行器警告] deprecation', eventName: 'loop.log', component: 'loop-runner', severity: 'WARN' },
+    { message: '[警告] resource low', eventName: 'loop.log', component: 'loop-runner', severity: 'WARN' },
+    { message: '[致命] unrecoverable', eventName: 'loop.log', component: 'loop-runner', severity: 'ERROR' },
+    { message: 'plain log without prefix', eventName: 'loop.log', component: 'loop-runner', severity: 'INFO' },
+  ];
+
+  for (const c of cases) {
+    const id = recordLoopLogEventInDb(db, runId, c.message);
+    const event = db.prepare('SELECT event_name, component, severity_text, body FROM runtime_events WHERE event_id = ?').get(id) as any;
+    assert.equal(event.event_name, c.eventName, `event_name mismatch for "${c.message}"`);
+    assert.equal(event.component, c.component, `component mismatch for "${c.message}"`);
+    assert.equal(event.severity_text, c.severity, `severity mismatch for "${c.message}"`);
+    assert.equal(event.body, c.message);
+  }
+
+  const attributesEvent = db.prepare("SELECT attributes_json FROM runtime_events WHERE body = 'plain log without prefix'").get() as any;
+  assert.equal(attributesEvent.attributes_json, '{}');
+
+  const kvEvent = db.prepare("SELECT attributes_json FROM runtime_events WHERE body = '[派发] task assigned'").get() as any;
+  assert.equal(kvEvent.attributes_json, '{}');
+
+  const kvMessage = '[派发] executor=agent-runner agent=dev-agent requirement=REQ-1 unit=1 flow=dev tool=harness code=main';
+  recordLoopLogEventInDb(db, runId, kvMessage);
+  const kvRich = db.prepare("SELECT attributes_json FROM runtime_events WHERE body = ?").get(kvMessage) as any;
+  const parsed = JSON.parse(kvRich.attributes_json);
+  assert.equal(parsed.executor, 'agent-runner');
+  assert.equal(parsed.agent, 'dev-agent');
+  assert.equal(parsed.requirement, 'REQ-1');
+  assert.equal(parsed.unit, '1');
+  assert.equal(parsed.flow, 'dev');
+  assert.equal(parsed.tool, 'harness');
+  assert.equal(parsed.code, 'main');
+});
+
+test('generates exception fingerprint', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { recordRuntimeEventInDb } = await import('./runtime-events');
+  const db = await databaseConnection();
+
+  const err = new Error('something broke at line 42');
+  const id = recordRuntimeEventInDb(db, {
+    eventName: 'loop.test.exception',
+    component: 'test',
+    body: 'test exception',
+    error: err,
+  });
+
+  const event = db.prepare(
+    'SELECT exception_type, exception_message, exception_stack, exception_fingerprint FROM runtime_events WHERE event_id = ?'
+  ).get(id) as any;
+
+  assert.equal(event.exception_type, 'Error');
+  assert.equal(event.exception_message, 'something broke at line 42');
+  assert.ok(event.exception_stack.includes('Error: something broke at line 42'));
+  assert.ok(event.exception_stack.includes('tasks.test.ts'));
+  assert.equal(event.exception_fingerprint.length, 24);
+  assert.match(event.exception_fingerprint, /^[a-f0-9]{24}$/);
+
+  const sameFingerprint = recordRuntimeEventInDb(db, {
+    eventName: 'loop.test.exception2',
+    component: 'test',
+    body: 'same shape',
+    error: new Error('something broke at line 99'),
+  });
+  const event2 = db.prepare(
+    'SELECT exception_fingerprint FROM runtime_events WHERE event_id = ?'
+  ).get(sameFingerprint) as any;
+  assert.equal(event2.exception_fingerprint, event.exception_fingerprint,
+    'fingerprints should match after normalization (numbers→#)');
+
+  const nonError = recordRuntimeEventInDb(db, {
+    eventName: 'loop.test.nonerror',
+    component: 'test',
+    body: 'string error',
+    error: 'plain string error',
+  });
+  const ne = db.prepare(
+    'SELECT exception_type, exception_message, exception_fingerprint FROM runtime_events WHERE event_id = ?'
+  ).get(nonError) as any;
+  assert.equal(ne.exception_type, 'string');
+  assert.ok(ne.exception_fingerprint.length > 0);
+
+  const noError = recordRuntimeEventInDb(db, {
+    eventName: 'loop.test.noerror',
+    component: 'test',
+    body: 'no error',
+  });
+  const clean = db.prepare(
+    'SELECT exception_type, exception_message, exception_stack, exception_fingerprint FROM runtime_events WHERE event_id = ?'
+  ).get(noError) as any;
+  assert.equal(clean.exception_type, null);
+  assert.equal(clean.exception_message, null);
+  assert.equal(clean.exception_stack, null);
+  assert.equal(clean.exception_fingerprint, null);
+
+  const sanitized = recordRuntimeEventInDb(db, {
+    eventName: 'loop.test.secret_in_error',
+    component: 'test',
+    body: 'error with secret',
+    error: new Error('auth failed token=super-secret-123'),
+  });
+  const se = db.prepare(
+    'SELECT exception_message FROM runtime_events WHERE event_id = ?'
+  ).get(sanitized) as any;
+  assert.match(se.exception_message, /\[REDACTED\]/);
+  assert.doesNotMatch(se.exception_message, /super-secret-123/);
+});
+
+test('truncates long body', async () => {
+  const { sanitizeRuntimeText } = await import('./runtime-events');
+
+  const short = sanitizeRuntimeText('hello');
+  assert.equal(short, 'hello');
+
+  const longBody = 'x'.repeat(15_000);
+  const truncated = sanitizeRuntimeText(longBody);
+  assert.equal(truncated.length, 12_001, 'should be 12000 chars + …');
+  assert.ok(truncated.endsWith('…'));
+  assert.ok(truncated.startsWith('xxx'));
+
+  const exactlyLimit = 'y'.repeat(12_000);
+  const notTruncated = sanitizeRuntimeText(exactlyLimit);
+  assert.equal(notTruncated.length, 12_000);
+  assert.ok(!notTruncated.endsWith('…'));
+
+  const exceptionMessage = sanitizeRuntimeText('e'.repeat(5_000), 3000);
+  assert.equal(exceptionMessage.length, 3_001);
+  assert.ok(exceptionMessage.endsWith('…'));
+
+  const nullInput = sanitizeRuntimeText(null);
+  assert.equal(nullInput, '');
+
+  const undefinedInput = sanitizeRuntimeText(undefined);
+  assert.equal(undefinedInput, '');
+
+  const numberInput = sanitizeRuntimeText(42);
+  assert.equal(numberInput, '42');
+
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { recordRuntimeEventInDb } = await import('./runtime-events');
+  const db = await databaseConnection();
+
+  const longBodyForDb = 'A'.repeat(15_000);
+  const id = recordRuntimeEventInDb(db, {
+    eventName: 'loop.test.truncation',
+    component: 'test',
+    body: longBodyForDb,
+  });
+  const event = db.prepare('SELECT body FROM runtime_events WHERE event_id = ?').get(id) as any;
+  assert.equal(event.body.length, 12_001);
+  assert.ok(event.body.endsWith('…'));
+  assert.ok(event.body.startsWith('AAA'));
+});
