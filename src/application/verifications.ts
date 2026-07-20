@@ -11,13 +11,14 @@ export type HarnessVerificationOutcome = {
 
 export async function runHarnessVerification(taskId: string, storyIndex: number, codeCommit?: string, executionId?: string): Promise<HarnessVerificationOutcome> {
   const db = await databaseConnection();
+  let existing: { verification_id: string; status: string } | undefined;
   if (executionId) {
-    const existing = db.prepare(`
+    existing = db.prepare(`
       SELECT verification_id, status
       FROM verification_runs
       WHERE execution_id = ?
     `).get(executionId) as { verification_id: string; status: string } | undefined;
-    if (existing && existing.status !== 'running') {
+    if (existing && (existing.status === 'passed' || existing.status === 'failed')) {
       const evidence = db.prepare(`
         SELECT criterion_id, command, passed
         FROM verification_evidence
@@ -32,9 +33,6 @@ export async function runHarnessVerification(taskId: string, storyIndex: number,
           : '当前规格没有确定性命令步骤，由后续语义验证覆盖。',
       };
     }
-    if (existing) {
-      db.prepare("UPDATE verification_runs SET status = 'error', finished_at = CURRENT_TIMESTAMP WHERE verification_id = ?").run(existing.verification_id);
-    }
   }
   const row = db.prepare(`
     SELECT revision, spec_json
@@ -45,11 +43,25 @@ export async function runHarnessVerification(taskId: string, storyIndex: number,
   if (!row) throw new Error(`交付单元 ${storyIndex} 缺少 resolved Slice Spec`);
   const spec = sliceSpecSchema.parse(JSON.parse(row.spec_json));
   const commandSteps = spec.verificationPlan.filter((step) => step.kind === 'command');
-  const verificationId = randomUUID();
-  db.prepare(`
-    INSERT INTO verification_runs(verification_id, task_id, story_index, spec_revision, code_commit, status, execution_id)
-    VALUES(?, ?, ?, ?, ?, 'running', ?)
-  `).run(verificationId, taskId, storyIndex, row.revision, codeCommit || null, executionId || null);
+  const verificationId = existing?.verification_id ?? randomUUID();
+  db.transaction(() => {
+    if (existing) {
+      // execution_id is unique by design: interrupted attempts resume their original
+      // verification run instead of creating a second row for the same execution.
+      db.prepare('DELETE FROM verification_evidence WHERE verification_id = ?').run(verificationId);
+      db.prepare(`
+        UPDATE verification_runs
+        SET task_id = ?, story_index = ?, spec_revision = ?, code_commit = ?,
+            status = 'running', started_at = CURRENT_TIMESTAMP, finished_at = NULL
+        WHERE verification_id = ?
+      `).run(taskId, storyIndex, row.revision, codeCommit || null, verificationId);
+      return;
+    }
+    db.prepare(`
+      INSERT INTO verification_runs(verification_id, task_id, story_index, spec_revision, code_commit, status, execution_id)
+      VALUES(?, ?, ?, ?, ?, 'running', ?)
+    `).run(verificationId, taskId, storyIndex, row.revision, codeCommit || null, executionId || null);
+  })();
 
   let passed = true;
   const summaries: string[] = [];

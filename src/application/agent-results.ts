@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { parseAgentResult, type AgentResult } from '../domain/agent-result';
+import { assertAgentResultRoleContract, parseAgentResult, type AgentResult } from '../domain/agent-result';
 import type { Actor } from '../domain/task';
 import { databaseConnection } from '../infrastructure/database';
 import {
@@ -217,6 +217,10 @@ export async function blockDelegation(delegation: DelegationEnvelope, reason: st
 type ApplyOutcome = 'advanced' | 'blocked' | 'rewound';
 
 async function applyResultEffects(delegation: DelegationEnvelope, result: AgentResult, sourceResultId?: string, sourceExecutionId?: string): Promise<ApplyOutcome> {
+  // The submission CLI runs this same static role contract so the Agent can
+  // correct a rejected receipt before exiting. Application keeps the check as
+  // a trust-boundary defense for legacy final-text and recovered results.
+  assertAgentResultRoleContract(result, delegation.agent);
   await ensureCodeSlotForDelegation(delegation, result);
   const artifactDocumentId = await saveArtifact(delegation, result);
 

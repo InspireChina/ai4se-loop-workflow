@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { omitNullObjectProperties } from './schema-normalization';
 
 const artifactSchema = z.object({
   title: z.string().min(1).max(240),
@@ -29,7 +30,12 @@ const runtimeInputSchema = z.object({
 
 const deliveryUnitSchema = z.object({ title: z.string().min(1).max(200) });
 
-export const sliceSpecSchema = z.object({
+const verificationStepBase = {
+  criterionId: z.string().min(1).max(120),
+  instruction: z.string().min(1).max(4000),
+};
+
+export const sliceSpecSchema = z.preprocess(omitNullObjectProperties, z.object({
   goal: z.string().min(1).max(4000),
   scope: z.object({
     included: z.array(z.string().min(1).max(2000)).min(1).max(100),
@@ -54,20 +60,31 @@ export const sliceSpecSchema = z.object({
     description: z.string().min(1).max(4000),
     oracle: z.string().min(1).max(4000),
   })).min(1).max(100),
-  verificationPlan: z.array(z.object({
-    criterionId: z.string().min(1).max(120),
-    kind: z.enum(['command', 'browser', 'inspection']),
-    instruction: z.string().min(1).max(4000),
-    command: z.string().min(1).max(2000).optional(),
-  })).min(1).max(100),
+  verificationPlan: z.array(z.discriminatedUnion('kind', [
+    z.object({
+      ...verificationStepBase,
+      kind: z.literal('command'),
+      command: z.string().min(1).max(2000),
+    }),
+    z.object({
+      ...verificationStepBase,
+      kind: z.literal('browser'),
+      command: z.string().min(1).max(2000).optional(),
+    }),
+    z.object({
+      ...verificationStepBase,
+      kind: z.literal('inspection'),
+      command: z.string().min(1).max(2000).optional(),
+    }),
+  ])).min(1).max(100),
   dependencies: z.array(z.string().min(1).max(1000)).max(100).default([]),
   changeBudget: z.object({
-    capabilities: z.array(z.string().min(1).max(500)).min(1).max(100),
+    capabilities: z.array(z.string().min(1).max(500)).max(100).default([]),
     paths: z.array(z.string().min(1).max(1000)).max(200).default([]),
   }),
-});
+}));
 
-export const agentResultSchema = z.object({
+export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object({
   outcome: z.enum(['completed', 'needs_input', 'failed']),
   summary: z.string().min(1).max(4000),
   artifact: artifactSchema.optional(),
@@ -89,7 +106,7 @@ export const agentResultSchema = z.object({
     passed: z.boolean(),
     summary: z.string().max(4000).optional().default(''),
   })).max(100).optional(),
-}).transform((result) => {
+})).transform((result) => {
   const deliveryUnits = result.deliveryUnits || result.stories;
   const rewindDeliveryUnit = result.rewindDeliveryUnit || result.rewindStory;
   const verdict = result.verdict === 'ready_for_approval' ? 'report_ready' as const : result.verdict;
@@ -102,6 +119,48 @@ export const agentResultSchema = z.object({
 });
 
 export type AgentResult = z.infer<typeof agentResultSchema>;
+
+export function assertAgentResultRoleContract(result: AgentResult, agent: string) {
+  if (result.questions.length && agent !== 'analyst-agent') {
+    throw new Error(`${agent} 不允许创建产品澄清问题；运行所需信息请使用 runtimeInputs`);
+  }
+  if (result.questions.length && result.runtimeInputs.length) throw new Error('同一次结果不能混合产品澄清问题和运行信息请求');
+  if (result.runtimeInputs.length) {
+    if (result.outcome !== 'needs_input') throw new Error('包含 runtimeInputs 时 outcome 必须为 needs_input');
+    return;
+  }
+  if (result.outcome !== 'completed' && !(agent === 'analyst-agent' && result.questions.length)) return;
+
+  switch (agent) {
+    case 'backlog-agent':
+      if (!result.classification || !result.route) throw new Error('backlog-agent 结果缺少 classification 或 route');
+      break;
+    case 'story-splitter-agent':
+      if (!result.deliveryUnits?.length) throw new Error('交付规划 Agent 结果缺少 deliveryUnits');
+      break;
+    case 'analyst-agent':
+      if (!result.artifact) throw new Error('analyst-agent 结果缺少 artifact');
+      if (!result.spec) throw new Error('方案分析 Agent 结果缺少结构化 Slice Spec');
+      if (result.questions.length && !result.spec.ambiguities.length) throw new Error('方案分析 Agent 提问时必须在 Slice Spec 中列出对应歧义');
+      break;
+    case 'repro-agent':
+      if (!result.artifact) throw new Error('repro-agent 结果缺少 artifact');
+      if (result.route !== 'plan') throw new Error('repro-agent 完成后必须 route=plan');
+      break;
+    case 'test-agent':
+      if (!result.verdict) throw new Error('验证 Agent 结果缺少 verdict');
+      break;
+    case 'review-agent':
+      if (!result.artifact) throw new Error('review-agent 结果缺少 artifact');
+      if (result.verdict === 'changes_requested') {
+        if (!result.rewindTo) throw new Error('Review Agent 请求修改时必须提供 rewindTo');
+        if (result.rewindTo !== 'plan' && !result.rewindDeliveryUnit) throw new Error('Review Agent 回退单元阶段时必须提供 rewindDeliveryUnit');
+      } else if (result.verdict !== 'report_ready') {
+        throw new Error('Review Agent 必须返回 verdict=report_ready 或 changes_requested');
+      }
+      break;
+  }
+}
 
 function extractJsonObjects(text: string) {
   const objects: string[] = [];

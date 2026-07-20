@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { omitNullObjectProperties } from './schema-normalization';
 
 export const evolutionObservationSchema = z.object({
   fingerprint: z.string().regex(/^[a-z0-9][a-z0-9-]{2,119}$/),
@@ -11,10 +12,10 @@ export const evolutionObservationSchema = z.object({
   evidenceCommentIds: z.array(z.string().uuid()).max(20).default([]),
 });
 
-export const evolutionResultSchema = z.object({
+export const evolutionResultSchema = z.preprocess(omitNullObjectProperties, z.object({
   summary: z.string().min(1).max(1000),
   observations: z.array(evolutionObservationSchema).max(5).default([]),
-});
+}));
 
 export type EvolutionResult = z.infer<typeof evolutionResultSchema>;
 

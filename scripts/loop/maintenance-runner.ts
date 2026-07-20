@@ -10,7 +10,7 @@ import {
   type SoftwareMaintenanceJob,
 } from '../../src/application/software-maintenance';
 import { recordRuntimeEvent, recordRuntimeException } from '../../src/application/runtime-events';
-import { getAgentExecutorSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
+import { agentExecutionOptions, getAgentExecutorSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
 import { parseSoftwareMaintenanceResult } from '../../src/domain/software-maintenance';
 import { databaseConnection, paths } from '../../src/infrastructure/database';
 import { getAgentExecutor } from '../../src/infrastructure/agent-executor';
@@ -100,10 +100,7 @@ async function processJob(job: SoftwareMaintenanceJob) {
   await updateSoftwareMaintenanceJob(job.job_id, { workspacePath: worktree, branchName: branch });
   const settings = await getAgentExecutorSettings();
   const executor = getAgentExecutor(settings.executorId);
-  const executionOptions = settings.executorId === 'codex' ? {
-    model: settings.codexModel || undefined,
-    reasoningEffort: settings.codexReasoningEffort === 'default' ? undefined : settings.codexReasoningEffort,
-  } : {};
+  const executionOptions = agentExecutionOptions(settings);
   const prompt = buildSoftwareMaintenancePrompt(job, evidence);
   const mainSnapshot = mainRepositorySnapshot();
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });

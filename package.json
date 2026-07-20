@@ -7,7 +7,7 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "test": "tsx --test src/**/*.test.ts",
+    "test": "tsx --test --import ./src/test/setup.ts src/**/*.test.ts",
     "db:migrate": "tsx scripts/migrate.ts",
     "loopctl": "tsx scripts/loop/loopctl.ts"
   },

@@ -16,11 +16,12 @@ export function createAgentResultChannel(kind: AgentResultKind): AgentResultChan
   return { directory, resultPath: join(directory, 'submitted-result.json'), kind };
 }
 
-export function agentResultChannelEnv(channel: AgentResultChannel) {
+export function agentResultChannelEnv(channel: AgentResultChannel, agent?: string) {
   return {
     LOOP_AGENT_RESULT_PATH: channel.resultPath,
     LOOP_AGENT_RESULT_PROTOCOL: agentResultProtocol,
     LOOP_AGENT_RESULT_KIND: channel.kind,
+    ...(agent ? { LOOP_AGENT_RESULT_AGENT: agent } : {}),
   };
 }
 

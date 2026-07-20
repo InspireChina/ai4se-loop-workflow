@@ -3,6 +3,7 @@ import { realpathSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { AGENT_EXECUTORS, type AgentExecutorId } from '../domain/agent-executor';
+import type { AgentExecutionOptions } from '../infrastructure/agent-executor';
 import { databaseConnection, setConfiguredWorkspaceRoot } from '../infrastructure/database';
 
 export const AGENT_EXECUTOR_OPTIONS: ReadonlyArray<{
@@ -26,8 +27,10 @@ export const CODEX_MODEL_OPTIONS = [
 ] as const;
 export type CodexModel = typeof CODEX_MODEL_OPTIONS[number]['id'];
 export const DEFAULT_CODEX_MODEL: CodexModel = 'gpt-5.6-sol';
+export const DEFAULT_CLAUDE_MODEL = '';
 const codexModelSchema = z.enum(CODEX_MODEL_OPTIONS.map((option) => option.id) as [CodexModel, ...CodexModel[]]);
 const codexReasoningEffortSchema = z.enum(CODEX_REASONING_EFFORTS);
+const claudeModelSchema = z.string().trim().max(200, 'Claude 模型名称不能超过 200 个字符').regex(/^[^\u0000-\u001f\u007f]*$/, 'Claude 模型名称包含无效控制字符');
 const langfuseSampleRateSchema = z.coerce.number().min(0, '采样率不能小于 0').max(1, '采样率不能大于 1');
 
 const LANGFUSE_SETTING_KEYS = [
@@ -43,6 +46,7 @@ export type AgentExecutorSettings = {
   executorId: AgentExecutorId;
   codexModel: CodexModel;
   codexReasoningEffort: CodexReasoningEffort;
+  claudeModel: string;
 };
 
 export type LangfuseSettings = {
@@ -110,35 +114,48 @@ export async function getAgentExecutorId(): Promise<AgentExecutorId> {
 }
 
 export async function getAgentExecutorSettings(): Promise<AgentExecutorSettings> {
-  const settings = await readProjectSettings(['agent_executor', 'codex_model', 'codex_reasoning_effort']);
+  const settings = await readProjectSettings(['agent_executor', 'codex_model', 'codex_reasoning_effort', 'claude_model']);
   const executor = executorSchema.safeParse(settings.agent_executor);
   const model = codexModelSchema.safeParse(settings.codex_model);
   const effort = codexReasoningEffortSchema.safeParse(settings.codex_reasoning_effort);
+  const claudeModel = claudeModelSchema.safeParse(settings.claude_model ?? DEFAULT_CLAUDE_MODEL);
   return {
     executorId: executor.success ? executor.data : 'cursor',
     codexModel: model.success ? model.data : DEFAULT_CODEX_MODEL,
     codexReasoningEffort: effort.success ? effort.data : 'default',
+    claudeModel: claudeModel.success ? claudeModel.data : DEFAULT_CLAUDE_MODEL,
   };
 }
 
-export async function setAgentExecutorSettings(input: { executorId: unknown; codexModel?: unknown; codexReasoningEffort?: unknown }) {
+export async function setAgentExecutorSettings(input: { executorId: unknown; codexModel?: unknown; codexReasoningEffort?: unknown; claudeModel?: unknown }) {
   const executorId = executorSchema.parse(input.executorId);
   const codexModel = codexModelSchema.parse(input.codexModel ?? DEFAULT_CODEX_MODEL);
   const codexReasoningEffort = codexReasoningEffortSchema.parse(input.codexReasoningEffort ?? 'default');
+  const claudeModel = claudeModelSchema.parse(input.claudeModel ?? DEFAULT_CLAUDE_MODEL);
   const db = await databaseConnection();
   const upsert = db.prepare(`INSERT INTO project_settings(setting_key, setting_value) VALUES(?, ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP`);
   db.transaction(() => {
     upsert.run('agent_executor', executorId);
     upsert.run('codex_model', codexModel);
     upsert.run('codex_reasoning_effort', codexReasoningEffort);
+    upsert.run('claude_model', claudeModel);
   })();
   try { revalidatePath('/settings'); } catch { /* CLI usage has no request context. */ }
-  return { executorId, codexModel, codexReasoningEffort };
+  return { executorId, codexModel, codexReasoningEffort, claudeModel };
 }
 
 export async function setAgentExecutorId(input: unknown) {
   const current = await getAgentExecutorSettings();
   return setAgentExecutorSettings({ ...current, executorId: input });
+}
+
+export function agentExecutionOptions(settings: AgentExecutorSettings): AgentExecutionOptions {
+  if (settings.executorId === 'codex') return {
+    model: settings.codexModel || undefined,
+    reasoningEffort: settings.codexReasoningEffort === 'default' ? undefined : settings.codexReasoningEffort,
+  };
+  if (settings.executorId === 'claude') return settings.claudeModel ? { model: settings.claudeModel } : {};
+  return {};
 }
 
 export async function getLangfuseSettings(): Promise<LangfuseSettings> {

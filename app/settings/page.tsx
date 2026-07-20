@@ -46,6 +46,16 @@ export default async function SettingsPage() {
         </div>
         <small className="muted">可选值：minimal、low、medium、high、xhigh。部分模型不支持所有强度。</small>
       </fieldset>
+      <fieldset className="claude-settings">
+        <legend>Claude 执行参数</legend>
+        <p className="muted">仅在选择 Claude 执行器时生效。可以使用 Claude CLI 支持的别名或完整模型 ID。</p>
+        <div className="fields">
+          <label>模型
+            <input name="claudeModel" defaultValue={settings.claudeModel} placeholder="例如 sonnet、opus 或完整模型 ID" spellCheck={false}/>
+            <small className="muted">留空时跟随 Claude CLI 的默认模型。</small>
+          </label>
+        </div>
+      </fieldset>
       <button className="button" type="submit">保存设置</button>
     </form>
     <form action={saveLangfuseSettingsAction} className="card settings">

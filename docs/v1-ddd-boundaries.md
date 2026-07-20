@@ -121,7 +121,7 @@ Maintenance Agent 的结论不是事实。Git status 决定实际变更，test/b
 
 ### 2.9 项目配置（Project Configuration）
 
-用户只配置工作区根目录和 Agent 执行器。工作区短 hash、应用数据目录和 SQLite 路径对普通用户不可见。
+用户只配置工作区根目录、Agent 执行器及其可选模型参数：Codex 模型/思考强度或 Claude 模型。工作区短 hash、应用数据目录和 SQLite 路径对普通用户不可见。
 
 当前工作区根目录存入应用级 `data/loopwork.db`；每个工作区的需求、文档、确认事项、Loop 运行和执行器设置存入独立项目数据库。切换工作区前必须确认当前项目没有活跃 Loop 运行。
 

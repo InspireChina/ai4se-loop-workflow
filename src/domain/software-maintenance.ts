@@ -1,6 +1,7 @@
 import { z } from 'zod';
+import { omitNullObjectProperties } from './schema-normalization';
 
-export const softwareMaintenanceResultSchema = z.object({
+export const softwareMaintenanceResultSchema = z.preprocess(omitNullObjectProperties, z.object({
   outcome: z.enum(['no_issue', 'fixed', 'not_repairable']),
   fingerprint: z.string().regex(/^[a-z0-9][a-z0-9-]{2,119}$/),
   classification: z.enum(['loop_bug', 'executor_issue', 'target_repo_issue', 'expected_failure', 'insufficient_evidence']),
@@ -14,7 +15,7 @@ export const softwareMaintenanceResultSchema = z.object({
     summary: z.string().max(1000),
   })).max(20).default([]),
   followUp: z.string().max(2000).default(''),
-});
+}));
 
 export type SoftwareMaintenanceResult = z.infer<typeof softwareMaintenanceResultSchema>;
 

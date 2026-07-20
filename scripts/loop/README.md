@@ -16,7 +16,7 @@ npm run loopctl -- paths
 
 Loop 生命周期、推进步骤和结束运行只由 Web App 与内部 Runner 管理。Runner 每次只启动一个 Agent，注入完整需求上下文并接收结构化 JSON；正常 Agent 不调用本 CLI。单个 Agent 仍可在当前执行步骤内使用辅助 subagent 收集上下文。
 
-Runner 启动 execution 前会初始化项目隔离的 `data/<repo-hash>/agent-runtime`，从中加载当前 Agent 的 `PROMPT.md`、`MEMORY.md` 和最近 daily memory，并把版本/哈希写入 execution attempt。流程 Agent、Evolution Evaluator 和 Software Maintenance Agent 的每个 execution 都会获得私有临时结果通道；Agent 使用 Prompt 中给出的 `submit-agent-result --input <result.json>` 命令提交对应类型的 Result Receipt，Runner 校验和持久化后再推进，最终文本 JSON 仅作兼容 fallback。执行结束后的 Evolution Evaluator 是非阻塞旁路：它只能记录观察或产生受 Canary 约束的 Prompt candidate，不能调度流程、绕过 Harness 或要求人工 Approval。
+Runner 启动 execution 前会初始化项目隔离的 `data/<repo-hash>/agent-runtime`，从中加载当前 Agent 的 `PROMPT.md`、`MEMORY.md` 和最近 daily memory，并把版本/哈希写入 execution attempt。流程 Agent、Evolution Evaluator 和 Software Maintenance Agent 的每个 execution 都会获得私有临时结果通道；Agent 使用 Prompt 中给出的 `submit-agent-result --input <result.json>` 命令提交对应类型的 Result Receipt。提交命令同步执行完整 Schema 和静态角色契约校验，失败时保留输入供 Agent 修正重提；成功后 Runner 防御性复验并持久化，最终文本 JSON 仅作兼容 fallback。执行结束后的 Evolution Evaluator 是非阻塞旁路：它只能记录观察或产生受 Canary 约束的 Prompt candidate，不能调度流程、绕过 Harness 或要求人工 Approval。
 
 `agent-runner.ts` 的顶层 `finally` 会把本 execution 的结构化日志游标写入 `software_maintenance_jobs`，然后 best-effort 唤醒独立 `maintenance-runner.ts`。finally 不直接调用模型或修改代码。Maintenance Runner 在应用仓库的隔离 Git worktree 内分析 Loop Engineering 自身问题，通过变更预算、保护路径、`npm test`、`npm run build` 和 clean-baseline 检查后才能自动 cherry-pick；失败不会阻塞主 Loop。
 

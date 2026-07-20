@@ -1,11 +1,24 @@
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, readdirSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { isAbsolute, dirname, join, relative, resolve } from 'node:path';
 import { Umzug } from 'umzug';
 
-const appRoot = process.env.LOOP_APP_ROOT ? resolve(process.env.LOOP_APP_ROOT) : process.cwd();
-const dataRoot = join(appRoot, 'data');
+const repositoryRoot = process.cwd();
+const isTestProcess = process.env.LOOP_TEST === '1'
+  || Boolean(process.env.NODE_TEST_CONTEXT)
+  || process.argv.some((argument) => /(?:^|[/\\])[^/\\]+\.test\.[cm]?[jt]sx?$/.test(argument));
+const appRoot = process.env.LOOP_APP_ROOT ? resolve(process.env.LOOP_APP_ROOT) : repositoryRoot;
+const dataRoot = process.env.LOOP_DATA_ROOT ? resolve(process.env.LOOP_DATA_ROOT) : join(appRoot, 'data');
+if (isTestProcess) {
+  if (process.env.LOOP_TEST_SETUP_PID !== String(process.pid) || !process.env.LOOP_DATA_ROOT || !process.env.LOOP_WORKSPACE_ROOT_OVERRIDE) {
+    throw new Error('数据库测试隔离未初始化；请通过 npm test 运行测试');
+  }
+  const relation = relative(repositoryRoot, dataRoot);
+  if (!relation || (!relation.startsWith('..') && !isAbsolute(relation))) {
+    throw new Error(`数据库测试禁止使用仓库内数据路径：${dataRoot}`);
+  }
+}
 const appDbPath = join(dataRoot, 'loopwork.db');
 let appDb: Database.Database | undefined;
 const workspaceDatabases = new Map<string, Database.Database>();

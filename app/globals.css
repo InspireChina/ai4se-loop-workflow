@@ -162,10 +162,12 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .settings-section-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:start}
 .settings-section-head .badge{align-self:center}
 .settings code{background:#eef3ff;color:var(--blue);border-radius:5px;padding:1px 5px}
-.codex-settings{border-top:1px solid var(--line);padding-top:16px;margin-top:4px}
-.codex-settings>small{display:block;margin-top:8px}
+.codex-settings,.claude-settings{border-top:1px solid var(--line);padding-top:16px;margin-top:4px}
+.codex-settings>small,.claude-settings>small{display:block;margin-top:8px}
 .settings:has(input[name="agentExecutor"][value="cursor"]:checked) .codex-settings,
 .settings:has(input[name="agentExecutor"][value="claude"]:checked) .codex-settings{display:none}
+.settings:has(input[name="agentExecutor"][value="cursor"]:checked) .claude-settings,
+.settings:has(input[name="agentExecutor"][value="codex"]:checked) .claude-settings{display:none}
 .workspace-switch{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}
 .workspace-switch label{min-width:0}
 .settings>.button{justify-self:start}

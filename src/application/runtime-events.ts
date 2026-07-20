@@ -38,8 +38,8 @@ export function clearRuntimeEventContext() {
 }
 
 function inferSeverity(message: string): RuntimeEventSeverity {
-  if (/\[(?:执行器错误|错误|致命)\]|\b(?:fatal|panic)\b/i.test(message)) return 'ERROR';
-  if (/\[(?:警告)\]|失败|\b(?:fail|failed|warn|warning|timeout|timed out)\b/i.test(message)) return 'WARN';
+  if (message.startsWith('[执行器错误]') || message.startsWith('[错误]') || message.startsWith('[致命]')) return 'ERROR';
+  if (message.startsWith('[执行器警告]') || message.startsWith('[警告]')) return 'WARN';
   return 'INFO';
 }
 

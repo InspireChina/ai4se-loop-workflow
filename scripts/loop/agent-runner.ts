@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
 import { join } from 'node:path';
-import { getAgentExecutorSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
+import { agentExecutionOptions, getAgentExecutorSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
 import { enqueueSoftwareMaintenance } from '../../src/application/software-maintenance';
 import { clearRuntimeEventContext, recordRuntimeEvent, recordRuntimeException, setRuntimeEventContext } from '../../src/application/runtime-events';
 import { loadAgentRuntime } from '../../src/application/agent-profiles';
@@ -157,6 +157,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     '# Result Submission Contract',
     '完成当前步骤后，把结果写入一个临时 JSON 文件，再调用下面的专用命令提交。Runner 只把提交内容作为状态机输入；你的普通最终回复可以简短说明已经提交，不需要重复 JSON。',
     `提交命令：node ${JSON.stringify(join(paths.appRoot, 'scripts', 'loop', 'submit-agent-result.mjs'))} --input <temporary-result-json-path> --consume`,
+    '提交命令会同步执行完整结构和角色契约校验。若命令返回非零退出码，必须根据错误修正临时 JSON 并重新提交；只有看到 Agent result submitted successfully 才算提交完成。',
     '只把 --consume 用于你为本次提交创建的临时 JSON；提交成功后命令会删除该文件。不要直接写 LOOP_AGENT_RESULT_PATH，也不要通过数据库或 loopctl 提交结果。若执行环境确实无法调用提交命令，才在最终回复中输出同一 JSON 对象作为兼容 fallback。',
     '结果 JSON 结构如下；不属于当前角色的字段可以省略：',
     JSON.stringify({
@@ -178,7 +179,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
         decisions: [{ key: '决策键', decision: '已确定结论', rationale: '依据', source: 'code | user | convention | safe_default' }],
         ambiguities: [],
         acceptanceCriteria: [{ id: 'AC-1', description: '可验收条件', oracle: '如何客观判断' }],
-        verificationPlan: [{ criterionId: 'AC-1', kind: 'command | browser | inspection', instruction: '验证步骤', command: '可选命令' }],
+        verificationPlan: [{ criterionId: 'AC-1', kind: 'command | browser | inspection', instruction: '验证步骤', command: 'kind=command 时必填；其他类型省略或填 null' }],
         dependencies: [],
         changeBudget: { capabilities: ['允许改变的能力'], paths: ['允许影响的路径'] },
       } : undefined,
@@ -352,10 +353,7 @@ async function handleExecutionFailure(attempt: ExecutionAttempt, delegation: Del
 async function main() {
   const settings = await getAgentExecutorSettings();
   const executor = getAgentExecutor(settings.executorId);
-  const executionOptions = settings.executorId === 'codex' ? {
-    model: settings.codexModel || undefined,
-    reasoningEffort: settings.codexReasoningEffort === 'default' ? undefined : settings.codexReasoningEffort,
-  } : {};
+  const executionOptions = agentExecutionOptions(settings);
   const staleCount = await reconcileStaleExecutions();
   if (staleCount) await appendLoopRunLog(runId, `[恢复] 已回收 ${staleCount} 个失去租约且尚无输出的 execution attempt`);
   const recoverable = await recoverNextExecutionAttempt();

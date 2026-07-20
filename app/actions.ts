@@ -111,6 +111,7 @@ export async function saveAgentExecutorAction(formData: FormData) {
     executorId: formData.get('agentExecutor'),
     codexModel: formData.get('codexModel'),
     codexReasoningEffort: formData.get('codexReasoningEffort'),
+    claudeModel: formData.get('claudeModel'),
   });
   redirect('/settings');
 }

@@ -1,18 +1,9 @@
 import assert from 'node:assert/strict';
-import { cpSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
 test('updates an existing task-level document instead of inserting a duplicate NULL-story row', async () => {
-  const appRoot = mkdtempSync(join(tmpdir(), 'loopwork-app-'));
-  const workspaceRoot = join(appRoot, 'workspace');
-  mkdirSync(workspaceRoot);
-  cpSync(join(process.cwd(), 'migrations'), join(appRoot, 'migrations'), { recursive: true });
-  cpSync(join(process.cwd(), 'app-migrations'), join(appRoot, 'app-migrations'), { recursive: true });
-  process.env.LOOP_APP_ROOT = appRoot;
-  process.env.LOOP_WORKSPACE_ROOT_OVERRIDE = workspaceRoot;
-
   const { databaseConnection } = await import('../infrastructure/database');
   const { listDocuments, upsertDocument } = await import('./tasks');
   const db = await databaseConnection();
@@ -574,10 +565,42 @@ test('versions Slice Specs, advances Dev without requiring a commit, and stores 
   const repeated = await runHarnessVerification(taskId, 1, undefined, 'test-execution-spec');
   assert.equal(repeated.verificationId, outcome.verificationId);
 
+  db.prepare(`
+    INSERT INTO verification_runs(
+      verification_id, task_id, story_index, spec_revision, status, execution_id
+    ) VALUES('verification-interrupted', ?, 1, 2, 'running', 'test-execution-interrupted')
+  `).run(taskId);
+  db.prepare(`
+    INSERT INTO verification_evidence(
+      evidence_id, verification_id, criterion_id, kind, instruction,
+      command, exit_code, output_summary, passed
+    ) VALUES(
+      'evidence-interrupted', 'verification-interrupted', 'STALE', 'command',
+      'Partial evidence from the interrupted run', 'exit 1', 1, 'stale', 0
+    )
+  `).run();
+
+  const resumed = await runHarnessVerification(taskId, 1, undefined, 'test-execution-interrupted');
+  assert.equal(resumed.verificationId, 'verification-interrupted');
+  assert.equal(resumed.passed, true);
+  const resumedRuns = db.prepare(`
+    SELECT verification_id, status
+    FROM verification_runs
+    WHERE execution_id = 'test-execution-interrupted'
+  `).all() as { verification_id: string; status: string }[];
+  assert.deepEqual(resumedRuns, [{ verification_id: 'verification-interrupted', status: 'passed' }]);
+  const resumedEvidence = db.prepare(`
+    SELECT criterion_id, passed
+    FROM verification_evidence
+    WHERE verification_id = 'verification-interrupted'
+    ORDER BY created_at, evidence_id
+  `).all() as { criterion_id: string; passed: number }[];
+  assert.deepEqual(resumedEvidence, [{ criterion_id: 'AC-1', passed: 1 }]);
+
   const detail = await getTask(taskId);
   assert.deepEqual(detail?.storySpecs.map((item) => [item.revision, item.status]), [[1, 'superseded'], [2, 'resolved']]);
   assert.equal(detail?.questions.find((item) => item.question_id === questionId)?.status, 'resolved');
-  assert.equal(detail?.verificationRuns.length, 1);
+  assert.equal(detail?.verificationRuns.length, 2);
   assert.equal(detail?.verificationEvidence[0]?.criterion_id, 'AC-1');
   assert.equal(detail?.verificationEvidence[0]?.passed, 1);
   assert.equal(detail?.verificationRuns[0]?.code_commit, null);
