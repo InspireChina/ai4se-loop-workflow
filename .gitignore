@@ -16,6 +16,9 @@ __pycache__/
 # operating system files
 .DS_Store
 
+# editor metadata
+.idea/
+
 # local environment
 .env
 .env.local
