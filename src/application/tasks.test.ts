@@ -36,8 +36,8 @@ test('updates an existing task-level document instead of inserting a duplicate N
 
 });
 
-test('anchors file comments to document revisions and supplies them to Agent evolution', async () => {
-  const { addDocumentComment, createTask, getTask, resolveDocumentComment, upsertDocument } = await import('./tasks');
+test('anchors verified file feedback to document revisions and supplies it to Agent evolution', async () => {
+  const { addDocumentComment, applyFeedbackTriage, applyFeedbackVerification, createTask, getTask, upsertDocument } = await import('./tasks');
   const { applyEvolutionResult, beginEvolutionRun } = await import('./agent-evolution');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -72,7 +72,18 @@ test('anchors file comments to document revisions and supplies them to Agent evo
   assert.equal(detail?.documentComments[0].quoted_text, 'needs a clearer boundary');
   assert.equal(detail?.documentComments[0].status, 'open');
 
-  await resolveDocumentComment({ taskId, commentId });
+  await applyFeedbackTriage(taskId, {
+    commentId,
+    disposition: 'learning_only',
+    reason: 'The report was already updated; preserve the convention as learning evidence.',
+    acceptance: [],
+  });
+  await applyFeedbackVerification(taskId, {
+    commentId,
+    verdict: 'resolved',
+    reason: 'Revision 2 states the boundary explicitly.',
+    evidence: ['Review report revision 2 contains an explicit boundary statement.'],
+  });
   db.prepare(`
     INSERT INTO execution_attempts(
       execution_id, run_id, task_id, agent, pipeline, delegation_key,
@@ -300,7 +311,7 @@ test('acknowledges the current review report as read without an approval decisio
   await assert.rejects(() => acknowledgeClosure({ taskId, reviewRevision: 1 }), /没有等待阅读/);
 });
 
-test('requires Review to consume closure comments and asks the user to confirm the revised report', async () => {
+test('routes closure feedback through triage, implementation, testing, and independent verification', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { parseAgentResult } = await import('../domain/agent-result');
   const {
@@ -308,8 +319,6 @@ test('requires Review to consume closure comments and asks the user to confirm t
     addDocumentComment,
     getTask,
     pipelineForTask,
-    resolveDocumentComment,
-    submitClosureFeedback,
   } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -340,20 +349,29 @@ test('requires Review to consume closure comments and asks the user to confirm t
 
   await assert.rejects(
     () => acknowledgeClosure({ taskId, reviewRevision: 1 }),
-    /还有 1 条未处理评论/,
+    /还有 1 条修改请求尚未通过反馈闭环验证/,
   );
-  await assert.rejects(
-    () => resolveDocumentComment({ taskId, commentId }),
-    /必须提交给 Review Agent 处理/,
-  );
-  await submitClosureFeedback(taskId);
+  const feedbackDelegation = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
+  assert.equal(feedbackDelegation.agent, 'feedback-agent');
+  assert.equal(feedbackDelegation.pipeline, 'feedback-triage');
+  await applyAgentResult('run-feedback-triage', feedbackDelegation, parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: '评论指出实现兼容性缺陷，应回退开发阶段。',
+    feedback: {
+      mode: 'triage',
+      commentId,
+      disposition: 'rewind',
+      targetStage: 'dev',
+      targetAgent: 'dev-agent',
+      targetDeliveryUnit: 1,
+      reason: '旧接口行为属于实现兼容性问题。',
+      acceptance: ['旧接口恢复可用', '兼容性回归测试通过'],
+    },
+  })));
   let detail = await getTask(taskId);
-  assert.equal(detail?.task.agile_status, 'in review');
-  assert.equal(detail?.task.current_subagent, 'review-agent');
-  assert.equal(detail?.task.run_state, 'runnable');
-  assert.equal(detail?.task.review_revision, 1);
-  assert.equal(detail?.task.review_document_id, null);
-  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'review-agent');
+  assert.equal(detail?.task.agile_status, 'in dev');
+  assert.equal(detail?.task.current_subagent, 'dev-agent');
+  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.feedback_status, 'in_progress');
 
   const delegation = {
     taskId,
@@ -388,26 +406,6 @@ test('requires Review to consume closure comments and asks the user to confirm t
     evidence: '',
     risk: '',
   };
-  await applyAgentResult('run-closure-feedback', delegation, parseAgentResult(JSON.stringify({
-    outcome: 'completed',
-    summary: '用户评论揭示兼容性实现缺陷，需要回到开发阶段修复。',
-    artifact: {
-      title: '结卡评论处理与回流',
-      content: '评论指出旧接口不可用；现有实现证据确认需要回到开发阶段修复交付单元 1。',
-    },
-    verdict: 'changes_requested',
-    rewindTo: 'dev',
-    rewindDeliveryUnit: 1,
-  })));
-
-  detail = await getTask(taskId);
-  assert.equal(detail?.task.agile_status, 'in dev');
-  assert.equal(detail?.task.current_subagent, 'dev-agent');
-  assert.equal(detail?.task.dev_index, 0);
-  assert.equal(detail?.task.test_index, 0);
-  assert.equal(detail?.task.review_revision, 1);
-  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.status, 'open');
-
   await applyAgentResult('run-closure-feedback-dev', {
     ...delegation,
     pipeline: 'dev',
@@ -423,6 +421,7 @@ test('requires Review to consume closure comments and asks the user to confirm t
     summary: '已恢复旧接口兼容性。',
     changedFiles: ['src/compatibility.ts'],
     tests: [{ command: 'npm test', passed: true }],
+    feedbackResolutions: [{ commentId, summary: '已恢复旧接口兼容性。', evidence: ['src/compatibility.ts'] }],
   })));
   await applyAgentResult('run-closure-feedback-test', {
     ...delegation,
@@ -444,6 +443,22 @@ test('requires Review to consume closure comments and asks the user to confirm t
   detail = await getTask(taskId);
   assert.equal(detail?.task.agile_status, 'in review');
   assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.status, 'open');
+  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.feedback_status, 'verifying');
+
+  const verifyDelegation = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
+  assert.equal(verifyDelegation.agent, 'feedback-agent');
+  assert.equal(verifyDelegation.pipeline, 'feedback-verify');
+  await applyAgentResult('run-feedback-verify', verifyDelegation, parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: '兼容性反馈已经处理并通过验证。',
+    feedback: {
+      mode: 'verify',
+      commentId,
+      verdict: 'resolved',
+      reason: '实现已修复且兼容性回归验证通过。',
+      evidence: ['src/compatibility.ts', 'npm test passed'],
+    },
+  })));
 
   await applyAgentResult('run-closure-feedback-review-v2', {
     ...delegation,
@@ -466,6 +481,7 @@ test('requires Review to consume closure comments and asks the user to confirm t
   assert.equal(detail?.task.review_revision, 2);
   assert.notEqual(detail?.task.review_document_id, documentId);
   assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.status, 'resolved');
+  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.feedback_status, 'resolved');
   assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.evolution_status, 'pending');
   assert.equal(detail?.closureAcknowledgements.length, 0);
 
@@ -799,7 +815,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 6);
+  assert.equal(original.profile.prompt_seed_revision, 7);
   assert.ok(original.currentPrompt.content.length > 800);
   assert.match(original.currentPrompt.content, /# 角色目标/);
   assert.match(original.currentPrompt.content, /# 完成条件/);
@@ -817,7 +833,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
   await ensureAgentRuntimeWorkspace();
   const upgradedSeed = await getAgentProfile('backlog-agent');
-  assert.equal(upgradedSeed.profile.prompt_seed_revision, 6);
+  assert.equal(upgradedSeed.profile.prompt_seed_revision, 7);
   assert.equal(upgradedSeed.currentPrompt.source, 'seed');
   assert.ok(upgradedSeed.currentPrompt.version > 1);
   assert.match(upgradedSeed.currentPrompt.content, /# 输入与证据优先级/);
@@ -840,7 +856,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const preservedHumanPrompt = await getAgentProfile('dev-agent');
   assert.equal(preservedHumanPrompt.currentPrompt.version, promptVersion);
   assert.equal(preservedHumanPrompt.currentPrompt.source, 'human');
-  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 6);
+  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 7);
 
   const localPrompt = `${promptContent}\n- 本地文件修改也必须形成版本。`;
   writeFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), localPrompt);

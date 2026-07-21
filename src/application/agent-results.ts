@@ -5,12 +5,14 @@ import { databaseConnection } from '../infrastructure/database';
 import {
   addQuestion,
   addRuntimeInputRequest,
+  applyFeedbackTriage,
+  applyFeedbackVerification,
   addStory,
   CodeSlotBusyError,
   getTask,
   rewindTask,
   resolveRuntimeInputs,
-  resolveReviewFeedback,
+  recordFeedbackProgress,
   saveStorySpec,
   updateTask,
   upsertDocument,
@@ -238,6 +240,16 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     return 'blocked' as const;
   }
 
+  if (delegation.agent === 'feedback-agent') {
+    if (!result.feedback || !delegation.feedbackId) throw new Error('Feedback Agent 缺少反馈结果或 feedbackId');
+    if (result.feedback.commentId !== delegation.feedbackId) throw new Error('Feedback Agent 返回了错误的 commentId');
+    if (delegation.pipeline === 'feedback-triage' && result.feedback.mode !== 'triage') throw new Error('Feedback Triage 必须返回 mode=triage');
+    if (delegation.pipeline === 'feedback-verify' && result.feedback.mode !== 'verify') throw new Error('Feedback Verify 必须返回 mode=verify');
+    if (result.feedback.mode === 'triage') await applyFeedbackTriage(delegation.taskId, result.feedback, sourceExecutionId);
+    else await applyFeedbackVerification(delegation.taskId, result.feedback, sourceExecutionId);
+    return result.feedback.mode === 'verify' && result.feedback.verdict === 'reopened' ? 'rewound' : 'advanced';
+  }
+
   const actor = delegation.agent as Actor;
   switch (delegation.agent) {
     case 'backlog-agent': {
@@ -248,6 +260,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         current_subagent: result.route === 'repro' ? 'repro-agent' : 'story-splitter-agent',
         next_step: result.summary,
       });
+      await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, executionId: sourceExecutionId, claims: result.feedbackResolutions });
       return 'advanced' as const;
     }
     case 'story-splitter-agent': {
@@ -261,6 +274,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         current_subagent: 'analyst-agent',
         next_step: `已拆分 ${result.deliveryUnits.length} 个交付单元，等待逐个进行方案分析`,
       });
+      await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, executionId: sourceExecutionId, claims: result.feedbackResolutions });
       return 'advanced' as const;
     }
     case 'analyst-agent': {
@@ -294,6 +308,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
           ? `交付单元 ${delegation.storyIndex} 的方案已按人工答复更新`
           : `交付单元 ${delegation.storyIndex} 的方案分析完成，无待确认设计决策`,
       });
+      await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, executionId: sourceExecutionId, claims: result.feedbackResolutions });
       return 'advanced' as const;
     }
     case 'repro-agent': {
@@ -314,6 +329,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         dev_index: delegation.storyIndex,
         next_step: result.summary,
       });
+      await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, executionId: sourceExecutionId, claims: result.feedbackResolutions });
       return 'advanced' as const;
     }
     case 'test-agent': {
@@ -328,6 +344,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
           test_index: delegation.storyIndex,
           next_step: result.summary,
         });
+        await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, verdict: result.verdict, executionId: sourceExecutionId, claims: result.feedbackResolutions });
         return 'advanced' as const;
       }
       const target = result.rewindTo === 'analysis' ? 'analysis' : 'dev';
@@ -364,7 +381,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         review_document_id: artifactDocumentId,
         next_step: `结卡报告 v${reviewRevision} 已生成，等待用户阅读并关闭需求`,
       });
-      await resolveReviewFeedback(delegation.taskId, artifactDocumentId);
+      await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, verdict: result.verdict, executionId: sourceExecutionId, claims: result.feedbackResolutions });
       return 'advanced' as const;
     }
     default:

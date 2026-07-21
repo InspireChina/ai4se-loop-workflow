@@ -212,7 +212,8 @@ export async function listAgentProfiles() {
     ORDER BY CASE profile.agent_id
       WHEN 'backlog-agent' THEN 1 WHEN 'story-splitter-agent' THEN 2
       WHEN 'analyst-agent' THEN 3 WHEN 'repro-agent' THEN 4
-      WHEN 'dev-agent' THEN 5 WHEN 'test-agent' THEN 6 ELSE 7 END
+      WHEN 'dev-agent' THEN 5 WHEN 'test-agent' THEN 6
+      WHEN 'review-agent' THEN 7 ELSE 8 END
   `).all() as (AgentProfile & { observation_count: number; promoted_count: number; execution_count: number })[];
 }
 

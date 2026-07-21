@@ -21,6 +21,7 @@ const agentLabels: Record<string, string> = {
   'dev-agent': '开发实现 Agent',
   'test-agent': '验证 Agent',
   'review-agent': '结卡报告 Agent',
+  'feedback-agent': '反馈处理 Agent',
 };
 
 const itemTypeLabels: Record<string, string> = {
@@ -39,6 +40,8 @@ const flowLabels: Record<string, string> = {
   dev: '开发实现',
   test: '验证',
   review: '结卡报告',
+  'feedback-triage': '反馈分流',
+  'feedback-verify': '反馈验证',
   resume: '恢复推进',
 };
 

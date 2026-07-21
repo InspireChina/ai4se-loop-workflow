@@ -98,6 +98,13 @@ async function buildPrompt(delegation: DelegationEnvelope) {
   const relevantVerificationIds = new Set(relevantVerificationRuns.map((run) => run.verification_id));
   const relevantDocuments = relevant(full.documents);
   const relevantDocumentIds = new Set(relevantDocuments.map((document) => document.document_id));
+  const currentFeedback = delegation.feedbackId
+    ? full.documentComments.find((comment) => comment.comment_id === delegation.feedbackId) || null
+    : null;
+  const activeFeedback = full.documentComments.filter((comment) =>
+    comment.feedback_status === 'in_progress'
+    && comment.target_agent === delegation.agent
+    && (comment.target_story_index == null || comment.target_story_index === delegation.storyIndex));
   const taskContext = {
     requirement: {
       requirementId: full.task.task_id,
@@ -116,6 +123,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     verificationEvidence: full.verificationEvidence.filter((evidence) => relevantVerificationIds.has(evidence.verification_id)),
     executionAttempts: exposeUnitIndex(relevant(full.executionAttempts)),
     questions: exposeUnitIndex(relevant(full.questions)),
+    currentFeedback,
   };
   const prompt = [
     `你是 ${agentLabel(delegation.agent)}，只完成当前执行步骤的专业工作。`,
@@ -148,11 +156,26 @@ async function buildPrompt(delegation: DelegationEnvelope) {
       flow: delegation.pipeline,
       agent: delegation.agent,
       delivery_unit_index: delegation.storyIndex,
+      feedback_id: delegation.feedbackId || null,
       description: delegation.description,
     }, null, 2),
     '',
     '完整需求上下文：',
     JSON.stringify(taskContext, null, 2),
+    ...(activeFeedback.length ? [
+      '',
+      '# Active Feedback Contract',
+      '下面的反馈已经由 Feedback Agent 完成 Triage，并明确路由给你。完成当前角色工作时必须处理这些 acceptance，并在 feedbackResolutions 中逐条提交 Resolution Claim；不要自行标记评论 resolved。',
+      JSON.stringify(activeFeedback.map((comment) => ({
+        commentId: comment.comment_id,
+        content: comment.content,
+        quotedText: comment.quoted_text,
+        targetStage: comment.target_stage,
+        targetDeliveryUnit: comment.target_story_index,
+        reason: comment.triage_reason,
+        acceptance: JSON.parse(comment.acceptance_json || '[]'),
+      })), null, 2),
+    ] : []),
     '',
     '# Result Submission Contract',
     '完成当前步骤后，把结果写入一个临时 JSON 文件，再调用下面的专用命令提交。Runner 只把提交内容作为状态机输入；你的普通最终回复可以简短说明已经提交，不需要重复 JSON。',
@@ -187,6 +210,12 @@ async function buildPrompt(delegation: DelegationEnvelope) {
       rewindTo: 'plan | analysis | dev | test',
       rewindDeliveryUnit: delegation.storyIndex,
       changedFiles: ['文件路径'],
+      feedback: delegation.agent === 'feedback-agent'
+        ? delegation.pipeline === 'feedback-verify'
+          ? { mode: 'verify', commentId: delegation.feedbackId, verdict: 'resolved | reopened', reason: '验证结论', evidence: ['实际证据'] }
+          : { mode: 'triage', commentId: delegation.feedbackId, disposition: 'no_change | reply | revise | rewind | learning_only', targetStage: 'plan | analysis | dev | test | review', targetAgent: '负责执行的 Agent', targetDeliveryUnit: delegation.storyIndex, reason: '影响判断', acceptance: ['反馈完成标准'] }
+        : undefined,
+      feedbackResolutions: activeFeedback.map((comment) => ({ commentId: comment.comment_id, summary: '如何处理了该反馈', evidence: ['新文档、代码或验证证据'] })),
       tests: [{ command: '测试命令', passed: true, summary: '结果' }],
     }, null, 2),
     '',

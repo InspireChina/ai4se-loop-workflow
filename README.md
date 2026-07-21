@@ -57,6 +57,7 @@ LoopWork 只在以下情况请求人介入：
 - 版本化 Prompt、Memory、项目知识和 Slice Spec。
 - 结构化 Agent Result、Harness Evidence 和 Trace。
 - execution attempt、Receipt、中断恢复、重试和 rewind。
+- Feedback Agent 的评论分流、处理验证和 Harness Resolve。
 - 权限边界、人工介入和可插拔执行器。
 - 受限的 Prompt 演化和 LoopWork 自维护闭环。
 

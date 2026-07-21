@@ -103,11 +103,13 @@ test('passes the configured Claude model as an explicit CLI override', () => {
   const executor = getAgentExecutor('claude');
   const args = executor.buildArgs('prompt', '/workspace', { model: 'claude-sonnet-4-6' });
   assert.deepEqual(args, [
-    '--print', '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions', '--no-session-persistence',
-    '--model', 'claude-sonnet-4-6', 'prompt',
+    '--print', '--input-format', 'text', '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions', '--no-session-persistence',
+    '--model', 'claude-sonnet-4-6',
   ]);
   assert.match(executor.formatCommand('/workspace', { model: 'claude-sonnet-4-6' }), /--model claude-sonnet-4-6/);
   assert.equal(executor.buildArgs('prompt', '/workspace').includes('--model'), false);
+  assert.equal(executor.buildArgs('prompt', '/workspace').includes('prompt'), false);
+  assert.equal(executor.promptMode, 'stdin');
 });
 
 test('uses the native Cursor Agent wrapper outside Windows with the workspace supplied as cwd', { skip: process.platform === 'win32' }, () => {

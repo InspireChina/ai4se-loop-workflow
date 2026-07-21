@@ -18,9 +18,8 @@ import {
   getRunStatus,
   initializeTaskContext,
   releaseBlock,
-  resolveDocumentComment,
+  reopenDocumentComment,
   submitClarificationAnswers,
-  submitClosureFeedback,
   submitRuntimeInputs,
   rewindTask,
   transitionTask,
@@ -165,13 +164,14 @@ export async function addDocumentCommentAction(formData: FormData) {
     startOffset: formData.get('startOffset') || undefined,
     endOffset: formData.get('endOffset') || undefined,
     content: formData.get('content'),
+    intent: formData.get('intent') || 'change_request',
   });
   redirect(`/tasks/${taskId}`);
 }
 
-export async function resolveDocumentCommentAction(formData: FormData) {
+export async function reopenDocumentCommentAction(formData: FormData) {
   const taskId = String(formData.get('taskId'));
-  await resolveDocumentComment({ taskId, commentId: formData.get('commentId') });
+  await reopenDocumentComment({ taskId, commentId: formData.get('commentId') });
   redirect(`/tasks/${taskId}`);
 }
 
@@ -195,11 +195,6 @@ export async function acknowledgeClosureAction(formData: FormData) {
     taskId: formData.get('taskId'),
     reviewRevision: formData.get('reviewRevision'),
   });
-  redirect(`/tasks/${formData.get('taskId')}`);
-}
-
-export async function submitClosureFeedbackAction(formData: FormData) {
-  await submitClosureFeedback(String(formData.get('taskId')));
   redirect(`/tasks/${formData.get('taskId')}`);
 }
 

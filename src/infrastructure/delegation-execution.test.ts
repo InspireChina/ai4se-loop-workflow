@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import test from 'node:test';
 import { createLangfuseTelemetry, type LangfuseClient } from './langfuse';
 import { buildAgentProcessLaunch, createTemporaryPrompt, executeDelegation, removeTemporaryPrompt } from './delegation-execution';
-import type { AgentExecutor } from './agent-executor';
+import { getAgentExecutor, type AgentExecutor } from './agent-executor';
 
 const credentials = { LANGFUSE_ENABLED: 'true', LANGFUSE_PUBLIC_KEY: 'pk-test', LANGFUSE_SECRET_KEY: 'sk-test', LANGFUSE_BASE_URL: 'https://langfuse.invalid', LANGFUSE_CAPTURE_PROMPTS: 'true' };
 const context = { agent: 'dev-agent', taskId: 'TASK-4', storyIndex: 4, pipeline: 'resume' };
@@ -47,6 +47,31 @@ test('stores long prompts in a private temporary file and passes only a short re
     removeTemporaryPrompt(temporary);
   }
   assert.equal(existsSync(temporary.directory), false);
+});
+
+test('streams the complete Claude prompt through stdin without placing it in process arguments', async () => {
+  const original = 'Claude must receive this complete prompt through stdin.\n'.repeat(4_000);
+  const installedExecutor = getAgentExecutor('claude');
+  const launch = buildAgentProcessLaunch(installedExecutor, original, '/workspace', { model: 'claude-sonnet-4-6' }, {});
+  assert.equal(installedExecutor.promptMode, 'stdin');
+  assert.equal(launch.args.some((argument) => argument.includes(original.slice(0, 200))), false);
+  assert.ok(launch.args.join(' ').length < 2_000);
+
+  const program = [
+    'let input = "";',
+    'process.stdin.setEncoding("utf8");',
+    'process.stdin.on("data", chunk => input += chunk);',
+    'process.stdin.on("end", () => console.log(JSON.stringify({type:"result",result:input})));',
+  ].join('');
+  const executor: AgentExecutor = {
+    id: 'claude', label: 'Claude stdin fixture', command: process.execPath, promptMode: 'stdin',
+    buildArgs: () => ['-e', program],
+    formatCommand: () => 'node claude stdin fixture',
+    parseStdout: () => null,
+    parseStderr: () => null,
+  };
+  const { result } = await run(executor, recordedTelemetry().telemetry, { prompt: original });
+  assert.equal(result.finalText, original);
 });
 
 function recordedTelemetry() {

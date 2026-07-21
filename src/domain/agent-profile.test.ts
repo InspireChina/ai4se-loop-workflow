@@ -3,7 +3,7 @@ import test from 'node:test';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
 test('ships rigorous versioned seed prompts for every flow Agent', () => {
-  assert.equal(AGENT_PROMPT_SEED_REVISION, 6);
+  assert.equal(AGENT_PROMPT_SEED_REVISION, 7);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
     assert.ok(prompt.length >= 450, `${agentId} seed prompt is too small to define a reliable role contract`);
@@ -19,4 +19,6 @@ test('ships rigorous versioned seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /runtimeInputs/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /逐条说明如何处理/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /verdict=changes_requested/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /Triage/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /Verify/);
 });

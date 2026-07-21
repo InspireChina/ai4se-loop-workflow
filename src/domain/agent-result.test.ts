@@ -98,3 +98,33 @@ test('parses a versionable Slice Spec and normalizes the legacy review verdict',
   assert.equal(result.verdict, 'report_ready');
   assert.equal(result.spec?.acceptanceCriteria[0]?.id, 'AC-1');
 });
+
+test('parses Feedback Agent triage and verification decisions', () => {
+  const triage = parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'Route the feedback back to implementation.',
+    feedback: {
+      mode: 'triage',
+      commentId: 'feedback-1',
+      disposition: 'rewind',
+      targetStage: 'dev',
+      targetAgent: 'dev-agent',
+      targetDeliveryUnit: 1,
+      reason: 'The comment identifies an implementation defect.',
+      acceptance: ['The behavior is restored and tested.'],
+    },
+  }));
+  assert.equal(triage.feedback?.mode, 'triage');
+  const verification = parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'Feedback resolution verified.',
+    feedback: {
+      mode: 'verify',
+      commentId: 'feedback-1',
+      verdict: 'resolved',
+      reason: 'The new behavior and evidence satisfy the feedback.',
+      evidence: ['verification-run-1'],
+    },
+  }));
+  assert.equal(verification.feedback?.mode, 'verify');
+});

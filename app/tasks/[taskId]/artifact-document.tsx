@@ -1,10 +1,10 @@
 'use client';
 
 import { useRef, useState } from 'react';
-import { Check, MessageSquare, Quote, RotateCcw } from 'lucide-react';
+import { MessageSquare, Quote, RotateCcw } from 'lucide-react';
 import type { DocumentComment } from '../../../src/application/tasks';
 import { MarkdownContent } from '../../../src/ui/markdown-content';
-import { addDocumentCommentAction, resolveDocumentCommentAction } from '../../actions';
+import { addDocumentCommentAction, reopenDocumentCommentAction } from '../../actions';
 
 type SelectionAnchor = {
   quotedText: string;
@@ -19,7 +19,8 @@ export function ArtifactDocument({
   format,
   revision,
   comments,
-  allowManualResolve = true,
+  allowReopen = true,
+  allowComment = true,
 }: {
   taskId: string;
   documentId: string;
@@ -27,7 +28,8 @@ export function ArtifactDocument({
   format: string;
   revision: number;
   comments: DocumentComment[];
-  allowManualResolve?: boolean;
+  allowReopen?: boolean;
+  allowComment?: boolean;
 }) {
   const previewRef = useRef<HTMLDivElement>(null);
   const [anchor, setAnchor] = useState<SelectionAnchor | null>(null);
@@ -65,7 +67,7 @@ export function ArtifactDocument({
         </div>
         {anchor && <button className="text-button" type="button" onClick={() => setAnchor(null)}><RotateCcw size={13}/>改为文件级</button>}
       </div>
-      <form action={addDocumentCommentAction} className="artifact-comment-form">
+      {allowComment && <form action={addDocumentCommentAction} className="artifact-comment-form">
         <input type="hidden" name="taskId" value={taskId}/>
         <input type="hidden" name="documentId" value={documentId}/>
         <input type="hidden" name="anchorType" value={anchor ? 'selection' : 'file'}/>
@@ -73,22 +75,30 @@ export function ArtifactDocument({
         <input type="hidden" name="startOffset" value={anchor?.startOffset ?? ''}/>
         <input type="hidden" name="endOffset" value={anchor?.endOffset ?? ''}/>
         {anchor ? <blockquote className="comment-anchor"><Quote size={13}/><span>{anchor.quotedText}</span></blockquote> : <p className="comment-anchor file-anchor"><MessageSquare size={13}/>评论整个文件</p>}
+        <label>反馈意图<select name="intent" defaultValue="change_request">
+          <option value="change_request">要求修改</option>
+          <option value="question">需要回复</option>
+          <option value="note">备注或建议</option>
+        </select></label>
         <textarea name="content" required maxLength={4000} placeholder="指出需要修改的内容、原因或希望以后采用的做法…"/>
         <button className="button secondary" type="submit">提交评论</button>
-      </form>
+      </form>}
 
       {comments.length > 0 && <div className="artifact-comments">
         {comments.map((comment) => <article className={`artifact-comment ${comment.status}`} key={comment.comment_id}>
           <div className="artifact-comment-meta">
             <span>{comment.anchor_type === 'selection' ? '选区评论' : '文件评论'} · revision {comment.document_revision}</span>
-            <small>{comment.status === 'resolved' ? '已解决' : '待处理'} · {comment.evolution_status === 'analyzed' ? '已用于演化分析' : '等待演化分析'}</small>
+            <small>{comment.feedback_status === 'resolved' ? '已解决' : comment.feedback_status === 'verifying' ? '等待反馈验证' : comment.feedback_status === 'in_progress' ? '处理中' : comment.feedback_status === 'triaged' ? '已分流' : comment.feedback_status === 'reopened' ? '已重新打开' : '等待分流'} · {comment.intent === 'change_request' ? '要求修改' : comment.intent === 'question' ? '需要回复' : '备注建议'} · {comment.evolution_status === 'analyzed' ? '已用于演化分析' : '尚未沉淀'}</small>
           </div>
           {comment.quoted_text && <blockquote className="comment-anchor"><Quote size={13}/><span>{comment.quoted_text}</span></blockquote>}
           <p>{comment.content}</p>
-          {comment.status === 'open' && allowManualResolve && <form action={resolveDocumentCommentAction}>
+          {comment.triage_reason && <p className="muted"><b>分流结论：</b>{comment.triage_reason}</p>}
+          {comment.resolution_claim_json && <details><summary>处理声明</summary><pre>{JSON.stringify(JSON.parse(comment.resolution_claim_json), null, 2)}</pre></details>}
+          {comment.verification_json && <details><summary>反馈验证</summary><pre>{JSON.stringify(JSON.parse(comment.verification_json), null, 2)}</pre></details>}
+          {comment.feedback_status === 'resolved' && allowReopen && <form action={reopenDocumentCommentAction}>
             <input type="hidden" name="taskId" value={taskId}/>
             <input type="hidden" name="commentId" value={comment.comment_id}/>
-            <button className="text-button" type="submit"><Check size={13}/>标记已解决</button>
+            <button className="text-button" type="submit"><RotateCcw size={13}/>重新打开</button>
           </form>}
         </article>)}
       </div>}

@@ -522,9 +522,9 @@ const executors: Omit<Record<AgentExecutorId, AgentExecutor>, 'cursor'> = {
     parseStderr: (line, context) => stderrLog('codex', context, line),
   },
   claude: {
-    id: 'claude', label: 'Claude', command: process.env.CLAUDE_CLI || 'claude', promptMode: 'argument',
-    buildArgs: (prompt, _workspace, options) => ['--print', '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions', '--no-session-persistence', ...(options?.model ? ['--model', options.model] : []), prompt],
-    formatCommand: (workspace, options) => `claude --print --output-format stream-json${options?.model ? ` --model ${options.model}` : ''} (cwd=${workspace})`,
+    id: 'claude', label: 'Claude', command: process.env.CLAUDE_CLI || 'claude', promptMode: 'stdin',
+    buildArgs: (_prompt, _workspace, options) => ['--print', '--input-format', 'text', '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions', '--no-session-persistence', ...(options?.model ? ['--model', options.model] : [])],
+    formatCommand: (workspace, options) => `claude --print --input-format text --output-format stream-json${options?.model ? ` --model ${options.model}` : ''} (stdin cwd=${workspace})`,
     parseStdout: parseClaudeStdout,
     parseStderr: (line, context) => stderrLog('claude', context, line),
   },

@@ -30,6 +30,26 @@ const runtimeInputSchema = z.object({
 
 const deliveryUnitSchema = z.object({ title: z.string().min(1).max(200) });
 
+const feedbackResultSchema = z.discriminatedUnion('mode', [
+  z.object({
+    mode: z.literal('triage'),
+    commentId: z.string().min(1).max(200),
+    disposition: z.enum(['no_change', 'reply', 'revise', 'rewind', 'learning_only']),
+    targetStage: z.enum(['plan', 'analysis', 'dev', 'test', 'review']).optional(),
+    targetAgent: z.string().min(1).max(120).optional(),
+    targetDeliveryUnit: z.number().int().positive().optional(),
+    reason: z.string().min(1).max(4000),
+    acceptance: z.array(z.string().min(1).max(2000)).max(30).default([]),
+  }),
+  z.object({
+    mode: z.literal('verify'),
+    commentId: z.string().min(1).max(200),
+    verdict: z.enum(['resolved', 'reopened']),
+    reason: z.string().min(1).max(4000),
+    evidence: z.array(z.string().min(1).max(2000)).max(50).default([]),
+  }),
+]);
+
 const verificationStepBase = {
   criterionId: z.string().min(1).max(120),
   instruction: z.string().min(1).max(4000),
@@ -101,6 +121,12 @@ export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object
   rewindDeliveryUnit: z.number().int().positive().optional(),
   rewindStory: z.number().int().positive().optional(),
   changedFiles: z.array(z.string().min(1).max(1000)).max(500).optional(),
+  feedback: feedbackResultSchema.optional(),
+  feedbackResolutions: z.array(z.object({
+    commentId: z.string().min(1).max(200),
+    summary: z.string().min(1).max(4000),
+    evidence: z.array(z.string().min(1).max(2000)).max(50).default([]),
+  })).max(50).optional().default([]),
   tests: z.array(z.object({
     command: z.string().min(1).max(2000),
     passed: z.boolean(),
@@ -158,6 +184,9 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
       } else if (result.verdict !== 'report_ready') {
         throw new Error('Review Agent 必须返回 verdict=report_ready 或 changes_requested');
       }
+      break;
+    case 'feedback-agent':
+      if (!result.feedback) throw new Error('feedback-agent 结果缺少 feedback');
       break;
   }
 }

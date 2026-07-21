@@ -1,4 +1,4 @@
-export const ACTORS = ['human', 'system', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent'] as const;
+export const ACTORS = ['human', 'system', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent', 'feedback-agent'] as const;
 export const TASK_STATUSES = ['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'ready_to_close', 'done', 'cancelled', 'blocked'] as const;
 export const RUN_STATES = ['runnable', 'waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked', 'idle'] as const;
 export type Actor = typeof ACTORS[number];
@@ -122,7 +122,15 @@ export function occupiesCodeSlot(task: TaskState) {
     || (task.agile_status === 'blocked' && task.resume_status === 'in dev');
 }
 
-export type Delegation = { taskId: string; pipeline: string; agent: string; storyIndex: number | null; resource: 'none' | 'browser'; description: string };
+export type Delegation = {
+  taskId: string;
+  pipeline: string;
+  agent: string;
+  storyIndex: number | null;
+  resource: 'none' | 'browser';
+  description: string;
+  feedbackId?: string | null;
+};
 
 export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Delegation | null {
   const line = (pipeline: string, agent: string, storyIndex: number | null, description: string): Delegation => ({
