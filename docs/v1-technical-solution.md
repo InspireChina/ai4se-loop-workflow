@@ -116,15 +116,18 @@ prototype/              历史资料，不参与运行
 Runner 的控制循环：
 
 ```text
-读取数据库 → 恢复未完成 attempt → 计算下一步 → 持久化输入 → 执行一个 Agent → Harness 验证 → 应用结果 → 再次计算
+读取数据库 → 恢复未完成 attempt → 计算各任务 Lane → 持久化输入 → 执行 Agent → 任一 Lane 完成后立即重新计算
 ```
 
-- 有可执行 Agent：每个任务选择一个下一步，不同任务并发执行；全部完成后，1 分钟后继续下一轮。
+- 交付拆分前与 Review 阶段：每个任务只运行一个 Control Agent。
+- 单元推进阶段：每个任务最多同时运行一个 Analysis Agent 和一个 Delivery Agent；Analysis 串行向前，Delivery 串行执行 Dev/Test。
+- 全局容量：最多 4 个 Analysis、1 个 Dev、1 个浏览器型 Agent；同优先级 Analysis 按等待最久者优先。
+- 任一 Lane 完成后立即继续调度，不等待其他 Agent 形成批次屏障。
 - 无可执行 Agent：不启动 CLI，输出 0 个 Agent，5 分钟后重试。
 - 代码槽繁忙：步骤在应用内排队，释放后继续，不生成用户确认事项。
-- 产品澄清未完成：`run_state=waiting_for_answers`，Agile 状态不被改成 blocked；其他需求继续运行。
-- 运行信息未补充：`run_state=waiting_for_runtime_input`，Agile 状态不变；提交全部回答后设置 `resume_pending=1`，交回原 Agent 和交付单元。Dev 等待时继续占用代码槽。
-- 执行异常：最多自动尝试三次，耗尽后进入 `run_state=system_blocked`。
+- 产品澄清未完成：只暂停 Analysis Lane；Delivery 继续消费已有 resolved Spec。
+- 运行信息未补充：只暂停发起请求的 Lane；提交后交回原 Agent 和交付单元。Dev 等待时继续占用代码槽。
+- 执行异常：最多自动尝试三次，耗尽后只阻塞失败 Lane。
 
 应用决定当前 Agent、推进阶段和交付单元。Agent 只负责当前目标，可以使用辅助 subagent 做上下文收集，但不能调度其他流程 Agent。
 

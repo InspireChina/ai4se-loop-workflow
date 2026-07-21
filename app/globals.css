@@ -348,6 +348,16 @@ main{padding:28px 20px}
 .task-summary>div:last-child{border-right:0}
 .task-summary b{display:block;font-size:20px;margin-top:5px}
 .task-summary p{margin:5px 0 0;overflow-wrap:anywhere}
+.lane-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-bottom:20px}
+.lane-card{padding:18px;border-top:3px solid #8aa8dd}
+.lane-card.completed{border-top-color:#55a273}
+.lane-card.system_blocked,.lane-card.waiting_for_answers,.lane-card.waiting_for_runtime_input{border-top-color:#d6a13b}
+.lane-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.lane-card-head h2{font-size:17px;margin:3px 0 0}
+.lane-card-head .eyebrow{margin:0}
+.lane-progress{font-size:18px;font-weight:700;margin-top:16px}
+.lane-card>p{margin:8px 0 0;color:var(--muted)}
+.lane-card>small{display:block;margin-top:8px;color:#9a6417}
 .task-detail-grid{display:grid;grid-template-columns:minmax(0,1fr) 330px;gap:18px;align-items:start}
 .task-main-column{display:grid;gap:26px;min-width:0}
 .task-action-column{display:grid;gap:14px;position:sticky;top:24px}
@@ -377,7 +387,7 @@ main{padding:28px 20px}
 .task-action-column .danger-card{grid-column:auto}
 }
 
-@media(max-width:1100px){.task-summary,.task-action-column,.two-card-grid,.inline-create{grid-template-columns:1fr}
+@media(max-width:1100px){.task-summary,.task-action-column,.two-card-grid,.inline-create,.lane-grid{grid-template-columns:1fr}
 .executor-options{grid-template-columns:1fr}
 .workspace-switch{grid-template-columns:1fr}
 .task-steps{padding:14px}

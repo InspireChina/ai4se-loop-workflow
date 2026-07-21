@@ -176,7 +176,8 @@ export async function reopenDocumentCommentAction(formData: FormData) {
 }
 
 export async function releaseBlockAction(formData: FormData) {
-  await releaseBlock(String(formData.get('taskId')));
+  const lane = String(formData.get('lane') || '');
+  await releaseBlock(String(formData.get('taskId')), lane === 'analysis' || lane === 'delivery' ? lane : undefined);
   redirect(`/tasks/${formData.get('taskId')}`);
 }
 
@@ -186,7 +187,8 @@ export async function submitClarificationAnswersAction(formData: FormData) {
 }
 
 export async function submitRuntimeInputsAction(formData: FormData) {
-  await submitRuntimeInputs(String(formData.get('taskId')));
+  const lane = String(formData.get('lane') || '');
+  await submitRuntimeInputs(String(formData.get('taskId')), lane === 'analysis' || lane === 'delivery' ? lane : undefined);
   redirect(`/tasks/${formData.get('taskId')}`);
 }
 

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { hash } from '../infrastructure/database';
 import { databaseConnection } from '../infrastructure/database';
 import type { DelegationEnvelope } from './tasks';
+import { laneForAgent } from './task-lanes';
 
 export type ExecutionStatus =
   | 'planned'
@@ -21,6 +22,7 @@ export type ExecutionAttempt = {
   story_index: number | null;
   agent: string;
   pipeline: string;
+  lane: string | null;
   delegation_key: string;
   attempt: number;
   status: ExecutionStatus;
@@ -50,6 +52,7 @@ const RECOVERABLE = ['output_received', 'verifying', 'applying'] as const;
 function delegationKey(delegation: DelegationEnvelope, inputHash: string) {
   return hash(JSON.stringify({
     taskId: delegation.taskId,
+    lane: delegation.lane,
     storyIndex: delegation.storyIndex,
     agent: delegation.agent,
     pipeline: delegation.pipeline,
@@ -59,6 +62,46 @@ function delegationKey(delegation: DelegationEnvelope, inputHash: string) {
     reviewRevision: delegation.reviewRevision,
     inputHash,
   }));
+}
+
+function retrySignature(delegation: DelegationEnvelope) {
+  const base = {
+    taskId: delegation.taskId,
+    lane: delegation.lane || laneForAgent(delegation.agent),
+    storyIndex: delegation.storyIndex,
+    agent: delegation.agent,
+    pipeline: delegation.pipeline,
+    feedbackId: delegation.feedbackId || null,
+  };
+  if (delegation.lane === 'analysis') return JSON.stringify({
+    ...base,
+    analysisIndex: delegation.analysisIndex,
+    specResolvedIndex: delegation.specResolvedIndex,
+    totalStories: delegation.totalStories,
+  });
+  if (delegation.lane === 'delivery') return JSON.stringify({
+    ...base,
+    devIndex: delegation.devIndex,
+    testIndex: delegation.testIndex,
+  });
+  return JSON.stringify({
+    ...base,
+    agileStatus: delegation.agileStatus,
+    analysisIndex: delegation.analysisIndex,
+    devIndex: delegation.devIndex,
+    testIndex: delegation.testIndex,
+    totalStories: delegation.totalStories,
+    reviewRevision: delegation.reviewRevision,
+  });
+}
+
+function storedRetrySignature(attempt: ExecutionAttempt) {
+  try {
+    const snapshot = JSON.parse(attempt.input_json) as { delegation?: DelegationEnvelope };
+    return snapshot.delegation ? retrySignature(snapshot.delegation) : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function reconcileStaleExecutions() {
@@ -89,12 +132,33 @@ export async function beginExecutionAttempt(input: {
   const db = await databaseConnection();
   const inputJson = JSON.stringify({ delegation: input.delegation, prompt: input.prompt });
   const inputHash = hash(inputJson);
-  const key = delegationKey(input.delegation, inputHash);
-  const previous = db.prepare(`
+  let key = delegationKey(input.delegation, inputHash);
+  let previous = db.prepare(`
     SELECT * FROM execution_attempts
     WHERE delegation_key = ?
     ORDER BY attempt DESC LIMIT 1
   `).get(key) as ExecutionAttempt | undefined;
+  const latestLogical = db.prepare(`
+    SELECT * FROM execution_attempts
+    WHERE task_id = ? AND story_index IS ? AND agent = ? AND pipeline = ?
+      AND COALESCE(lane, CASE
+        WHEN agent = 'analyst-agent' THEN 'analysis'
+        WHEN agent IN ('dev-agent', 'test-agent') THEN 'delivery'
+        ELSE 'control'
+      END) = ?
+    ORDER BY rowid DESC
+    LIMIT 1
+  `).get(
+    input.delegation.taskId,
+    input.delegation.storyIndex,
+    input.delegation.agent,
+    input.delegation.pipeline,
+    input.delegation.lane || laneForAgent(input.delegation.agent),
+  ) as ExecutionAttempt | undefined;
+  if (latestLogical?.status === 'retryable_failed' && storedRetrySignature(latestLogical) === retrySignature(input.delegation)) {
+    key = latestLogical.delegation_key;
+    previous = latestLogical;
+  }
   if (previous && RECOVERABLE.includes(previous.status as typeof RECOVERABLE[number])) {
     return { attempt: previous, recovered: true };
   }
@@ -105,11 +169,11 @@ export async function beginExecutionAttempt(input: {
   const leaseMinutes = Math.max(1, Math.min(input.leaseMinutes || 40, 24 * 60));
   db.prepare(`
     INSERT INTO execution_attempts(
-      execution_id, run_id, task_id, story_index, agent, pipeline,
+      execution_id, run_id, task_id, story_index, agent, pipeline, lane,
       delegation_key, attempt, status, input_hash, input_json, base_commit,
       prompt_version, prompt_hash, memory_revision, memory_hash, evolution_candidate_id,
       lease_owner, lease_expires_at, heartbeat_at, started_at
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', ?), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
   `).run(
     executionId,
     input.runId,
@@ -117,6 +181,7 @@ export async function beginExecutionAttempt(input: {
     input.delegation.storyIndex,
     input.delegation.agent,
     input.delegation.pipeline,
+    input.delegation.lane || laneForAgent(input.delegation.agent),
     key,
     attemptNumber,
     inputHash,

@@ -112,7 +112,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       ...process.env,
       ...(resultChannel ? agentResultChannelEnv(resultChannel, context.agent) : {}),
     });
-    await appendLog(`[Agent] 开始 agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - ${description}`);
+    await appendLog(`[Agent] 开始 lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - ${description}`);
     await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - 启动 ${executor.label} CLI：${executor.formatCommand(workspaceRoot, executionOptions)}`);
     const child: ChildProcess = spawn(launch.command, launch.args, {
       cwd: workspaceRoot,
@@ -195,7 +195,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     }
     await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - ${executor.label} CLI 已退出 code=${terminalExitCode ?? 'signal'}`);
     if (terminalExitCode && terminalExitCode !== 0) await appendLog(`[错误] ${context.agent} 执行失败 code=${terminalExitCode}`);
-    else await appendLog(`[Agent] 完成 agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - 处理完成`);
+    else await appendLog(`[Agent] 完成 lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - 处理完成`);
     traceStatus = timedOut ? 'timed_out' : executionFailed ? 'execution_error' : terminalExitCode === 0 ? 'completed' : terminalExitCode === null ? 'cancelled' : 'failed';
     return {
       exitCode: terminalExitCode ?? 1,

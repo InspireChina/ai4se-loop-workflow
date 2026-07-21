@@ -67,7 +67,7 @@ function inferComponent(eventName: string) {
 
 function logAttributes(message: string) {
   const attributes: Record<string, string> = {};
-  for (const match of message.matchAll(/\b(executor|agent|requirement|unit|flow|tool|code)=([^\s]+)/g)) attributes[match[1]] = match[2];
+  for (const match of message.matchAll(/\b(executor|lane|agent|requirement|unit|flow|resource|tool|code)=([^\s]+)/g)) attributes[match[1]] = match[2];
   return attributes;
 }
 

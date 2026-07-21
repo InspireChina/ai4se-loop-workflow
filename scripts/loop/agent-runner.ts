@@ -25,14 +25,15 @@ import {
   recoverNextExecutionAttempt,
   type ExecutionAttempt,
 } from '../../src/application/executions';
-import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTaskContext, rewindTask, type DelegationEnvelope } from '../../src/application/tasks';
+import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTask, getTaskContext, markDelegationLaneRunning, reconcileStaleTaskLanes, rewindTask, settleDelegationLane, type DelegationEnvelope } from '../../src/application/tasks';
+import { laneForAgent } from '../../src/application/task-lanes';
 import { runHarnessVerification, type HarnessVerificationOutcome } from '../../src/application/verifications';
 import { parseAgentResult } from '../../src/domain/agent-result';
 import { parseEvolutionResult } from '../../src/domain/agent-evolution';
 import { agentLabel, deliveryUnitLabel } from '../../src/domain/terminology';
 import { getAgentExecutor, type AgentExecutor } from '../../src/infrastructure/agent-executor';
 import { executeDelegation } from '../../src/infrastructure/delegation-execution';
-import { startAgentRun, startDispatchRetryRun } from '../../src/infrastructure/agent-runner';
+import { startDispatchRetryRun } from '../../src/infrastructure/agent-runner';
 import { paths } from '../../src/infrastructure/database';
 import { gitHead } from '../../src/infrastructure/git';
 import { createLangfuseTelemetry } from '../../src/infrastructure/langfuse';
@@ -40,6 +41,12 @@ import { startMaintenanceRunner } from '../../src/infrastructure/maintenance-run
 
 const runId = process.argv[2];
 if (!runId) throw new Error('missing run id');
+const backgroundEvaluations = new Set<Promise<void>>();
+
+function scheduleEvolution(evaluation: Promise<void>) {
+  const tracked = evaluation.finally(() => { backgroundEvaluations.delete(tracked); });
+  backgroundEvaluations.add(tracked);
+}
 
 async function activateMaintenanceContext(attempt: ExecutionAttempt, delegation: DelegationEnvelope) {
   const eventFromId = await recordRuntimeEvent({
@@ -110,6 +117,16 @@ async function buildPrompt(delegation: DelegationEnvelope) {
       itemType: full.task.item_type,
       priority: full.task.priority,
       link: full.task.link,
+      },
+    lifecycle: {
+      agileStatus: full.task.agile_status,
+      lanes: full.lanes,
+      progress: {
+        analysis: full.task.analysis_index,
+        development: full.task.dev_index,
+        verification: full.task.test_index,
+        total: full.task.total_stories,
+      },
     },
     currentDeliveryUnit: relevantStory ? { index: relevantStory.story_index, title: relevantStory.title } : null,
     deliveryUnits: full.stories.map((unit) => ({ index: unit.story_index, title: unit.title })),
@@ -150,6 +167,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
       requirement_description: delegation.taskDescription,
       item_type: delegation.itemType,
       priority: delegation.priority,
+      lane: delegation.lane,
       flow: delegation.pipeline,
       agent: delegation.agent,
       delivery_unit_index: delegation.storyIndex,
@@ -221,10 +239,6 @@ async function buildPrompt(delegation: DelegationEnvelope) {
   return { prompt, runtime };
 }
 
-function delayLabel(ms: number) {
-  return ms >= 60000 ? `${Math.max(1, Math.round(ms / 60000))} 分钟` : `${Math.max(1, Math.round(ms / 1000))} 秒`;
-}
-
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -232,22 +246,6 @@ function sleep(ms: number) {
 async function isRunActive() {
   const run = await getRunStatus();
   return Boolean(run?.active && run.runId === runId);
-}
-
-async function scheduleNextLoop() {
-  const retryMs = Number(process.env.LOOP_ACTIVE_DISPATCH_RETRY_MS || 60 * 1000);
-  await appendLoopRunLog(runId, `[运行] 本轮 Agent 批次已完成，${delayLabel(retryMs)}后继续 Loop`);
-  await sleep(retryMs);
-  if (!(await isRunActive())) return;
-
-  await appendLoopRunLog(runId, '[运行] 继续下一轮派发');
-  const dispatch = await createLoopDispatch(runId, { includeRunHeader: false });
-  if (dispatch.delegations.length > 0) {
-    await appendLoopRunLog(runId, `[运行] 下一轮发现 ${dispatch.delegations.length} 个任务级执行步骤，启动并发执行器`);
-    await startAgentRun(runId);
-    return;
-  }
-  await startDispatchRetryRun(runId);
 }
 
 async function runDelegation(delegation: DelegationEnvelope, prompt: string, executor: AgentExecutor, executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' }) {
@@ -262,10 +260,11 @@ async function runDelegation(delegation: DelegationEnvelope, prompt: string, exe
     executor,
     executionOptions,
     context: {
-    agent: delegation.agent,
-    taskId: delegation.taskId,
-    storyIndex: delegation.storyIndex,
-    pipeline: delegation.pipeline,
+      agent: delegation.agent,
+      taskId: delegation.taskId,
+      storyIndex: delegation.storyIndex,
+      pipeline: delegation.pipeline,
+      lane: delegation.lane,
     },
     description: delegation.description,
     telemetry,
@@ -283,6 +282,15 @@ async function runDelegation(delegation: DelegationEnvelope, prompt: string, exe
 async function processDurableResult(attempt: ExecutionAttempt, delegation: DelegationEnvelope, result: ReturnType<typeof parseAgentResult>) {
   let codeCommit = attempt.code_commit || '';
   let harnessVerification: HarnessVerificationOutcome | null = null;
+  const current = await getTask(delegation.taskId);
+  if (!current || ['done', 'cancelled'].includes(current.task.agile_status)) {
+    await markExecutionStage(attempt.execution_id, 'applying');
+    const outcome = await applyAgentResult(runId, delegation, result, { codeCommit, executionId: attempt.execution_id });
+    await recordExecutionReceipt(attempt.execution_id, 'application', outcome, { outcome, terminalTask: true });
+    await completeExecution(attempt.execution_id);
+    await appendLoopRunLog(runId, `[运行] ${agentLabel(delegation.agent)} 返回时需求已结束，结果仅保留为证据，不再应用`);
+    return { outcome, harnessVerification };
+  }
   if (delegation.agent === 'dev-agent' && result.outcome === 'completed') {
     if (!codeCommit) {
       const currentHead = gitHead(paths.root);
@@ -308,7 +316,7 @@ async function processDurableResult(attempt: ExecutionAttempt, delegation: Deleg
   const outcome = await applyAgentResult(runId, delegation, result, { codeCommit, executionId: attempt.execution_id });
   await recordExecutionReceipt(attempt.execution_id, 'application', outcome, { outcome });
   await completeExecution(attempt.execution_id);
-  const outcomeLabel = { advanced: '已推进', blocked: '等待澄清', rewound: '已回退' }[outcome];
+  const outcomeLabel = { advanced: '已推进', blocked: '等待澄清', rewound: '已回退', discarded: '已丢弃副作用' }[outcome];
   await appendLoopRunLog(runId, `[运行] ${agentLabel(delegation.agent)} 结构化结果已应用：${outcomeLabel}`);
   if (delegation.agent === 'dev-agent' && harnessVerification && !harnessVerification.passed) {
     await rewindTask({
@@ -403,6 +411,7 @@ async function executeDelegationStep(
       leaseMinutes: Math.ceil(Number(process.env.AGENT_EXECUTOR_TIMEOUT_MS || 30 * 60 * 1000) / 60_000) + 10,
     });
     attempt = durable.attempt;
+    await markDelegationLaneRunning(delegation);
     maintenance = await activateMaintenanceContext(durable.attempt, delegation);
 
     if (durable.recovered && durable.attempt.status === 'applied') {
@@ -440,7 +449,7 @@ async function executeDelegationStep(
       const applied = await processDurableResult({ ...durable.attempt, result_json: JSON.stringify(result), status: 'output_received' }, delegation, result);
       const succeeded = result.outcome !== 'failed' && applied.harnessVerification?.passed !== false;
       await updatePromptCanary(delegation.agent, succeeded, durable.attempt.execution_id);
-      await runEvolutionEvaluator({
+      scheduleEvolution(runEvolutionEvaluator({
         executionId: durable.attempt.execution_id,
         taskId: delegation.taskId,
         storyIndex: delegation.storyIndex,
@@ -451,7 +460,7 @@ async function executeDelegationStep(
         applicationOutcome: applied.outcome,
         harness: applied.harnessVerification,
         diagnostics: execution.diagnostics,
-      }, executor, executionOptions);
+      }, executor, executionOptions));
     } catch (error) {
       if (error instanceof CodeSlotBusyError) {
         await failExecution(durable.attempt.execution_id, error.message, false);
@@ -470,8 +479,32 @@ async function executeDelegationStep(
       await blockDelegation(delegation, reason);
     }
   } finally {
+    await settleDelegationLane(delegation);
     if (maintenance) await enqueueExecutionMaintenance(maintenance, unexpectedFailure);
   }
+}
+
+function normalizeDelegation(delegation: DelegationEnvelope) {
+  return { ...delegation, lane: delegation.lane || laneForAgent(delegation.agent) } as DelegationEnvelope;
+}
+
+async function drainQueuedAgentResults() {
+  let waiting = false;
+  while (true) {
+    const queued = await applyNextQueuedAgentResult();
+    if (queued.status === 'none') break;
+    if (queued.status === 'applied') {
+      await appendLoopRunLog(runId, `[运行] 已应用排队结果：${agentLabel(queued.agent)} ${queued.taskId}${queued.storyIndex ? ` · ${deliveryUnitLabel(queued.storyIndex)}` : ''}，结果=${queued.outcome}`);
+      continue;
+    }
+    if (queued.status === 'waiting') {
+      waiting = true;
+      await appendLoopRunLog(runId, `[运行] 排队结果等待代码槽释放：${agentLabel(queued.agent)} ${queued.taskId}${queued.storyIndex ? ` · ${deliveryUnitLabel(queued.storyIndex)}` : ''}，当前占用=${queued.ownerTaskId}`);
+      break;
+    }
+    await appendLoopRunLog(runId, `[错误] 排队结果应用失败：${agentLabel(queued.agent)} ${queued.taskId}${queued.storyIndex ? ` · ${deliveryUnitLabel(queued.storyIndex)}` : ''} - ${queued.reason}`);
+  }
+  return waiting;
 }
 
 async function main() {
@@ -480,17 +513,20 @@ async function main() {
   const executionOptions = agentExecutionOptions(settings);
   const staleCount = await reconcileStaleExecutions();
   if (staleCount) await appendLoopRunLog(runId, `[恢复] 已回收 ${staleCount} 个失去租约且尚无输出的 execution attempt`);
-  const recoverable = await recoverNextExecutionAttempt();
-  if (recoverable) {
+  const staleLanes = await reconcileStaleTaskLanes();
+  if (staleLanes) await appendLoopRunLog(runId, `[恢复] 已恢复 ${staleLanes} 条失去活跃 execution 的 Lane`);
+  let recoverable = await recoverNextExecutionAttempt();
+  while (recoverable) {
     const snapshot = JSON.parse(recoverable.input_json) as { delegation: DelegationEnvelope };
-    const maintenance = await activateMaintenanceContext(recoverable, snapshot.delegation);
+    const delegation = normalizeDelegation(snapshot.delegation);
+    const maintenance = await activateMaintenanceContext(recoverable, delegation);
     try {
       await appendLoopRunLog(runId, `[恢复] 继续 execution attempt ${recoverable.execution_id}，不重复调用 Agent`);
       const result = parseAgentResult(recoverable.result_json || '');
-      const applied = await processDurableResult(recoverable, snapshot.delegation, result);
+      const applied = await processDurableResult(recoverable, delegation, result);
       const succeeded = result.outcome !== 'failed' && applied.harnessVerification?.passed !== false;
-      await updatePromptCanary(snapshot.delegation.agent, succeeded, recoverable.execution_id);
-      await runEvolutionEvaluator({
+      await updatePromptCanary(delegation.agent, succeeded, recoverable.execution_id);
+      scheduleEvolution(runEvolutionEvaluator({
         executionId: recoverable.execution_id,
         taskId: recoverable.task_id,
         storyIndex: recoverable.story_index,
@@ -501,49 +537,51 @@ async function main() {
         applicationOutcome: applied.outcome,
         harness: applied.harnessVerification,
         diagnostics: [],
-      }, executor, executionOptions);
+      }, executor, executionOptions));
     } catch (error) {
       const reason = `恢复 execution attempt 失败：${error instanceof Error ? error.message : String(error)}`;
-      await handleExecutionFailure(recoverable, snapshot.delegation, reason, false);
+      await handleExecutionFailure(recoverable, delegation, reason, false);
     } finally {
+      await settleDelegationLane(delegation);
       await enqueueExecutionMaintenance(maintenance);
     }
-    await scheduleNextLoop();
-    return;
+    recoverable = await recoverNextExecutionAttempt();
   }
-  const queued = await applyNextQueuedAgentResult();
-  let queuedWaiting = false;
-  if (queued.status === 'applied') {
-    await appendLoopRunLog(runId, `[运行] 已应用排队结果：${agentLabel(queued.agent)} ${queued.taskId}${queued.storyIndex ? ` · ${deliveryUnitLabel(queued.storyIndex)}` : ''}，结果=${queued.outcome}`);
-    await scheduleNextLoop();
-    return;
-  }
-  if (queued.status === 'waiting') {
-    queuedWaiting = true;
-    await appendLoopRunLog(runId, `[运行] 排队结果等待代码槽释放：${agentLabel(queued.agent)} ${queued.taskId}${queued.storyIndex ? ` · ${deliveryUnitLabel(queued.storyIndex)}` : ''}，当前占用=${queued.ownerTaskId}`);
-  } else if (queued.status === 'failed') {
-    await appendLoopRunLog(runId, `[错误] 排队结果应用失败：${agentLabel(queued.agent)} ${queued.taskId}${queued.storyIndex ? ` · ${deliveryUnitLabel(queued.storyIndex)}` : ''} - ${queued.reason}`);
-  }
-  const dispatch = await createLoopDispatch(runId, { includeRunHeader: false, logDelegations: false });
-  if (!dispatch.delegations.length) {
+
+  const active = new Map<string, Promise<void>>();
+  while (await isRunActive()) {
+    const queuedWaiting = await drainQueuedAgentResults();
+    const dispatch = await createLoopDispatch(runId, { includeRunHeader: false, logDelegations: false });
+    let started = 0;
+    for (const rawDelegation of dispatch.delegations) {
+      const delegation = normalizeDelegation(rawDelegation);
+      const key = `${delegation.taskId}:${delegation.lane}`;
+      if (active.has(key)) continue;
+      const execution = executeDelegationStep(delegation, executor, executionOptions)
+        .catch(async (error) => {
+          await appendLoopRunLog(runId, `[错误] requirement=${delegation.taskId} lane=${delegation.lane} agent=${delegation.agent} 执行器退出：${error instanceof Error ? error.message : String(error)}`);
+        })
+        .finally(() => { active.delete(key); });
+      active.set(key, execution);
+      started += 1;
+    }
+    if (started) await appendLoopRunLog(runId, `[运行] 使用 ${executor.label} CLI，新启动 ${started} 个 Lane Agent；已有 ${active.size - started} 个继续运行`);
+    if (active.size) {
+      await Promise.race(active.values());
+      continue;
+    }
+    if (backgroundEvaluations.size) {
+      await Promise.race(backgroundEvaluations);
+      continue;
+    }
     if (queuedWaiting) {
-      await scheduleNextLoop();
-      return;
+      await sleep(Number(process.env.LOOP_ACTIVE_DISPATCH_RETRY_MS || 60 * 1000));
+      continue;
     }
     await startDispatchRetryRun(runId);
     return;
   }
-  if (!(await isRunActive())) return;
-  await appendLoopRunLog(runId, `[运行] 使用 ${executor.label} CLI，并发执行 ${dispatch.delegations.length} 个任务级 Agent 步骤`);
-  const outcomes = await Promise.allSettled(
-    dispatch.delegations.map((delegation) => executeDelegationStep(delegation, executor, executionOptions)),
-  );
-  for (const [index, outcome] of outcomes.entries()) {
-    if (outcome.status === 'fulfilled') continue;
-    const delegation = dispatch.delegations[index];
-    await appendLoopRunLog(runId, `[错误] requirement=${delegation.taskId} agent=${delegation.agent} 并发执行器退出：${outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)}`);
-  }
-  await scheduleNextLoop();
+  await Promise.allSettled(active.values());
 }
 
 async function run() {

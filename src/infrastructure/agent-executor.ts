@@ -8,6 +8,7 @@ export type AgentExecutionContext = {
   taskId: string;
   storyIndex: number | null;
   pipeline: string;
+  lane?: 'control' | 'analysis' | 'delivery';
 };
 
 export type AgentExecutionOptions = {
@@ -230,7 +231,7 @@ function stringifyValue(value: unknown) {
 }
 
 function meta(executor: AgentExecutorId, context: AgentExecutionContext) {
-  return `executor=${executor} agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline}`;
+  return `executor=${executor} lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline}`;
 }
 
 function toolNameFromCursor(event: Record<string, unknown>) {

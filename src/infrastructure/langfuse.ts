@@ -15,6 +15,7 @@ export type TelemetryContext = {
   storyIndex?: number | null;
   pipeline?: string;
   agent?: string;
+  lane?: 'control' | 'analysis' | 'delivery';
 };
 
 export type LangfuseClient = {
@@ -155,7 +156,7 @@ function parseConfig(env: Readonly<Record<string, string | undefined>>): ParsedC
 function stableSample(context: TelemetryContext, sampleRate: number) {
   if (sampleRate <= 0) return false;
   if (sampleRate >= 1) return true;
-  const key = [context.runToken, context.taskId, context.storyIndex, context.pipeline, context.agent].map((value) => String(value ?? '')).join('|');
+  const key = [context.runToken, context.taskId, context.storyIndex, context.pipeline, context.agent, context.lane].map((value) => String(value ?? '')).join('|');
   let hash = 2_166_136_261;
   for (let index = 0; index < key.length; index += 1) {
     hash ^= key.charCodeAt(index);
@@ -256,6 +257,7 @@ export function createLangfuseTelemetry(options: LangfuseTelemetryOptions = {}):
         deliveryUnitIndex: context.storyIndex ?? null,
         flow: context.pipeline ?? null,
         agent: context.agent ?? null,
+        ...(context.lane ? { lane: context.lane } : {}),
         operation: context.pipeline ?? null,
         node: context.agent ?? null,
         executor: attributes.executor,
@@ -269,7 +271,7 @@ export function createLangfuseTelemetry(options: LangfuseTelemetryOptions = {}):
         name: `loop.${observationSegment(context.pipeline, 'agent-execution')}`,
         sessionId: context.runToken,
         metadata,
-        tags: [context.agent, context.pipeline, attributes.executor].filter((value): value is string => Boolean(value)),
+        tags: [context.agent, context.lane, context.pipeline, attributes.executor].filter((value): value is string => Boolean(value)),
         ...(prompt ? { input: { prompt } } : {}),
       }));
       if (!trace?.update) return noOpTrace;
@@ -279,6 +281,7 @@ export function createLangfuseTelemetry(options: LangfuseTelemetryOptions = {}):
           executor: attributes.executor,
           operation: context.pipeline ?? null,
           node: context.agent ?? null,
+          ...(context.lane ? { lane: context.lane } : {}),
           configuredModel: attributes.model ?? null,
           reasoningEffort: attributes.reasoningEffort ?? null,
           usageAvailable: false,

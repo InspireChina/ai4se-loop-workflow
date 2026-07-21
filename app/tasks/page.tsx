@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { formatEventTime } from '../../src/application/event-time';
-import { listCompletedTasks, listTasks } from '../../src/application/tasks';
+import { listCompletedTasks, listTasks, type TaskWithLanes } from '../../src/application/tasks';
 import { agentLabel, itemTypeLabel, statusLabel } from '../../src/domain/terminology';
 import CreateTaskDialog from './create-task-dialog';
 
@@ -28,12 +28,13 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
           const hasCompletedAt = Boolean(task.completed_at);
           const timeLabel = hasCompletedAt ? '完成时间' : '更新时间';
           const timeValue = task.completed_at ?? task.updated_at;
+          const laneSummary = completedView ? '' : (task as TaskWithLanes).lanes.map((lane) => `${lane.lane === 'analysis' ? 'Analysis' : 'Delivery'}: ${agentLabel(lane.current_agent)}（${lane.status}）`).join(' · ');
 
           return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}>
             <span><strong>{task.title}</strong><small>{task.task_id} · {task.priority || '未定级'}</small></span>
             <span>{itemTypeLabel(task.item_type)}</span>
             <span className={`badge ${task.agile_status === 'done' ? 'green' : 'blue'}`}>{statusLabel(task.agile_status)}</span>
-            <span>{completedView ? <><small>{timeLabel}</small><br />{formatEventTime(timeValue)}</> : agentLabel(task.current_subagent)}</span>
+            <span>{completedView ? <><small>{timeLabel}</small><br />{formatEventTime(timeValue)}</> : laneSummary}</span>
           </Link>;
         })}
         {tasks.length === 0 && <div className="empty">{completedView ? '暂无已完成需求。' : '当前没有进行中的需求。'}</div>}

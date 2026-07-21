@@ -7,6 +7,19 @@ import { isRunProcessAlive, readRunPid } from '../infrastructure/run-process';
 import { toUtcIsoString } from './event-time';
 import { recordLoopLogEventInDb } from './runtime-events';
 import {
+  laneCanDispatch,
+  ensureTaskLanesInDb,
+  laneForAgent,
+  markTaskLaneRunningInDb,
+  refreshTaskLaneStatesInDb,
+  settleTaskLaneInDb,
+  setTaskLaneStateInDb,
+  taskLaneInDb,
+  taskLanesInDb,
+  type TaskLane,
+  type TaskLaneKind,
+} from './task-lanes';
+import {
   assertActorCanCreate,
   assertState,
   assertUpdate,
@@ -35,6 +48,7 @@ export type Task = TaskState & {
   updated_at: string;
   completed_at: string | null;
 };
+export type TaskWithLanes = Task & { lanes: TaskLane[] };
 
 export type Story = { task_id: string; story_index: number; title: string; directory: string };
 export type StorySpec = { spec_id: string; task_id: string; story_index: number; revision: number; status: 'draft' | 'waiting_for_answers' | 'resolved' | 'superseded'; spec_json: string; source_result_id: string | null; created_at: string; resolved_at: string | null };
@@ -122,7 +136,7 @@ export type RuntimeInputRequest = {
 export type ClosureAcknowledgement = { acknowledgement_id: string; task_id: string; review_document_id: string; review_revision: number; acknowledged_by: string; acknowledged_at: string };
 export type VerificationRun = { verification_id: string; task_id: string; story_index: number; spec_revision: number; code_commit: string | null; status: string; started_at: string; finished_at: string | null };
 export type VerificationEvidence = { evidence_id: string; verification_id: string; criterion_id: string; kind: string; instruction: string; command: string | null; exit_code: number | null; output_summary: string | null; passed: number; created_at: string };
-export type ExecutionAttemptView = { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; last_error: string | null; created_at: string; started_at: string | null; finished_at: string | null };
+export type ExecutionAttemptView = { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; lane: string | null; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; last_error: string | null; created_at: string; started_at: string | null; finished_at: string | null };
 export type Event = { event_id: string; actor: string; event_type: string; summary: string; created_at: string };
 export type RunStatus = { runId: string; owner: string; startedAt: string; pid: number | null; active: boolean } | null;
 export type RunLogChunk = { lastId: number; raw: string };
@@ -223,14 +237,18 @@ async function syncTaskFiles(_db: Awaited<ReturnType<typeof databaseConnection>>
   // DB-first product mode: target repo files are no longer generated or synchronized.
 }
 
-export async function listTasks(options: { includeTerminal?: boolean } = {}): Promise<Task[]> {
+export async function listTasks(options: { includeTerminal?: boolean } = {}): Promise<TaskWithLanes[]> {
   const db = await databaseConnection();
   const where = options.includeTerminal ? '' : "WHERE agile_status NOT IN ('done', 'cancelled')";
-  return db.prepare(`
+  const tasks = db.prepare(`
     ${taskSelect}
     ${where}
     ORDER BY CASE agile_status WHEN 'blocked' THEN 0 ELSE 1 END, priority, updated_at DESC
   `).all() as Task[];
+  return tasks.map((task) => {
+    refreshTaskLaneStatesInDb(db, task);
+    return { ...task, lanes: taskLanesInDb(db, task) };
+  });
 }
 
 /**
@@ -278,8 +296,10 @@ export async function getTask(taskId: string) {
     JOIN verification_runs run ON run.verification_id = evidence.verification_id
     WHERE run.task_id = ? ORDER BY evidence.created_at, evidence.evidence_id
   `).all(taskId) as VerificationEvidence[];
+  refreshTaskLaneStatesInDb(db, task);
+  const lanes = taskLanesInDb(db, task);
   const executionAttempts = db.prepare(`
-    SELECT execution_id, run_id, task_id, story_index, agent, pipeline, attempt, status,
+    SELECT execution_id, run_id, task_id, story_index, agent, pipeline, lane, attempt, status,
            input_hash, base_commit, code_commit, verification_id,
            prompt_version, prompt_hash, memory_revision, memory_hash, evolution_candidate_id, last_error,
            created_at, started_at, finished_at
@@ -288,7 +308,7 @@ export async function getTask(taskId: string) {
     ORDER BY created_at, execution_id
   `).all(taskId) as ExecutionAttemptView[];
   const events = db.prepare('SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at DESC').all(taskId) as Event[];
-  return { task, stories, storySpecs, questions, runtimeInputs, documents, documentComments, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events };
+  return { task, lanes, stories, storySpecs, questions, runtimeInputs, documents, documentComments, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events };
 }
 
 export async function getTaskContext(taskId: string) {
@@ -678,6 +698,7 @@ export async function createTask(input: unknown) {
     `).run(taskId, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, value.priority || null, value.status, currentSubagent, '新建需求，等待 Loop 梳理', state.blocked_reason, value.actor);
     const task = link ? (db.prepare(`${taskSelect} WHERE link = ?`).get(link) as Task | undefined) : fetchTask(db, taskId);
     if (!task) throw new Error('需求创建失败');
+    ensureTaskLanesInDb(db, task);
     addEvent(db, task.task_id, value.actor, 'TaskCreated', `创建需求：${task.title}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, task.task_id);
@@ -726,6 +747,8 @@ export async function initializeTaskContext(input: unknown) {
           updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(value.kind, changes.agile_status, changes.current_subagent, changes.next_step, changes.blocked_reason, value.actor, changes.agile_status, changes.agile_status, value.taskId);
+    const after = fetchTask(db, value.taskId);
+    if (after) refreshTaskLaneStatesInDb(db, after);
     addEvent(db, value.taskId, value.actor, 'ContextInitialized', '初始化数据库上下文');
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId);
@@ -756,6 +779,8 @@ export async function addStory(input: unknown) {
   try {
     db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, ?, ?, ?)').run(value.taskId, nextIndex, value.title, directory);
     db.prepare('UPDATE tasks SET total_stories = ?, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?').run(prospective.total_stories, `已新增交付单元 ${nextIndex}，等待方案分析`, value.actor, value.taskId);
+    const after = fetchTask(db, value.taskId);
+    if (after) refreshTaskLaneStatesInDb(db, after);
     addEvent(db, value.taskId, value.actor, 'StoryAdded', `新增交付单元 ${nextIndex}：${value.title}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId);
@@ -890,6 +915,17 @@ export async function addRuntimeInputRequest(input: unknown) {
       value.sourceAgent,
       value.taskId,
     );
+    const lane = laneForAgent(value.sourceAgent);
+    if (lane !== 'control') {
+      setTaskLaneStateInDb(db, {
+        taskId: value.taskId,
+        lane,
+        status: 'waiting_for_runtime_input',
+        currentAgent: value.sourceAgent,
+        currentStoryIndex: value.storyIndex || null,
+        blockedReason: value.title,
+      });
+    }
     addEvent(db, value.taskId, value.sourceAgent, 'RuntimeInputRequested', `请求运行信息：${value.title}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId);
@@ -931,20 +967,26 @@ export async function answerRuntimeInput(input: unknown) {
   refreshPages('/', `/tasks/${value.taskId}`);
 }
 
-export async function submitRuntimeInputs(taskId: string) {
+export async function submitRuntimeInputs(taskId: string, requestedLane?: TaskLaneKind) {
   const db = await databaseConnection();
   const task = fetchTask(db, taskId);
-  if (!task || task.run_state !== 'waiting_for_runtime_input') throw new Error('需求当前不在等待运行信息状态');
-  if (!task.current_subagent) throw new Error('运行信息请求缺少负责 Agent');
+  if (!task) throw new Error('需求不存在');
+  const lanes = taskLanesInDb(db, task);
+  const lane = requestedLane
+    ? lanes.find((item) => item.lane === requestedLane)
+    : lanes.find((item) => item.status === 'waiting_for_runtime_input');
+  if (!lane || lane.status !== 'waiting_for_runtime_input' || !lane.current_agent) throw new Error('指定 Lane 当前不在等待运行信息状态');
+  const agents = lane.lane === 'analysis' ? ['analyst-agent'] : ['dev-agent', 'test-agent'];
+  const placeholders = agents.map(() => '?').join(', ');
   const pending = (db.prepare(`
     SELECT COUNT(*) AS count FROM runtime_input_requests
-    WHERE task_id = ? AND status = 'pending'
-  `).get(taskId) as { count: number }).count;
+    WHERE task_id = ? AND source_agent IN (${placeholders}) AND status = 'pending'
+  `).get(taskId, ...agents) as { count: number }).count;
   if (pending) throw new Error('仍有未回答的运行信息，不能继续执行');
   const answered = (db.prepare(`
     SELECT COUNT(*) AS count FROM runtime_input_requests
-    WHERE task_id = ? AND status = 'answered'
-  `).get(taskId) as { count: number }).count;
+    WHERE task_id = ? AND source_agent IN (${placeholders}) AND status = 'answered'
+  `).get(taskId, ...agents) as { count: number }).count;
   if (!answered) throw new Error('没有可提交的运行信息回答');
   db.exec('BEGIN');
   try {
@@ -953,8 +995,16 @@ export async function submitRuntimeInputs(taskId: string) {
       SET run_state = 'runnable', resume_pending = 1, blocked_reason = NULL,
           next_step = ?, last_actor = 'human', updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
-    `).run(`运行信息已补充，交回 ${task.current_subagent} 从当前阶段继续`, taskId);
-    addEvent(db, taskId, 'human', 'RuntimeInputsSubmitted', `提交运行信息回答，交回 ${task.current_subagent}。`);
+    `).run(`运行信息已补充，交回 ${lane.current_agent} 从当前阶段继续`, taskId);
+    setTaskLaneStateInDb(db, {
+      taskId,
+      lane: lane.lane,
+      status: 'runnable',
+      currentAgent: lane.current_agent,
+      currentStoryIndex: lane.current_story_index,
+      resumePending: 1,
+    });
+    addEvent(db, taskId, 'human', 'RuntimeInputsSubmitted', `提交 ${lane.lane} Lane 运行信息回答，交回 ${lane.current_agent}。`);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
@@ -1047,6 +1097,17 @@ export async function addQuestion(input: unknown) {
             resume_pending = 0, blocked_reason = ?, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP
         WHERE task_id = ?
       `).run(agent, value.blockedReason || value.title, `等待人工回答：${value.title}`, value.actor, value.taskId);
+      const lane = laneForAgent(agent);
+      if (lane !== 'control') {
+        setTaskLaneStateInDb(db, {
+          taskId: value.taskId,
+          lane,
+          status: 'waiting_for_answers',
+          currentAgent: agent,
+          currentStoryIndex: storyIndex || null,
+          blockedReason: value.blockedReason || value.title,
+        });
+      }
     }
     addEvent(db, value.taskId, value.actor, 'ClarificationRequested', `请求澄清：${value.title}`);
     db.exec('COMMIT');
@@ -1062,8 +1123,9 @@ export async function addQuestion(input: unknown) {
 export async function submitClarificationAnswers(taskId: string) {
   const db = await databaseConnection();
   const task = fetchTask(db, taskId);
-  if (!task || task.run_state !== 'waiting_for_answers') throw new Error('需求当前不在等待澄清回答状态');
-  if (task.current_subagent !== 'analyst-agent') throw new Error('只有方案分析阶段可以提交产品澄清回答');
+  if (!task) throw new Error('需求不存在');
+  const lane = taskLaneInDb(db, task, 'analysis');
+  if (lane.status !== 'waiting_for_answers') throw new Error('Analysis Lane 当前不在等待澄清回答状态');
   const pending = (db.prepare("SELECT COUNT(*) AS count FROM questions WHERE task_id = ? AND status = 'pending'").get(taskId) as { count: number }).count;
   if (pending) throw new Error('仍有未回答的澄清问题，不能继续分析');
   db.exec('BEGIN');
@@ -1075,6 +1137,14 @@ export async function submitClarificationAnswers(taskId: string) {
           last_actor = 'human', updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(taskId);
+    setTaskLaneStateInDb(db, {
+      taskId,
+      lane: 'analysis',
+      status: 'runnable',
+      currentAgent: 'analyst-agent',
+      currentStoryIndex: lane.current_story_index || task.analysis_index + 1,
+      resumePending: 1,
+    });
     addEvent(db, taskId, 'human', 'ClarificationAnswersSubmitted', '提交全部澄清回答，等待 AI 重建规格。');
     db.exec('COMMIT');
   } catch (error) {
@@ -1084,10 +1154,57 @@ export async function submitClarificationAnswers(taskId: string) {
   refreshPages('/', `/tasks/${taskId}`);
 }
 
-export async function releaseBlock(taskId: string) {
+export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind) {
   const db = await databaseConnection();
   const task = fetchTask(db, taskId);
-  if (!task || task.agile_status !== 'blocked') throw new Error('需求当前不在系统阻塞状态');
+  if (!task) throw new Error('需求不存在');
+  const lane = taskLanesInDb(db, task).find((item) => item.status === 'system_blocked' && (!requestedLane || item.lane === requestedLane));
+  if (lane) {
+    const pendingQuestions = lane.lane === 'analysis'
+      ? (db.prepare("SELECT COUNT(*) AS count FROM questions WHERE task_id = ? AND status = 'pending'").get(taskId) as { count: number }).count
+      : 0;
+    if (pendingQuestions) throw new Error('产品澄清必须通过提交回答恢复，不能用系统恢复命令绕过');
+    if (lane.lane === 'delivery' && lane.current_agent === 'dev-agent') {
+      const active = db.prepare(`${taskSelect} WHERE task_id != ?`).all(taskId) as Task[];
+      const owner = active.find(occupiesCodeSlot);
+      if (owner) throw new Error(`代码槽已被 ${owner.task_id} 占用`);
+    }
+    db.exec('BEGIN');
+    try {
+      setTaskLaneStateInDb(db, {
+        taskId,
+        lane: lane.lane,
+        status: 'runnable',
+        currentAgent: lane.current_agent,
+        currentStoryIndex: lane.current_story_index,
+        resumePending: 1,
+      });
+      const otherBlocked = (db.prepare(`
+        SELECT COUNT(*) AS count FROM task_lanes
+        WHERE task_id = ? AND status = 'system_blocked'
+      `).get(taskId) as { count: number }).count;
+      if (task.agile_status === 'blocked' && task.resume_status && task.resume_status !== 'blocked') {
+        db.prepare(`
+          UPDATE tasks SET agile_status = ?, run_state = 'runnable', resume_status = NULL,
+            resume_pending = 0, blocked_reason = NULL, last_actor = 'system', updated_at = CURRENT_TIMESTAMP
+          WHERE task_id = ?
+        `).run(task.resume_status, taskId);
+      } else if (!otherBlocked) {
+        db.prepare(`
+          UPDATE tasks SET blocked_reason = NULL, next_step = ?, last_actor = 'system', updated_at = CURRENT_TIMESTAMP
+          WHERE task_id = ?
+        `).run(`${lane.lane} Lane 阻塞已解除，等待继续调度`, taskId);
+      }
+      addEvent(db, taskId, 'system', 'LaneBlockRecovered', `恢复 ${lane.lane} Lane，交回 ${lane.current_agent || '对应 Agent'}。`);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+    refreshPages(`/tasks/${taskId}`, '/');
+    return;
+  }
+  if (task.agile_status !== 'blocked') throw new Error('需求当前不在系统阻塞状态');
   const pendingQuestions = (db.prepare('SELECT COUNT(*) AS count FROM questions WHERE task_id = ? AND status = \'pending\'').get(taskId) as { count: number }).count;
   if (pendingQuestions) throw new Error('产品澄清必须通过提交回答恢复，不能用系统恢复命令绕过');
   const resumeStatus = task.resume_status;
@@ -1199,6 +1316,8 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
   db.exec('BEGIN');
   try {
     db.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE task_id = ?`).run(...values, taskId);
+    const after = fetchTask(db, taskId);
+    if (after) refreshTaskLaneStatesInDb(db, after);
     addEvent(db, taskId, actor, 'TaskUpdated', changes.next_step || `更新状态：${changes.agile_status || before.agile_status}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, taskId, { createClearedBlock: Boolean(changes.agile_status && changes.agile_status !== 'blocked') });
@@ -1255,6 +1374,8 @@ export async function acknowledgeClosure(input: unknown) {
           next_step = '结卡报告已阅读，需求已关闭', last_actor = 'human', updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(value.taskId);
+    setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'analysis', status: 'completed' });
+    setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'delivery', status: 'completed' });
     addEvent(db, value.taskId, value.actor, 'ClosureAcknowledged', `已阅读结卡报告 v${value.reviewRevision} 并关闭需求。`);
     db.exec('COMMIT');
   } catch (error) {
@@ -1344,6 +1465,18 @@ export async function rewindTask(input: unknown) {
           last_actor = ?, completed_at = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(nextStatus, targetAgent, analysisIndex, devIndex, testIndex, totalStories, resolvedSpecIndex, value.reason || `回退 ${storyLabel} 到 ${value.to}`, value.actor, value.taskId);
+    if (value.to === 'plan') {
+      setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'analysis', status: 'pending' });
+      setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'delivery', status: 'pending' });
+    } else if (value.to === 'analysis') {
+      setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'analysis', status: 'runnable' });
+      const deliveryStatus = testIndex < devIndex || devIndex < analysisIndex ? 'runnable' : 'pending';
+      setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'delivery', status: deliveryStatus });
+    } else {
+      setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'delivery', status: 'runnable' });
+      const nextTask = fetchTask(db, value.taskId);
+      if (nextTask) refreshTaskLaneStatesInDb(db, nextTask);
+    }
     addEvent(db, value.taskId, value.actor, 'TaskRewound', `回退 ${storyLabel} 到 ${value.to}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId, { createClearedBlock: true });
@@ -1374,6 +1507,8 @@ export async function cancelTask(input: unknown) {
           completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(`已取消：${value.reason}`, value.taskId);
+    setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'analysis', status: 'completed' });
+    setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'delivery', status: 'completed' });
     addEvent(db, value.taskId, 'human', 'TaskCancelled', value.reason);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId, { createClearedBlock: true });
@@ -1415,6 +1550,7 @@ function feedbackDelegation(task: Task, row: FeedbackQueueRow): DelegationEnvelo
   return {
     ...toEnvelope(task, {
       taskId: row.task_id,
+      lane: 'control',
       pipeline: `feedback-${mode}`,
       agent: 'feedback-agent',
       storyIndex: row.story_index,
@@ -1426,20 +1562,206 @@ function feedbackDelegation(task: Task, row: FeedbackQueueRow): DelegationEnvelo
   };
 }
 
+type ActiveLaneExecution = { task_id: string; lane: string; agent: string };
+
+function activeLaneExecutions(db: Awaited<ReturnType<typeof databaseConnection>>) {
+  return db.prepare(`
+    SELECT task_id, lane, MAX(agent) AS agent
+    FROM (
+      SELECT task_id, COALESCE(lane, CASE
+        WHEN agent = 'analyst-agent' THEN 'analysis'
+        WHEN agent IN ('dev-agent', 'test-agent') THEN 'delivery'
+        ELSE 'control'
+      END) AS lane, agent
+      FROM execution_attempts
+      WHERE status IN ('planned', 'running', 'output_received', 'verifying', 'applying')
+      UNION ALL
+      SELECT task_id, CASE
+        WHEN agent = 'analyst-agent' THEN 'analysis'
+        WHEN agent IN ('dev-agent', 'test-agent') THEN 'delivery'
+        ELSE 'control'
+      END AS lane, agent
+      FROM agent_results
+      WHERE application_status = 'pending'
+    ) active
+    GROUP BY task_id, lane
+  `).all() as ActiveLaneExecution[];
+}
+
+function laneLine(task: Task, lane: TaskLane, codeSlotAvailable: boolean): Delegation | null {
+  const line = (pipeline: string, agent: string, storyIndex: number | null, resource: 'none' | 'browser', description: string): Delegation => ({
+    taskId: task.task_id,
+    lane: lane.lane,
+    pipeline,
+    agent,
+    storyIndex,
+    resource,
+    description,
+  });
+  if (!laneCanDispatch(lane)) return null;
+  if (lane.lane === 'analysis') {
+    if (lane.resume_pending && lane.current_agent) {
+      const storyIndex = lane.current_story_index || Math.min(task.total_stories, task.analysis_index + 1);
+      return line('resume', lane.current_agent, storyIndex, 'none', '读取人工输入或恢复信息，并继续 Analysis Lane');
+    }
+    if (task.analysis_index >= task.total_stories) return null;
+    return line(
+      'analysis',
+      'analyst-agent',
+      task.analysis_index + 1,
+      'none',
+      `分析交付单元 ${task.analysis_index + 1} 的需求和方案`,
+    );
+  }
+  if (lane.resume_pending && lane.current_agent) {
+    const storyIndex = lane.current_story_index || (lane.current_agent === 'test-agent' ? task.test_index + 1 : task.dev_index + 1);
+    if (lane.current_agent === 'dev-agent' && !codeSlotAvailable) return null;
+    return line('resume', lane.current_agent, storyIndex, lane.current_agent === 'test-agent' ? 'browser' : 'none', '读取人工输入，并恢复 Delivery Lane');
+  }
+  if (task.test_index < task.dev_index) return line('test', 'test-agent', task.test_index + 1, 'browser', `验证交付单元 ${task.test_index + 1}`);
+  if (task.dev_index < task.analysis_index && codeSlotAvailable) return line('dev', 'dev-agent', task.dev_index + 1, 'none', `实现交付单元 ${task.dev_index + 1}`);
+  return null;
+}
+
+function controlLine(task: Task, codeSlotAvailable: boolean, lanes: TaskLane[]) {
+  const deliveryComplete = task.total_stories > 0
+    && task.analysis_index === task.total_stories
+    && task.dev_index === task.total_stories
+    && task.test_index === task.total_stories;
+  const lanesCompleted = lanes.length === 2 && lanes.every((lane) => lane.status === 'completed');
+  if (task.agile_status === 'in review' && (!deliveryComplete || !lanesCompleted)) return null;
+  if (task.total_stories > 0 && ['ready for dev', 'in dev', 'blocked'].includes(task.agile_status)) {
+    if (lanesCompleted && deliveryComplete && task.run_state === 'runnable') {
+      return {
+        taskId: task.task_id,
+        lane: 'control',
+        pipeline: 'review',
+        agent: 'review-agent',
+        storyIndex: null,
+        resource: 'none',
+        description: '全部交付单元已完成，进入整体验收',
+      } satisfies Delegation;
+    }
+    return null;
+  }
+  return nextDelegation(task, codeSlotAvailable);
+}
+
+function analysisPriority(task: Task, lane: TaskLane) {
+  const priority = String(task.priority || '').toUpperCase();
+  const rank = priority === 'P0' || priority === 'S0' ? 0
+    : priority === 'P1' || priority === 'S1' ? 1
+      : priority === 'P2' || priority === 'S2' ? 2
+        : priority === 'P3' || priority === 'S3' ? 3 : 9;
+  return { rank, readyAt: lane.ready_at || lane.updated_at || task.updated_at, taskId: task.task_id };
+}
+
+function compareAnalysisCandidates(a: { task: Task; lane: TaskLane }, b: { task: Task; lane: TaskLane }) {
+  const left = analysisPriority(a.task, a.lane);
+  const right = analysisPriority(b.task, b.lane);
+  return left.rank - right.rank || left.readyAt.localeCompare(right.readyAt) || left.taskId.localeCompare(right.taskId);
+}
+
 export async function pipelineForTask(taskId: string): Promise<Delegation[]> {
   const db = await databaseConnection();
   const task = fetchTask(db, taskId);
   if (!task) throw new Error('需求不存在');
+  refreshTaskLaneStatesInDb(db, task);
+  const allActive = activeLaneExecutions(db);
+  const active = allActive.filter((item) => item.task_id === taskId);
   const feedback = nextFeedbackRow(db, taskId);
-  if (feedback) return [feedbackDelegation(task, feedback)];
+  if (feedback) return active.length ? [] : [feedbackDelegation(task, feedback)];
+  if (task.agile_status === 'blocked') return [];
   const otherActive = db.prepare(`${taskSelect} WHERE task_id != ?`).all(taskId) as Task[];
-  const codeSlotAvailable = !otherActive.some(occupiesCodeSlot);
-  const line = nextDelegation(task, codeSlotAvailable);
-  return line ? [line] : [];
+  const codeSlotAvailable = !otherActive.some(occupiesCodeSlot) && !allActive.some((item) => item.task_id !== taskId && item.agent === 'dev-agent');
+  const lanes = taskLanesInDb(db, task);
+  const control = controlLine(task, codeSlotAvailable, lanes);
+  if (control) return active.length ? [] : [control];
+  const lines = lanes
+    .filter((lane) => !active.some((item) => item.lane === lane.lane))
+    .map((lane) => laneLine(task, lane, codeSlotAvailable))
+    .filter((line): line is Delegation => Boolean(line));
+  return lines;
 }
 
 export async function pipelineAll(): Promise<Delegation[]> {
   return pipelineAllEnvelopes();
+}
+
+export async function markDelegationLaneRunning(delegation: DelegationEnvelope) {
+  if (delegation.lane === 'control') return;
+  const db = await databaseConnection();
+  markTaskLaneRunningInDb(db, {
+    taskId: delegation.taskId,
+    lane: delegation.lane,
+    agent: delegation.agent,
+    storyIndex: delegation.storyIndex,
+  });
+  refreshPages('/', `/tasks/${delegation.taskId}`);
+}
+
+export async function settleDelegationLane(delegation: DelegationEnvelope) {
+  if (delegation.lane === 'control') return;
+  const db = await databaseConnection();
+  const task = fetchTask(db, delegation.taskId);
+  if (!task) return;
+  settleTaskLaneInDb(db, task, delegation.lane);
+  refreshPages('/', `/tasks/${delegation.taskId}`);
+}
+
+export async function reconcileStaleTaskLanes() {
+  const db = await databaseConnection();
+  const rows = db.prepare(`
+    SELECT lane.task_id, lane.lane
+    FROM task_lanes lane
+    WHERE lane.status = 'running'
+      AND NOT EXISTS (
+        SELECT 1 FROM execution_attempts execution
+        WHERE execution.task_id = lane.task_id
+          AND COALESCE(execution.lane, CASE
+            WHEN execution.agent = 'analyst-agent' THEN 'analysis'
+            WHEN execution.agent IN ('dev-agent', 'test-agent') THEN 'delivery'
+            ELSE 'control'
+          END) = lane.lane
+          AND execution.status IN ('planned', 'running', 'output_received', 'verifying', 'applying')
+      )
+  `).all() as { task_id: string; lane: TaskLaneKind }[];
+  for (const row of rows) {
+    const task = fetchTask(db, row.task_id);
+    if (task) settleTaskLaneInDb(db, task, row.lane);
+  }
+  return rows.length;
+}
+
+export async function setTaskLaneState(input: {
+  taskId: string;
+  lane: TaskLaneKind;
+  status: TaskLane['status'];
+  currentAgent?: string | null;
+  currentStoryIndex?: number | null;
+  blockedReason?: string | null;
+  resumePending?: number;
+}) {
+  const db = await databaseConnection();
+  const task = fetchTask(db, input.taskId);
+  if (!task) throw new Error('需求不存在');
+  db.transaction(() => {
+    setTaskLaneStateInDb(db, input);
+    if (input.status === 'system_blocked') {
+      db.prepare(`
+        UPDATE tasks SET current_subagent = ?, blocked_reason = ?, next_step = ?,
+          last_actor = 'system', updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ?
+      `).run(
+        input.currentAgent || null,
+        input.blockedReason || 'Lane 执行失败',
+        `${input.lane} Lane 系统阻塞：${input.blockedReason || '执行失败'}`,
+        input.taskId,
+      );
+      addEvent(db, input.taskId, 'system', 'LaneSystemBlocked', `${input.lane} Lane：${input.blockedReason || '执行失败'}`);
+    }
+  })();
+  refreshPages('/', `/tasks/${input.taskId}`);
 }
 
 function toEnvelope(task: Task, delegation: Delegation): DelegationEnvelope {
@@ -1485,20 +1807,50 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
       WHEN 'P2' THEN 2 WHEN 'S2' THEN 2 WHEN 'P3' THEN 3 WHEN 'S3' THEN 3 ELSE 9
     END,
     updated_at DESC`).all() as Task[];
-  let codeAvailable = !tasks.some(occupiesCodeSlot);
+  const active = activeLaneExecutions(db);
+  const activeKeys = new Set(active.map((item) => `${item.task_id}:${item.lane}`));
+  let analysisSlots = Math.max(0, 4 - active.filter((item) => item.lane === 'analysis').length);
+  let codeAvailable = !tasks.some(occupiesCodeSlot) && !active.some((item) => item.agent === 'dev-agent');
   const readyDev = !codeAvailable ? null : tasks.find((task) => task.agile_status === 'ready for dev' && task.dev_index < task.analysis_index)?.task_id || null;
-  let browserUsed = false;
+  let browserUsed = active.some((item) => ['backlog-agent', 'repro-agent', 'test-agent'].includes(item.agent));
   const lines: DelegationEnvelope[] = [];
+  const analysisCandidates: { task: Task; lane: TaskLane }[] = [];
   for (const task of tasks) {
+    refreshTaskLaneStatesInDb(db, task);
     const taskCodeAvailable = occupiesCodeSlot(task) || (codeAvailable && (!readyDev || task.task_id === readyDev));
     const feedback = nextFeedbackRow(db, task.task_id);
-    const normal = feedback ? null : nextDelegation(task, taskCodeAvailable);
-    const envelope = feedback ? feedbackDelegation(task, feedback) : normal ? toEnvelope(task, normal) : null;
-    if (!envelope) continue;
-    if (envelope.resource === 'browser' && browserUsed) continue;
-    if (envelope.resource === 'browser') browserUsed = true;
-    if (envelope.pipeline === 'dev') codeAvailable = false;
-    lines.push(envelope);
+    const taskHasActive = active.some((item) => item.task_id === task.task_id);
+    if (feedback) {
+      if (!taskHasActive) lines.push(feedbackDelegation(task, feedback));
+      continue;
+    }
+    if (task.agile_status === 'blocked') continue;
+    const lanes = taskLanesInDb(db, task);
+    const control = controlLine(task, taskCodeAvailable, lanes);
+    if (control) {
+      if (taskHasActive) continue;
+      if (control.resource === 'browser' && browserUsed) continue;
+      if (control.resource === 'browser') browserUsed = true;
+      lines.push(toEnvelope(task, control));
+      continue;
+    }
+    const analysis = lanes.find((lane) => lane.lane === 'analysis');
+    if (analysis && !activeKeys.has(`${task.task_id}:analysis`) && laneLine(task, analysis, taskCodeAvailable)) analysisCandidates.push({ task, lane: analysis });
+    const delivery = lanes.find((lane) => lane.lane === 'delivery');
+    if (!delivery || activeKeys.has(`${task.task_id}:delivery`)) continue;
+    const deliveryLine = laneLine(task, delivery, taskCodeAvailable);
+    if (!deliveryLine) continue;
+    if (deliveryLine.resource === 'browser' && browserUsed) continue;
+    if (deliveryLine.resource === 'browser') browserUsed = true;
+    if (deliveryLine.pipeline === 'dev' || (deliveryLine.pipeline === 'resume' && deliveryLine.agent === 'dev-agent')) codeAvailable = false;
+    lines.push(toEnvelope(task, deliveryLine));
+  }
+  for (const candidate of analysisCandidates.sort(compareAnalysisCandidates)) {
+    if (!analysisSlots) break;
+    const line = laneLine(candidate.task, candidate.lane, true);
+    if (!line) continue;
+    lines.push(toEnvelope(candidate.task, line));
+    analysisSlots -= 1;
   }
   return lines;
 }
@@ -1576,7 +1928,7 @@ export async function createLoopDispatch(runId: string, options: { includeRunHea
   if (options.logDelegations !== false) {
     await appendLoopRunLog(runId, `[派发] 本轮生成 ${lines.length} 个 agent`);
     for (const [index, line] of lines.entries()) {
-      await appendLoopRunLog(runId, `[派发] #${index + 1} agent=${line.agent} flow=${line.pipeline} requirement=${line.taskId} unit=${line.storyIndex ?? '-'} resource=${line.resource}`);
+      await appendLoopRunLog(runId, `[派发] #${index + 1} lane=${line.lane} agent=${line.agent} flow=${line.pipeline} requirement=${line.taskId} unit=${line.storyIndex ?? '-'} resource=${line.resource}`);
       await appendLoopRunLog(runId, `[派发]      ${line.description}`);
     }
     if (!lines.length) await appendLoopRunLog(runId, '[派发] 当前没有可执行步骤，等待新需求或状态变化');
@@ -1587,6 +1939,7 @@ export async function createLoopDispatch(runId: string, options: { includeRunHea
 export function toJsonlEnvelope(item: DelegationEnvelope) {
   return JSON.stringify({
     task_id: item.taskId,
+    lane: item.lane,
     title: item.title,
     task_description: item.taskDescription,
     item_type: item.itemType,
@@ -1623,5 +1976,5 @@ export function toJsonlEnvelope(item: DelegationEnvelope) {
 
 export function toPipeEnvelope(item: DelegationEnvelope) {
   const clean = (value: unknown) => String(value ?? '').replaceAll('|', '／').replaceAll('\n', ' ').trim();
-  return [item.taskId, item.title, item.pipeline, item.agent, item.storyIndex ?? '', item.description].map(clean).join('|');
+  return [item.taskId, item.title, item.pipeline, item.agent, item.storyIndex ?? '', item.description, item.lane].map(clean).join('|');
 }

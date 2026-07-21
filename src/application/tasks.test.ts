@@ -630,6 +630,7 @@ test('versions Slice Specs, advances Dev without requiring a commit, and stores 
 test('lets Dev and Test request runtime information and resume the same delivery unit', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { beginEvolutionRun } = await import('./agent-evolution');
+  const { completeExecution } = await import('./executions');
   const { parseAgentResult } = await import('../domain/agent-result');
   const {
     answerRuntimeInput,
@@ -704,6 +705,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
       recommendation: '无关联项时确认仓库允许的占位值。',
     }],
   })), { executionId: 'execution-runtime-dev-request' });
+  await completeExecution('execution-runtime-dev-request');
 
   let detail = await getTask(taskId);
   assert.equal(detail?.task.agile_status, 'ready for dev');
@@ -714,11 +716,12 @@ test('lets Dev and Test request runtime information and resume the same delivery
   await submitRuntimeInputs(taskId);
   assert.deepEqual((await pipelineForTask(taskId))[0], {
     taskId,
+    lane: 'delivery',
     pipeline: 'resume',
     agent: 'dev-agent',
     storyIndex: 1,
     resource: 'none',
-    description: '读取人工输入，并安全恢复需求推进',
+    description: '读取人工输入，并恢复 Delivery Lane',
   });
 
   addExecution('execution-runtime-dev-resume', 'dev-agent', 'resume');
@@ -727,6 +730,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
     summary: 'Implementation completed using the supplied repository metadata.',
     changedFiles: [],
   })), { executionId: 'execution-runtime-dev-resume' });
+  await completeExecution('execution-runtime-dev-resume');
   detail = await getTask(taskId);
   assert.equal(detail?.task.dev_index, 1);
   assert.equal(detail?.runtimeInputs[0]?.status, 'resolved');
@@ -751,6 +755,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
     summary: 'A target test environment is required.',
     runtimeInputs: [{ title: '测试环境', question: '应在哪个已配置环境执行黑盒验证？' }],
   })), { executionId: 'execution-runtime-test-request' });
+  await completeExecution('execution-runtime-test-request');
   detail = await getTask(taskId);
   const testInput = detail!.runtimeInputs.find((input) => input.source_agent === 'test-agent')!;
   assert.equal(detail?.task.run_state, 'waiting_for_runtime_input');
@@ -766,6 +771,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
     verdict: 'passed',
     tests: [{ command: 'npm test', passed: true }],
   })), { executionId: 'execution-runtime-test-resume' });
+  await completeExecution('execution-runtime-test-resume');
   detail = await getTask(taskId);
   assert.equal(detail?.task.test_index, 1);
   assert.equal(detail?.task.agile_status, 'in review');
@@ -805,6 +811,61 @@ test('persists execution input before work and recovers output without rerunning
   assert.equal(row.code_commit, 'abc123');
 });
 
+test('keeps retry attempts in one logical generation even when the rebuilt prompt changes', async () => {
+  const { createTask, pipelineAllEnvelopes } = await import('./tasks');
+  const { beginExecutionAttempt, completeExecution, failExecution } = await import('./executions');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Stable retry generation' });
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id != ?").run(taskId);
+  const delegation = (await pipelineAllEnvelopes()).find((item) => item.taskId === taskId);
+  assert.ok(delegation);
+
+  const first = await beginExecutionAttempt({ runId: 'run-retry-1', delegation, prompt: 'prompt before execution history exists' });
+  await failExecution(first.attempt.execution_id, 'executor failed', false);
+  const second = await beginExecutionAttempt({ runId: 'run-retry-2', delegation, prompt: 'prompt now includes attempt one' });
+  await failExecution(second.attempt.execution_id, 'executor failed again', false);
+  const third = await beginExecutionAttempt({ runId: 'run-retry-3', delegation, prompt: 'prompt now includes attempts one and two' });
+
+  assert.deepEqual([first.attempt.attempt, second.attempt.attempt, third.attempt.attempt], [1, 2, 3]);
+  assert.equal(second.attempt.delegation_key, first.attempt.delegation_key);
+  assert.equal(third.attempt.delegation_key, first.attempt.delegation_key);
+
+  await completeExecution(third.attempt.execution_id);
+  const rework = await beginExecutionAttempt({ runId: 'run-rework-1', delegation, prompt: 'new rework generation after completion' });
+  assert.equal(rework.recovered, false);
+  assert.equal(rework.attempt.attempt, 1);
+  assert.notEqual(rework.attempt.delegation_key, first.attempt.delegation_key);
+  await completeExecution(rework.attempt.execution_id);
+});
+
+test('records a late Agent result after cancellation without reopening task lanes or applying effects', async () => {
+  const { applyAgentResult } = await import('./agent-results');
+  const { parseAgentResult } = await import('../domain/agent-result');
+  const { cancelTask, createTask, getTask, pipelineAllEnvelopes } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Cancel while Agent is running' });
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id != ?").run(taskId);
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+  const delegation = (await pipelineAllEnvelopes()).find((item) => item.taskId === taskId);
+  assert.ok(delegation);
+
+  await cancelTask({ taskId, reason: 'No longer needed' });
+  const outcome = await applyAgentResult('run-late-cancelled-result', delegation, parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'This result arrived after cancellation.',
+  })));
+
+  assert.equal(outcome, 'discarded');
+  const detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'cancelled');
+  assert.deepEqual(detail?.lanes.map((lane) => lane.status), ['completed', 'completed']);
+  const recorded = db.prepare("SELECT application_status, effect_outcome FROM agent_results WHERE task_id = ? AND run_id = 'run-late-cancelled-result'").get(taskId) as { application_status: string; effect_outcome: string };
+  assert.deepEqual(recorded, { application_status: 'applied', effect_outcome: 'discarded' });
+});
+
 test('isolates feedback scheduling per task and emits one concurrent delegation for each task queue', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { addDocumentComment, createTask, pipelineAllEnvelopes, upsertDocument } = await import('./tasks');
@@ -839,6 +900,261 @@ test('isolates feedback scheduling per task and emits one concurrent delegation 
   assert.equal(second?.agent, 'feedback-agent');
   assert.notEqual(first?.feedbackId, second?.feedbackId);
   assert.equal(normal?.agent, 'story-splitter-agent');
+});
+
+test('dispatches independent Analysis and Delivery lanes for the same task', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { pipelineAllEnvelopes, pipelineForTask, toPipeEnvelope } = await import('./tasks');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+  const taskId = 'TASK-parallel-lanes';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, priority, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+    ) VALUES(?, 'Parallel lanes', 'feature', 'P1', 'ready for dev', 'analyst-agent', 1, 0, 0, 3, 1, '')
+  `).run(taskId);
+  for (let index = 1; index <= 3; index += 1) {
+    db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, ?, ?, ?)').run(taskId, index, `Unit ${index}`, `unit-${index}`);
+  }
+  db.prepare(`
+    INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json)
+    VALUES('SPEC-parallel-1', ?, 1, 1, 'resolved', '{}')
+  `).run(taskId);
+
+  const delegations = await pipelineForTask(taskId);
+  assert.deepEqual(delegations.map((item) => [item.lane, item.agent, item.storyIndex]).sort(), [
+    ['analysis', 'analyst-agent', 2],
+    ['delivery', 'dev-agent', 1],
+  ]);
+  const envelope = (await pipelineAllEnvelopes()).find((item) => item.taskId === taskId && item.lane === 'analysis');
+  assert.ok(envelope);
+  const pipeColumns = toPipeEnvelope(envelope).split('|');
+  assert.deepEqual(pipeColumns.slice(2, 5), ['analysis', 'analyst-agent', '2']);
+  assert.equal(pipeColumns[6], 'analysis');
+});
+
+test('keeps Delivery runnable while Analysis waits for human clarification', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { getTask, pipelineForTask, setTaskLaneState } = await import('./tasks');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  const taskId = 'TASK-analysis-waits-delivery-runs';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+    ) VALUES(?, 'Lane-local clarification', 'feature', 'ready for dev', 'analyst-agent', 1, 0, 0, 2, 1, '')
+  `).run(taskId);
+  for (let index = 1; index <= 2; index += 1) {
+    db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, ?, ?, ?)').run(taskId, index, `Unit ${index}`, `unit-${index}`);
+  }
+  db.prepare(`
+    INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json)
+    VALUES('SPEC-lane-wait-1', ?, 1, 1, 'resolved', '{}')
+  `).run(taskId);
+  await getTask(taskId);
+  await setTaskLaneState({
+    taskId,
+    lane: 'analysis',
+    status: 'waiting_for_answers',
+    currentAgent: 'analyst-agent',
+    currentStoryIndex: 2,
+    blockedReason: 'Need product decision',
+  });
+
+  const delegations = await pipelineForTask(taskId);
+  assert.deepEqual(delegations.map((item) => [item.lane, item.agent, item.storyIndex]), [['delivery', 'dev-agent', 1]]);
+  const detail = await getTask(taskId);
+  assert.equal(detail?.lanes.find((lane) => lane.lane === 'analysis')?.status, 'waiting_for_answers');
+  assert.equal(detail?.lanes.find((lane) => lane.lane === 'delivery')?.status, 'runnable');
+
+  await setTaskLaneState({ taskId, lane: 'analysis', status: 'runnable' });
+  await setTaskLaneState({
+    taskId,
+    lane: 'delivery',
+    status: 'system_blocked',
+    currentAgent: 'dev-agent',
+    currentStoryIndex: 1,
+    blockedReason: 'Development executor unavailable',
+  });
+  const whileDeliveryBlocked = await pipelineForTask(taskId);
+  assert.deepEqual(whileDeliveryBlocked.map((item) => [item.lane, item.agent, item.storyIndex]), [['analysis', 'analyst-agent', 2]]);
+});
+
+test('caps Analysis concurrency at four and preserves existing task cursors when lanes are materialized', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { getTask, pipelineAllEnvelopes } = await import('./tasks');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+
+  const preservedTaskId = 'TASK-preserved-lane-cursors';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+    ) VALUES(?, 'Preserved cursors', 'feature', 'ready for dev', 'analyst-agent', 3, 2, 1, 4, 3, '')
+  `).run(preservedTaskId);
+  const preserved = await getTask(preservedTaskId);
+  assert.deepEqual(
+    [preserved?.task.analysis_index, preserved?.task.dev_index, preserved?.task.test_index],
+    [3, 2, 1],
+  );
+  assert.deepEqual(preserved?.lanes.map((lane) => [lane.lane, lane.status]), [
+    ['analysis', 'runnable'],
+    ['delivery', 'runnable'],
+  ]);
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id = ?").run(preservedTaskId);
+
+  const taskIds: string[] = [];
+  for (let index = 0; index < 5; index += 1) {
+    const taskId = `TASK-analysis-cap-${index}`;
+    taskIds.push(taskId);
+    db.prepare(`
+      INSERT INTO tasks(
+        task_id, title, item_type, priority, agile_status, current_subagent,
+        analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+      ) VALUES(?, ?, 'feature', ?, 'ready for dev', 'analyst-agent', 0, 0, 0, 1, 0, '')
+    `).run(taskId, `Analysis cap ${index}`, index === 4 ? 'P0' : 'P3');
+    db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, ?, ?)').run(taskId, `Unit ${index}`, `unit-${index}`);
+  }
+  const analysis = (await pipelineAllEnvelopes()).filter((item) => taskIds.includes(item.taskId) && item.lane === 'analysis');
+  assert.equal(analysis.length, 4);
+  assert.equal(analysis.some((item) => item.taskId === 'TASK-analysis-cap-4'), true);
+});
+
+test('releases only the requested blocked lane and resumes its persisted delivery unit', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { getTask, pipelineForTask, releaseBlock, setTaskLaneState } = await import('./tasks');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  const taskId = 'TASK-two-blocked-lanes';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+    ) VALUES(?, 'Two blocked lanes', 'feature', 'ready for dev', 'analyst-agent', 0, 0, 0, 2, 0, '')
+  `).run(taskId);
+  await getTask(taskId);
+  await setTaskLaneState({ taskId, lane: 'analysis', status: 'system_blocked', currentAgent: 'analyst-agent', currentStoryIndex: 1, blockedReason: 'analysis failed' });
+  await setTaskLaneState({ taskId, lane: 'delivery', status: 'system_blocked', currentAgent: 'dev-agent', currentStoryIndex: 1, blockedReason: 'delivery failed' });
+
+  await releaseBlock(taskId, 'analysis');
+
+  const detail = await getTask(taskId);
+  assert.deepEqual(detail?.lanes.map((lane) => [lane.lane, lane.status, lane.resume_pending]), [
+    ['analysis', 'runnable', 1],
+    ['delivery', 'system_blocked', 0],
+  ]);
+  assert.deepEqual((await pipelineForTask(taskId)).map((item) => [item.lane, item.pipeline, item.storyIndex]), [
+    ['analysis', 'resume', 1],
+  ]);
+});
+
+test('opens Review only after both lanes are completed and never skips a post-result lane block', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { getTask, pipelineForTask, releaseBlock, setTaskLaneState } = await import('./tasks');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  const taskId = 'TASK-review-lane-gate';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+    ) VALUES(?, 'Review lane gate', 'feature', 'in dev', 'test-agent', 1, 1, 1, 1, 1, '')
+  `).run(taskId);
+  await getTask(taskId);
+  await setTaskLaneState({ taskId, lane: 'analysis', status: 'system_blocked', currentAgent: 'analyst-agent', currentStoryIndex: 1, blockedReason: 'post-result hook failed' });
+
+  assert.deepEqual(await pipelineForTask(taskId), []);
+  await releaseBlock(taskId, 'analysis');
+  assert.deepEqual((await pipelineForTask(taskId)).map((item) => [item.lane, item.pipeline, item.storyIndex]), [
+    ['analysis', 'resume', 1],
+  ]);
+
+  await setTaskLaneState({ taskId, lane: 'analysis', status: 'completed' });
+  const review = await pipelineForTask(taskId);
+  assert.equal(review.length, 1);
+  assert.deepEqual([review[0].lane, review[0].agent, review[0].pipeline], ['control', 'review-agent', 'review']);
+});
+
+test('does not dispatch Review when a task is manually moved to review with incomplete units', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { pipelineForTask } = await import('./tasks');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  const taskId = 'TASK-incomplete-manual-review';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+    ) VALUES(?, 'Incomplete manual review', 'feature', 'in review', 'review-agent', 1, 0, 0, 2, 1, '')
+  `).run(taskId);
+  assert.deepEqual(await pipelineForTask(taskId), []);
+});
+
+test('treats legacy task-level blocked state as an exclusive control gate', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { getTask, pipelineAllEnvelopes, pipelineForTask } = await import('./tasks');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  const taskId = 'TASK-global-control-block';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, resume_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index,
+      run_state, blocked_reason, work_dir
+    ) VALUES(?, 'Global control block', 'feature', 'blocked', 'ready for dev', 'story-splitter-agent',
+      1, 0, 0, 2, 1, 'system_blocked', 'control failed', '')
+  `).run(taskId);
+  const detail = await getTask(taskId);
+  assert.equal(detail?.lanes.some((lane) => lane.status === 'runnable'), true);
+  assert.deepEqual(await pipelineForTask(taskId), []);
+  assert.equal((await pipelineAllEnvelopes()).some((item) => item.taskId === taskId), false);
+});
+
+test('counts one active Analysis lane once when both its execution and queued result are visible', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { pipelineAllEnvelopes } = await import('./tasks');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+  const activeTaskId = 'TASK-active-analysis-dedup';
+  db.prepare(`
+    INSERT INTO tasks(task_id, title, item_type, agile_status, current_subagent, total_stories, work_dir)
+    VALUES(?, 'Active Analysis', 'feature', 'ready for dev', 'analyst-agent', 1, '')
+  `).run(activeTaskId);
+  db.prepare(`
+    INSERT INTO execution_attempts(
+      execution_id, run_id, task_id, story_index, agent, pipeline, lane,
+      delegation_key, attempt, status, input_hash, input_json
+    ) VALUES('EXEC-analysis-dedup', 'run-dedup', ?, 1, 'analyst-agent', 'analysis', 'analysis',
+      'key-analysis-dedup', 1, 'applying', 'hash', '{}')
+  `).run(activeTaskId);
+  db.prepare(`
+    INSERT INTO agent_results(
+      result_id, run_id, task_id, story_index, agent, pipeline, outcome,
+      result_json, application_status, execution_id
+    ) VALUES('RESULT-analysis-dedup', 'run-dedup', ?, 1, 'analyst-agent', 'analysis', 'completed',
+      '{}', 'pending', 'EXEC-analysis-dedup')
+  `).run(activeTaskId);
+
+  const candidates: string[] = [];
+  for (let index = 0; index < 5; index += 1) {
+    const taskId = `TASK-analysis-dedup-candidate-${index}`;
+    candidates.push(taskId);
+    db.prepare(`
+      INSERT INTO tasks(task_id, title, item_type, priority, agile_status, current_subagent, total_stories, work_dir)
+      VALUES(?, ?, 'feature', 'P2', 'ready for dev', 'analyst-agent', 1, '')
+    `).run(taskId, `Analysis candidate ${index}`);
+  }
+  const dispatched = (await pipelineAllEnvelopes()).filter((item) => candidates.includes(item.taskId) && item.lane === 'analysis');
+  assert.equal(dispatched.length, 3);
 });
 
 test('materializes editable Agent Prompt and Memory outside the workspace with version history', async () => {
@@ -1087,15 +1403,17 @@ test('infers event metadata from message prefix', async () => {
   const kvEvent = db.prepare("SELECT attributes_json FROM runtime_events WHERE body = '[派发] task assigned'").get() as any;
   assert.equal(kvEvent.attributes_json, '{}');
 
-  const kvMessage = '[派发] executor=agent-runner agent=dev-agent requirement=REQ-1 unit=1 flow=dev tool=harness code=main';
+  const kvMessage = '[派发] executor=agent-runner lane=delivery agent=dev-agent requirement=REQ-1 unit=1 flow=dev resource=none tool=harness code=main';
   recordLoopLogEventInDb(db, runId, kvMessage);
   const kvRich = db.prepare("SELECT attributes_json FROM runtime_events WHERE body = ?").get(kvMessage) as any;
   const parsed = JSON.parse(kvRich.attributes_json);
   assert.equal(parsed.executor, 'agent-runner');
+  assert.equal(parsed.lane, 'delivery');
   assert.equal(parsed.agent, 'dev-agent');
   assert.equal(parsed.requirement, 'REQ-1');
   assert.equal(parsed.unit, '1');
   assert.equal(parsed.flow, 'dev');
+  assert.equal(parsed.resource, 'none');
   assert.equal(parsed.tool, 'harness');
   assert.equal(parsed.code, 'main');
 });

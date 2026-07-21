@@ -32,7 +32,13 @@ const taskSteps = [
   { label: '完成', statuses: ['done'] },
 ] as const;
 
-function stepDetail(task: { agile_status: string; run_state: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number }) {
+function stepDetail(task: { agile_status: string; run_state: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number }, lanes: { lane: string; status: string; current_agent: string | null }[]) {
+  const laneAttention = lanes.filter((lane) => ['waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked'].includes(lane.status));
+  if (laneAttention.length) return laneAttention.map((lane) => {
+    const laneName = lane.lane === 'analysis' ? 'Analysis' : 'Delivery';
+    const state = lane.status === 'waiting_for_answers' ? '等待澄清' : lane.status === 'waiting_for_runtime_input' ? '等待运行信息' : '系统阻塞';
+    return `${laneName} ${state} · ${agentLabel(lane.current_agent)}`;
+  }).join('；');
   if (task.run_state === 'waiting_for_runtime_input') return `等待补充运行信息 · ${agentLabel(task.current_subagent)}`;
   if (task.agile_status === 'blocked') return `系统异常已暂停 · ${agentLabel(task.current_subagent)}`;
   if (task.agile_status === 'backlog') return '正在收集上下文';
@@ -46,16 +52,28 @@ function stepDetail(task: { agile_status: string; run_state: string; current_sub
   return '需求已取消';
 }
 
+function laneStatusLabel(status: string) {
+  return ({
+    pending: '等待上游', runnable: '可运行', running: '运行中',
+    waiting_for_answers: '等待澄清', waiting_for_runtime_input: '等待运行信息',
+    system_blocked: '系统阻塞', completed: '已完成',
+  } as Record<string, string>)[status] || status;
+}
+
 export default async function TaskDetail({ params }: { params: Promise<{ taskId: string }> }) {
   const { taskId } = await params;
   const detail = await getTask(taskId);
   if (!detail) notFound();
-  const { task, stories, storySpecs, questions, runtimeInputs, documents, documentComments, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events } = detail;
+  const { task, lanes, stories, storySpecs, questions, runtimeInputs, documents, documentComments, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events } = detail;
+  const analysisLane = lanes.find((lane) => lane.lane === 'analysis')!;
+  const deliveryLane = lanes.find((lane) => lane.lane === 'delivery')!;
   const pipeline = await pipelineForTask(taskId);
   const unansweredQuestions = questions.filter((question) => question.status === 'pending');
-  const waitingForAnswers = task.run_state === 'waiting_for_answers';
+  const waitingForAnswers = analysisLane.status === 'waiting_for_answers';
   const unansweredRuntimeInputs = runtimeInputs.filter((input) => input.status === 'pending');
-  const waitingForRuntimeInput = task.run_state === 'waiting_for_runtime_input';
+  const waitingRuntimeLanes = lanes.filter((lane) => lane.status === 'waiting_for_runtime_input');
+  const waitingForRuntimeInput = waitingRuntimeLanes.length > 0;
+  const blockedLanes = lanes.filter((lane) => lane.status === 'system_blocked');
   const reviewDocument = task.review_document_id ? documents.find((document) => document.document_id === task.review_document_id) : null;
   const blockingFeedback = documentComments.filter((comment) => comment.intent === 'change_request' && comment.feedback_status !== 'resolved');
   const deliveryDocuments = documents.filter((document) => document.document_id !== reviewDocument?.document_id);
@@ -71,12 +89,13 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           <p className="eyebrow">{task.task_id}</p>
           <h1>{task.title}</h1>
         </div>
-        <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待澄清' : statusLabel(task.agile_status)}</span>
+        <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待澄清' : blockedLanes.length ? 'Lane 阻塞' : statusLabel(task.agile_status)}</span>
       </div>
       <div className="chips">
         <span>{itemTypeLabel(task.item_type)}</span>
         <span>{task.priority || '未定级'}</span>
-        <span>{agentLabel(task.current_subagent)}</span>
+        <span>Analysis · {agentLabel(analysisLane.current_agent)}</span>
+        <span>Delivery · {agentLabel(deliveryLane.current_agent)}</span>
         {task.link && <a href={task.link} target="_blank" rel="noreferrer">{task.link}</a>}
       </div>
     </header>
@@ -102,7 +121,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         <span className="caption-dot"/>
         <div>
           <small>{taskSteps[Math.max(currentStep, 0)]?.label}</small>
-          <strong>{stepDetail(task)}</strong>
+          <strong>{stepDetail(task, lanes)}</strong>
         </div>
       </div>
     </section>
@@ -115,6 +134,25 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       <div><small>待补充运行信息</small><b>{unansweredRuntimeInputs.length}</b></div>
       <div className="summary-wide"><small>下一步</small><p>{terminologyText(task.next_step) || '—'}</p></div>
       <div className="summary-wide"><small>文档</small><p>{documents.length} 个数据库文档</p></div>
+    </section>
+
+    <section className="lane-grid" aria-label="任务并行 Lane 状态">
+      {[analysisLane, deliveryLane].map((lane) => <article className={`card lane-card ${lane.status}`} key={lane.lane}>
+        <div className="lane-card-head">
+          <div>
+            <p className="eyebrow">{lane.lane === 'analysis' ? 'Analysis Lane' : 'Delivery Lane'}</p>
+            <h2>{lane.lane === 'analysis' ? '规格分析流水线' : '开发验证流水线'}</h2>
+          </div>
+          <span className={`badge ${lane.status === 'completed' ? 'green' : lane.status.includes('waiting') || lane.status === 'system_blocked' ? 'amber' : 'blue'}`}>{laneStatusLabel(lane.status)}</span>
+        </div>
+        <div className="lane-progress">
+          {lane.lane === 'analysis'
+            ? `分析 ${task.analysis_index}/${task.total_stories}`
+            : `实现 ${task.dev_index}/${task.total_stories} · 验证 ${task.test_index}/${task.total_stories}`}
+        </div>
+        <p>{lane.current_agent ? `${agentLabel(lane.current_agent)}${lane.current_story_index ? ` · ${deliveryUnitLabel(lane.current_story_index)}` : ''}` : lane.status === 'pending' ? '等待可消费的上游结果' : '当前没有运行中的 Agent'}</p>
+        {lane.blocked_reason && <small>{terminologyText(lane.blocked_reason)}</small>}
+      </article>)}
     </section>
 
     <div className="task-detail-grid">
@@ -177,7 +215,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                 </details>;
               })}
               {executionAttempts.map((attempt) => <details key={attempt.execution_id} className="document-item">
-                <summary><GitBranch size={15}/><span>{deliveryUnitLabel(attempt.story_index)} · {agentLabel(attempt.agent)} · attempt {attempt.attempt}</span><small>{attempt.status}</small></summary>
+                <summary><GitBranch size={15}/><span>{attempt.lane ? `${attempt.lane === 'analysis' ? 'Analysis' : attempt.lane === 'delivery' ? 'Delivery' : 'Control'} · ` : ''}{deliveryUnitLabel(attempt.story_index)} · {agentLabel(attempt.agent)} · attempt {attempt.attempt}</span><small>{attempt.status}</small></summary>
                 <pre>{[
                   `execution: ${attempt.execution_id}`,
                   `input hash: ${attempt.input_hash}`,
@@ -220,10 +258,15 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               </form>}
             </article>)}
           </div>
-          {waitingForRuntimeInput && unansweredRuntimeInputs.length === 0 && <form action={submitRuntimeInputsAction} className="release-block">
-            <input type="hidden" name="taskId" value={task.task_id}/>
-            <button className="button success">提交全部运行信息并交回 {agentLabel(task.current_subagent)}</button>
-          </form>}
+          {waitingRuntimeLanes.map((lane) => {
+            const agents = lane.lane === 'analysis' ? ['analyst-agent'] : ['dev-agent', 'test-agent'];
+            const pending = runtimeInputs.filter((input) => input.status === 'pending' && agents.includes(input.source_agent));
+            return pending.length === 0 && <form action={submitRuntimeInputsAction} className="release-block" key={lane.lane}>
+              <input type="hidden" name="taskId" value={task.task_id}/>
+              <input type="hidden" name="lane" value={lane.lane}/>
+              <button className="button success">提交 {lane.lane === 'analysis' ? 'Analysis' : 'Delivery'} Lane 运行信息并交回 {agentLabel(lane.current_agent)}</button>
+            </form>;
+          })}
         </section>
 
         <section className="task-section">
@@ -314,17 +357,25 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       <aside className="task-action-column">
         <section className="card form-panel">
           <h2><GitBranch size={15}/>推进流程</h2>
-          {pipeline.length === 0 ? <p className="muted">当前没有可派发步骤。</p> : pipeline.map((item) => <div className="pipeline-card" key={`${item.pipeline}-${item.storyIndex || 0}`}>
+          {pipeline.length === 0 ? <p className="muted">当前没有可派发步骤。</p> : pipeline.map((item) => <div className="pipeline-card" key={`${item.lane}-${item.pipeline}-${item.storyIndex || 0}`}>
             <GitBranch size={16}/>
             <div>
-              <strong>{flowLabel(item.pipeline)} · {agentLabel(item.agent)}</strong>
+              <strong>{item.lane === 'analysis' ? 'Analysis' : item.lane === 'delivery' ? 'Delivery' : 'Control'} · {flowLabel(item.pipeline)} · {agentLabel(item.agent)}</strong>
               <small>{deliveryUnitLabel(item.storyIndex)} · {item.resource === 'browser' ? '浏览器' : '无需独占资源'}</small>
               <p>{item.description}</p>
             </div>
           </div>)}
         </section>
 
-        {task.agile_status === 'blocked' && task.run_state === 'system_blocked' && <form action={releaseBlockAction} className="card form-panel release-block">
+        {lanes.filter((lane) => lane.status === 'system_blocked').map((lane) => <form action={releaseBlockAction} className="card form-panel release-block" key={lane.lane}>
+          <h2><AlertTriangle size={15}/>{lane.lane === 'analysis' ? 'Analysis' : 'Delivery'} Lane 阻塞</h2>
+          <p className="muted">{terminologyText(lane.blocked_reason) || '本次 Lane 执行被系统暂停。'}</p>
+          <input type="hidden" name="taskId" value={task.task_id}/>
+          <input type="hidden" name="lane" value={lane.lane}/>
+          <button className="button success" type="submit">解除该 Lane 阻塞并继续</button>
+        </form>)}
+
+        {task.agile_status === 'blocked' && task.run_state === 'system_blocked' && blockedLanes.length === 0 && <form action={releaseBlockAction} className="card form-panel release-block">
           <h2><AlertTriangle size={15}/>系统阻塞</h2>
           <p className="muted">{terminologyText(task.blocked_reason) || '本次执行被系统暂停。解除后将从已保存的执行结果继续。'}</p>
           <input type="hidden" name="taskId" value={task.task_id}/>

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { assertAgentResultRoleContract, parseAgentResult, type AgentResult } from '../domain/agent-result';
 import type { Actor } from '../domain/task';
 import { databaseConnection } from '../infrastructure/database';
+import { laneForAgent, settleTaskLaneInDb } from './task-lanes';
 import {
   addQuestion,
   addRuntimeInputRequest,
@@ -14,6 +15,7 @@ import {
   resolveRuntimeInputs,
   recordFeedbackProgress,
   saveStorySpec,
+  setTaskLaneState,
   updateTask,
   upsertDocument,
   type DelegationEnvelope,
@@ -152,6 +154,7 @@ function envelopeFromTask(row: QueuedAgentResult, detail: NonNullable<Awaited<Re
   const task = detail.task;
   return {
     taskId: row.task_id,
+    lane: row.agent === 'analyst-agent' ? 'analysis' : row.agent === 'dev-agent' || row.agent === 'test-agent' ? 'delivery' : 'control',
     pipeline: row.pipeline,
     agent: row.agent,
     storyIndex: row.story_index,
@@ -207,6 +210,17 @@ async function ensureCodeSlotForDelegation(delegation: DelegationEnvelope, resul
 }
 
 export async function blockDelegation(delegation: DelegationEnvelope, reason: string) {
+  if (delegation.lane === 'analysis' || delegation.lane === 'delivery') {
+    await setTaskLaneState({
+      taskId: delegation.taskId,
+      lane: delegation.lane,
+      status: 'system_blocked',
+      currentAgent: delegation.agent,
+      currentStoryIndex: delegation.storyIndex,
+      blockedReason: reason,
+    });
+    return;
+  }
   await updateTask(delegation.taskId, 'system', {
     agile_status: 'blocked',
     current_subagent: delegation.agent,
@@ -216,7 +230,7 @@ export async function blockDelegation(delegation: DelegationEnvelope, reason: st
   });
 }
 
-type ApplyOutcome = 'advanced' | 'blocked' | 'rewound';
+type ApplyOutcome = 'advanced' | 'blocked' | 'rewound' | 'discarded';
 
 async function applyResultEffects(delegation: DelegationEnvelope, result: AgentResult, sourceResultId?: string, sourceExecutionId?: string): Promise<ApplyOutcome> {
   // The submission CLI runs this same static role contract so the Agent can
@@ -394,6 +408,11 @@ export async function applyAgentResult(runId: string, delegation: DelegationEnve
   if (recorded.applicationStatus === 'applied') return recorded.effectOutcome || 'advanced';
   if (recorded.applicationStatus === 'failed') throw new Error('该 execution attempt 的 Agent 结果此前应用失败，拒绝重复产生副作用');
   const resultId = recorded.resultId;
+  const current = await getTask(delegation.taskId);
+  if (!current || ['done', 'cancelled'].includes(current.task.agile_status)) {
+    await markApplication(resultId, 'applied', null, 'discarded');
+    return 'discarded' as const;
+  }
   try {
     const outcome = await applyResultEffects(delegation, result, resultId, options.executionId);
     if (result.outcome === 'completed') {
@@ -429,7 +448,7 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
     FROM agent_results ar
     JOIN tasks t ON t.task_id = ar.task_id
     WHERE ar.application_status = 'pending'
-      AND t.agile_status NOT IN ('blocked', 'done', 'cancelled')
+      AND t.agile_status != 'blocked'
     ORDER BY ar.created_at, ar.result_id
     LIMIT 1
   `).get() as QueuedAgentResult | undefined;
@@ -438,6 +457,18 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
   try {
     const detail = await getTask(row.task_id);
     if (!detail) throw new Error(`需求不存在：${row.task_id}`);
+    if (['done', 'cancelled'].includes(detail.task.agile_status)) {
+      await markApplication(row.result_id, 'applied', null, 'discarded');
+      if (row.execution_id) {
+        db.prepare(`
+          UPDATE execution_attempts
+          SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP,
+              lease_expires_at = NULL
+          WHERE execution_id = ?
+        `).run(row.execution_id);
+      }
+      return { status: 'applied', resultId: row.result_id, taskId: row.task_id, storyIndex: row.story_index, agent: row.agent, outcome: 'discarded' };
+    }
     const result = parseAgentResult(row.result_json);
     const delegation = envelopeFromTask(row, detail);
     const outcome = await applyResultEffects(delegation, result, row.result_id, row.execution_id || undefined);
@@ -463,6 +494,11 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
         VALUES(?, ?, 'application', ?, ?)
         ON CONFLICT(execution_id, kind, receipt_key) DO NOTHING
       `).run(randomUUID(), execution.execution_id, outcome, JSON.stringify({ outcome, source: 'application_queue' }));
+    }
+    const lane = laneForAgent(row.agent);
+    if (lane !== 'control') {
+      const refreshed = await getTask(row.task_id);
+      if (refreshed) settleTaskLaneInDb(db, refreshed.task, lane);
     }
     return { status: 'applied', resultId: row.result_id, taskId: row.task_id, storyIndex: row.story_index, agent: row.agent, outcome };
   } catch (error) {

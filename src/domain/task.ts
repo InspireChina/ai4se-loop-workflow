@@ -124,6 +124,7 @@ export function occupiesCodeSlot(task: TaskState) {
 
 export type Delegation = {
   taskId: string;
+  lane: 'control' | 'analysis' | 'delivery';
   pipeline: string;
   agent: string;
   storyIndex: number | null;
@@ -135,6 +136,7 @@ export type Delegation = {
 export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Delegation | null {
   const line = (pipeline: string, agent: string, storyIndex: number | null, description: string): Delegation => ({
     taskId: task.task_id,
+    lane: agent === 'analyst-agent' ? 'analysis' : agent === 'dev-agent' || agent === 'test-agent' ? 'delivery' : 'control',
     pipeline,
     agent,
     storyIndex,
@@ -151,7 +153,10 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
   }
   if (status === 'backlog') return line('backlog', 'backlog-agent', null, '收集上下文并完成分类');
   if (status === 'in repro') return line('repro', 'repro-agent', null, '复现 Bug 并定位根因');
-  if (status === 'in plan') return line('split', 'story-splitter-agent', null, '拆分为可独立验收的交付单元');
+  if (status === 'in plan') {
+    if (total > 0) return null;
+    return line('split', 'story-splitter-agent', null, '拆分为可独立验收的交付单元');
+  }
   if (status === 'ready for dev') {
     if (d < a && codeSlotAvailable) return line('dev', 'dev-agent', d + 1, `实现交付单元 ${d + 1}，并占用代码槽`);
     if (a < total) return line('analysis', 'analyst-agent', a + 1, `分析交付单元 ${a + 1} 的需求和方案`);

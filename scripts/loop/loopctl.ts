@@ -26,6 +26,7 @@ import {
 } from '../../src/application/tasks';
 import { databaseConnection, paths } from '../../src/infrastructure/database';
 import type { Actor, TaskStatus } from '../../src/domain/task';
+import type { TaskLaneKind } from '../../src/application/task-lanes';
 
 type Args = { _: string[]; [key: string]: string | boolean | string[] | undefined };
 
@@ -98,6 +99,7 @@ async function printTask(taskId: string) {
   if (!detail) throw new Error(`task not found: ${taskId}`);
   const task = detail.task;
   for (const [key, item] of Object.entries(task)) console.log(`${key}: ${item ?? ''}`);
+  for (const lane of detail.lanes) console.log(`lane.${lane.lane}: ${lane.status} agent=${lane.current_agent || ''} story=${lane.current_story_index || ''} reason=${lane.blocked_reason || ''}`);
 }
 
 async function printTaskList(args: Args) {
@@ -106,7 +108,8 @@ async function printTaskList(args: Args) {
   const limit = Number(optional(args, 'limit') || 50);
   const tasks = (await listTasks({ includeTerminal })).filter((task) => !status || task.agile_status === status).slice(0, limit);
   for (const task of tasks) {
-    console.log(`${task.task_id} | ${task.agile_status} | ${task.priority || ''} | ${task.title} | current=${task.current_subagent || ''} | a=${task.analysis_index}/${task.total_stories} d=${task.dev_index} t=${task.test_index} | ${task.next_step || ''}`);
+    const lanes = task.lanes.map((lane) => `${lane.lane}=${lane.status}${lane.current_agent ? `/${lane.current_agent}` : ''}`).join(' ');
+    console.log(`${task.task_id} | ${task.agile_status} | ${task.priority || ''} | ${task.title} | ${lanes} | a=${task.analysis_index}/${task.total_stories} d=${task.dev_index} t=${task.test_index} | ${task.next_step || ''}`);
   }
 }
 
@@ -116,7 +119,7 @@ async function printTaskUrlList() {
 }
 
 async function printBlockList(format: string) {
-  const tasks = (await listTasks({ includeTerminal: true })).filter((task) => task.agile_status === 'blocked');
+  const tasks = (await listTasks({ includeTerminal: true })).filter((task) => task.agile_status === 'blocked' || task.lanes.some((lane) => lane.status === 'system_blocked'));
   if (format === 'jsonl') {
     for (const task of tasks) console.log(JSON.stringify(task));
     return;
@@ -128,10 +131,17 @@ async function printBlockList(format: string) {
   console.log('## Blocked Tasks\n');
   for (const task of tasks) {
     console.log(`- ${task.title} (${task.task_id})`);
-    console.log(`  - Agent: ${task.current_subagent || ''}`);
-    console.log(`  - Reason: ${task.blocked_reason || ''}`);
+    const blockedLanes = task.lanes.filter((lane) => lane.status === 'system_blocked');
+    for (const lane of blockedLanes) {
+      console.log(`  - ${lane.lane} Lane: ${lane.current_agent || ''} · ${lane.blocked_reason || ''}`);
+      console.log(`    - Operator recovery: npm run loopctl -- system-unblock ${task.task_id} --lane ${lane.lane}`);
+    }
+    if (!blockedLanes.length && task.agile_status === 'blocked') {
+      console.log(`  - Agent: ${task.current_subagent || ''}`);
+      console.log(`  - Reason: ${task.blocked_reason || ''}`);
+      console.log(`  - Operator recovery: npm run loopctl -- system-unblock ${task.task_id}`);
+    }
     console.log(`  - Next Step: ${task.next_step || ''}`);
-    console.log(`  - Operator recovery: npm run loopctl -- system-unblock ${task.task_id}`);
     console.log('');
   }
 }
@@ -239,8 +249,12 @@ async function main() {
       return;
     case 'system-unblock':
     case 'block-release': // legacy operator alias
-      await releaseBlock(args._[0]);
-      console.log(`system block recovered ${args._[0]}`);
+      {
+        const lane = optional(args, 'lane');
+        if (lane && lane !== 'analysis' && lane !== 'delivery') throw new Error('--lane must be analysis or delivery');
+        await releaseBlock(args._[0], lane as TaskLaneKind | undefined);
+        console.log(`system block recovered ${args._[0]}${lane ? ` lane=${lane}` : ''}`);
+      }
       return;
     case 'task-update': {
       const taskId = args._[0];
