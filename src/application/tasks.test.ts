@@ -217,6 +217,78 @@ test('lists only completed Tasks in completion order while preserving terminal T
   assert.equal(detail?.events[0]?.summary, 'Task completed');
 });
 
+test('pauses requirement intake for user alignment and resumes the same backlog agent before splitting', async () => {
+  const { applyAgentResult } = await import('./agent-results');
+  const { parseAgentResult } = await import('../domain/agent-result');
+  const { answerQuestion, createTask, getTask, pipelineForTask, submitClarificationAnswers } = await import('./tasks');
+  const taskId = await createTask({
+    title: 'Requirement-level clarification',
+    description: 'Add an export action, but the intended audience is not specified.',
+  });
+  const firstDelegation = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
+  assert.deepEqual([firstDelegation.lane, firstDelegation.pipeline, firstDelegation.agent, firstDelegation.storyIndex], ['control', 'backlog', 'backlog-agent', null]);
+
+  const blocked = await applyAgentResult('run-requirement-clarification', firstDelegation, parseAgentResult(JSON.stringify({
+    outcome: 'needs_input',
+    summary: 'The target audience changes the requirement scope and delivery boundary.',
+    artifact: {
+      title: 'Requirement context with an open boundary',
+      content: 'The export action is requested. The supported audience remains unresolved.',
+    },
+    questions: [{
+      decisionKey: 'export-audience',
+      title: '确认导出能力的目标用户',
+      question: '本次导出能力只面向管理员，还是同时面向普通成员？',
+      why: '目标用户会改变权限范围和后续交付单元拆分。',
+      recommendation: '本轮只面向管理员。',
+      recommendationReason: '这是满足当前目标的最小范围。',
+      alternatives: [
+        { id: 'admin', label: '仅管理员', consequences: ['保持较小权限范围'] },
+        { id: 'all-members', label: '所有成员', consequences: ['需要新增成员权限和兼容行为'] },
+      ],
+      dependsOn: [],
+    }],
+  })));
+  assert.equal(blocked, 'blocked');
+
+  let detail = await getTask(taskId);
+  const question = detail?.questions.find((item) => item.source_agent === 'backlog-agent');
+  assert.equal(detail?.task.agile_status, 'backlog');
+  assert.equal(detail?.task.run_state, 'waiting_for_answers');
+  assert.equal(detail?.task.current_subagent, 'backlog-agent');
+  assert.equal(question?.story_index, null);
+  assert.equal(question?.kind, 'local');
+  assert.equal(question?.status, 'pending');
+  assert.deepEqual(await pipelineForTask(taskId), []);
+
+  await answerQuestion({ taskId, questionId: question!.question_id, answer: '本轮只面向管理员。' });
+  await submitClarificationAnswers(taskId);
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.run_state, 'runnable');
+  assert.equal(detail?.task.resume_pending, 1);
+  const resumedDelegation = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
+  assert.deepEqual([resumedDelegation.lane, resumedDelegation.pipeline, resumedDelegation.agent, resumedDelegation.storyIndex], ['control', 'resume', 'backlog-agent', null]);
+
+  await applyAgentResult('run-requirement-clarification-resume', resumedDelegation, parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'The export action is limited to administrators and can proceed to delivery planning.',
+    classification: 'feature',
+    route: 'plan',
+    artifact: {
+      title: 'Resolved requirement context',
+      content: 'The export action is limited to administrators. Ordinary members are out of scope.',
+    },
+  })));
+
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'in plan');
+  assert.equal(detail?.task.run_state, 'runnable');
+  assert.equal(detail?.task.resume_pending, 0);
+  assert.equal(detail?.questions.find((item) => item.question_id === question?.question_id)?.status, 'resolved');
+  assert.ok(detail?.events.some((event) => event.event_type === 'RequirementClarificationsResolved'));
+  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'story-splitter-agent');
+});
+
 test('submits answered analysis clarifications back to the analyst without approving or advancing', async () => {
   const { addQuestion, answerQuestion, getTask, submitClarificationAnswers } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
@@ -542,6 +614,16 @@ test('versions Slice Specs, advances Dev without requiring a commit, and stores 
     scope: { included: ['The contracted behavior'], excluded: ['Other features'] },
     behaviors: [{ scenario: 'The behavior is invoked', expected: 'The documented result is produced' }],
     decisions: [],
+    decisionTree: [{
+      key: 'output-mode',
+      question: 'Which output mode should be used?',
+      impact: 'Changes the visible output contract.',
+      options: [
+        { id: 'structured', label: 'Structured JSON', consequences: ['Stable machine-readable contract'] },
+        { id: 'text', label: 'Readable text', consequences: ['Optimized for direct reading'] },
+      ],
+      status: 'needs_user_input' as const,
+    }],
     ambiguities: [{ key: 'output-mode', description: 'The output mode must be chosen.' }],
     acceptanceCriteria: [{ id: 'AC-1', description: 'The runtime is available', oracle: 'node --version exits with zero' }],
     verificationPlan: [{ criterionId: 'AC-1', kind: 'command' as const, instruction: 'Check Node runtime', command: 'node --version' }],
@@ -567,6 +649,13 @@ test('versions Slice Specs, advances Dev without requiring a commit, and stores 
     spec: {
       ...baseSpec,
       decisions: [{ key: 'output-mode', decision: 'Structured JSON', rationale: 'User answer', source: 'user' as const }],
+      decisionTree: [{
+        ...baseSpec.decisionTree[0],
+        status: 'resolved_from_context' as const,
+        selectedOption: 'structured',
+        source: 'user' as const,
+        evidence: ['The user answered: Use structured JSON.'],
+      }],
       ambiguities: [],
     },
   });
@@ -1172,7 +1261,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 7);
+  assert.equal(original.profile.prompt_seed_revision, 10);
   assert.ok(original.currentPrompt.content.length > 800);
   assert.match(original.currentPrompt.content, /# 角色目标/);
   assert.match(original.currentPrompt.content, /# 完成条件/);
@@ -1190,10 +1279,12 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
   await ensureAgentRuntimeWorkspace();
   const upgradedSeed = await getAgentProfile('backlog-agent');
-  assert.equal(upgradedSeed.profile.prompt_seed_revision, 7);
+  assert.equal(upgradedSeed.profile.prompt_seed_revision, 10);
   assert.equal(upgradedSeed.currentPrompt.source, 'seed');
   assert.ok(upgradedSeed.currentPrompt.version > 1);
   assert.match(upgradedSeed.currentPrompt.content, /# 输入与证据优先级/);
+  const resumedBacklog = await loadAgentRuntime('backlog-agent', 'resume');
+  assert.match(resumedBacklog.prompt, /已回答的需求级产品问题/);
 
   const promptContent = `${original.currentPrompt.content}\n\n- 在修改前先读取相关 Slice Spec。`;
   const promptVersion = await saveAgentPrompt({ agentId: 'dev-agent', content: promptContent, reason: 'test prompt version' });
@@ -1213,7 +1304,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const preservedHumanPrompt = await getAgentProfile('dev-agent');
   assert.equal(preservedHumanPrompt.currentPrompt.version, promptVersion);
   assert.equal(preservedHumanPrompt.currentPrompt.source, 'human');
-  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 7);
+  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 10);
 
   const localPrompt = `${promptContent}\n- 本地文件修改也必须形成版本。`;
   writeFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), localPrompt);

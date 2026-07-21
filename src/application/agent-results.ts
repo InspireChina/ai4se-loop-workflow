@@ -239,16 +239,17 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
   assertAgentResultRoleContract(result, delegation.agent);
   await ensureCodeSlotForDelegation(delegation, result);
 
-  if (result.questions.length && delegation.agent !== 'analyst-agent') {
-    throw new Error(`${delegation.agent} 不允许创建产品澄清问题；运行所需信息请使用 runtimeInputs`);
+  const canAskAlignmentQuestions = delegation.agent === 'backlog-agent' || delegation.agent === 'analyst-agent';
+  if (result.questions.length && !canAskAlignmentQuestions) {
+    throw new Error(`${delegation.agent} 不允许创建设计澄清问题；运行所需信息请使用 runtimeInputs`);
   }
-  if (result.questions.length && result.runtimeInputs.length) throw new Error('同一次结果不能混合产品澄清问题和运行信息请求');
+  if (result.questions.length && result.runtimeInputs.length) throw new Error('同一次结果不能混合设计澄清问题和运行信息请求');
   if (result.runtimeInputs.length) {
     if (result.outcome !== 'needs_input') throw new Error('包含 runtimeInputs 时 outcome 必须为 needs_input');
     await saveRuntimeInputs(delegation, result, sourceExecutionId);
     return 'blocked' as const;
   }
-  if (result.outcome !== 'completed' && !(delegation.agent === 'analyst-agent' && result.questions.length)) {
+  if (result.outcome !== 'completed' && !(canAskAlignmentQuestions && result.questions.length)) {
     await blockDelegation(delegation, result.summary);
     return 'blocked' as const;
   }
@@ -267,6 +268,10 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
   const actor = delegation.agent as Actor;
   switch (delegation.agent) {
     case 'backlog-agent': {
+      if (result.questions.length) {
+        await saveQuestions(delegation, result);
+        return 'blocked' as const;
+      }
       if (!result.classification || !result.route) throw new Error('backlog-agent 结果缺少 classification 或 route');
       await updateTask(delegation.taskId, actor, {
         item_type: result.classification,

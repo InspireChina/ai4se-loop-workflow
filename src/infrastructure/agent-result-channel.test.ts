@@ -117,7 +117,20 @@ test('returns the full contract error to the Agent and accepts a corrected resub
       goal: 'Define one objectively verifiable behavior.',
       scope: { included: ['One behavior'], excluded: [] },
       behaviors: [{ scenario: 'The behavior runs', expected: 'The expected result is visible' }],
-      decisions: [],
+      decisions: [{ key: 'state-shape', decision: 'Keep the existing state shape', rationale: 'The current public contract proves it', source: 'code' }],
+      decisionTree: [{
+        key: 'state-shape',
+        question: 'Should the existing public state shape change?',
+        impact: 'A change would affect compatibility.',
+        options: [
+          { id: 'keep', label: 'Keep it', consequences: ['Preserves compatibility'] },
+          { id: 'change', label: 'Change it', consequences: ['Requires compatibility work'] },
+        ],
+        status: 'resolved_from_context',
+        selectedOption: 'keep',
+        source: 'code',
+        evidence: ['The current public interface defines the existing state shape.'],
+      }],
       ambiguities: [],
       acceptanceCriteria: [
         { id: 'AC-1', description: 'The state can be inspected', oracle: 'Inspect the state' },

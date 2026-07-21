@@ -10,6 +10,16 @@ type TasksPageProps = {
   searchParams: Promise<{ view?: string | string[] }>;
 };
 
+const laneStatusLabels: Record<string, string> = {
+  pending: '等待上游',
+  runnable: '可运行',
+  running: '运行中',
+  waiting_for_answers: '等待澄清',
+  waiting_for_runtime_input: '等待运行信息',
+  system_blocked: '系统阻塞',
+  completed: '已完成',
+};
+
 export default async function TasksPage({ searchParams }: TasksPageProps) {
   const { view } = await searchParams;
   const completedView = view === 'completed';
@@ -28,12 +38,16 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
           const hasCompletedAt = Boolean(task.completed_at);
           const timeLabel = hasCompletedAt ? '完成时间' : '更新时间';
           const timeValue = task.completed_at ?? task.updated_at;
-          const laneSummary = completedView ? '' : (task as TaskWithLanes).lanes.map((lane) => `${lane.lane === 'analysis' ? 'Analysis' : 'Delivery'}: ${agentLabel(lane.current_agent)}（${lane.status}）`).join(' · ');
+          const waitingForRequirementAnswers = !completedView && task.run_state === 'waiting_for_answers' && task.current_subagent === 'backlog-agent';
+          const laneSummary = completedView ? '' : waitingForRequirementAnswers
+            ? `${agentLabel(task.current_subagent)}（等待用户回答）`
+            : (task as TaskWithLanes).lanes.map((lane) => `${lane.lane === 'analysis' ? 'Analysis' : 'Delivery'}: ${agentLabel(lane.current_agent)}（${laneStatusLabels[lane.status] || lane.status}）`).join(' · ');
+          const displayStatus = waitingForRequirementAnswers ? '等待需求澄清' : statusLabel(task.agile_status);
 
           return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}>
             <span><strong>{task.title}</strong><small>{task.task_id} · {task.priority || '未定级'}</small></span>
             <span>{itemTypeLabel(task.item_type)}</span>
-            <span className={`badge ${task.agile_status === 'done' ? 'green' : 'blue'}`}>{statusLabel(task.agile_status)}</span>
+            <span className={`badge ${task.agile_status === 'done' ? 'green' : waitingForRequirementAnswers ? 'amber' : 'blue'}`}>{displayStatus}</span>
             <span>{completedView ? <><small>{timeLabel}</small><br />{formatEventTime(timeValue)}</> : laneSummary}</span>
           </Link>;
         })}

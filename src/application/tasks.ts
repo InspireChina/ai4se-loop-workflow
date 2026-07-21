@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
-import { sliceSpecSchema } from '../domain/agent-result';
+import { assertSliceSpecDecisionCoverage, sliceSpecSchema } from '../domain/agent-result';
 import { databaseConnection, paths } from '../infrastructure/database';
 import { isRunProcessAlive, readRunPid } from '../infrastructure/run-process';
 import { toUtcIsoString } from './event-time';
@@ -799,6 +799,7 @@ export async function saveStorySpec(input: unknown) {
     spec: sliceSpecSchema,
     sourceResultId: z.string().optional().nullable(),
   }).parse(input);
+  assertSliceSpecDecisionCoverage(value.spec);
   if (value.status === 'resolved' && value.spec.ambiguities.length) throw new Error('resolved Slice Spec 不能包含未解决歧义');
   if (value.status === 'waiting_for_answers' && !value.spec.ambiguities.length) throw new Error('等待回答的 Slice Spec 必须列出歧义');
   const criterionIds = new Set(value.spec.acceptanceCriteria.map((criterion) => criterion.id));
@@ -812,7 +813,7 @@ export async function saveStorySpec(input: unknown) {
       SELECT COUNT(*) AS count FROM questions
       WHERE task_id = ? AND story_index = ? AND status = 'pending'
     `).get(value.taskId, value.storyIndex) as { count: number }).count;
-    if (pending) throw new Error('仍有未回答的产品歧义，不能保存 resolved Slice Spec');
+    if (pending) throw new Error('仍有未回答的设计歧义，不能保存 resolved Slice Spec');
     const answeredKeys = (db.prepare(`
       SELECT decision_key FROM questions
       WHERE task_id = ? AND story_index = ? AND status = 'answered' AND decision_key IS NOT NULL
@@ -1125,27 +1126,51 @@ export async function submitClarificationAnswers(taskId: string) {
   const task = fetchTask(db, taskId);
   if (!task) throw new Error('需求不存在');
   const lane = taskLaneInDb(db, task, 'analysis');
-  if (lane.status !== 'waiting_for_answers') throw new Error('Analysis Lane 当前不在等待澄清回答状态');
-  const pending = (db.prepare("SELECT COUNT(*) AS count FROM questions WHERE task_id = ? AND status = 'pending'").get(taskId) as { count: number }).count;
-  if (pending) throw new Error('仍有未回答的澄清问题，不能继续分析');
+  const requirementLevel = task.run_state === 'waiting_for_answers'
+    && task.current_subagent === 'backlog-agent';
+  const analysisLevel = !requirementLevel && lane.status === 'waiting_for_answers';
+  if (!requirementLevel && !analysisLevel) throw new Error('当前需求不在等待澄清回答状态');
+  const pending = requirementLevel
+    ? (db.prepare(`
+        SELECT COUNT(*) AS count FROM questions
+        WHERE task_id = ? AND story_index IS NULL AND source_agent = 'backlog-agent' AND status = 'pending'
+      `).get(taskId) as { count: number }).count
+    : (db.prepare(`
+        SELECT COUNT(*) AS count FROM questions
+        WHERE task_id = ? AND story_index = ? AND source_agent = 'analyst-agent' AND status = 'pending'
+      `).get(taskId, lane.current_story_index || task.analysis_index + 1) as { count: number }).count;
+  if (pending) throw new Error('仍有未回答的澄清问题，不能继续推进');
   db.exec('BEGIN');
   try {
     db.prepare(`
       UPDATE tasks
       SET run_state = 'runnable', resume_pending = 1, blocked_reason = NULL,
-          next_step = '用户回答已提交，交回方案分析 Agent 重建完整规格',
+          next_step = ?,
           last_actor = 'human', updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
-    `).run(taskId);
-    setTaskLaneStateInDb(db, {
+    `).run(
+      requirementLevel
+        ? '用户回答已提交，交回需求梳理 Agent 更新需求边界'
+        : '用户回答已提交，交回方案分析 Agent 重建完整规格',
       taskId,
-      lane: 'analysis',
-      status: 'runnable',
-      currentAgent: 'analyst-agent',
-      currentStoryIndex: lane.current_story_index || task.analysis_index + 1,
-      resumePending: 1,
-    });
-    addEvent(db, taskId, 'human', 'ClarificationAnswersSubmitted', '提交全部澄清回答，等待 AI 重建规格。');
+    );
+    if (analysisLevel) {
+      setTaskLaneStateInDb(db, {
+        taskId,
+        lane: 'analysis',
+        status: 'runnable',
+        currentAgent: 'analyst-agent',
+        currentStoryIndex: lane.current_story_index || task.analysis_index + 1,
+        resumePending: 1,
+      });
+    }
+    addEvent(
+      db,
+      taskId,
+      'human',
+      'ClarificationAnswersSubmitted',
+      requirementLevel ? '提交全部需求级澄清回答，等待 AI 更新需求边界。' : '提交全部单元级澄清回答，等待 AI 重建规格。',
+    );
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
@@ -1163,7 +1188,7 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
     const pendingQuestions = lane.lane === 'analysis'
       ? (db.prepare("SELECT COUNT(*) AS count FROM questions WHERE task_id = ? AND status = 'pending'").get(taskId) as { count: number }).count
       : 0;
-    if (pendingQuestions) throw new Error('产品澄清必须通过提交回答恢复，不能用系统恢复命令绕过');
+    if (pendingQuestions) throw new Error('设计澄清必须通过提交回答恢复，不能用系统恢复命令绕过');
     if (lane.lane === 'delivery' && lane.current_agent === 'dev-agent') {
       const active = db.prepare(`${taskSelect} WHERE task_id != ?`).all(taskId) as Task[];
       const owner = active.find(occupiesCodeSlot);
@@ -1206,7 +1231,7 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
   }
   if (task.agile_status !== 'blocked') throw new Error('需求当前不在系统阻塞状态');
   const pendingQuestions = (db.prepare('SELECT COUNT(*) AS count FROM questions WHERE task_id = ? AND status = \'pending\'').get(taskId) as { count: number }).count;
-  if (pendingQuestions) throw new Error('产品澄清必须通过提交回答恢复，不能用系统恢复命令绕过');
+  if (pendingQuestions) throw new Error('设计澄清必须通过提交回答恢复，不能用系统恢复命令绕过');
   const resumeStatus = task.resume_status;
   if (!resumeStatus || resumeStatus === 'blocked') throw new Error('系统阻塞缺少可恢复状态');
   if (!task.current_subagent) throw new Error('系统阻塞缺少负责 Agent');
@@ -1265,6 +1290,16 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
   if (changes.agile_status === 'blocked' && before.agile_status !== 'blocked') changes.resume_status = before.agile_status;
   const prospective = { ...before, ...changes } as TaskState;
   assertState(prospective);
+  const completingRequirementClarification = actor === 'backlog-agent'
+    && before.agile_status === 'backlog'
+    && (changes.agile_status === 'in plan' || changes.agile_status === 'in repro');
+  if (completingRequirementClarification) {
+    const pending = (db.prepare(`
+      SELECT COUNT(*) AS count FROM questions
+      WHERE task_id = ? AND story_index IS NULL AND source_agent = 'backlog-agent' AND status = 'pending'
+    `).get(taskId) as { count: number }).count;
+    if (pending) throw new Error('仍有未回答的需求级产品歧义，不能完成需求梳理');
+  }
   if (changes.analysis_index !== undefined && changes.analysis_index > before.analysis_index && prospective.spec_resolved_index < changes.analysis_index) {
     throw new Error(`交付单元 ${changes.analysis_index} 尚无已解决的 Slice Spec`);
   }
@@ -1316,6 +1351,14 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
   db.exec('BEGIN');
   try {
     db.prepare(`UPDATE tasks SET ${fields.join(', ')} WHERE task_id = ?`).run(...values, taskId);
+    if (completingRequirementClarification) {
+      const resolved = db.prepare(`
+        UPDATE questions
+        SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ? AND story_index IS NULL AND source_agent = 'backlog-agent' AND status = 'answered'
+      `).run(taskId);
+      if (resolved.changes) addEvent(db, taskId, 'backlog-agent', 'RequirementClarificationsResolved', '需求级澄清回答已纳入最新需求上下文。');
+    }
     const after = fetchTask(db, taskId);
     if (after) refreshTaskLaneStatesInDb(db, after);
     addEvent(db, taskId, actor, 'TaskUpdated', changes.next_step || `更新状态：${changes.agile_status || before.agile_status}`);

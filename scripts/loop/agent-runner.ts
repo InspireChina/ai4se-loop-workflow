@@ -196,15 +196,15 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     '完成当前步骤后，把结果写入一个临时 JSON 文件，再调用下面的专用命令提交。Runner 只把提交内容作为状态机输入；你的普通最终回复可以简短说明已经提交，不需要重复 JSON。',
     `提交命令：node ${JSON.stringify(join(paths.appRoot, 'scripts', 'loop', 'submit-agent-result.mjs'))} --input <temporary-result-json-path> --consume`,
     '提交命令会同步执行完整结构和角色契约校验。若命令返回非零退出码，必须根据错误修正临时 JSON 并重新提交；只有看到 Agent result submitted successfully 才算提交完成。',
+    ...(delegation.agent === 'analyst-agent' ? ['Analyst 必须提交完整 decisionTree。下面示例展示 needs_input：若返回 completed，必须删除 questions 和 ambiguities，并把每个决策改为有明确 source、selectedOption 与 evidence 的 resolved_from_context。'] : []),
     '只把 --consume 用于你为本次提交创建的临时 JSON；提交成功后命令会删除该文件。不要直接写 LOOP_AGENT_RESULT_PATH，也不要通过数据库或 loopctl 提交结果。若执行环境确实无法调用提交命令，才在最终回复中输出同一 JSON 对象作为兼容 fallback。',
     '结果 JSON 结构如下；不属于当前角色的字段可以省略：',
     JSON.stringify({
       outcome: 'completed | needs_input | failed',
       summary: '本步骤简要结论',
       artifact: delegation.agent === 'feedback-agent' ? undefined : { title: '文档标题', content: 'Markdown 正文' },
-      questions: delegation.agent === 'analyst-agent' ? [
-        { decisionKey: '稳定的决策键', title: '设计决策 1', question: '需要用户决定的具体问题', why: '该决策影响什么', recommendation: '推荐答案', recommendationReason: '推荐理由', alternatives: [{ id: 'option-a', label: '方案 A', consequences: ['影响'] }], dependsOn: [] },
-        { decisionKey: '另一个决策键', title: '设计决策 2', question: '另一个需要用户决定的具体问题', why: '与其他决策的依赖', recommendation: '推荐答案', recommendationReason: '推荐理由', alternatives: [{ id: 'option-b', label: '方案 B', consequences: ['影响'] }], dependsOn: ['稳定的决策键'] },
+      questions: delegation.agent === 'backlog-agent' || delegation.agent === 'analyst-agent' ? [
+        { decisionKey: 'output-mode', title: '确认输出方式', question: '结果应使用结构化输出还是可读文本？', why: '该选择会改变用户可观察行为和兼容契约', recommendation: '使用结构化输出', recommendationReason: '更容易稳定消费和验证', alternatives: [{ id: 'structured', label: '结构化输出', consequences: ['调用方可以稳定解析'] }, { id: 'text', label: '可读文本', consequences: ['便于直接阅读但解析契约较弱'] }], dependsOn: [] },
       ] : undefined,
       runtimeInputs: delegation.agent === 'feedback-agent' ? undefined : [{ title: '缺少的运行信息', question: '需要用户补充的非产品信息', why: '为什么无法从仓库或环境推导', recommendation: '安全的推荐答案或处理方式' }],
       classification: 'feature | bug | tech | intake | other',
@@ -214,8 +214,9 @@ async function buildPrompt(delegation: DelegationEnvelope) {
         goal: '当前交付单元的用户可观察目标',
         scope: { included: ['本次包含内容'], excluded: ['明确不包含内容'] },
         behaviors: [{ scenario: '场景', expected: '期望行为' }],
-        decisions: [{ key: '决策键', decision: '已确定结论', rationale: '依据', source: 'code | user | convention | safe_default' }],
-        ambiguities: [],
+        decisions: [],
+        decisionTree: [{ key: 'output-mode', question: '结果应使用哪一种输出方式？', impact: '改变用户可观察输出和调用方兼容契约', options: [{ id: 'structured', label: '结构化输出', consequences: ['调用方可以稳定解析'] }, { id: 'text', label: '可读文本', consequences: ['便于直接阅读但解析契约较弱'] }], status: 'needs_user_input' }],
+        ambiguities: [{ key: 'output-mode', description: '上下文没有指定用户可观察的输出契约' }],
         acceptanceCriteria: [{ id: 'AC-1', description: '可验收条件', oracle: '如何客观判断' }],
         verificationPlan: [{ criterionId: 'AC-1', kind: 'command | browser | inspection', instruction: '验证步骤', command: 'kind=command 时必填；其他类型省略或填 null' }],
         dependencies: [],
@@ -234,7 +235,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
       tests: [{ command: '测试命令', passed: true, summary: '结果' }],
     }, null, 2),
     '',
-    'questions 仅供方案分析 Agent 提出产品语义决策；其他 Agent 不得使用。任何 Agent 若缺少无法从代码、仓库、文档和环境推导的非敏感运行信息，使用 runtimeInputs 并返回 outcome=needs_input。不要通过 runtimeInputs 询问产品决策、审批、密钥或可自行探索的事实。',
+    'questions 仅供需求梳理 Agent 提出影响目标、范围、路由或交付边界的需求级产品问题，以及方案分析 Agent 提出交付单元内的产品决策和重大技术决策；其他 Agent 不得使用。需求梳理 Agent 或方案分析 Agent 提问时必须 outcome=needs_input。任何 Agent 若缺少无法从代码、仓库、文档和环境推导的非敏感运行信息，使用 runtimeInputs 并返回 outcome=needs_input。不要通过 runtimeInputs 询问设计决策、审批、密钥或可自行探索的事实。',
   ].join('\n');
   return { prompt, runtime };
 }

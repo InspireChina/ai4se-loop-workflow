@@ -345,13 +345,20 @@ export async function loadAgentRuntime(agentIdInput: string, pipeline?: string):
   const detail = await getAgentProfile(agentIdInput, false);
   const selected = detail.candidatePrompt || detail.currentPrompt;
   const modeInstruction = pipeline === 'resume'
-    ? agentIdInput === 'analyst-agent'
-      ? '根据上下文中的用户答复更新当前交付单元的方案分析。'
-      : '读取上下文中已回答的运行信息，从暂停点继续当前阶段；重新核验条件，不重复已经完成且仍然有效的工作。'
+    ? agentIdInput === 'backlog-agent'
+      ? '根据上下文中已回答的需求级产品问题更新需求目标、范围、路由和交付边界；不要重复询问已经回答的问题。'
+      : agentIdInput === 'analyst-agent'
+        ? '根据上下文中的用户答复更新当前交付单元的方案分析；只解决用户已经明确回答的决策，继续列出并询问所有仍无上下文证据的产品决策和重大技术决策。'
+        : '读取上下文中已回答的运行信息，从暂停点继续当前阶段；重新核验条件，不重复已经完成且仍然有效的工作。'
     : '只处理当前委派阶段和交付单元，不扩张到无关工作。';
+  const prompt = selected.content.includes('{{mode_instruction}}')
+    ? selected.content.replaceAll('{{mode_instruction}}', modeInstruction)
+    : pipeline === 'resume'
+      ? `# 当前恢复要求\n${modeInstruction}\n\n${selected.content}`
+      : selected.content;
   return {
     agentId: agentIdInput,
-    prompt: selected.content.replaceAll('{{mode_instruction}}', modeInstruction),
+    prompt,
     promptVersion: selected.version,
     promptHash: selected.content_hash,
     promptStatus: selected.status === 'candidate' ? 'candidate' : 'active',

@@ -39,6 +39,7 @@ function stepDetail(task: { agile_status: string; run_state: string; current_sub
     const state = lane.status === 'waiting_for_answers' ? '等待澄清' : lane.status === 'waiting_for_runtime_input' ? '等待运行信息' : '系统阻塞';
     return `${laneName} ${state} · ${agentLabel(lane.current_agent)}`;
   }).join('；');
+  if (task.run_state === 'waiting_for_answers') return `等待需求级澄清 · ${agentLabel(task.current_subagent)}`;
   if (task.run_state === 'waiting_for_runtime_input') return `等待补充运行信息 · ${agentLabel(task.current_subagent)}`;
   if (task.agile_status === 'blocked') return `系统异常已暂停 · ${agentLabel(task.current_subagent)}`;
   if (task.agile_status === 'backlog') return '正在收集上下文';
@@ -69,7 +70,8 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const deliveryLane = lanes.find((lane) => lane.lane === 'delivery')!;
   const pipeline = await pipelineForTask(taskId);
   const unansweredQuestions = questions.filter((question) => question.status === 'pending');
-  const waitingForAnswers = analysisLane.status === 'waiting_for_answers';
+  const waitingForRequirementAnswers = task.run_state === 'waiting_for_answers' && task.current_subagent === 'backlog-agent';
+  const waitingForAnswers = waitingForRequirementAnswers || analysisLane.status === 'waiting_for_answers';
   const unansweredRuntimeInputs = runtimeInputs.filter((input) => input.status === 'pending');
   const waitingRuntimeLanes = lanes.filter((lane) => lane.status === 'waiting_for_runtime_input');
   const waitingForRuntimeInput = waitingRuntimeLanes.length > 0;
@@ -191,13 +193,27 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               {currentSpecs.map((spec) => {
                 const parsed = JSON.parse(spec.spec_json) as {
                   goal: string;
+                  decisionTree?: {
+                    key: string;
+                    question: string;
+                    status: 'resolved_from_context' | 'needs_user_input';
+                    selectedOption?: string;
+                    source?: 'code' | 'user' | 'convention';
+                    evidence?: string[];
+                  }[];
                   ambiguities: { key: string; description: string }[];
                   acceptanceCriteria: { id: string; description: string; oracle: string }[];
                   changeBudget: { capabilities: string[]; paths: string[] };
                 };
                 return <details key={spec.spec_id} className="document-item" open={spec.status === 'waiting_for_answers'}>
-                  <summary><FileText size={15}/><span>{deliveryUnitLabel(spec.story_index)} · Slice Spec v{spec.revision}</span><small>{spec.status === 'resolved' ? '歧义已归零' : '等待产品决策'}</small></summary>
+                  <summary><FileText size={15}/><span>{deliveryUnitLabel(spec.story_index)} · Slice Spec v{spec.revision}</span><small>{spec.status === 'resolved' ? '歧义已归零' : '等待设计决策'}</small></summary>
                   <div className="answer"><b>目标：</b>{parsed.goal}</div>
+                  {!!parsed.decisionTree?.length && <pre>{parsed.decisionTree.map((item) => [
+                    `${item.key}: ${item.question}`,
+                    item.status === 'resolved_from_context'
+                      ? `已从上下文确定：${item.selectedOption} · 来源 ${item.source}${item.evidence?.length ? `\n证据：${item.evidence.join('；')}` : ''}`
+                      : '等待用户决策',
+                  ].join('\n')).join('\n\n')}</pre>}
                   {parsed.ambiguities.length > 0 && <pre>{parsed.ambiguities.map((item) => `${item.key}: ${item.description}`).join('\n')}</pre>}
                   <pre>{parsed.acceptanceCriteria.map((item) => `${item.id} · ${item.description}\nOracle: ${item.oracle}`).join('\n\n')}</pre>
                   <small>变更预算：{parsed.changeBudget.capabilities.join('、')}{parsed.changeBudget.paths.length ? ` · ${parsed.changeBudget.paths.join('、')}` : ''}</small>
@@ -271,11 +287,11 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
 
         <section className="task-section">
           <div className="section-head">
-            <h2>产品澄清</h2>
+            <h2>设计澄清</h2>
             <small>{questions.length} 个问题</small>
           </div>
           <div className="question-list">
-            {questions.length === 0 ? <div className="card empty">当前没有待回答的产品歧义。</div> : questions.map((question) => <article className="question card" key={question.question_id}>
+            {questions.length === 0 ? <div className="card empty">当前没有待回答的设计歧义。</div> : questions.map((question) => <article className="question card" key={question.question_id}>
               <div className="question-title">
                 <AlertTriangle size={18}/>
                 <div>
@@ -294,7 +310,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               {question.answer ? <p className="answer"><b>你的答复：</b>{question.answer}</p> : <form action={answerQuestionAction}>
                 <input type="hidden" name="taskId" value={task.task_id}/>
                 <input type="hidden" name="questionId" value={question.question_id}/>
-                <textarea name="answer" required placeholder="填写产品决策、边界或补充信息…"/>
+                <textarea name="answer" required placeholder="填写产品或重大技术决策、边界或补充信息…"/>
                 <button className="button" type="submit">保存答复</button>
               </form>}
             </article>)}

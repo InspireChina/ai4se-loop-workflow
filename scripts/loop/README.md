@@ -33,6 +33,6 @@ npm run loopctl -- system-unblock TASK-id --lane delivery
 npm run loopctl -- task-rewind TASK-id --actor human --to analysis --story 2
 ```
 
-不要直接改 SQLite。`system-unblock` 只恢复自动重试耗尽后的执行异常；并行推进中的 Analysis/Delivery 阻塞应通过 `--lane` 精确恢复，不能提交产品回答或绕过 Slice Spec。产品澄清在 UI 回答并提交后只恢复给 Analyst。Agent 的运行过程不需要主动上报；Runner 会直接解析所选 CLI 的 stream-json / JSONL。
+不要直接改 SQLite。`system-unblock` 只恢复自动重试耗尽后的执行异常；并行推进中的 Analysis/Delivery 阻塞应通过 `--lane` 精确恢复，不能提交设计回答或绕过 Slice Spec。需求级澄清在 UI 回答并提交后只恢复给需求梳理 Agent；单元级设计澄清只恢复给对应的 Analyst。Analyst 的 Slice Spec 必须覆盖完整关键决策树，包括产品决策和重大技术决策；所有无上下文证据的关键决策都必须形成用户问题，Harness 不接受 `safe_default`。Agent 的运行过程不需要主动上报；Runner 会直接解析所选 CLI 的 stream-json / JSONL。
 
 这里保留的 `task-*`、`story` 等命令参数只是维护接口和数据库兼容名，不是产品界面或 Agent 提示词中的术语。
