@@ -224,7 +224,6 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
   // a trust-boundary defense for legacy final-text and recovered results.
   assertAgentResultRoleContract(result, delegation.agent);
   await ensureCodeSlotForDelegation(delegation, result);
-  const artifactDocumentId = await saveArtifact(delegation, result);
 
   if (result.questions.length && delegation.agent !== 'analyst-agent') {
     throw new Error(`${delegation.agent} 不允许创建产品澄清问题；运行所需信息请使用 runtimeInputs`);
@@ -250,6 +249,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     return result.feedback.mode === 'verify' && result.feedback.verdict === 'reopened' ? 'rewound' : 'advanced';
   }
 
+  const artifactDocumentId = await saveArtifact(delegation, result);
   const actor = delegation.agent as Actor;
   switch (delegation.agent) {
     case 'backlog-agent': {

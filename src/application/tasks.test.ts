@@ -357,6 +357,10 @@ test('routes closure feedback through triage, implementation, testing, and indep
   await applyAgentResult('run-feedback-triage', feedbackDelegation, parseAgentResult(JSON.stringify({
     outcome: 'completed',
     summary: '评论指出实现兼容性缺陷，应回退开发阶段。',
+    artifact: {
+      title: '不应保存的 Feedback Agent 临时说明',
+      content: 'Feedback Agent 只提交结构化判断，不创建交付文档。',
+    },
     feedback: {
       mode: 'triage',
       commentId,
@@ -372,6 +376,7 @@ test('routes closure feedback through triage, implementation, testing, and indep
   assert.equal(detail?.task.agile_status, 'in dev');
   assert.equal(detail?.task.current_subagent, 'dev-agent');
   assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.feedback_status, 'in_progress');
+  assert.equal(detail?.documents.some((document) => document.title === '不应保存的 Feedback Agent 临时说明'), false);
 
   const delegation = {
     taskId,
@@ -798,6 +803,42 @@ test('persists execution input before work and recovers output without rerunning
   assert.equal(repeated.attempt.status, 'applied');
   const row = db.prepare('SELECT code_commit FROM execution_attempts WHERE execution_id = ?').get(started.attempt.execution_id) as { code_commit: string };
   assert.equal(row.code_commit, 'abc123');
+});
+
+test('isolates feedback scheduling per task and emits one concurrent delegation for each task queue', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { addDocumentComment, createTask, pipelineAllEnvelopes, upsertDocument } = await import('./tasks');
+  const feedbackTasks: string[] = [];
+  for (const [index, suffix] of ['A', 'B'].entries()) {
+    const taskId = await createTask({ title: `Isolated feedback task ${suffix}` });
+    const documentId = await upsertDocument({
+      taskId,
+      kind: 'context',
+      title: `Feedback source ${suffix}`,
+      content: `Document ${suffix}`,
+      actor: 'review-agent',
+    });
+    await addDocumentComment({
+      taskId,
+      documentId,
+      anchorType: 'file',
+      content: `Change request ${suffix}`,
+      intent: index === 0 ? 'change_request' : 'question',
+    });
+    feedbackTasks.push(taskId);
+  }
+  const normalTaskId = await createTask({ title: 'Task without feedback continues independently' });
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'in plan' WHERE task_id = ?").run(normalTaskId);
+
+  const delegations = await pipelineAllEnvelopes();
+  const first = delegations.find((item) => item.taskId === feedbackTasks[0]);
+  const second = delegations.find((item) => item.taskId === feedbackTasks[1]);
+  const normal = delegations.find((item) => item.taskId === normalTaskId);
+  assert.equal(first?.agent, 'feedback-agent');
+  assert.equal(second?.agent, 'feedback-agent');
+  assert.notEqual(first?.feedbackId, second?.feedbackId);
+  assert.equal(normal?.agent, 'story-splitter-agent');
 });
 
 test('materializes editable Agent Prompt and Memory outside the workspace with version history', async () => {

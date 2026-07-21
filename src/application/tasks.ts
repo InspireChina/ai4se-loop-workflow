@@ -1393,7 +1393,7 @@ type FeedbackQueueRow = {
   document_title: string;
 };
 
-function nextFeedbackRow(db: Awaited<ReturnType<typeof databaseConnection>>, taskId?: string, priorityOnly = false) {
+function nextFeedbackRow(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: string) {
   return db.prepare(`
     SELECT comment.comment_id, comment.task_id, comment.intent, comment.feedback_status,
            document.story_index, document.title AS document_title
@@ -1401,14 +1401,13 @@ function nextFeedbackRow(db: Awaited<ReturnType<typeof databaseConnection>>, tas
     JOIN documents document ON document.document_id = comment.document_id
     JOIN tasks task ON task.task_id = comment.task_id
     WHERE comment.feedback_status IN ('submitted', 'reopened', 'verifying')
-      ${taskId ? 'AND comment.task_id = ?' : ''}
-      ${priorityOnly ? "AND (comment.feedback_status = 'verifying' OR comment.intent = 'change_request')" : ''}
+      AND comment.task_id = ?
     ORDER BY
       CASE comment.feedback_status WHEN 'verifying' THEN 0 WHEN 'reopened' THEN 1 ELSE 2 END,
       CASE comment.intent WHEN 'change_request' THEN 0 WHEN 'question' THEN 1 ELSE 2 END,
       comment.created_at, comment.comment_id
     LIMIT 1
-  `).get(...(taskId ? [taskId] : [])) as FeedbackQueueRow | undefined;
+  `).get(taskId) as FeedbackQueueRow | undefined;
 }
 
 function feedbackDelegation(task: Task, row: FeedbackQueueRow): DelegationEnvelope {
@@ -1431,42 +1430,16 @@ export async function pipelineForTask(taskId: string): Promise<Delegation[]> {
   const db = await databaseConnection();
   const task = fetchTask(db, taskId);
   if (!task) throw new Error('需求不存在');
-  const priorityFeedback = nextFeedbackRow(db, taskId, true);
-  if (priorityFeedback) return [feedbackDelegation(task, priorityFeedback)];
+  const feedback = nextFeedbackRow(db, taskId);
+  if (feedback) return [feedbackDelegation(task, feedback)];
   const otherActive = db.prepare(`${taskSelect} WHERE task_id != ?`).all(taskId) as Task[];
   const codeSlotAvailable = !otherActive.some(occupiesCodeSlot);
   const line = nextDelegation(task, codeSlotAvailable);
-  if (line) return [line];
-  const feedback = nextFeedbackRow(db, taskId);
-  return feedback ? [feedbackDelegation(task, feedback)] : [];
+  return line ? [line] : [];
 }
 
 export async function pipelineAll(): Promise<Delegation[]> {
-  const db = await databaseConnection();
-  const priorityFeedback = nextFeedbackRow(db, undefined, true);
-  if (priorityFeedback) {
-    const task = fetchTask(db, priorityFeedback.task_id);
-    return task ? [feedbackDelegation(task, priorityFeedback)] : [];
-  }
-  const tasks = db.prepare(`${taskSelect} WHERE agile_status NOT IN ('done', 'cancelled') ORDER BY updated_at`).all() as Task[];
-  let codeAvailable = !tasks.some(occupiesCodeSlot);
-  const readyDev = !codeAvailable ? null : tasks.find((task) => task.agile_status === 'ready for dev' && task.dev_index < task.analysis_index)?.task_id || null;
-  let browserUsed = false;
-  const lines: Delegation[] = [];
-  for (const task of tasks) {
-    const taskCodeAvailable = occupiesCodeSlot(task) || (codeAvailable && (!readyDev || task.task_id === readyDev));
-    const line = nextDelegation(task, taskCodeAvailable);
-    if (!line) continue;
-    if (line.resource === 'browser' && browserUsed) continue;
-    if (line.resource === 'browser') browserUsed = true;
-    if (line.pipeline === 'dev') codeAvailable = false;
-    lines.push(line);
-  }
-  if (lines.length) return lines;
-  const feedback = nextFeedbackRow(db);
-  if (!feedback) return lines;
-  const task = fetchTask(db, feedback.task_id);
-  return task ? [feedbackDelegation(task, feedback)] : lines;
+  return pipelineAllEnvelopes();
 }
 
 function toEnvelope(task: Task, delegation: Delegation): DelegationEnvelope {
@@ -1502,11 +1475,6 @@ function toEnvelope(task: Task, delegation: Delegation): DelegationEnvelope {
 
 export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
   const db = await databaseConnection();
-  const priorityFeedback = nextFeedbackRow(db, undefined, true);
-  if (priorityFeedback) {
-    const task = fetchTask(db, priorityFeedback.task_id);
-    return task ? [feedbackDelegation(task, priorityFeedback)] : [];
-  }
   const tasks = db.prepare(`${taskSelect} WHERE agile_status NOT IN ('done', 'cancelled') ORDER BY
     CASE agile_status
       WHEN 'blocked' THEN 0 WHEN 'in dev' THEN 1 WHEN 'in review' THEN 2
@@ -1523,18 +1491,16 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
   const lines: DelegationEnvelope[] = [];
   for (const task of tasks) {
     const taskCodeAvailable = occupiesCodeSlot(task) || (codeAvailable && (!readyDev || task.task_id === readyDev));
-    const line = nextDelegation(task, taskCodeAvailable);
-    if (!line) continue;
-    if (line.resource === 'browser' && browserUsed) continue;
-    if (line.resource === 'browser') browserUsed = true;
-    if (line.pipeline === 'dev') codeAvailable = false;
-    lines.push(toEnvelope(task, line));
+    const feedback = nextFeedbackRow(db, task.task_id);
+    const normal = feedback ? null : nextDelegation(task, taskCodeAvailable);
+    const envelope = feedback ? feedbackDelegation(task, feedback) : normal ? toEnvelope(task, normal) : null;
+    if (!envelope) continue;
+    if (envelope.resource === 'browser' && browserUsed) continue;
+    if (envelope.resource === 'browser') browserUsed = true;
+    if (envelope.pipeline === 'dev') codeAvailable = false;
+    lines.push(envelope);
   }
-  if (lines.length) return lines;
-  const feedback = nextFeedbackRow(db);
-  if (!feedback) return lines;
-  const task = fetchTask(db, feedback.task_id);
-  return task ? [feedbackDelegation(task, feedback)] : lines;
+  return lines;
 }
 
 export async function beginRun(owner = 'ui') {
@@ -1606,7 +1572,7 @@ export async function createLoopDispatch(runId: string, options: { includeRunHea
     await appendLoopRunLog(runId, `[运行] 工作区=${paths.root}`);
     await appendLoopRunLog(runId, `[运行] 数据目录=${paths.dataDir}`);
   }
-  const lines = (await pipelineAllEnvelopes()).slice(0, 1);
+  const lines = await pipelineAllEnvelopes();
   if (options.logDelegations !== false) {
     await appendLoopRunLog(runId, `[派发] 本轮生成 ${lines.length} 个 agent`);
     for (const [index, line] of lines.entries()) {

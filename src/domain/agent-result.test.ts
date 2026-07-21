@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseAgentResult } from './agent-result';
+import { assertAgentResultRoleContract, parseAgentResult } from './agent-result';
 
 test('parses a structured agent result with role-specific fields', () => {
   const result = parseAgentResult(JSON.stringify({
@@ -127,4 +127,20 @@ test('parses Feedback Agent triage and verification decisions', () => {
     },
   }));
   assert.equal(verification.feedback?.mode, 'verify');
+});
+
+test('rejects Feedback Agent attempts to enter product or runtime input flows', () => {
+  const result = parseAgentResult(JSON.stringify({
+    outcome: 'needs_input',
+    summary: 'Ask the user instead of triaging feedback.',
+    runtimeInputs: [{ title: 'Need a decision', question: 'What should happen?' }],
+    feedback: {
+      mode: 'triage',
+      commentId: 'feedback-1',
+      disposition: 'no_change',
+      reason: 'No change proposed.',
+      acceptance: [],
+    },
+  }));
+  assert.throws(() => assertAgentResultRoleContract(result, 'feedback-agent'), /不能创建产品问题或运行信息请求/);
 });

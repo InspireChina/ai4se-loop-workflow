@@ -147,6 +147,9 @@ export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object
 export type AgentResult = z.infer<typeof agentResultSchema>;
 
 export function assertAgentResultRoleContract(result: AgentResult, agent: string) {
+  if (agent === 'feedback-agent' && (result.questions.length || result.runtimeInputs.length)) {
+    throw new Error('feedback-agent 不能创建产品问题或运行信息请求');
+  }
   if (result.questions.length && agent !== 'analyst-agent') {
     throw new Error(`${agent} 不允许创建产品澄清问题；运行所需信息请使用 runtimeInputs`);
   }

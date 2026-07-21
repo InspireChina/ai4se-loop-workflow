@@ -49,7 +49,7 @@
 
 ### 2.2 Loop 编排（Loop Orchestration）
 
-负责读取需求当前事实、计算下一步并逐个执行 Agent；Agent 不负责决定整体流程。
+负责读取需求当前事实、按任务计算下一步并并发执行不同任务的 Agent；Agent 不负责决定整体流程。
 
 - 模型：`LoopRun`、`ExecutionAttempt`、`ExecutionReceipt`
 - 关键用例：开始运行、计算推进步骤、执行单个 Agent、应用结构化结果、结束运行

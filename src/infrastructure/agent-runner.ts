@@ -48,7 +48,7 @@ async function startDetachedRunner(runId: string, scriptName: string) {
 
 export async function startAgentRun(runId: string) {
   const pid = await startDetachedRunner(runId, 'agent-runner.ts');
-  await appendLoopRunLog(runId, `[运行] 已启动逐个执行 runner pid=${pid}`);
+  await appendLoopRunLog(runId, `[运行] 已启动任务批次 runner pid=${pid}`);
 }
 
 export async function startDispatchRetryRun(runId: string) {

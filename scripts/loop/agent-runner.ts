@@ -3,7 +3,7 @@ import '../load-env.js';
 import { join } from 'node:path';
 import { agentExecutionOptions, getAgentExecutorSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
 import { enqueueSoftwareMaintenance } from '../../src/application/software-maintenance';
-import { clearRuntimeEventContext, recordRuntimeEvent, recordRuntimeException, setRuntimeEventContext } from '../../src/application/runtime-events';
+import { recordRuntimeEvent, recordRuntimeException } from '../../src/application/runtime-events';
 import { loadAgentRuntime } from '../../src/application/agent-profiles';
 import {
   applyEvolutionResult,
@@ -41,50 +41,47 @@ import { startMaintenanceRunner } from '../../src/infrastructure/maintenance-run
 const runId = process.argv[2];
 if (!runId) throw new Error('missing run id');
 
-let maintenanceExecutionId: string | null = null;
-let maintenanceEventFromId: number | null = null;
-let runnerTerminalError: unknown;
-
 async function activateMaintenanceContext(attempt: ExecutionAttempt, delegation: DelegationEnvelope) {
-  maintenanceExecutionId = attempt.execution_id;
-  setRuntimeEventContext({
-    runId,
-    executionId: attempt.execution_id,
-    taskId: delegation.taskId,
-    agentId: delegation.agent,
-    stage: attempt.status,
-  });
-  maintenanceEventFromId = await recordRuntimeEvent({
+  const eventFromId = await recordRuntimeEvent({
     eventName: 'loop.execution.cycle.started',
     component: 'loop-runner',
     body: `execution cycle started ${attempt.execution_id}`,
     context: { runId, executionId: attempt.execution_id, taskId: delegation.taskId, agentId: delegation.agent },
     attributes: { attempt: attempt.attempt, pipeline: delegation.pipeline, promptVersion: attempt.prompt_version, memoryRevision: attempt.memory_revision },
   });
+  return { executionId: attempt.execution_id, eventFromId };
 }
 
-async function enqueueFinallyMaintenance() {
-  if (!maintenanceExecutionId && !runnerTerminalError) return;
+async function enqueueExecutionMaintenance(context: { executionId: string; eventFromId: number }, failure?: unknown) {
   try {
-    if (runnerTerminalError) await recordRuntimeException({ runId, executionId: maintenanceExecutionId || undefined, component: 'loop-runner', stage: 'finally', error: runnerTerminalError, fatal: true });
+    if (failure) await recordRuntimeException({ runId, executionId: context.executionId, component: 'loop-runner', stage: 'finally', error: failure, fatal: true });
     else await recordRuntimeEvent({
-      eventName: 'loop.execution.cycle.finished', component: 'loop-runner', body: `execution cycle finished ${maintenanceExecutionId}`,
-      context: { runId, executionId: maintenanceExecutionId }, attributes: { maintenanceQueued: true },
+      eventName: 'loop.execution.cycle.finished', component: 'loop-runner', body: `execution cycle finished ${context.executionId}`,
+      context: { runId, executionId: context.executionId }, attributes: { maintenanceQueued: true },
     });
     const jobId = await enqueueSoftwareMaintenance({
-      triggerKind: runnerTerminalError ? 'runner_error' : 'execution_finally',
+      triggerKind: failure ? 'runner_error' : 'execution_finally',
       runId,
-      executionId: maintenanceExecutionId,
-      eventFromId: maintenanceEventFromId,
-      severity: runnerTerminalError ? 'FATAL' : undefined,
-      summary: runnerTerminalError instanceof Error ? runnerTerminalError.message : runnerTerminalError ? String(runnerTerminalError) : 'execution finally inspection',
+      executionId: context.executionId,
+      eventFromId: context.eventFromId,
+      severity: failure ? 'FATAL' : undefined,
+      summary: failure instanceof Error ? failure.message : failure ? String(failure) : 'execution finally inspection',
     });
     if (jobId) await startMaintenanceRunner();
   } catch (error) {
     try { await appendLoopRunLog(runId, `[维护] 无法排入软件维护任务，但不影响主 Loop：${error instanceof Error ? error.message : String(error)}`); } catch { /* main runner is already terminating */ }
-  } finally {
-    clearRuntimeEventContext();
   }
+}
+
+async function enqueueRunnerFailureMaintenance(failure: unknown) {
+  try {
+    const eventFromId = await recordRuntimeException({ runId, component: 'loop-runner', stage: 'finally', error: failure, fatal: true });
+    const jobId = await enqueueSoftwareMaintenance({
+      triggerKind: 'runner_error', runId, eventFromId, severity: 'FATAL',
+      summary: failure instanceof Error ? failure.message : String(failure),
+    });
+    if (jobId) await startMaintenanceRunner();
+  } catch { /* runner failure remains the primary error */ }
 }
 
 async function buildPrompt(delegation: DelegationEnvelope) {
@@ -186,12 +183,12 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     JSON.stringify({
       outcome: 'completed | needs_input | failed',
       summary: '本步骤简要结论',
-      artifact: { title: '文档标题', content: 'Markdown 正文' },
+      artifact: delegation.agent === 'feedback-agent' ? undefined : { title: '文档标题', content: 'Markdown 正文' },
       questions: delegation.agent === 'analyst-agent' ? [
         { decisionKey: '稳定的决策键', title: '设计决策 1', question: '需要用户决定的具体问题', why: '该决策影响什么', recommendation: '推荐答案', recommendationReason: '推荐理由', alternatives: [{ id: 'option-a', label: '方案 A', consequences: ['影响'] }], dependsOn: [] },
         { decisionKey: '另一个决策键', title: '设计决策 2', question: '另一个需要用户决定的具体问题', why: '与其他决策的依赖', recommendation: '推荐答案', recommendationReason: '推荐理由', alternatives: [{ id: 'option-b', label: '方案 B', consequences: ['影响'] }], dependsOn: ['稳定的决策键'] },
       ] : undefined,
-      runtimeInputs: [{ title: '缺少的运行信息', question: '需要用户补充的非产品信息', why: '为什么无法从仓库或环境推导', recommendation: '安全的推荐答案或处理方式' }],
+      runtimeInputs: delegation.agent === 'feedback-agent' ? undefined : [{ title: '缺少的运行信息', question: '需要用户补充的非产品信息', why: '为什么无法从仓库或环境推导', recommendation: '安全的推荐答案或处理方式' }],
       classification: 'feature | bug | tech | intake | other',
       route: 'plan | repro',
       deliveryUnits: [{ title: '可独立交付和验收的最小业务闭环' }],
@@ -239,14 +236,14 @@ async function isRunActive() {
 
 async function scheduleNextLoop() {
   const retryMs = Number(process.env.LOOP_ACTIVE_DISPATCH_RETRY_MS || 60 * 1000);
-  await appendLoopRunLog(runId, `[运行] 本轮 Agent 已完成，${delayLabel(retryMs)}后继续 Loop`);
+  await appendLoopRunLog(runId, `[运行] 本轮 Agent 批次已完成，${delayLabel(retryMs)}后继续 Loop`);
   await sleep(retryMs);
   if (!(await isRunActive())) return;
 
   await appendLoopRunLog(runId, '[运行] 继续下一轮派发');
   const dispatch = await createLoopDispatch(runId, { includeRunHeader: false });
   if (dispatch.delegations.length > 0) {
-    await appendLoopRunLog(runId, `[运行] 下一轮发现 ${dispatch.delegations.length} 个执行步骤，启动逐个执行器`);
+    await appendLoopRunLog(runId, `[运行] 下一轮发现 ${dispatch.delegations.length} 个任务级执行步骤，启动并发执行器`);
     await startAgentRun(runId);
     return;
   }
@@ -379,6 +376,104 @@ async function handleExecutionFailure(attempt: ExecutionAttempt, delegation: Del
   await blockDelegation(delegation, reason);
 }
 
+async function executeDelegationStep(
+  delegation: DelegationEnvelope,
+  executor: AgentExecutor,
+  executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' },
+) {
+  if (!(await isRunActive())) return;
+  await appendLoopRunLog(runId, `[运行] 执行任务级 Agent：requirement=${delegation.taskId} agent=${delegation.agent}`);
+
+  let attempt: ExecutionAttempt | null = null;
+  let maintenance: { executionId: string; eventFromId: number } | null = null;
+  let unexpectedFailure: unknown;
+  try {
+    const headBefore = delegation.agent === 'dev-agent' ? gitHead(paths.root) : '';
+    const builtPrompt = await buildPrompt(delegation);
+    const durable = await beginExecutionAttempt({
+      runId,
+      delegation,
+      prompt: builtPrompt.prompt,
+      baseCommit: headBefore,
+      promptVersion: builtPrompt.runtime.promptVersion,
+      promptHash: builtPrompt.runtime.promptHash,
+      memoryRevision: builtPrompt.runtime.memoryRevision,
+      memoryHash: builtPrompt.runtime.memoryHash,
+      evolutionCandidateId: builtPrompt.runtime.evolutionCandidateId,
+      leaseMinutes: Math.ceil(Number(process.env.AGENT_EXECUTOR_TIMEOUT_MS || 30 * 60 * 1000) / 60_000) + 10,
+    });
+    attempt = durable.attempt;
+    maintenance = await activateMaintenanceContext(durable.attempt, delegation);
+
+    if (durable.recovered && durable.attempt.status === 'applied') {
+      await appendLoopRunLog(runId, `[恢复] requirement=${delegation.taskId} execution attempt ${durable.attempt.execution_id} 已应用，跳过重复执行`);
+      return;
+    }
+    if (durable.recovered && durable.attempt.result_json) {
+      try {
+        await processDurableResult(durable.attempt, delegation, parseAgentResult(durable.attempt.result_json));
+      } catch (error) {
+        await handleExecutionFailure(durable.attempt, delegation, error instanceof Error ? error.message : String(error), false);
+      }
+      return;
+    }
+
+    const execution = await runDelegation(delegation, builtPrompt.prompt, executor, executionOptions);
+    if (execution.exitCode !== 0) {
+      await handleExecutionFailure(durable.attempt, delegation, `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`, true);
+      return;
+    }
+
+    let result;
+    try {
+      const resultText = execution.submittedResult || execution.finalText;
+      result = parseAgentResult(resultText);
+      if (!execution.submittedResult) await appendLoopRunLog(runId, `[结果通道] requirement=${delegation.taskId} Agent 未调用 submit-agent-result，已兼容读取最终文本`);
+    } catch (error) {
+      const channelReason = execution.resultSubmissionError ? `；结果通道错误：${execution.resultSubmissionError}` : '';
+      const reason = `Agent 未通过结果命令或最终文本返回合法结构化结果：${error instanceof Error ? error.message : String(error)}${channelReason}`;
+      await handleExecutionFailure(durable.attempt, delegation, reason, true);
+      return;
+    }
+    await markExecutionOutput(durable.attempt.execution_id, result);
+    try {
+      const applied = await processDurableResult({ ...durable.attempt, result_json: JSON.stringify(result), status: 'output_received' }, delegation, result);
+      const succeeded = result.outcome !== 'failed' && applied.harnessVerification?.passed !== false;
+      await updatePromptCanary(delegation.agent, succeeded, durable.attempt.execution_id);
+      await runEvolutionEvaluator({
+        executionId: durable.attempt.execution_id,
+        taskId: delegation.taskId,
+        storyIndex: delegation.storyIndex,
+        agentId: delegation.agent,
+        attempt: durable.attempt.attempt,
+        promptVersion: builtPrompt.runtime.promptVersion,
+        result: { outcome: result.outcome, summary: result.summary },
+        applicationOutcome: applied.outcome,
+        harness: applied.harnessVerification,
+        diagnostics: execution.diagnostics,
+      }, executor, executionOptions);
+    } catch (error) {
+      if (error instanceof CodeSlotBusyError) {
+        await failExecution(durable.attempt.execution_id, error.message, false);
+        await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 结果已进入队列，等待 ${error.ownerTaskId} 释放代码槽`);
+        return;
+      }
+      const reason = `应用 Agent 结果失败：${error instanceof Error ? error.message : String(error)}`;
+      await handleExecutionFailure(durable.attempt, delegation, reason, false);
+    }
+  } catch (error) {
+    unexpectedFailure = error;
+    const reason = `任务级 Agent 执行异常：${error instanceof Error ? error.message : String(error)}`;
+    if (attempt) await handleExecutionFailure(attempt, delegation, reason, false);
+    else {
+      await appendLoopRunLog(runId, `[错误] requirement=${delegation.taskId} agent=${delegation.agent} ${reason}`);
+      await blockDelegation(delegation, reason);
+    }
+  } finally {
+    if (maintenance) await enqueueExecutionMaintenance(maintenance, unexpectedFailure);
+  }
+}
+
 async function main() {
   const settings = await getAgentExecutorSettings();
   const executor = getAgentExecutor(settings.executorId);
@@ -388,7 +483,7 @@ async function main() {
   const recoverable = await recoverNextExecutionAttempt();
   if (recoverable) {
     const snapshot = JSON.parse(recoverable.input_json) as { delegation: DelegationEnvelope };
-    await activateMaintenanceContext(recoverable, snapshot.delegation);
+    const maintenance = await activateMaintenanceContext(recoverable, snapshot.delegation);
     try {
       await appendLoopRunLog(runId, `[恢复] 继续 execution attempt ${recoverable.execution_id}，不重复调用 Agent`);
       const result = parseAgentResult(recoverable.result_json || '');
@@ -410,6 +505,8 @@ async function main() {
     } catch (error) {
       const reason = `恢复 execution attempt 失败：${error instanceof Error ? error.message : String(error)}`;
       await handleExecutionFailure(recoverable, snapshot.delegation, reason, false);
+    } finally {
+      await enqueueExecutionMaintenance(maintenance);
     }
     await scheduleNextLoop();
     return;
@@ -436,91 +533,15 @@ async function main() {
     await startDispatchRetryRun(runId);
     return;
   }
-  const delegation = dispatch.delegations[0];
   if (!(await isRunActive())) return;
-  await appendLoopRunLog(runId, `[运行] 使用 ${executor.label} CLI，执行 1 个 Agent 步骤`);
-  await appendLoopRunLog(runId, `[运行] 执行 Agent：${agentLabel(delegation.agent)}`);
-
-  let headBefore = '';
-  if (delegation.agent === 'dev-agent') {
-    headBefore = gitHead(paths.root);
-  }
-
-  const builtPrompt = await buildPrompt(delegation);
-  const prompt = builtPrompt.prompt;
-  const durable = await beginExecutionAttempt({
-    runId,
-    delegation,
-    prompt,
-    baseCommit: headBefore,
-    promptVersion: builtPrompt.runtime.promptVersion,
-    promptHash: builtPrompt.runtime.promptHash,
-    memoryRevision: builtPrompt.runtime.memoryRevision,
-    memoryHash: builtPrompt.runtime.memoryHash,
-    evolutionCandidateId: builtPrompt.runtime.evolutionCandidateId,
-    leaseMinutes: Math.ceil(Number(process.env.AGENT_EXECUTOR_TIMEOUT_MS || 30 * 60 * 1000) / 60_000) + 10,
-  });
-  await activateMaintenanceContext(durable.attempt, delegation);
-  if (durable.recovered && durable.attempt.status === 'applied') {
-    await appendLoopRunLog(runId, `[恢复] execution attempt ${durable.attempt.execution_id} 已应用，跳过重复执行`);
-    await scheduleNextLoop();
-    return;
-  }
-  if (durable.recovered && durable.attempt.result_json) {
-    try {
-      await processDurableResult(durable.attempt, delegation, parseAgentResult(durable.attempt.result_json));
-    } catch (error) {
-      await handleExecutionFailure(durable.attempt, delegation, error instanceof Error ? error.message : String(error), false);
-    }
-    await scheduleNextLoop();
-    return;
-  }
-
-  const execution = await runDelegation(delegation, prompt, executor, executionOptions);
-  if (execution.exitCode !== 0) {
-    await handleExecutionFailure(durable.attempt, delegation, `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`, true);
-    await scheduleNextLoop();
-    return;
-  }
-
-  let result;
-  try {
-    const resultText = execution.submittedResult || execution.finalText;
-    result = parseAgentResult(resultText);
-    if (!execution.submittedResult) await appendLoopRunLog(runId, '[结果通道] Agent 未调用 submit-agent-result，已兼容读取最终文本');
-  } catch (error) {
-    const channelReason = execution.resultSubmissionError ? `；结果通道错误：${execution.resultSubmissionError}` : '';
-    const reason = `Agent 未通过结果命令或最终文本返回合法结构化结果：${error instanceof Error ? error.message : String(error)}${channelReason}`;
-    await handleExecutionFailure(durable.attempt, delegation, reason, true);
-    await scheduleNextLoop();
-    return;
-  }
-  await markExecutionOutput(durable.attempt.execution_id, result);
-  try {
-    const applied = await processDurableResult({ ...durable.attempt, result_json: JSON.stringify(result), status: 'output_received' }, delegation, result);
-    const succeeded = result.outcome !== 'failed' && applied.harnessVerification?.passed !== false;
-    await updatePromptCanary(delegation.agent, succeeded, durable.attempt.execution_id);
-    await runEvolutionEvaluator({
-      executionId: durable.attempt.execution_id,
-      taskId: delegation.taskId,
-      storyIndex: delegation.storyIndex,
-      agentId: delegation.agent,
-      attempt: durable.attempt.attempt,
-      promptVersion: builtPrompt.runtime.promptVersion,
-      result: { outcome: result.outcome, summary: result.summary },
-      applicationOutcome: applied.outcome,
-      harness: applied.harnessVerification,
-      diagnostics: execution.diagnostics,
-    }, executor, executionOptions);
-  } catch (error) {
-    if (error instanceof CodeSlotBusyError) {
-      await failExecution(durable.attempt.execution_id, error.message, false);
-      await appendLoopRunLog(runId, `[运行] ${agentLabel(delegation.agent)} 结果已进入队列，等待 ${error.ownerTaskId} 释放代码槽`);
-      await scheduleNextLoop();
-      return;
-    }
-    const reason = `应用 Agent 结果失败：${error instanceof Error ? error.message : String(error)}`;
-    await handleExecutionFailure(durable.attempt, delegation, reason, false);
+  await appendLoopRunLog(runId, `[运行] 使用 ${executor.label} CLI，并发执行 ${dispatch.delegations.length} 个任务级 Agent 步骤`);
+  const outcomes = await Promise.allSettled(
+    dispatch.delegations.map((delegation) => executeDelegationStep(delegation, executor, executionOptions)),
+  );
+  for (const [index, outcome] of outcomes.entries()) {
+    if (outcome.status === 'fulfilled') continue;
+    const delegation = dispatch.delegations[index];
+    await appendLoopRunLog(runId, `[错误] requirement=${delegation.taskId} agent=${delegation.agent} 并发执行器退出：${outcome.reason instanceof Error ? outcome.reason.message : String(outcome.reason)}`);
   }
   await scheduleNextLoop();
 }
@@ -529,11 +550,9 @@ async function run() {
   try {
     await main();
   } catch (error) {
-    runnerTerminalError = error;
     await appendLoopRunLog(runId, `[执行器错误] ${error instanceof Error ? error.message : String(error)}`);
     await endRun(runId, true, { stopRunner: false, reason: error instanceof Error ? error.message : String(error) });
-  } finally {
-    await enqueueFinallyMaintenance();
+    await enqueueRunnerFailureMaintenance(error);
   }
 }
 
