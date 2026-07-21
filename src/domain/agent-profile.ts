@@ -11,7 +11,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 10;
+export const AGENT_PROMPT_SEED_REVISION = 11;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'backlog-agent': {
@@ -140,7 +140,7 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '4. 为新增或修复行为增加与风险相称的确定性测试。Bug 修复应保留能够证明原问题的回归测试。',
       '5. 执行与改动直接相关的测试，再执行项目要求的回归检查；记录真实命令、通过状态和有意义的结果摘要。',
       '6. 完成前逐条对照 acceptance criteria，并检查实际文件是否超出 change budget。',
-      '7. 若本轮产生代码改动，可以按照目标仓库现有规范只提交本轮相关代码；提交不是完成前提，现有实现已满足规格或仓库不适合提交时可以不创建 commit。提交失败时不得绕过 hook；若只缺少无法从上下文推导的非敏感运行元数据，返回 needs_input 和 runtimeInputs，其他失败则如实报告。',
+      '7. 若本轮修改了任何受 Git 管理的源码、测试、配置或文档，必须按照目标仓库规范选择性暂存并提交本轮相关改动；工作区已有其他未提交内容不是跳过 commit 的理由，不得把它们纳入本轮提交。若走查确认现有实现已经满足规格且本轮没有修改文件，则不要制造 commit。提交失败时不得绕过 hook；若只缺少无法从上下文推导的非敏感运行元数据，返回 needs_input 和 runtimeInputs，其他失败则如实报告。',
       '',
       '# 决策边界',
       '不要自行补充未解决的产品语义或重大技术决策，也不要用 runtimeInputs 询问设计决策、审批或可自行探索的仓库事实。runtimeInputs 只用于继续当前步骤所必需、无法推导且适合由用户补充的非敏感运行信息。若发现 spec 与代码事实冲突，清楚说明而不是静默改变需求。执行 Git 提交前必须检查工作区状态和仓库规范，只能暂存本轮相关改动，不得纳入已存在的无关修改。不要修改需求状态或数据库流程记录。',
@@ -149,7 +149,7 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '不得创建或修改密钥、凭据和环境变量文件；不得绕过类型检查、删除失败测试、降低验证强度或用硬编码掩盖失败；不得顺带重构无关模块。',
       '',
       '# 完成条件',
-      '只有现有或本轮补齐的实现覆盖当前 spec、必要测试真实通过、任何变更保持在预算内且不存在已知未报告失败时，才返回 completed。无须改动时 changedFiles 可以为空且无需创建 commit，但 summary 和 artifact 必须明确说明走查依据；有改动时必须准确列出 changedFiles。是否创建 commit 不影响完成判定；实现取舍与残余风险写入 artifact。',
+      '只有现有或本轮补齐的实现覆盖当前 spec、必要测试真实通过、任何变更保持在预算内且不存在已知未报告失败时，才返回 completed。无须改动时 changedFiles 必须为空且无需创建 commit，summary 和 artifact 必须明确说明走查依据；有改动时必须准确列出 changedFiles，并在成功提交本轮相关改动后才能返回 completed。实现取舍、提交情况与残余风险写入 artifact。',
     ].join('\n'),
   },
   'test-agent': {

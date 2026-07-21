@@ -1,28 +1,26 @@
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
-import { AlertTriangle, Check, CheckCircle2, Clock3, FileText, GitBranch, RotateCcw, SlidersHorizontal } from 'lucide-react';
+import { AlertTriangle, Check, CheckCircle2, Clock3, FileText, GitBranch } from 'lucide-react';
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
+import { getTaskContextChat } from '../../../src/application/task-context-chat';
 import { agentLabel, confirmationKindLabel, deliveryUnitLabel, documentKindLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
 import { ArtifactDocument } from './artifact-document';
+import { TaskAutoRefresh } from './task-auto-refresh';
+import { TaskContextChat } from './task-context-chat';
 import {
   acknowledgeClosureAction,
   addStoryAction,
   answerQuestionAction,
   answerRuntimeInputAction,
   cancelTaskAction,
-  initializeContextAction,
   releaseBlockAction,
   submitClarificationAnswersAction,
   submitRuntimeInputsAction,
-  rewindTaskAction,
-  transitionTaskAction,
 } from '../../actions';
 
 export const dynamic = 'force-dynamic';
 
-const statusOptions = ['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'blocked'];
-const agentOptions = ['backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent'];
 const taskSteps = [
   { label: '需求整理', statuses: ['backlog', 'in repro'] },
   { label: '交付拆分', statuses: ['in plan'] },
@@ -69,6 +67,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const analysisLane = lanes.find((lane) => lane.lane === 'analysis')!;
   const deliveryLane = lanes.find((lane) => lane.lane === 'delivery')!;
   const pipeline = await pipelineForTask(taskId);
+  const contextChat = await getTaskContextChat(taskId);
   const unansweredQuestions = questions.filter((question) => question.status === 'pending');
   const waitingForRequirementAnswers = task.run_state === 'waiting_for_answers' && task.current_subagent === 'backlog-agent';
   const waitingForAnswers = waitingForRequirementAnswers || analysisLane.status === 'waiting_for_answers';
@@ -94,6 +93,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待澄清' : blockedLanes.length ? 'Lane 阻塞' : statusLabel(task.agile_status)}</span>
       </div>
       <div className="chips">
+        <TaskAutoRefresh/>
         <span>{itemTypeLabel(task.item_type)}</span>
         <span>{task.priority || '未定级'}</span>
         <span>Analysis · {agentLabel(analysisLane.current_agent)}</span>
@@ -184,12 +184,31 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         </section>
 
         <section className="task-section">
+          <div>
+            <div className="section-head"><h2>交付文档</h2><small>{deliveryDocuments.length} 个文档 · {documentComments.filter((comment) => comment.feedback_status !== 'resolved').length} 条待处理反馈</small></div>
+            <div className="card document-list">{deliveryDocuments.length === 0 ? <div className="empty">还没有数据库文档。</div> : deliveryDocuments.map((document) => <details key={document.document_id} className="document-item">
+              <summary><FileText size={15}/><span>{terminologyText(document.title)}</span><small>{[documentKindLabel(document.kind), deliveryUnitLabel(document.story_index), agentLabel(document.source_agent)].filter(Boolean).join(' · ')}</small></summary>
+              <ArtifactDocument
+                taskId={task.task_id}
+                documentId={document.document_id}
+                content={document.content}
+                format={document.format}
+                revision={document.revision}
+                comments={documentComments.filter((comment) => comment.document_id === document.document_id)}
+                allowReopen={task.agile_status !== 'done'}
+                allowComment={task.agile_status !== 'done'}
+              />
+            </details>)}</div>
+          </div>
+        </section>
+
+        <section className="task-section">
           <div className="section-head">
             <h2>规格与验证证据</h2>
-            <small>{currentSpecs.length} 个当前规格 · {verificationRuns.length} 次 Harness 验证 · {executionAttempts.length} 次执行尝试</small>
+            <small>{currentSpecs.length} 个当前规格 · {verificationRuns.length} 次 Harness 验证</small>
           </div>
           <div className="card document-list">
-            {currentSpecs.length === 0 && verificationRuns.length === 0 && executionAttempts.length === 0 ? <div className="empty">方案分析完成后会在这里显示版本化 Slice Spec；开发完成后会显示 Harness 证据。</div> : <>
+            {currentSpecs.length === 0 && verificationRuns.length === 0 ? <div className="empty">方案分析完成后会在这里显示版本化 Slice Spec；开发完成后会显示 Harness 证据。</div> : <>
               {currentSpecs.map((spec) => {
                 const parsed = JSON.parse(spec.spec_json) as {
                   goal: string;
@@ -230,19 +249,6 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                   ].filter(Boolean).join('\n')).join('\n\n') : '该规格没有可由 Harness 确定性执行的命令步骤。'}</pre>
                 </details>;
               })}
-              {executionAttempts.map((attempt) => <details key={attempt.execution_id} className="document-item">
-                <summary><GitBranch size={15}/><span>{attempt.lane ? `${attempt.lane === 'analysis' ? 'Analysis' : attempt.lane === 'delivery' ? 'Delivery' : 'Control'} · ` : ''}{deliveryUnitLabel(attempt.story_index)} · {agentLabel(attempt.agent)} · attempt {attempt.attempt}</span><small>{attempt.status}</small></summary>
-                <pre>{[
-                  `execution: ${attempt.execution_id}`,
-                  `input hash: ${attempt.input_hash}`,
-                  attempt.base_commit ? `base commit: ${attempt.base_commit}` : '',
-                  attempt.code_commit ? `code commit: ${attempt.code_commit}` : '',
-                  attempt.verification_id ? `verification: ${attempt.verification_id}` : '',
-                  attempt.prompt_version ? `prompt: v${attempt.prompt_version} · ${attempt.prompt_hash || ''}` : '',
-                  attempt.memory_revision ? `memory: r${attempt.memory_revision} · ${attempt.memory_hash || ''}` : '',
-                  attempt.last_error ? `error: ${attempt.last_error}` : '',
-                ].filter(Boolean).join('\n')}</pre>
-              </details>)}
             </>}
           </div>
         </section>
@@ -321,25 +327,6 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           </form>}
         </section>
 
-        <section className="task-section">
-          <div>
-            <div className="section-head"><h2>交付文档</h2><small>{deliveryDocuments.length} 个文档 · {documentComments.filter((comment) => comment.feedback_status !== 'resolved').length} 条待处理反馈</small></div>
-            <div className="card document-list">{deliveryDocuments.length === 0 ? <div className="empty">还没有数据库文档。</div> : deliveryDocuments.map((document) => <details key={document.document_id} className="document-item">
-              <summary><FileText size={15}/><span>{terminologyText(document.title)}</span><small>{[documentKindLabel(document.kind), deliveryUnitLabel(document.story_index), agentLabel(document.source_agent)].filter(Boolean).join(' · ')}</small></summary>
-              <ArtifactDocument
-                taskId={task.task_id}
-                documentId={document.document_id}
-                content={document.content}
-                format={document.format}
-                revision={document.revision}
-                comments={documentComments.filter((comment) => comment.document_id === document.document_id)}
-                allowReopen={task.agile_status !== 'done'}
-                allowComment={task.agile_status !== 'done'}
-              />
-            </details>)}</div>
-          </div>
-        </section>
-
         {(task.agile_status === 'ready_to_close' || closureAcknowledgements.length > 0) && <section className="task-section">
           <div className="section-head"><h2>结卡报告</h2><small>版本 {task.review_revision}</small></div>
           <div className="card document-list">
@@ -371,6 +358,8 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       </div>
 
       <aside className="task-action-column">
+        <TaskContextChat taskId={task.task_id} initialSession={contextChat.session} initialMessages={contextChat.messages}/>
+
         <section className="card form-panel">
           <h2><GitBranch size={15}/>推进流程</h2>
           {pipeline.length === 0 ? <p className="muted">当前没有可派发步骤。</p> : pipeline.map((item) => <div className="pipeline-card" key={`${item.lane}-${item.pipeline}-${item.storyIndex || 0}`}>
@@ -398,51 +387,47 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           <button className="button success" type="submit">解除系统阻塞并继续</button>
         </form>}
 
-        <form action={initializeContextAction} className="card form-panel">
-          <h2>需求上下文</h2>
-          <input type="hidden" name="taskId" value={task.task_id}/>
-          <div className="fields">
-            <label>类型<select name="kind" defaultValue={task.item_type}><option value="feature">功能需求</option><option value="bug">缺陷</option><option value="tech">技术改进</option><option value="intake">待梳理</option></select></label>
-            <label>说明<input name="slug" placeholder="可选备注，不创建目录"/></label>
-          </div>
-          <div className="fields">
-            <label>状态<select name="status" defaultValue={task.agile_status === 'backlog' ? 'in plan' : task.agile_status}>{statusOptions.map((status) => <option value={status} key={status}>{statusLabel(status)}</option>)}</select></label>
-            <label>Agent<select name="currentSubagent" defaultValue={task.current_subagent || 'story-splitter-agent'}>{agentOptions.map((agent) => <option value={agent} key={agent}>{agentLabel(agent)}</option>)}</select></label>
-          </div>
-          <label>下一步<input name="nextStep" placeholder="例如：拆分交付单元"/></label>
-          <button className="button" type="submit">同步需求上下文</button>
-        </form>
-
-        <form action={transitionTaskAction} className="card form-panel">
-          <h2><SlidersHorizontal size={15}/>状态流转</h2>
-          <input type="hidden" name="taskId" value={task.task_id}/>
-          <div className="fields">
-            <label>状态<select name="status" defaultValue={task.agile_status}>{statusOptions.map((status) => <option value={status} key={status}>{statusLabel(status)}</option>)}</select></label>
-            <label>Agent<select name="currentSubagent" defaultValue={task.current_subagent || ''}><option value="">不修改</option>{agentOptions.map((agent) => <option value={agent} key={agent}>{agentLabel(agent)}</option>)}</select></label>
-          </div>
-          <label>下一步<input name="nextStep" placeholder="更新 next_step"/></label>
-          <button className="button secondary" type="submit">更新状态</button>
-        </form>
-
-        <form action={rewindTaskAction} className="card form-panel">
-          <h2><RotateCcw size={15}/>回退</h2>
-          <input type="hidden" name="taskId" value={task.task_id}/>
-          <div className="fields">
-            <label>回退到<select name="to" defaultValue="analysis"><option value="plan">交付拆分</option><option value="analysis">方案分析</option><option value="dev">开发实现</option><option value="test">验证</option></select></label>
-            <label>交付单元<input name="story" type="number" min="1" max={Math.max(task.total_stories, 1)} placeholder="单元序号"/></label>
-          </div>
-          <label>原因<input name="reason" placeholder="为什么需要回退"/></label>
-          <button className="button secondary" type="submit">执行回退</button>
-        </form>
-
-        <form action={cancelTaskAction} className="card form-panel danger-card">
-          <h2>取消需求</h2>
-          <input type="hidden" name="taskId" value={task.task_id}/>
-          <label>原因<input name="reason" required placeholder="重复、撤回或无效"/></label>
-          <label className="checkbox"><input type="checkbox" name="confirmCodeClean"/>代码槽已清理</label>
-          <button className="button danger" type="submit">取消需求</button>
-        </form>
+        {!['done', 'cancelled'].includes(task.agile_status) && <details className="card danger-card task-danger-zone">
+          <summary>危险操作</summary>
+          <form action={cancelTaskAction} className="form-panel">
+            <h2>取消需求</h2>
+            <p className="muted">仅用于业务目标已经撤回、重复或无效；正常反馈请使用文档评论或澄清回答。</p>
+            <input type="hidden" name="taskId" value={task.task_id}/>
+            <label>原因<input name="reason" required placeholder="重复、撤回或无效"/></label>
+            <label className="checkbox"><input type="checkbox" name="confirmCodeClean"/>代码槽已清理</label>
+            <button className="button danger" type="submit">取消需求</button>
+          </form>
+        </details>}
       </aside>
     </div>
+
+    <section className="task-section task-audit-section">
+      <div className="section-head">
+        <h2>执行审计</h2>
+        <small>{executionAttempts.length} 次执行尝试 · 技术追溯信息</small>
+      </div>
+      <details className="card audit-details">
+        <summary className="audit-summary">
+          <GitBranch size={16}/>
+          <span>查看 Agent 输入版本、提交与验证关联</span>
+          <small>默认折叠</small>
+        </summary>
+        <div className="document-list">
+          {executionAttempts.length === 0 ? <div className="empty">尚无执行审计记录。</div> : executionAttempts.map((attempt) => <details key={attempt.execution_id} className="document-item">
+            <summary><GitBranch size={15}/><span>{attempt.lane ? `${attempt.lane === 'analysis' ? 'Analysis' : attempt.lane === 'delivery' ? 'Delivery' : 'Control'} · ` : ''}{deliveryUnitLabel(attempt.story_index)} · {agentLabel(attempt.agent)} · attempt {attempt.attempt}</span><small>{attempt.status}</small></summary>
+            <pre>{[
+              `execution: ${attempt.execution_id}`,
+              `input hash: ${attempt.input_hash}`,
+              attempt.base_commit ? `base commit: ${attempt.base_commit}` : '',
+              attempt.code_commit ? `code commit: ${attempt.code_commit}` : '',
+              attempt.verification_id ? `verification: ${attempt.verification_id}` : '',
+              attempt.prompt_version ? `prompt: v${attempt.prompt_version} · ${attempt.prompt_hash || ''}` : '',
+              attempt.memory_revision ? `memory: r${attempt.memory_revision} · ${attempt.memory_hash || ''}` : '',
+              attempt.last_error ? `error: ${attempt.last_error}` : '',
+            ].filter(Boolean).join('\n')}</pre>
+          </details>)}
+        </div>
+      </details>
+    </section>
   </>;
 }
