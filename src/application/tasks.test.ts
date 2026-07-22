@@ -1998,6 +1998,35 @@ test('correlates and redacts structured runtime events before queuing a durable 
   }
 });
 
+test('redacts nested authorization attributes before persisting runtime events', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { recordRuntimeEventInDb } = await import('./runtime-events');
+  const db = await databaseConnection();
+  const secret = 'nested-authorization-secret';
+
+  const eventId = recordRuntimeEventInDb(db, {
+    eventName: 'loop.test.nested_authorization',
+    component: 'test',
+    body: 'record nested authorization attributes',
+    attributes: {
+      metadata: {
+        authorization: secret,
+        requestId: 'safe-context',
+      },
+    },
+  });
+  const event = db.prepare('SELECT attributes_json FROM runtime_events WHERE event_id = ?')
+    .get(eventId) as { attributes_json: string };
+
+  assert.doesNotMatch(event.attributes_json, new RegExp(secret));
+  assert.deepEqual(JSON.parse(event.attributes_json), {
+    metadata: {
+      authorization: '[REDACTED]',
+      requestId: 'safe-context',
+    },
+  });
+});
+
 test('infers event metadata from message prefix', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { recordLoopLogEventInDb } = await import('./runtime-events');
