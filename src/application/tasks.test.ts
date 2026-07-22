@@ -2027,6 +2027,66 @@ test('redacts nested authorization attributes before persisting runtime events',
   });
 });
 
+test('runtime-event-tolerance run-log: retains text log and writes maintenance warning when its structured mirror fails', async () => {
+  const { appendLoopRunLog, readLoopRunLogChunk } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const runId = 'runtime-event-tolerance-run-log';
+
+  db.exec('ALTER TABLE runtime_events RENAME TO runtime_events_unavailable');
+  try {
+    await assert.doesNotReject(appendLoopRunLog(runId, '[运行] text record must survive'));
+    const log = await readLoopRunLogChunk(runId);
+    assert.match(log.raw, /\[运行\] text record must survive/);
+    assert.match(log.raw, /\[维护\] 结构化运行时事件写入失败/);
+  } finally {
+    db.exec('ALTER TABLE runtime_events_unavailable RENAME TO runtime_events');
+  }
+});
+
+test('runtime-event-tolerance cycle-start: isolates startup event writes and preserves a null boundary', async () => {
+  const { recordRuntimeEventWithFallback, readLoopRunLogChunk } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { recordRuntimeEvent } = await import('./runtime-events');
+  const db = await databaseConnection();
+  const runId = 'runtime-event-tolerance-cycle-start';
+
+  db.exec('ALTER TABLE runtime_events RENAME TO runtime_events_unavailable');
+  try {
+    const eventFromId = await recordRuntimeEventWithFallback(runId, 'cycle.started 结构化事件写入失败，不影响主流程', () => recordRuntimeEvent({
+      eventName: 'loop.execution.cycle.started', component: 'loop-runner', body: 'injected cycle-start failure', context: { runId },
+    }));
+    assert.equal(eventFromId, null);
+    assert.match((await readLoopRunLogChunk(runId)).raw, /\[维护\] cycle\.started 结构化事件写入失败/);
+  } finally {
+    db.exec('ALTER TABLE runtime_events_unavailable RENAME TO runtime_events');
+  }
+  const source = readFileSync(join(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+  assert.match(source, /recordRuntimeEventWithFallback\([\s\S]*?cycle\.started 结构化事件写入失败[\s\S]*?recordRuntimeEvent/);
+  assert.match(source, /eventFromId: number \| null/);
+});
+
+test('runtime-event-tolerance dispatch-waiter: isolates exception writes and records a maintenance warning', async () => {
+  const { recordRuntimeEventWithFallback, readLoopRunLogChunk } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { recordRuntimeException } = await import('./runtime-events');
+  const db = await databaseConnection();
+  const runId = 'runtime-event-tolerance-dispatch-waiter';
+
+  db.exec('ALTER TABLE runtime_events RENAME TO runtime_events_unavailable');
+  try {
+    const eventId = await recordRuntimeEventWithFallback(runId, 'dispatch-waiter 结构化异常事件写入失败，不影响原始失败', () => recordRuntimeException({
+      runId, component: 'dispatch-waiter', stage: 'finally', error: new Error('injected dispatch-waiter exception failure'), fatal: true,
+    }));
+    assert.equal(eventId, null);
+    assert.match((await readLoopRunLogChunk(runId)).raw, /\[维护\] dispatch-waiter 结构化异常事件写入失败/);
+  } finally {
+    db.exec('ALTER TABLE runtime_events_unavailable RENAME TO runtime_events');
+  }
+  const source = readFileSync(join(process.cwd(), 'scripts/loop/dispatch-waiter.ts'), 'utf8');
+  assert.match(source, /recordRuntimeEventWithFallback\([\s\S]*?dispatch-waiter 结构化异常事件写入失败[\s\S]*?recordRuntimeException/);
+});
+
 test('infers event metadata from message prefix', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { recordLoopLogEventInDb } = await import('./runtime-events');

@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
-import { appendLoopRunLog, getRunStatus, startRunHeartbeat } from '../../src/application/tasks';
+import { appendLoopRunLog, getRunStatus, recordRuntimeEventWithFallback, startRunHeartbeat } from '../../src/application/tasks';
 import { enqueueSoftwareMaintenance } from '../../src/application/software-maintenance';
 import { recordRuntimeException } from '../../src/application/runtime-events';
 import { startAgentRun } from '../../src/infrastructure/agent-runner';
@@ -48,7 +48,11 @@ async function run() {
     stopHeartbeat?.();
     if (!failure) return;
     try {
-      const eventId = await recordRuntimeException({ runId, component: 'dispatch-waiter', stage: 'finally', error: failure, fatal: true });
+      const eventId = await recordRuntimeEventWithFallback(
+        runId,
+        'dispatch-waiter 结构化异常事件写入失败，不影响原始失败',
+        () => recordRuntimeException({ runId, component: 'dispatch-waiter', stage: 'finally', error: failure, fatal: true }),
+      );
       const jobId = await enqueueSoftwareMaintenance({
         triggerKind: 'runner_error', runId, eventFromId: eventId, severity: 'FATAL',
         summary: failure instanceof Error ? failure.message : String(failure),

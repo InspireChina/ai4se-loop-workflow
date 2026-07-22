@@ -24,7 +24,7 @@ import {
   recoverNextExecutionAttempt,
   type ExecutionAttempt,
 } from '../../src/application/executions';
-import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTask, getTaskContext, markDelegationLaneRunning, reconcileStaleTaskLanes, rewindTask, settleDelegationLane, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
+import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTask, getTaskContext, markDelegationLaneRunning, reconcileStaleTaskLanes, recordRuntimeEventWithFallback, rewindTask, settleDelegationLane, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
 import { laneForAgent } from '../../src/application/task-lanes';
 import { runHarnessVerification, type HarnessVerificationOutcome } from '../../src/application/verifications';
 import { parseAgentResult } from '../../src/domain/agent-result';
@@ -49,17 +49,22 @@ function scheduleEvolution(evaluation: Promise<void>) {
 }
 
 async function activateMaintenanceContext(attempt: ExecutionAttempt, delegation: DelegationEnvelope) {
-  const eventFromId = await recordRuntimeEvent({
-    eventName: 'loop.execution.cycle.started',
-    component: 'loop-runner',
-    body: `execution cycle started ${attempt.execution_id}`,
-    context: { runId, executionId: attempt.execution_id, taskId: delegation.taskId, agentId: delegation.agent },
-    attributes: { attempt: attempt.attempt, pipeline: delegation.pipeline, promptVersion: attempt.prompt_version, memoryRevision: attempt.memory_revision },
-  });
+  let eventFromId: number | null = null;
+  eventFromId = await recordRuntimeEventWithFallback(
+    runId,
+    'cycle.started 结构化事件写入失败，不影响主流程',
+    () => recordRuntimeEvent({
+      eventName: 'loop.execution.cycle.started',
+      component: 'loop-runner',
+      body: `execution cycle started ${attempt.execution_id}`,
+      context: { runId, executionId: attempt.execution_id, taskId: delegation.taskId, agentId: delegation.agent },
+      attributes: { attempt: attempt.attempt, pipeline: delegation.pipeline, promptVersion: attempt.prompt_version, memoryRevision: attempt.memory_revision },
+    }),
+  );
   return { executionId: attempt.execution_id, eventFromId };
 }
 
-async function enqueueExecutionMaintenance(context: { executionId: string; eventFromId: number }, failure?: unknown) {
+async function enqueueExecutionMaintenance(context: { executionId: string; eventFromId: number | null }, failure?: unknown) {
   try {
     if (failure) await recordRuntimeException({ runId, executionId: context.executionId, component: 'loop-runner', stage: 'finally', error: failure, fatal: true });
     else await recordRuntimeEvent({
@@ -399,7 +404,7 @@ async function executeDelegationStep(
   await appendLoopRunLog(runId, `[运行] 执行任务级 Agent：requirement=${delegation.taskId} agent=${delegation.agent}`);
 
   let attempt: ExecutionAttempt | null = null;
-  let maintenance: { executionId: string; eventFromId: number } | null = null;
+  let maintenance: { executionId: string; eventFromId: number | null } | null = null;
   let unexpectedFailure: unknown;
   try {
     const headBefore = delegation.agent === 'dev-agent' ? gitHead(paths.root) : '';
