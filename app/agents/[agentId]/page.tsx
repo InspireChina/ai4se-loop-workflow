@@ -13,7 +13,7 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
   const detail = await getAgentProfile(agentId);
   const effectivePrompt = [
     '# Harness Core Contract（只读）',
-    '流程调度、权限、状态机和 JSON Result Schema 由 Harness 强制执行，Agent Prompt 无权覆盖。',
+    '流程调度、权限、状态机和最小结果协议由 Harness 执行，专业语义由对应 Agent 判断，Agent Prompt 无权扩大权限。',
     '',
     `# Role Prompt · v${detail.candidatePrompt?.version || detail.currentPrompt.version}${detail.candidatePrompt ? ' Canary' : ''}`,
     (detail.candidatePrompt || detail.currentPrompt).content,

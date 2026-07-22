@@ -157,6 +157,7 @@ export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object
   // Read-only compatibility for results queued before the terminology change.
   stories: z.array(deliveryUnitSchema).max(50).optional(),
   verdict: z.enum(['passed', 'failed', 'report_ready', 'ready_for_approval', 'changes_requested']).optional(),
+  failureKind: z.enum(['implementation', 'specification', 'environment', 'inconclusive']).optional(),
   rewindTo: z.enum(['plan', 'analysis', 'dev', 'test']).optional(),
   rewindDeliveryUnit: z.number().int().positive().optional(),
   rewindStory: z.number().int().positive().optional(),
@@ -164,6 +165,11 @@ export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object
   feedback: feedbackResultSchema.optional(),
   feedbackResolutions: z.array(z.object({
     commentId: z.string().min(1).max(200),
+    summary: z.string().min(1).max(4000),
+    evidence: z.array(z.string().min(1).max(2000)).max(50).default([]),
+  })).max(50).optional().default([]),
+  recoveryResolutions: z.array(z.object({
+    recoveryId: z.string().min(1).max(200),
     summary: z.string().min(1).max(4000),
     evidence: z.array(z.string().min(1).max(2000)).max(50).default([]),
   })).max(50).optional().default([]),
@@ -192,10 +198,6 @@ function duplicateKeys(keys: string[]) {
   return [...new Set(keys.filter((key) => seen.has(key) || !seen.add(key)))];
 }
 
-function sameKeys(left: string[], right: string[]) {
-  return left.length === right.length && left.every((key) => right.includes(key));
-}
-
 export function assertSliceSpecDecisionCoverage(spec: SliceSpec, questions?: AgentResult['questions']) {
   if (!spec.decisionTree.length) throw new Error('Slice Spec 必须包含完整 decisionTree，不能省略关键设计决策覆盖');
 
@@ -209,42 +211,36 @@ export function assertSliceSpecDecisionCoverage(spec: SliceSpec, questions?: Age
   ])];
   if (repeated.length) throw new Error(`Slice Spec 决策键不能重复：${repeated.join(', ')}`);
 
-  const resolvedKeys = spec.decisionTree.filter((point) => point.status === 'resolved_from_context').map((point) => point.key);
-  const unresolvedKeys = spec.decisionTree.filter((point) => point.status === 'needs_user_input').map((point) => point.key);
-  if (!sameKeys(decisionKeys, resolvedKeys)) throw new Error('decisions 必须与 decisionTree 中 resolved_from_context 的决策一一对应');
-  if (!sameKeys(ambiguityKeys, unresolvedKeys)) throw new Error('ambiguities 必须与 decisionTree 中 needs_user_input 的决策一一对应');
-
-  const unsafeDefaults = spec.decisions.filter((decision) => decision.source === 'safe_default');
-  if (unsafeDefaults.length) throw new Error(`关键设计决策不能使用 safe_default：${unsafeDefaults.map((decision) => decision.key).join(', ')}`);
+  const treeKeySet = new Set(treeKeys);
+  const unresolvedKeySet = new Set(spec.decisionTree
+    .filter((point) => point.status === 'needs_user_input')
+    .map((point) => point.key));
+  const unknownDecisionKeys = decisionKeys.filter((key) => !treeKeySet.has(key));
+  if (unknownDecisionKeys.length) throw new Error(`decisions 引用了 decisionTree 中不存在的决策：${unknownDecisionKeys.join(', ')}`);
+  const unknownAmbiguityKeys = ambiguityKeys.filter((key) => !unresolvedKeySet.has(key));
+  if (unknownAmbiguityKeys.length) throw new Error(`ambiguities 引用了非待确认决策：${unknownAmbiguityKeys.join(', ')}`);
 
   for (const point of spec.decisionTree) {
     const optionIds = point.options.map((option) => option.id);
     const duplicateOptions = duplicateKeys(optionIds);
     if (duplicateOptions.length) throw new Error(`决策 ${point.key} 的选项 id 不能重复：${duplicateOptions.join(', ')}`);
-    if (point.status !== 'resolved_from_context') continue;
-    if (!optionIds.includes(point.selectedOption)) throw new Error(`决策 ${point.key} 的 selectedOption 不在候选选项中`);
-    const decision = spec.decisions.find((item) => item.key === point.key);
-    if (!decision || decision.source !== point.source) throw new Error(`决策 ${point.key} 的结论来源与 decisionTree 不一致`);
+    if (point.status === 'resolved_from_context' && !optionIds.includes(point.selectedOption)) {
+      throw new Error(`决策 ${point.key} 的 selectedOption 不在候选选项中`);
+    }
   }
 
   if (questions === undefined) return;
   const missingQuestionKeys = questions.filter((question) => !question.decisionKey);
   if (missingQuestionKeys.length) throw new Error('方案分析 Agent 的每个问题都必须包含 decisionKey');
   const questionKeys = questions.map((question) => question.decisionKey!);
-  const repeatedQuestions = duplicateKeys(questionKeys);
-  if (repeatedQuestions.length) throw new Error(`方案分析 Agent 的问题 decisionKey 不能重复：${repeatedQuestions.join(', ')}`);
-  if (!sameKeys(questionKeys, unresolvedKeys)) throw new Error('questions 必须与 decisionTree 中 needs_user_input 的决策一一对应');
+  const invalidQuestionKeys = questionKeys.filter((key) => !unresolvedKeySet.has(key));
+  if (invalidQuestionKeys.length) throw new Error(`questions 引用了非待确认决策：${invalidQuestionKeys.join(', ')}`);
   for (const question of questions) {
-    const point = spec.decisionTree.find((item) => item.key === question.decisionKey)!;
-    const questionOptionIds = question.alternatives.map((option) => option.id);
-    const treeOptionIds = point.options.map((option) => option.id);
-    if (!sameKeys(questionOptionIds, treeOptionIds)) throw new Error(`问题 ${question.decisionKey} 的选项必须与 decisionTree 一致`);
-    for (const treeOption of point.options) {
-      const questionOption = question.alternatives.find((option) => option.id === treeOption.id)!;
-      if (questionOption.label !== treeOption.label || !sameKeys(questionOption.consequences, treeOption.consequences)) {
-        throw new Error(`问题 ${question.decisionKey} 的选项说明和后果必须与 decisionTree 一致`);
-      }
-    }
+    const point = spec.decisionTree.find((item) => item.key === question.decisionKey);
+    if (!point) continue;
+    const treeOptionIds = new Set(point.options.map((option) => option.id));
+    const unknownOptions = question.alternatives.filter((option) => !treeOptionIds.has(option.id));
+    if (unknownOptions.length) throw new Error(`问题 ${question.decisionKey} 引用了不存在的选项`);
   }
 }
 
@@ -291,7 +287,7 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
       break;
     case 'review-agent':
       if (!result.artifact) throw new Error('review-agent 结果缺少 artifact');
-      if (result.verdict !== 'report_ready') throw new Error('Review Agent 只能返回 verdict=report_ready；反馈回退由 Feedback Agent 和 Harness 负责');
+      if (result.verdict !== 'report_ready') throw new Error('Review Agent 只能返回 verdict=report_ready；反馈判断由 Feedback Agent 负责，Application 执行路由');
       if (result.rewindTo || result.rewindDeliveryUnit) throw new Error('Review Agent 不得返回回退决策');
       break;
     case 'feedback-agent':

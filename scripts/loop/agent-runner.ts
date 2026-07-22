@@ -24,9 +24,13 @@ import {
   recoverNextExecutionAttempt,
   type ExecutionAttempt,
 } from '../../src/application/executions';
-import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTask, getTaskContext, markDelegationLaneRunning, reconcileStaleTaskLanes, recordRuntimeEventWithFallback, rewindTask, settleDelegationLane, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
+import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTask, getTaskContext, markDelegationLaneRunning, reconcileStaleTaskLanes, recordRuntimeEventWithFallback, settleDelegationLane, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
 import { laneForAgent } from '../../src/application/task-lanes';
-import { runHarnessVerification, type HarnessVerificationOutcome } from '../../src/application/verifications';
+import {
+  listRecoveryItemsForStage,
+  recoveryItemForPrompt,
+  recoveryStageForAgent,
+} from '../../src/application/recovery-items';
 import { parseAgentResult } from '../../src/domain/agent-result';
 import { parseEvolutionResult } from '../../src/domain/agent-evolution';
 import { agentLabel, deliveryUnitLabel } from '../../src/domain/terminology';
@@ -103,8 +107,6 @@ async function buildPrompt(delegation: DelegationEnvelope) {
   const includeAll = delegation.agent === 'review-agent' || delegation.agent === 'feedback-agent';
   const relevant = <T extends { story_index: number | null }>(items: T[]) => includeAll ? items : items.filter((item) => item.story_index === null || item.story_index === delegation.storyIndex);
   const exposeUnitIndex = <T extends { story_index: number | null }>(items: T[]) => items.map(({ story_index, ...item }) => ({ ...item, delivery_unit_index: story_index }));
-  const relevantVerificationRuns = relevant(full.verificationRuns);
-  const relevantVerificationIds = new Set(relevantVerificationRuns.map((run) => run.verification_id));
   const relevantDocuments = relevant(full.documents);
   const relevantDocumentIds = new Set(relevantDocuments.map((document) => document.document_id));
   const currentFeedback = delegation.feedbackId
@@ -118,6 +120,10 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     && comment.feedback_needs_rebase === 0
     && comment.target_agent === delegation.agent
     && (comment.target_story_index == null || comment.target_story_index === delegation.storyIndex));
+  const recoveryStage = recoveryStageForAgent(delegation.agent);
+  const activeRecovery = recoveryStage
+    ? await listRecoveryItemsForStage({ taskId: delegation.taskId, storyIndex: delegation.storyIndex, stage: recoveryStage })
+    : [];
   const taskContext = {
     requirement: {
       requirementId: full.task.task_id,
@@ -142,8 +148,6 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     documents: exposeUnitIndex(relevantDocuments),
     documentComments: full.documentComments.filter((comment) => relevantDocumentIds.has(comment.document_id)),
     sliceSpecs: exposeUnitIndex(relevant(full.storySpecs)).map((item) => ({ ...item, spec_json: JSON.parse(item.spec_json) })),
-    verificationRuns: exposeUnitIndex(relevantVerificationRuns),
-    verificationEvidence: full.verificationEvidence.filter((evidence) => relevantVerificationIds.has(evidence.verification_id)),
     executionAttempts: exposeUnitIndex(relevant(full.executionAttempts)),
     questions: exposeUnitIndex(relevant(full.questions)),
     currentFeedback,
@@ -202,6 +206,13 @@ async function buildPrompt(delegation: DelegationEnvelope) {
         acceptance: JSON.parse(comment.acceptance_json || '[]'),
       })), null, 2),
     ] : []),
+    ...(activeRecovery.length ? [
+      '',
+      '# Active Recovery Contract',
+      '下面是 Test Agent 持久化的未解决失败证据。它们不是历史备注，而是当前交付单元需要继续闭环的上下文。',
+      '方案分析 Agent 和开发实现 Agent 应处理与当前阶段有关的事项；可以在 recoveryResolutions 中说明处理方式，但 Claim 不是推进的硬条件，也不能自行关闭事项。只有后续 Test Agent 独立验证通过才能关闭失败事项。',
+      JSON.stringify(activeRecovery.map(recoveryItemForPrompt), null, 2),
+    ] : []),
     '',
     '# Result Submission Contract',
     '完成当前步骤后，把结果写入一个临时 JSON 文件，再调用下面的专用命令提交。Runner 只把提交内容作为状态机输入；你的普通最终回复可以简短说明已经提交，不需要重复 JSON。',
@@ -234,6 +245,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
         changeBudget: { capabilities: ['允许改变的能力'], paths: ['允许影响的路径'] },
       } : undefined,
       verdict: delegation.agent === 'review-agent' ? 'report_ready' : 'passed | failed',
+      failureKind: delegation.agent === 'test-agent' ? 'implementation | specification | environment | inconclusive；仅失败时填写' : undefined,
       rewindTo: delegation.agent === 'test-agent' ? 'analysis | dev' : undefined,
       rewindDeliveryUnit: delegation.agent === 'test-agent' ? delegation.storyIndex : undefined,
       changedFiles: ['文件路径'],
@@ -243,6 +255,9 @@ async function buildPrompt(delegation: DelegationEnvelope) {
           : { mode: 'triage', decisions: (delegation.feedbackIds || []).map((commentId) => ({ commentId, disposition: 'no_change | reply | revise | rewind | learning_only', targetStage: 'context | repro | plan | analysis | dev | test | review', targetDeliveryUnit: delegation.storyIndex, reason: '影响判断', acceptance: ['反馈完成标准'] })) }
         : undefined,
       feedbackResolutions: activeFeedback.map((comment) => ({ commentId: comment.comment_id, summary: '如何处理了该反馈', evidence: ['新文档、代码或验证证据'] })),
+      recoveryResolutions: activeRecovery
+        .filter((item) => recoveryStage !== 'test' && item.target_stage === recoveryStage && ['pending', 'reopened'].includes(item.status))
+        .map((item) => ({ recoveryId: item.recovery_id, summary: '如何处理了该恢复事项', evidence: ['代码、规格或测试证据'] })),
       tests: [{ command: '测试命令', passed: true, summary: '结果' }],
     }, null, 2),
     '',
@@ -292,7 +307,6 @@ async function runDelegation(delegation: DelegationEnvelope, prompt: string, exe
 
 async function processDurableResult(attempt: ExecutionAttempt, delegation: DelegationEnvelope, result: ReturnType<typeof parseAgentResult>) {
   let codeCommit = attempt.code_commit || '';
-  let harnessVerification: HarnessVerificationOutcome | null = null;
   const current = await getTask(delegation.taskId);
   if (!current || ['done', 'cancelled'].includes(current.task.agile_status)) {
     await markExecutionStage(attempt.execution_id, 'applying');
@@ -300,7 +314,7 @@ async function processDurableResult(attempt: ExecutionAttempt, delegation: Deleg
     await recordExecutionReceipt(attempt.execution_id, 'application', outcome, { outcome, terminalTask: true });
     await completeExecution(attempt.execution_id);
     await appendLoopRunLog(runId, `[运行] ${agentLabel(delegation.agent)} 返回时需求已结束，结果仅保留为证据，不再应用`);
-    return { outcome, harnessVerification };
+    return { outcome };
   }
   if (delegation.agent === 'dev-agent' && result.outcome === 'completed') {
     if (!codeCommit) {
@@ -314,13 +328,9 @@ async function processDurableResult(attempt: ExecutionAttempt, delegation: Deleg
         });
         await appendLoopRunLog(runId, `[运行] 检测到开发实现 Agent 创建的 commit：${codeCommit.slice(0, 10)}`);
       } else {
-        await appendLoopRunLog(runId, '[运行] 开发实现 Agent 未创建新 commit；Runner 将直接验证当前工作区');
+        await appendLoopRunLog(runId, '[运行] 开发实现 Agent 未创建新 commit；当前工作区仍将交给 Test Agent 独立验证');
       }
     }
-    await markExecutionStage(attempt.execution_id, 'verifying');
-    harnessVerification = await runHarnessVerification(delegation.taskId, delegation.storyIndex!, codeCommit, attempt.execution_id);
-    await recordExecutionReceipt(attempt.execution_id, 'verification', harnessVerification.verificationId, harnessVerification);
-    await appendLoopRunLog(runId, `[验证] Harness ${harnessVerification.passed ? '通过' : '失败'}：${harnessVerification.summary}`);
   }
 
   await markExecutionStage(attempt.execution_id, 'applying');
@@ -329,17 +339,7 @@ async function processDurableResult(attempt: ExecutionAttempt, delegation: Deleg
   await completeExecution(attempt.execution_id);
   const outcomeLabel = { advanced: '已推进', blocked: '等待澄清', rewound: '已回退', discarded: '已丢弃副作用' }[outcome];
   await appendLoopRunLog(runId, `[运行] ${agentLabel(delegation.agent)} 结构化结果已应用：${outcomeLabel}`);
-  if (delegation.agent === 'dev-agent' && harnessVerification && !harnessVerification.passed) {
-    await rewindTask({
-      taskId: delegation.taskId,
-      actor: 'system',
-      to: 'dev',
-      story: delegation.storyIndex,
-      reason: `Harness 确定性验证失败：${harnessVerification.summary}`,
-    });
-    await appendLoopRunLog(runId, `[验证] 已自动回退${deliveryUnitLabel(delegation.storyIndex)}到开发实现，不需要人工裁决`);
-  }
-  return { outcome, harnessVerification };
+  return { outcome };
 }
 
 async function runEvolutionEvaluator(
@@ -457,7 +457,7 @@ async function executeDelegationStep(
     await markExecutionOutput(durable.attempt.execution_id, result);
     try {
       const applied = await processDurableResult({ ...durable.attempt, result_json: JSON.stringify(result), status: 'output_received' }, delegation, result);
-      const succeeded = result.outcome !== 'failed' && applied.harnessVerification?.passed !== false;
+      const succeeded = result.outcome !== 'failed' && result.verdict !== 'failed';
       await updatePromptCanary(delegation.agent, succeeded, durable.attempt.execution_id);
       scheduleEvolution(runEvolutionEvaluator({
         executionId: durable.attempt.execution_id,
@@ -468,7 +468,6 @@ async function executeDelegationStep(
         promptVersion: builtPrompt.runtime.promptVersion,
         result: { outcome: result.outcome, summary: result.summary },
         applicationOutcome: applied.outcome,
-        harness: applied.harnessVerification,
         diagnostics: execution.diagnostics,
       }, executor, executionOptions));
     } catch (error) {
@@ -532,7 +531,7 @@ async function main() {
       await appendLoopRunLog(runId, `[恢复] 继续 execution attempt ${recoverable.execution_id}，不重复调用 Agent`);
       const result = parseAgentResult(recoverable.result_json || '');
       const applied = await processDurableResult(recoverable, delegation, result);
-      const succeeded = result.outcome !== 'failed' && applied.harnessVerification?.passed !== false;
+      const succeeded = result.outcome !== 'failed' && result.verdict !== 'failed';
       await updatePromptCanary(delegation.agent, succeeded, recoverable.execution_id);
       scheduleEvolution(runEvolutionEvaluator({
         executionId: recoverable.execution_id,
@@ -543,7 +542,6 @@ async function main() {
         promptVersion: recoverable.prompt_version,
         result: { outcome: result.outcome, summary: result.summary },
         applicationOutcome: applied.outcome,
-        harness: applied.harnessVerification,
         diagnostics: [],
       }, executor, executionOptions));
     } catch (error) {

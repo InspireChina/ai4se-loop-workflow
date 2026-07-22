@@ -524,8 +524,9 @@ test('routes closure feedback through triage, implementation, testing, and indep
     summary: '已恢复旧接口兼容性。',
     changedFiles: ['src/compatibility.ts'],
     tests: [{ command: 'npm test', passed: true }],
-    feedbackResolutions: [{ commentId, summary: '已恢复旧接口兼容性。', evidence: ['src/compatibility.ts'] }],
   })));
+  detail = await getTask(taskId);
+  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.resolution_claim_json, null);
   await applyAgentResult('run-closure-feedback-test', {
     ...delegation,
     pipeline: 'test',
@@ -759,6 +760,54 @@ test('holds review-targeted feedback until the normal forward flow reaches Revie
   assert.equal((await pipelineForTask(taskId))[0]?.agent, 'test-agent');
 
   db.prepare("UPDATE document_comments SET status = 'resolved', feedback_status = 'resolved' WHERE comment_id = ?").run(commentId);
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle', current_subagent = NULL WHERE task_id = ?").run(taskId);
+});
+
+test('applies valid Feedback decisions and leaves omitted comments queued for the next turn', async () => {
+  const { parseAgentResult } = await import('../domain/agent-result');
+  const { applyAgentResult } = await import('./agent-results');
+  const { addDocumentComment, getTask, pipelineForTask } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = 'TASK-feedback-partial-batch';
+  const documentId = 'DOC-feedback-partial-batch';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+    ) VALUES(?, 'Partial feedback batch', 'feature', 'in review', 'review-agent', 1, 1, 1, 1, 1, '')
+  `).run(taskId);
+  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Reviewed unit', 'story-001')").run(taskId);
+  db.prepare(`
+    INSERT INTO documents(document_id, task_id, story_index, kind, title, content, source_agent)
+    VALUES(?, ?, 1, 'test_result', 'Verification result', 'Evidence', 'test-agent')
+  `).run(documentId, taskId);
+  const first = await addDocumentComment({ taskId, documentId, anchorType: 'file', content: '补充第一个测试说明。' });
+  const second = await addDocumentComment({ taskId, documentId, anchorType: 'file', content: '补充第二个测试说明。' });
+  const delegation = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
+  await applyAgentResult('run-feedback-partial-batch', delegation, parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: '本轮只形成了第一条评论的有效判断。',
+    feedback: {
+      mode: 'triage',
+      decisions: [{
+        commentId: first,
+        disposition: 'revise',
+        targetStage: 'test',
+        targetDeliveryUnit: 1,
+        reason: '需要补充验证证据。',
+        acceptance: ['验证结果包含对应证据'],
+      }],
+    },
+  })));
+  const detail = await getTask(taskId);
+  const comments = new Map(detail?.documentComments.map((comment) => [comment.comment_id, comment]));
+  assert.equal(comments.get(first)?.feedback_status, 'in_progress');
+  assert.equal(comments.get(second)?.feedback_status, 'submitted');
+  const next = (await pipelineForTask(taskId))[0];
+  assert.equal(next?.agent, 'feedback-agent');
+  assert.deepEqual(next?.feedbackIds, [second]);
+  db.prepare("UPDATE document_comments SET status = 'resolved', feedback_status = 'resolved' WHERE task_id = ?").run(taskId);
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle', current_subagent = NULL WHERE task_id = ?").run(taskId);
 });
 
@@ -1138,9 +1187,8 @@ test('lets Feedback Agent choose only a stage while the Harness routes context a
   }
 });
 
-test('versions Slice Specs, advances Dev without requiring a commit, and stores Harness evidence', async () => {
+test('versions Slice Specs and advances Dev without requiring a commit', async () => {
   const { addQuestion, answerQuestion, getTask, saveStorySpec, updateTask } = await import('./tasks');
-  const { runHarnessVerification } = await import('./verifications');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = 'TASK-versioned-slice-spec';
@@ -1211,50 +1259,9 @@ test('versions Slice Specs, advances Dev without requiring a commit, and stores 
     next_step: '现有实现已经满足规格，无须创建 commit',
   });
 
-  const outcome = await runHarnessVerification(taskId, 1, undefined, 'test-execution-spec');
-  assert.equal(outcome.passed, true);
-  const repeated = await runHarnessVerification(taskId, 1, undefined, 'test-execution-spec');
-  assert.equal(repeated.verificationId, outcome.verificationId);
-
-  db.prepare(`
-    INSERT INTO verification_runs(
-      verification_id, task_id, story_index, spec_revision, status, execution_id
-    ) VALUES('verification-interrupted', ?, 1, 2, 'running', 'test-execution-interrupted')
-  `).run(taskId);
-  db.prepare(`
-    INSERT INTO verification_evidence(
-      evidence_id, verification_id, criterion_id, kind, instruction,
-      command, exit_code, output_summary, passed
-    ) VALUES(
-      'evidence-interrupted', 'verification-interrupted', 'STALE', 'command',
-      'Partial evidence from the interrupted run', 'exit 1', 1, 'stale', 0
-    )
-  `).run();
-
-  const resumed = await runHarnessVerification(taskId, 1, undefined, 'test-execution-interrupted');
-  assert.equal(resumed.verificationId, 'verification-interrupted');
-  assert.equal(resumed.passed, true);
-  const resumedRuns = db.prepare(`
-    SELECT verification_id, status
-    FROM verification_runs
-    WHERE execution_id = 'test-execution-interrupted'
-  `).all() as { verification_id: string; status: string }[];
-  assert.deepEqual(resumedRuns, [{ verification_id: 'verification-interrupted', status: 'passed' }]);
-  const resumedEvidence = db.prepare(`
-    SELECT criterion_id, passed
-    FROM verification_evidence
-    WHERE verification_id = 'verification-interrupted'
-    ORDER BY created_at, evidence_id
-  `).all() as { criterion_id: string; passed: number }[];
-  assert.deepEqual(resumedEvidence, [{ criterion_id: 'AC-1', passed: 1 }]);
-
   const detail = await getTask(taskId);
   assert.deepEqual(detail?.storySpecs.map((item) => [item.revision, item.status]), [[1, 'superseded'], [2, 'resolved']]);
   assert.equal(detail?.questions.find((item) => item.question_id === questionId)?.status, 'resolved');
-  assert.equal(detail?.verificationRuns.length, 2);
-  assert.equal(detail?.verificationEvidence[0]?.criterion_id, 'AC-1');
-  assert.equal(detail?.verificationEvidence[0]?.passed, 1);
-  assert.equal(detail?.verificationRuns[0]?.code_commit, null);
 });
 
 test('lets Dev and Test request runtime information and resume the same delivery unit', async () => {
@@ -1889,7 +1896,6 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
       promptVersion: 1,
       result: { outcome: 'completed', summary: 'Execution completed with verified evidence.' },
       applicationOutcome: 'advanced',
-      harness: { passed: true, summary: 'All deterministic checks passed.' },
       diagnostics: [],
     };
     const run = await beginEvolutionRun(evidence);

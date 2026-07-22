@@ -20,7 +20,6 @@ export type EvolutionEvidence = {
   promptVersion: number | null;
   result: { outcome: string; summary: string };
   applicationOutcome: string;
-  harness?: { passed: boolean; summary: string } | null;
   diagnostics: string[];
   comments?: EvolutionCommentEvidence[];
   runtimeInputs?: EvolutionRuntimeInputEvidence[];

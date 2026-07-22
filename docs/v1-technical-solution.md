@@ -38,8 +38,8 @@ flowchart LR
   CLI --> Stream["JSON stream / JSONL"]
   Stream --> Logs["日志标准化"]
   CLI --> Result["结构化 Agent Result"]
-  Result --> Harness["Slice Spec / Harness Evidence"]
-  Harness --> App
+  Result --> Evidence["Slice Spec / Test Evidence / Recovery Item"]
+  Evidence --> App
   Result --> Evolution["Evolution Evaluator"]
   Evolution --> Profiles
   App --> Events[("Structured Runtime Events")]
@@ -96,7 +96,7 @@ prototype/              历史资料，不参与运行
 | 交付单元 | SQLite `stories` |
 | 设计歧义、决策选项与用户答复 | SQLite `questions` |
 | 版本化最小单元契约 | SQLite `story_specs` |
-| Harness 验证与证据 | SQLite `verification_runs` / `verification_evidence` |
+| Test 失败与恢复证据 | SQLite `documents` / `recovery_items` |
 | Agent 执行尝试与副作用收据 | SQLite `execution_attempts` / `execution_receipts` |
 | Agent Prompt / Memory 版本 | SQLite `agent_profiles` / `agent_prompt_versions` / `agent_memory_versions` |
 | 当前实际 Agent 文件 | `data/<repo-hash>/agent-runtime/agents/<agent>/PROMPT.md` / `MEMORY.md` |
@@ -152,17 +152,17 @@ Agent 最终返回统一结构化 JSON，包含可选的：
 - `runtimeInputs`：任何 Agent 可返回的非敏感运行信息请求；存在时必须 `outcome=needs_input`，不能与设计问题混用。
 - `rewind` / `rewindDeliveryUnit`：需要回退时的建议。
 
-Review Agent 只返回完整 artifact 和 `verdict=report_ready`。Feedback Agent 一次读取任务当前评论快照，为每条评论返回 `targetStage`；Harness 映射目标 Agent、合并单元游标并只执行一次最早回退。后续阶段评论保持待处理，到达目标阶段时统一注入；任务级回退使交付单元失效时，单元评论在重新拆分后再次绑定，但不跳转到后续阶段。Review Agent 不得再次返回回退决策。
+Review Agent 只返回完整 artifact 和 `verdict=report_ready`。Feedback Agent 一次读取任务当前评论快照，为评论返回 `targetStage`；Application 应用本轮有效决策、映射目标 Agent、合并单元游标并只执行一次最早回退，遗漏或无效评论继续留在队列。后续阶段评论保持待处理，到达目标阶段时统一注入；任务级回退使交付单元失效时，单元评论在重新拆分后再次绑定，但不跳转到后续阶段。Review Agent 不得再次返回回退决策。
 
-Application 负责校验结果、写入数据库和推进状态。对 Analyst，Application 还会拒绝缺失关键决策树、使用 `safe_default`、缺少证据、选项不一致或隐藏未决分支的规格。Agent 不调用 `loopctl`，不写 `.project` 文档，不直接写 SQLite，也不主动写运行日志。
+Application 负责校验最小结果协议、写入数据库和推进状态。对 Analyst，Application 只检查决策引用有效、待确认规格不能冒充 resolved，以及仍有未决歧义时不能推进；完整性和专业语义由 Analyst Prompt、用户对齐和后续 Test 流程保证。Agent 不调用 `loopctl`，不写 `.project` 文档，不直接写 SQLite，也不主动写运行日志。
 
 ## 7. Agent Runtime 与演化
 
 应用启动 Loop 前初始化 `data/<repo-hash>/agent-runtime`。它位于应用数据目录、被 Git 忽略且按目标 repo 隔离；种子 Prompt 只在 Agent Profile 首次创建时使用，此后的事实由版本表和本地 Runtime 文件共同物化。每次执行前检测本地文件哈希，外部编辑会形成 `source=local` 的新版本。
 
-Runner 按 `Core Contract → Role Prompt → Durable Memory → recent daily memory → task context → Result Submission Contract` 组装最终输入，并把 Prompt/Memory 的版本和哈希写入 execution attempt。Core Contract、结果 Schema 和提交通道不开放编辑，避免自定义 Prompt 改写权限、状态机或结构化协议。每次 execution 获得一个私有临时结果通道；Agent 将 Result Receipt 写入临时 JSON 后调用 `submit-agent-result`，CLI 同步加载领域 Zod Schema 和当前 Agent 的静态角色契约。校验失败时命令返回非零退出码且不删除临时输入，Agent 可在当前 execution 内修正并重提；成功后 CLI 投递规范化结果，Runner 再防御性复验和持久化。Agent 的普通最终回复不承载状态迁移，最终文本 JSON 只保留为兼容 fallback。
+Runner 按 `Core Contract → Role Prompt → Durable Memory → recent daily memory → task context → Result Submission Contract` 组装最终输入，并把 Prompt/Memory 的版本和哈希写入 execution attempt。Core Contract、最小结果协议和提交通道不开放编辑，避免自定义 Prompt 改写权限或状态机。每次 execution 获得一个私有临时结果通道；Agent 将 Result Receipt 写入临时 JSON 后调用 `submit-agent-result`，CLI 校验结果可解析、角色推进所需的最小字段和安全边界，失败时保留临时输入供 Agent 修正重提；成功后 Runner 持久化结果并进入 Application 用例。专业语义不由 Runner 重复判断。Agent 的普通最终回复不承载状态迁移，最终文本 JSON 只保留为兼容 fallback。
 
-Evolution Evaluator 是主执行后的 best-effort 旁路：它在同类型 Agent 的一次结果成功应用后运行，而不是在评论保存时运行。开放评论按任务形成 Triage 批次，再由 Harness 生成唯一回退计划；Evaluator 读取评论、批次、处理声明和验证结果作为演化证据。业务评论的 `status=open` 会一直保留到必要流程完成并通过独立验证，和 `evolution_status=analyzed` 相互独立。成功恢复时，已使用的运行信息问答也会作为 evidence 输入，但不得把具体用户数据、具体卡号、地址、账号或凭据写入 Memory；明确的仓库级模板和通用占位符可以提炼。观察首先进入 daily memory 与去重 occurrence 表；只有 `occurrence >= 3`、`distinct requirements >= 2`、`confidence >= 0.75` 且通过安全规则时才提升。Memory 直接形成新 revision；Prompt 形成 candidate，并只由带匹配 `evolution_candidate_id` 的真实 execution attempt 消耗三次 Canary。失败立即回滚，成功三次才激活。Evaluator 失败不改变主执行结果。
+Evolution Evaluator 是主执行后的 best-effort 旁路：它在同类型 Agent 的一次结果成功应用后运行，而不是在评论保存时运行。开放评论按任务形成 Triage 批次，再由 Application 应用有效决策并生成唯一回退计划；Evaluator 读取评论、批次、处理声明和验证结果作为演化证据。业务评论的 `status=open` 会一直保留到必要流程完成并通过独立验证，和 `evolution_status=analyzed` 相互独立。成功恢复时，已使用的运行信息问答也会作为 evidence 输入，但不得把具体用户数据、具体卡号、地址、账号或凭据写入 Memory；明确的仓库级模板和通用占位符可以提炼。观察首先进入 daily memory 与去重 occurrence 表；只有 `occurrence >= 3`、`distinct requirements >= 2`、`confidence >= 0.75` 且通过安全规则时才提升。Memory 直接形成新 revision；Prompt 形成 candidate，并只由带匹配 `evolution_candidate_id` 的真实 execution attempt 消耗三次 Canary。失败立即回滚，成功三次才激活。Evaluator 失败不改变主执行结果。
 
 数据库文档以 Markdown 预览呈现，并允许文件级或选区级评论。评论保存文档 revision、引用原文和渲染文本偏移；文档更新只增加 revision，不改写历史锚点。Runner 把当前交付单元的评论放进 Agent task context；Evolution Evaluator 另外读取该 Agent 全局尚未分析的评论，并通过 `evidenceCommentIds` 显式关联 observation。成功评估后评论才转为 analyzed，评估失败继续保留为 pending。评论只是高价值证据，仍受跨需求阈值、Prompt candidate 和 Canary 约束。
 
@@ -213,8 +213,8 @@ Agent
 1. 记录 Agent 启动前的 Git HEAD，不清理或 checkpoint 当前工作区。
 2. 执行当前交付单元。
 3. 若 Agent 创建了 commit，记录执行后的 HEAD；没有 commit 也允许继续。
-4. 按已解决 Slice Spec 的 verification plan 运行轻量 Harness，保存命令、退出码和输出证据。
-5. Harness 失败时自动回退开发；通过后才推进开发进度。
+4. Dev 完成后直接推进到独立 Test Agent；verification plan 只作为验证意图和线索。
+5. Test Agent 根据仓库与环境事实选择真实验证方法，保存证据并把失败明确分类为实现、规格、环境或无法判断；Application 只执行明确的回退或阻塞路由。
 
 Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。Agent 不得绕过仓库规则；若失败只缺少无法推导的非敏感元数据，则通过 `runtimeInputs` 请求补充并从 Dev 阶段恢复，否则按普通执行失败处理。Runner 不提供 Git 专项恢复状态。
 
@@ -226,7 +226,7 @@ Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。A
 |---|---|
 | 工作台 | 需求概览、待设计澄清、待补充运行信息、待读结卡、近期活动、Loop 状态。 |
 | 需求列表 | 状态、优先级、进度、当前 Agent；右上角浮窗创建需求。 |
-| 需求详情 | 顶部 Steps、交付单元、Slice Spec、设计澄清、运行信息、Harness 证据、execution attempts、结卡报告和事件。 |
+| 需求详情 | 顶部 Steps、交付单元、Slice Spec、设计澄清、运行信息、Test 文档、execution attempts、结卡报告和事件。 |
 | 运行面板 | 开始/停止 Loop，查看占满工作区的流式分层日志。 |
 | 项目设置 | 工作区根目录、执行器；Codex 显示模型和思考强度，Claude 显示可选模型。 |
 | Agent 配置 | 各角色 Prompt / Memory 编辑、Effective Prompt 预览、版本回滚、daily memory、观察与自动演化状态。 |
@@ -246,7 +246,7 @@ Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。A
 - 方案分析、开发实现、验证按交付单元顺序推进，整体验收只执行一次。
 - Analyst 产生的歧义、版本化规格、回答、文档和结果全部写入 SQLite 并可在详情页查看。
 - 回答只形成决策事实；必须由 Analyst 生成无歧义的新规格后才能进入开发。
-- Harness 的每条证据都关联验收标准、规格版本和 execution；Agent 创建了 Commit 时附带其哈希。
+- Test Agent 的验证文档关联当前交付单元和规格，失败证据持久化为 Recovery Item 并注入后续 Analysis、Dev 与 Test execution。
 - Agent 进程在结构化输出后中断时能从原 attempt 恢复，不重复调用 Agent。
 - 每个 attempt 可追溯实际 Prompt/Memory 哈希；目标 repo Git 不影响 Runtime Workspace。
 - 单次观察不能自动改长期 Prompt；满足跨需求阈值后仍必须通过三次 Canary，失败自动回滚。
@@ -254,7 +254,7 @@ Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。A
 - runtime event 必须关联 run/execution 并在落库前脱敏 secret；原始异常不得泄露到维护 Prompt。
 - 软件修复只在独立 worktree 发生，保护边界、变更预算、test/build 或 clean-baseline 任一失败都不得自动落地主仓库。
 - Review 生成报告后释放代码槽并进入 `ready_to_close`；阅读动作不产生 approve/reject。
-- 当前报告有未验证反馈时，关闭动作被服务端拒绝。Feedback Agent 批量选择 target stage，Harness 合并为一次最早回退；后续阶段反馈等待正常推进，Review 只生成更新后报告。反馈在处理与独立验证完成前保持开放。
+- 当前报告有未验证反馈时，关闭动作被服务端拒绝。Feedback Agent 批量选择 target stage，Application 合并本轮有效决策为一次最早回退；遗漏反馈留到下轮，后续阶段反馈等待正常推进，Review 只生成更新后报告。反馈在处理与独立验证完成前保持开放。
 - 开发实现完成后由 Runner 创建独立 Git commit；代码槽繁忙会自动排队。
 - 运行面板能观察 Agent、工具调用、辅助 subagent、警告和错误。
 - 任一 UI 命令都不能绕过状态、进度、确认和资源约束。

@@ -24,7 +24,7 @@ test('ships rigorous versioned seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /runtimeInputs/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /runtimeInputs/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /逐条说明如何处理/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /反馈的阶段判断和回退路由由 Feedback Agent 与 Harness 负责/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /反馈的阶段判断由 Feedback Agent 负责，Application 执行明确路由/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /不得返回 changes_requested/);
   assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /Triage/);
   assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /Verify/);

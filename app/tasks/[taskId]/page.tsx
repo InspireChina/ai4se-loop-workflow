@@ -63,7 +63,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const { taskId } = await params;
   const detail = await getTask(taskId);
   if (!detail) notFound();
-  const { task, lanes, stories, storySpecs, questions, runtimeInputs, documents, documentComments, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events } = detail;
+  const { task, lanes, stories, storySpecs, questions, runtimeInputs, documents, documentComments, closureAcknowledgements, executionAttempts, events } = detail;
   const analysisLane = lanes.find((lane) => lane.lane === 'analysis')!;
   const deliveryLane = lanes.find((lane) => lane.lane === 'delivery')!;
   const pipeline = await pipelineForTask(taskId);
@@ -204,11 +204,11 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
 
         <section className="task-section">
           <div className="section-head">
-            <h2>规格与验证证据</h2>
-            <small>{currentSpecs.length} 个当前规格 · {verificationRuns.length} 次 Harness 验证</small>
+            <h2>交付规格</h2>
+            <small>{currentSpecs.length} 个当前规格</small>
           </div>
           <div className="card document-list">
-            {currentSpecs.length === 0 && verificationRuns.length === 0 ? <div className="empty">方案分析完成后会在这里显示版本化 Slice Spec；开发完成后会显示 Harness 证据。</div> : <>
+            {currentSpecs.length === 0 ? <div className="empty">方案分析完成后会在这里显示版本化 Slice Spec，验证证据由 Test Agent 写入交付文档。</div> : <>
               {currentSpecs.map((spec) => {
                 const parsed = JSON.parse(spec.spec_json) as {
                   goal: string;
@@ -236,17 +236,6 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                   {parsed.ambiguities.length > 0 && <pre>{parsed.ambiguities.map((item) => `${item.key}: ${item.description}`).join('\n')}</pre>}
                   <pre>{parsed.acceptanceCriteria.map((item) => `${item.id} · ${item.description}\nOracle: ${item.oracle}`).join('\n\n')}</pre>
                   <small>变更预算：{parsed.changeBudget.capabilities.join('、')}{parsed.changeBudget.paths.length ? ` · ${parsed.changeBudget.paths.join('、')}` : ''}</small>
-                </details>;
-              })}
-              {verificationRuns.map((run) => {
-                const evidence = verificationEvidence.filter((item) => item.verification_id === run.verification_id);
-                return <details key={run.verification_id} className="document-item">
-                  <summary><CheckCircle2 size={15}/><span>{deliveryUnitLabel(run.story_index)} · Harness</span><small>Spec v{run.spec_revision} · {run.status === 'passed' ? '通过' : run.status === 'failed' ? '失败' : run.status}</small></summary>
-                  <pre>{evidence.length ? evidence.map((item) => [
-                    `${item.passed ? 'PASS' : 'FAIL'} ${item.criterion_id} · ${item.instruction}`,
-                    item.command ? `$ ${item.command}` : '',
-                    item.output_summary || '',
-                  ].filter(Boolean).join('\n')).join('\n\n') : '该规格没有可由 Harness 确定性执行的命令步骤。'}</pre>
                 </details>;
               })}
             </>}

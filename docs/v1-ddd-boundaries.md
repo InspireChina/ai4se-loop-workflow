@@ -12,7 +12,7 @@
 | 单元级设计歧义 | Analyst 无法从代码、用户答复或明确项目文档推导的产品决策或重大技术决策。重大技术决策包括架构边界、公开接口、持久化与迁移、跨模块依赖、安全与隐私、性能目标、部署运维行为以及代价高且难回退的选择。 |
 | 决策事实 | 用户对设计歧义的回答；它是新规格的输入，不是 Approval。 |
 | Slice Spec | 当前交付单元的版本化最小契约；只有歧义归零的 resolved 版本可以进入开发。 |
-| 验证证据 | Harness 针对某个规格版本和当前工作区保存的可追溯结果；Agent 创建了 Commit 时可附带其哈希。 |
+| 验证证据 | Test Agent 针对当前规格和实际环境保存的可追溯结果；失败时形成跨阶段 Recovery Item。 |
 | 结卡确认 | 用户已阅读指定版本结卡报告的事实，不包含 approve/reject。 |
 | 交付文档 | 需求梳理、方案分析、问题复现、验证结果和整体验收等正文。 |
 | Loop 运行 | 应用持续计算下一步、执行 Agent、保存结果并再次计算的本地循环。 |
@@ -30,7 +30,7 @@
 标准推进过程：
 
 ```text
-录入需求 → 需求梳理 → 交付拆分 → 单元推进（规格 → 开发 → Harness / 语义验证）→ 结卡报告 → 阅读结卡 → 完成
+录入需求 → 需求梳理 → 交付拆分 → 单元推进（规格 → 开发 → 独立 Test）→ 结卡报告 → 阅读结卡 → 完成
 ```
 
 交付单元必须以可验收的业务结果命名和拆分。不得把“数据库层”“接口层”“页面层”“测试层”分别作为交付单元；这些属于同一个业务闭环内部的实现工作。
@@ -58,7 +58,7 @@
 
 每次 Agent 执行只处理一个明确目标。当前 Agent 可使用辅助 subagent 收集局部上下文，但辅助 subagent 不参与整体调度，也不能推进其他交付单元。
 
-Application 必须在调用 CLI 前持久化输入快照，在收到结构化输出后先持久化输出，再执行 Git、Harness 和状态推进。`agent-runner` 是恢复、结果消费、新派发和空队列等待的唯一调度入口。Loop Run 通过进程存活和短周期心跳识别异常退出，不给 execution 设置租约：恢复时优先继续已有输出；只有所属 Runner 已确认退出且 execution 尚无持久化输出时，才允许创建下一个 attempt。同一输入最多自动尝试三次。
+Application 必须在调用 CLI 前持久化输入快照，在收到结构化输出后先持久化输出，再执行状态推进。`agent-runner` 是恢复、结果消费、新派发和空队列等待的唯一调度入口。Loop Run 通过进程存活和短周期心跳识别异常退出，不给 execution 设置租约：恢复时优先继续已有输出；只有所属 Runner 已确认退出且 execution 尚无持久化输出时，才允许创建下一个 attempt。同一输入最多自动尝试三次。
 
 执行日志不由 Agent 主动上报。Agent Executor Adapter 直接解析 Cursor、Codex、Claude 的流式输出、工具调用、stderr 和退出码；Application 在命令成功后追加领域审计事件。
 
@@ -72,14 +72,14 @@ Loop 的等待策略属于编排规则：本轮有 Agent 执行时，1 分钟后
 - 关键命令：保存待回答规格、批量创建歧义、回答歧义、提交回答、保存 resolved 规格
 - 依赖：需求管理
 
-需求梳理 Agent 和 Analyst 可以在各自边界内创建设计歧义。需求梳理 Agent 只询问影响目标、范围、plan/repro 路由或交付拆分的需求级产品问题；全部回答后只恢复给同一个需求梳理 Agent，完成新版需求上下文后才允许交付拆分。Analyst 必须在 `decisionTree` 中枚举当前单元的产品决策和重大技术决策：有明确上下文证据的写入 `resolved_from_context`，其余全部写入 `needs_user_input`，并与 `ambiguities`、`questions` 一一对应。Harness 拒绝缺失决策树、使用 `safe_default`、选项不一致或隐藏未决分支的结果。命名、局部代码组织、既有组件用法和容易回退的等价实现等细节不属于该决策树。全部回答后只恢复给对应 Analysis Lane，`analysis_progress` 不前进，直到 Analyst 生成无未决分支且验收 Oracle 完整的新规格版本。
+需求梳理 Agent 和 Analyst 可以在各自边界内创建设计歧义。需求梳理 Agent 只询问影响目标、范围、plan/repro 路由或交付拆分的需求级产品问题；全部回答后只恢复给同一个需求梳理 Agent，完成新版需求上下文后才允许交付拆分。Analyst 必须在 `decisionTree` 中枚举当前单元的产品决策和重大技术决策：有明确上下文证据的写入 `resolved_from_context`，其余写入 `needs_user_input` 并形成用户问题。Application 只校验决策引用有效、待确认规格不能冒充 resolved，以及仍有未决歧义时不能推进；不再比较 `decisionTree`、`decisions`、`ambiguities` 和 `questions` 中重复文案是否完全一致。命名、局部代码组织、既有组件用法和容易回退的等价实现等细节不属于该决策树。全部回答后只恢复给对应 Analysis Lane，`analysis_progress` 不前进，直到 Analyst 生成无未决分支且验收 Oracle 完整的新规格版本。
 
 ### 2.4 验证与结卡（Verification and Closure）
 
-- 模型：`VerificationRun`、`VerificationEvidence`、`ClosureReport`、`ClosureAcknowledgement`
-- 关键命令：执行 Harness、记录证据、生成结卡报告、确认已阅读当前报告
+- 模型：`TestResult`、`RecoveryItem`、`ClosureReport`、`ClosureAcknowledgement`
+- 关键命令：保存 Test 证据、记录失败恢复事项、生成结卡报告、确认已阅读当前报告
 
-Harness 以与 Agent 相同的 bypass 权限执行 resolved Slice Spec 中的命令，并把每条结果绑定到验收标准、规格版本和 execution；若 Agent 创建了 Commit 则同时记录其哈希。失败自动回退，不请求人工裁决。Feedback Agent 批量判断当前任务评论的 target stage，Harness 合并游标并只执行一次最早回退；较晚阶段反馈随正常 Loop 到达对应 Agent，任务级回退后的单元反馈先重新绑定。Review Agent 只汇总最终事实和已处理的反馈，不再发起第二次回退。存在未验证反馈时不能结卡。
+Test Agent 独立读取 resolved Slice Spec、实际仓库和运行环境，将 verification plan 当作线索而不是可直接执行的真相，自行选择验证方法并保存证据。实现失败明确回退 Dev，规格失败明确回退 Analysis；环境问题和无法判断不会默认解释为实现失败，而是保持 Test 阶段阻塞并等待恢复。Feedback Agent 批量判断当前任务评论的 target stage，Application 合并游标并只执行一次最早回退；较晚阶段反馈随正常 Loop 到达对应 Agent，任务级回退后的单元反馈先重新绑定。Review Agent 只汇总最终事实和已处理的反馈，不再发起第二次回退。存在未验证反馈时不能结卡。
 
 ### 2.5 文档管理（Document Management）
 
@@ -208,11 +208,10 @@ classDiagram
 | 是否满足状态和进度不变量 | Application / Domain |
 | 需求如何拆成业务闭环 | 交付规划 Agent |
 | 单元方案与实现细节 | 方案分析 / 开发实现 Agent |
-| 确定性验收是否通过 | Harness 证据 |
-| 语义和黑盒验证是否通过 | 验证 Agent + Application |
+| 验收与黑盒验证是否通过 | 验证 Agent；Application 只保存结论并执行明确路由 |
 | 最终事实如何呈现 | Review Agent |
 | 是否已阅读结卡报告 | 用户的 Closure Acknowledgement |
-| 文档评论如何处理 | Feedback Agent 批量返回每条评论的 target stage；Harness 合并为一次最早回退，后续反馈按阶段等待；Review Agent 只生成更新后报告 |
+| 文档评论如何处理 | Feedback Agent 批量返回每条评论的 target stage；Application 合并有效决策为一次最早回退，遗漏反馈留到下轮；Review Agent 只生成更新后报告 |
 | 工具调用、subagent 使用 | 当前 Agent |
 | 文档、确认事项和结果入库 | Application |
 | 运行信息请求、回答与原阶段恢复 | 当前 Agent 提出；Application 持久化和恢复；用户仅补充事实 |
@@ -232,7 +231,7 @@ Agent 通过 Runner 为当前 execution 注入的 `submit-agent-result --input <
 | Delivery Unit | `stories`，序号列当前仍为 `story_index`。 |
 | Clarification Question / Decision Fact | `questions`。 |
 | Slice Spec | `story_specs`。 |
-| Verification Run / Evidence | `verification_runs` / `verification_evidence`。 |
+| Test Result / Recovery Evidence | `documents` / `recovery_items`；`verification_runs` / `verification_evidence` 仅保留旧数据库兼容。 |
 | Closure Acknowledgement | `closure_acknowledgements`。 |
 | Delivery Document | `documents`。 |
 | Loop Run / logs | `loop_meta` / `run_logs`。 |

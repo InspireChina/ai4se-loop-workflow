@@ -30,6 +30,7 @@ test('submits one Agent result through the execution-scoped CLI channel', (t) =>
     questions: [],
     runtimeInputs: [],
     feedbackResolutions: [],
+    recoveryResolutions: [],
   });
 });
 

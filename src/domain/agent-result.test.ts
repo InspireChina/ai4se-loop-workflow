@@ -143,7 +143,7 @@ test('parses a versionable Slice Spec and normalizes the legacy review verdict',
   );
 });
 
-test('requires every analysis decision to be evidenced or aligned with one user question', () => {
+test('keeps unresolved analysis decisions in the question flow without requiring duplicated wording', () => {
   const unresolved = parseAgentResult(JSON.stringify({
     outcome: 'needs_input',
     summary: 'One product decision is not covered by context.',
@@ -202,7 +202,7 @@ test('requires every analysis decision to be evidenced or aligned with one user 
       ambiguities: [],
     },
   }));
-  assert.throws(() => assertAgentResultRoleContract(unsafe, 'analyst-agent'), /不能使用 safe_default/);
+  assert.doesNotThrow(() => assertAgentResultRoleContract(unsafe, 'analyst-agent'));
 });
 
 test('parses Feedback Agent triage and verification decisions', () => {
@@ -245,6 +245,27 @@ test('parses Feedback Agent triage and verification decisions', () => {
   assert.equal(verification.feedback?.mode, 'verify');
 });
 
+test('treats Recovery Resolution Claims as optional context instead of a role gate', () => {
+  const result = parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'Recovered the failed behavior.',
+    recoveryResolutions: [{
+      recoveryId: 'REC-001',
+      summary: 'Added the missing regression path.',
+      evidence: ['test retry passes'],
+    }],
+  }));
+  assert.doesNotThrow(() => assertAgentResultRoleContract(result, 'dev-agent'));
+  assert.doesNotThrow(() => assertAgentResultRoleContract({ ...result, verdict: 'passed' }, 'test-agent'));
+  const incomplete = parseAgentResult(JSON.stringify({
+    outcome: 'needs_input',
+    summary: 'Cannot finish recovery yet.',
+    runtimeInputs: [{ title: 'Runtime URL', question: 'Which test URL is available?' }],
+    recoveryResolutions: [{ recoveryId: 'REC-001', summary: 'Partial work', evidence: [] }],
+  }));
+  assert.doesNotThrow(() => assertAgentResultRoleContract(incomplete, 'dev-agent'));
+});
+
 test('keeps feedback rewind decisions out of the Review Agent contract', () => {
   const result = parseAgentResult(JSON.stringify({
     outcome: 'completed',
@@ -256,7 +277,7 @@ test('keeps feedback rewind decisions out of the Review Agent contract', () => {
   }));
   assert.throws(
     () => assertAgentResultRoleContract(result, 'review-agent'),
-    /Feedback Agent 和 Harness/,
+    /Feedback Agent.*Application/,
   );
 });
 

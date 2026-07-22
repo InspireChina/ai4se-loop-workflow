@@ -30,6 +30,7 @@ import {
   type TaskState,
   type TaskStatus,
 } from '../domain/task';
+import type { RecoveryItem } from './recovery-items';
 
 export type Task = TaskState & {
   title: string;
@@ -137,8 +138,6 @@ export type RuntimeInputRequest = {
   resolved_at: string | null;
 };
 export type ClosureAcknowledgement = { acknowledgement_id: string; task_id: string; review_document_id: string; review_revision: number; acknowledged_by: string; acknowledged_at: string };
-export type VerificationRun = { verification_id: string; task_id: string; story_index: number; spec_revision: number; code_commit: string | null; status: string; started_at: string; finished_at: string | null };
-export type VerificationEvidence = { evidence_id: string; verification_id: string; criterion_id: string; kind: string; instruction: string; command: string | null; exit_code: number | null; output_summary: string | null; passed: number; created_at: string };
 export type ExecutionAttemptView = { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; lane: string | null; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; last_error: string | null; created_at: string; started_at: string | null; finished_at: string | null };
 export type Event = { event_id: string; actor: string; event_type: string; summary: string; created_at: string };
 export type RunStatus = {
@@ -325,12 +324,6 @@ export async function getTask(taskId: string) {
   const documents = db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[];
   const documentComments = db.prepare('SELECT * FROM document_comments WHERE task_id = ? ORDER BY created_at').all(taskId) as DocumentComment[];
   const closureAcknowledgements = db.prepare('SELECT * FROM closure_acknowledgements WHERE task_id = ? ORDER BY review_revision').all(taskId) as ClosureAcknowledgement[];
-  const verificationRuns = db.prepare('SELECT * FROM verification_runs WHERE task_id = ? ORDER BY started_at, verification_id').all(taskId) as VerificationRun[];
-  const verificationEvidence = db.prepare(`
-    SELECT evidence.* FROM verification_evidence evidence
-    JOIN verification_runs run ON run.verification_id = evidence.verification_id
-    WHERE run.task_id = ? ORDER BY evidence.created_at, evidence.evidence_id
-  `).all(taskId) as VerificationEvidence[];
   refreshTaskLaneStatesInDb(db, task);
   const lanes = taskLanesInDb(db, task);
   const executionAttempts = db.prepare(`
@@ -342,8 +335,13 @@ export async function getTask(taskId: string) {
     WHERE task_id = ?
     ORDER BY created_at, execution_id
   `).all(taskId) as ExecutionAttemptView[];
+  const recoveryItems = db.prepare(`
+    SELECT * FROM recovery_items
+    WHERE task_id = ?
+    ORDER BY created_at, recovery_id
+  `).all(taskId) as RecoveryItem[];
   const events = db.prepare('SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at DESC').all(taskId) as Event[];
-  return { task, lanes, stories, storySpecs, questions, runtimeInputs, documents, documentComments, closureAcknowledgements, verificationRuns, verificationEvidence, executionAttempts, events };
+  return { task, lanes, stories, storySpecs, questions, runtimeInputs, documents, documentComments, closureAcknowledgements, executionAttempts, recoveryItems, events };
 }
 
 export async function getTaskContext(taskId: string) {
@@ -664,22 +662,24 @@ async function rewindFeedbackUnitBatch(taskId: string, routed: PreparedFeedbackT
 }
 
 export async function applyFeedbackTriageBatch(taskId: string, decisions: FeedbackTriageDecision[], executionId?: string) {
-  if (!decisions.length) throw new Error('Feedback Triage 批次不能为空');
-  const duplicateIds = decisions.map((decision) => decision.commentId).filter((id, index, values) => values.indexOf(id) !== index);
-  if (duplicateIds.length) throw new Error(`Feedback Triage 包含重复评论：${[...new Set(duplicateIds)].join(', ')}`);
+  if (!decisions.length) return;
+  const uniqueDecisions = [...new Map(decisions.map((decision) => [decision.commentId, decision])).values()];
   const db = await databaseConnection();
-  const placeholders = decisions.map(() => '?').join(', ');
+  const placeholders = uniqueDecisions.map(() => '?').join(', ');
   const comments = db.prepare(`
     SELECT comment.*, document.story_index
     FROM document_comments comment
     JOIN documents document ON document.document_id = comment.document_id
     WHERE comment.task_id = ? AND comment.comment_id IN (${placeholders})
-  `).all(taskId, ...decisions.map((decision) => decision.commentId)) as (DocumentComment & { story_index: number | null })[];
-  if (comments.length !== decisions.length) throw new Error('Feedback Triage 批次包含不存在或不属于当前任务的评论');
+  `).all(taskId, ...uniqueDecisions.map((decision) => decision.commentId)) as (DocumentComment & { story_index: number | null })[];
+  if (!comments.length) return;
   const commentsById = new Map(comments.map((comment) => [comment.comment_id, comment]));
   const taskLevelStages: FeedbackTriageDecision['targetStage'][] = ['context', 'repro', 'plan', 'review'];
-  const prepared = decisions.map((decision): PreparedFeedbackTriage => {
-    const comment = commentsById.get(decision.commentId)!;
+  const task = fetchTask(db, taskId);
+  if (!task) throw new Error('需求不存在');
+  const prepared = uniqueDecisions.flatMap((decision): PreparedFeedbackTriage[] => {
+    const comment = commentsById.get(decision.commentId);
+    if (!comment) return [];
     const allowed = ['submitted', 'triaged', 'reopened'].includes(comment.feedback_status)
       || (comment.feedback_status === 'in_progress' && comment.feedback_needs_rebase === 1);
     const actionable = decision.disposition === 'revise' || decision.disposition === 'rewind';
@@ -693,25 +693,19 @@ export async function applyFeedbackTriageBatch(taskId: string, decisions: Feedba
       && comment.target_stage === (decision.targetStage || null)
       && comment.target_agent === targetAgent
       && comment.target_story_index === targetStory;
-    if (!allowed && !sameAppliedDecision) throw new Error(`反馈 ${comment.comment_id} 当前不能重新 Triage：${comment.feedback_status}`);
-    if (actionable && !decision.targetStage) throw new Error(`反馈 ${comment.comment_id} 需要修改或回退，必须指定 targetStage`);
-    if (actionable && !decision.acceptance.length) throw new Error(`反馈 ${comment.comment_id} 需要修改或回退，必须提供 acceptance`);
-    if (decision.targetStage && !taskLevelStages.includes(decision.targetStage) && !targetStory) throw new Error(`反馈 ${comment.comment_id} 的单元阶段必须指定交付单元`);
-    return { decision, comment, actionable, targetStory, targetAgent };
+    if (!allowed && !sameAppliedDecision) return [];
+    if (actionable && (!decision.targetStage || !decision.acceptance.length)) return [];
+    if (decision.targetStage && !taskLevelStages.includes(decision.targetStage) && !targetStory) return [];
+    if (actionable && targetStory && task.total_stories > 0 && targetStory > task.total_stories) return [];
+    return [{ decision, comment, actionable, targetStory, targetAgent }];
   });
+  if (!prepared.length) return;
   if (prepared.every((item) => item.comment.feedback_status === 'in_progress'
     && item.comment.feedback_needs_rebase === 0
     && item.comment.disposition === item.decision.disposition
     && item.comment.target_stage === (item.decision.targetStage || null)
     && item.comment.target_agent === item.targetAgent
     && item.comment.target_story_index === item.targetStory)) return;
-  const task = fetchTask(db, taskId);
-  if (!task) throw new Error('需求不存在');
-  for (const item of prepared) {
-    if (item.actionable && item.targetStory && task.total_stories > 0 && item.targetStory > task.total_stories) {
-      throw new Error(`反馈 ${item.decision.commentId} 的目标交付单元 ${item.targetStory} 不存在`);
-    }
-  }
   const batchId = executionId || randomUUID();
   const routed = prepared.filter((item) => feedbackDecisionNeedsRoute(task, item)).sort(feedbackFrontier);
   const frontier = routed[0] || null;
@@ -740,7 +734,7 @@ export async function applyFeedbackTriageBatch(taskId: string, decisions: Feedba
           item.targetStory,
           JSON.stringify(item.decision.acceptance),
           item.decision.reason,
-          item.actionable ? null : JSON.stringify({ executionId: executionId || null, summary: item.decision.reason, evidence: [] }),
+          null,
           batchId,
           frontier?.decision.commentId === item.decision.commentId ? 1 : 0,
           item.decision.commentId,
@@ -805,19 +799,21 @@ export async function recordFeedbackProgress(input: {
   const claims = new Map((input.claims || []).map((claim) => [claim.commentId, claim]));
   for (const feedback of active) {
     if (feedback.target_agent === input.agent && (feedback.target_story_index == null || feedback.target_story_index === input.storyIndex)) {
-      const claim = claims.get(feedback.comment_id) || { commentId: feedback.comment_id, summary: input.summary, evidence: [] };
-      db.prepare(`
-        UPDATE document_comments SET resolution_claim_json = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE comment_id = ?
-      `).run(JSON.stringify({ ...claim, executionId: input.executionId || null, agent: input.agent }), feedback.comment_id);
-      feedback.resolution_claim_json = JSON.stringify(claim);
+      const claim = claims.get(feedback.comment_id);
+      if (claim) {
+        db.prepare(`
+          UPDATE document_comments SET resolution_claim_json = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE comment_id = ?
+        `).run(JSON.stringify({ ...claim, executionId: input.executionId || null, agent: input.agent }), feedback.comment_id);
+        feedback.resolution_claim_json = JSON.stringify(claim);
+      }
     }
     const testReady = input.agent === 'test-agent' && input.verdict === 'passed'
       && feedback.target_story_index === input.storyIndex
       && ['analysis', 'dev', 'test'].includes(feedback.target_stage || '');
     const reviewReady = input.agent === 'review-agent' && input.verdict === 'report_ready'
       && ['context', 'repro', 'plan', 'review'].includes(feedback.target_stage || '');
-    if ((testReady || reviewReady) && feedback.resolution_claim_json) {
+    if (testReady || reviewReady) {
       db.prepare(`
         UPDATE document_comments SET feedback_status = 'verifying', updated_at = CURRENT_TIMESTAMP
         WHERE comment_id = ?
@@ -1021,9 +1017,6 @@ export async function saveStorySpec(input: unknown) {
   assertSliceSpecDecisionCoverage(value.spec);
   if (value.status === 'resolved' && value.spec.ambiguities.length) throw new Error('resolved Slice Spec 不能包含未解决歧义');
   if (value.status === 'waiting_for_answers' && !value.spec.ambiguities.length) throw new Error('等待回答的 Slice Spec 必须列出歧义');
-  const criterionIds = new Set(value.spec.acceptanceCriteria.map((criterion) => criterion.id));
-  const missingCriteria = value.spec.verificationPlan.filter((step) => !criterionIds.has(step.criterionId));
-  if (missingCriteria.length) throw new Error(`验证计划引用了不存在的验收标准：${missingCriteria.map((step) => step.criterionId).join(', ')}`);
   const db = await databaseConnection();
   const task = fetchTask(db, value.taskId);
   if (!task || value.storyIndex > task.total_stories) throw new Error('交付单元不存在');
@@ -1724,6 +1717,11 @@ export async function rewindTask(input: unknown) {
         UPDATE questions
         SET status = 'superseded', updated_at = CURRENT_TIMESTAMP
         WHERE task_id = ? AND status IN ('pending', 'answered', 'resolved')
+      `).run(value.taskId);
+      db.prepare(`
+        UPDATE recovery_items
+        SET status = 'superseded', resolved_at = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ? AND status IN ('pending', 'claimed', 'reopened')
       `).run(value.taskId);
       db.prepare('DELETE FROM stories WHERE task_id = ?').run(value.taskId);
     }

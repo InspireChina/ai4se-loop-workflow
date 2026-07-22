@@ -1,8 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { assertAgentResultRoleContract, parseAgentResult, type AgentResult } from '../domain/agent-result';
+import { parseAgentResult, type AgentResult } from '../domain/agent-result';
 import type { Actor } from '../domain/task';
 import { databaseConnection } from '../infrastructure/database';
 import { laneForAgent, settleTaskLaneInDb } from './task-lanes';
+import {
+  createOrReopenRecoveryItem,
+  recordRecoveryClaims,
+  resolveActiveRecoveryItems,
+} from './recovery-items';
 import {
   addQuestion,
   addRuntimeInputRequest,
@@ -262,10 +267,6 @@ export async function blockDelegation(delegation: DelegationEnvelope, reason: st
 type ApplyOutcome = 'advanced' | 'blocked' | 'rewound' | 'discarded';
 
 async function applyResultEffects(delegation: DelegationEnvelope, result: AgentResult, sourceResultId?: string, sourceExecutionId?: string): Promise<ApplyOutcome> {
-  // The submission CLI runs this same static role contract so the Agent can
-  // correct a rejected receipt before exiting. Application keeps the check as
-  // a trust-boundary defense for legacy final-text and recovered results.
-  assertAgentResultRoleContract(result, delegation.agent);
   await ensureCodeSlotForDelegation(delegation, result);
 
   const canAskAlignmentQuestions = delegation.agent === 'backlog-agent' || delegation.agent === 'analyst-agent';
@@ -278,7 +279,8 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     await saveRuntimeInputs(delegation, result, sourceExecutionId);
     return 'blocked' as const;
   }
-  if (result.outcome !== 'completed' && !(canAskAlignmentQuestions && result.questions.length)) {
+  const hasTestFailureVerdict = delegation.agent === 'test-agent' && result.verdict === 'failed';
+  if (result.outcome !== 'completed' && !(canAskAlignmentQuestions && result.questions.length) && !hasTestFailureVerdict) {
     await blockDelegation(delegation, result.summary);
     return 'blocked' as const;
   }
@@ -288,13 +290,14 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     if (delegation.pipeline === 'feedback-triage' && result.feedback.mode !== 'triage') throw new Error('Feedback Triage 必须返回 mode=triage');
     if (delegation.pipeline === 'feedback-verify' && result.feedback.mode !== 'verify') throw new Error('Feedback Verify 必须返回 mode=verify');
     if (result.feedback.mode === 'triage') {
-      const expected = [...new Set(delegation.feedbackIds || (delegation.feedbackId ? [delegation.feedbackId] : []))].sort();
-      const actual = [...new Set(result.feedback.decisions.map((decision) => decision.commentId))].sort();
-      if (!expected.length) throw new Error('Feedback Triage 缺少 feedbackIds 批次快照');
-      if (expected.length !== actual.length || expected.some((id, index) => id !== actual[index])) {
-        throw new Error('Feedback Agent 必须对批次快照中的每条评论各返回一个 Triage 决策');
-      }
-      await applyFeedbackTriageBatch(delegation.taskId, result.feedback.decisions, sourceExecutionId);
+      const expected = new Set(delegation.feedbackIds || (delegation.feedbackId ? [delegation.feedbackId] : []));
+      const seen = new Set<string>();
+      const applicable = result.feedback.decisions.filter((decision) => {
+        if (!expected.has(decision.commentId) || seen.has(decision.commentId)) return false;
+        seen.add(decision.commentId);
+        return true;
+      });
+      if (applicable.length) await applyFeedbackTriageBatch(delegation.taskId, applicable, sourceExecutionId);
     } else {
       if (!delegation.feedbackId || result.feedback.commentId !== delegation.feedbackId) throw new Error('Feedback Agent 返回了错误的 commentId');
       await applyFeedbackVerification(delegation.taskId, result.feedback, sourceExecutionId);
@@ -374,6 +377,13 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
           : `交付单元 ${delegation.storyIndex} 的方案分析完成，无待确认设计决策`,
       });
       await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, executionId: sourceExecutionId, claims: result.feedbackResolutions });
+      await recordRecoveryClaims({
+        taskId: delegation.taskId,
+        storyIndex: delegation.storyIndex,
+        agent: delegation.agent,
+        executionId: sourceExecutionId,
+        claims: result.recoveryResolutions,
+      });
       return 'advanced' as const;
     }
     case 'repro-agent': {
@@ -399,6 +409,13 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         next_step: result.summary,
       });
       await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, executionId: sourceExecutionId, claims: result.feedbackResolutions });
+      await recordRecoveryClaims({
+        taskId: delegation.taskId,
+        storyIndex: delegation.storyIndex,
+        agent: delegation.agent,
+        executionId: sourceExecutionId,
+        claims: result.recoveryResolutions,
+      });
       return 'advanced' as const;
     }
     case 'test-agent': {
@@ -414,9 +431,43 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
           next_step: result.summary,
         });
         await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, verdict: result.verdict, executionId: sourceExecutionId, claims: result.feedbackResolutions });
+        await resolveActiveRecoveryItems({
+          taskId: delegation.taskId,
+          storyIndex: delegation.storyIndex,
+          kind: 'test_failure',
+          verifier: delegation.agent,
+          executionId: sourceExecutionId,
+          summary: result.summary,
+        });
         return 'advanced' as const;
       }
-      const target = result.rewindTo === 'analysis' ? 'analysis' : 'dev';
+      const failureKind = result.failureKind
+        || (result.rewindTo === 'analysis' ? 'specification' : result.rewindTo === 'dev' ? 'implementation' : 'inconclusive');
+      if (failureKind === 'environment' || failureKind === 'inconclusive') {
+        await blockDelegation(
+          delegation,
+          `${failureKind === 'environment' ? '验证环境异常' : '验证结论无法确定'}：${result.summary}`,
+        );
+        return 'blocked' as const;
+      }
+      const target = failureKind === 'specification' ? 'analysis' : 'dev';
+      await createOrReopenRecoveryItem({
+        taskId: delegation.taskId,
+        storyIndex: result.rewindDeliveryUnit || delegation.storyIndex,
+        kind: 'test_failure',
+        sourceAgent: delegation.agent,
+        targetStage: target,
+        summary: result.summary,
+        details: {
+          verdict: result.verdict,
+          expected: '当前交付单元满足 resolved Slice Spec 与验收标准',
+          actual: result.summary,
+          tests: result.tests || [],
+          failureKind,
+          rewindTo: target,
+        },
+        sourceExecutionId,
+      });
       await rewindTask({ taskId: delegation.taskId, actor, to: target, story: result.rewindDeliveryUnit || delegation.storyIndex, reason: result.summary });
       return 'rewound' as const;
     }

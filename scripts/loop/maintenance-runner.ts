@@ -170,15 +170,7 @@ async function processJob(job: SoftwareMaintenanceJob) {
     });
     return;
   }
-  const reported = [...result.changedFiles].sort();
   const actual = [...changes.files].sort();
-  if (JSON.stringify(reported) !== JSON.stringify(actual)) {
-    await updateSoftwareMaintenanceJob(job.job_id, {
-      status: 'rejected', changedFilesJson: JSON.stringify(actual),
-      error: `Agent 声明文件与实际变更不一致：reported=${reported.join(', ')} actual=${actual.join(', ')}`, finished: true,
-    });
-    return;
-  }
   const existing = (await databaseConnection()).prepare(`
     SELECT job_id FROM software_maintenance_jobs
     WHERE incident_fingerprint = ? AND status = 'applied' AND job_id != ? LIMIT 1
