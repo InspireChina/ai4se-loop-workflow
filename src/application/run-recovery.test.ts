@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { databaseConnection } from '../infrastructure/database';
 import { reconcileInterruptedExecutions } from './executions';
-import { beginRun, createTask, endRun, getRunStatus, heartbeatRun } from './tasks';
+import { beginRun, createTask, endRun, getRunStatus, heartbeatRun, registerRunProcess } from './tasks';
 
 test('recovers interrupted executions by durable checkpoint instead of a lease', async () => {
   const db = await databaseConnection();
@@ -63,6 +63,7 @@ test('marks a dead previous run crashed before starting a new run', async () => 
   assert.equal(attempt.status, 'retryable_failed');
   assert.equal((await getRunStatus())?.runId, nextRunId);
 
+  await registerRunProcess(nextRunId, 'agent-runner', process.pid);
   await heartbeatRun(nextRunId, 'agent-runner');
   assert.equal((await getRunStatus())?.active, true);
   db.prepare(`
@@ -75,4 +76,26 @@ test('marks a dead previous run crashed before starting a new run', async () => 
   await endRun(nextRunId, false, { stopRunner: false });
   assert.equal(await getRunStatus(), null);
   assert.equal((db.prepare("SELECT status FROM execution_attempts WHERE execution_id = 'execution-stopped-run'").get() as { status: string }).status, 'retryable_failed');
+});
+
+test('refreshes heartbeat without replacing the detached runner process leader', async () => {
+  const db = await databaseConnection();
+  const runId = await beginRun('agent-runner');
+  const processLeaderPid = process.ppid;
+  await registerRunProcess(runId, 'agent-runner', processLeaderPid);
+  db.prepare("UPDATE loop_runs SET heartbeat_at = datetime('now', '-10 minutes') WHERE run_id = ?").run(runId);
+
+  await heartbeatRun(runId, 'agent-runner');
+
+  const persisted = db.prepare(`
+    SELECT runner_pid, process_kind, heartbeat_at
+    FROM loop_runs
+    WHERE run_id = ?
+  `).get(runId) as { runner_pid: number; process_kind: string; heartbeat_at: string };
+  assert.equal(persisted.runner_pid, processLeaderPid);
+  assert.equal(persisted.process_kind, 'agent-runner');
+  assert.ok(Date.now() - new Date(`${persisted.heartbeat_at.replace(' ', 'T')}Z`).getTime() < 5_000);
+  assert.equal((await getRunStatus())?.active, true);
+
+  await endRun(runId, false, { stopRunner: false });
 });

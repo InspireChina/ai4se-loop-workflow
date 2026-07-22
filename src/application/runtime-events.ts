@@ -22,10 +22,13 @@ const severityNumber: Record<RuntimeEventSeverity, number> = {
   FATAL: 21,
 };
 
-const secretPattern = /((?:api[_-]?key|token|secret|password|authorization|cookie)\s*[=:]\s*)([^\s,;]+)/ig;
+const secretPattern = /((?:api[_-]?key|token|secret|password|authorization|cookie)\s*[=:]\s*)([^\s,;]+)|("(?:api[_-]?key|token|secret|password|authorization|cookie)"\s*:\s*")([^"]*)(")/ig;
 
 export function sanitizeRuntimeText(input: unknown, limit = 12_000) {
-  const value = String(input ?? '').replace(secretPattern, '$1[REDACTED]');
+  const value = String(input ?? '').replace(secretPattern, (match, barePrefix, _bareValue, jsonPrefix, _jsonValue, jsonQuote) => {
+    if (jsonPrefix !== undefined) return `${jsonPrefix}[REDACTED]${jsonQuote || '"'}`;
+    return `${barePrefix}[REDACTED]`;
+  });
   return value.length > limit ? `${value.slice(0, limit)}…` : value;
 }
 
@@ -110,7 +113,7 @@ export function recordRuntimeEventInDb(db: Awaited<ReturnType<typeof databaseCon
     timestamp, timestamp, context.runId || null, context.executionId || null,
     context.runId || null, context.executionId || null, context.taskId || null, context.agentId || null,
     input.eventName, input.component, context.stage || null, severity, severityNumber[severity],
-    sanitizeRuntimeText(input.body), JSON.stringify(input.attributes || {}),
+    sanitizeRuntimeText(input.body), sanitizeRuntimeText(JSON.stringify(input.attributes || {})),
     exception.exceptionType, exception.exceptionMessage, exception.exceptionStack, exception.exceptionFingerprint,
   );
   return Number(info.lastInsertRowid);

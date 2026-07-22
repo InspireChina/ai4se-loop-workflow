@@ -2266,14 +2266,15 @@ export async function registerRunProcess(runId: string, processKind: 'agent-runn
   `).run(processKind, pid, runId);
 }
 
-export async function heartbeatRun(runId: string, processKind: 'agent-runner' | 'dispatch-waiter', pid = process.pid) {
+export async function heartbeatRun(runId: string, processKind: 'agent-runner' | 'dispatch-waiter') {
   const db = await databaseConnection();
+  // runner_pid belongs to the detached process-group leader registered by the launcher.
+  // The tsx worker that emits heartbeats can have a different process.pid.
   db.prepare(`
     UPDATE loop_runs
-    SET status = 'running', process_kind = ?, runner_pid = ?, heartbeat_at = CURRENT_TIMESTAMP
+    SET status = 'running', process_kind = ?, heartbeat_at = CURRENT_TIMESTAMP
     WHERE run_id = ? AND status IN ('starting', 'running')
-      AND (runner_pid IS NULL OR runner_pid = ?)
-  `).run(processKind, pid, runId, pid);
+  `).run(processKind, runId);
 }
 
 export async function startRunHeartbeat(runId: string, processKind: 'agent-runner' | 'dispatch-waiter') {
