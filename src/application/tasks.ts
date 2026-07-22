@@ -3,7 +3,7 @@ import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { assertSliceSpecDecisionCoverage, sliceSpecSchema } from '../domain/agent-result';
 import { databaseConnection, paths } from '../infrastructure/database';
-import { isRunProcessAlive, readRunPid } from '../infrastructure/run-process';
+import { isProcessAlive, readRunPid } from '../infrastructure/run-process';
 import { toUtcIsoString } from './event-time';
 import { recordLoopLogEventInDb } from './runtime-events';
 import {
@@ -138,7 +138,16 @@ export type VerificationRun = { verification_id: string; task_id: string; story_
 export type VerificationEvidence = { evidence_id: string; verification_id: string; criterion_id: string; kind: string; instruction: string; command: string | null; exit_code: number | null; output_summary: string | null; passed: number; created_at: string };
 export type ExecutionAttemptView = { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; lane: string | null; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; last_error: string | null; created_at: string; started_at: string | null; finished_at: string | null };
 export type Event = { event_id: string; actor: string; event_type: string; summary: string; created_at: string };
-export type RunStatus = { runId: string; owner: string; startedAt: string; pid: number | null; active: boolean } | null;
+export type RunStatus = {
+  runId: string;
+  owner: string;
+  startedAt: string;
+  heartbeatAt: string | null;
+  processKind: string | null;
+  status: 'starting' | 'running' | 'stopping' | 'stopped' | 'crashed';
+  pid: number | null;
+  active: boolean;
+} | null;
 export type RunLogChunk = { lastId: number; raw: string };
 export type DelegationEnvelope = Delegation & {
   title: string;
@@ -1906,12 +1915,40 @@ export async function beginRun(owner = 'ui') {
   if (current?.active) {
     throw new Error(`已有本地 loop 正在运行 pid=${current.pid ?? 'starting'}`);
   }
+  if (current?.runId) {
+    const { stopAgentRun } = await import('../infrastructure/agent-runner');
+    const { reconcileInterruptedExecutions } = await import('./executions');
+    await stopAgentRun(current.runId);
+    const recovered = await reconcileInterruptedExecutions(current.runId, 'Runner 异常退出，执行尚未返回结构化结果，可安全重试');
+    db.prepare(`
+      UPDATE loop_runs
+      SET status = 'crashed', finished_at = CURRENT_TIMESTAMP,
+          failure_reason = COALESCE(failure_reason, '启动新一轮时检测到 Runner 已退出')
+      WHERE run_id = ? AND status IN ('starting', 'running', 'stopping')
+    `).run(current.runId);
+    db.prepare("DELETE FROM loop_meta WHERE key = 'active_run'").run();
+    await reconcileStaleTaskLanes();
+    await appendLoopRunLog(current.runId, `[恢复] 检测到旧 Runner 已退出：${recovered.failedCount} 个无结果执行转为可重试，${recovered.recoverableCount + recovered.pendingResultCount} 个已有结果执行等待恢复`);
+  } else {
+    const { reconcileInterruptedExecutions } = await import('./executions');
+    const recovered = await reconcileInterruptedExecutions(null, '未找到所属 Runner，执行尚未返回结构化结果，可安全重试');
+    if (recovered.failedCount) await reconcileStaleTaskLanes();
+  }
   const runId = randomUUID();
   const startedAt = new Date();
-  db.prepare(`
-    INSERT INTO loop_meta(key, value) VALUES('active_run', ?)
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
-  `).run(JSON.stringify({ runId, owner, startedAt: toUtcIsoString(startedAt) }));
+  db.transaction(() => {
+    db.prepare(`
+      INSERT INTO loop_runs(run_id, owner, status, started_at)
+      VALUES(?, ?, 'starting', ?)
+    `).run(runId, owner, toUtcIsoString(startedAt));
+    db.prepare(`
+      INSERT INTO loop_meta(key, value) VALUES('active_run', ?)
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+    `).run(JSON.stringify({ runId, owner, startedAt: toUtcIsoString(startedAt) }));
+  })();
+  await appendLoopRunLog(runId, `[运行] 开始运行 run=${runId}`);
+  await appendLoopRunLog(runId, `[运行] 工作区=${paths.root}`);
+  await appendLoopRunLog(runId, `[运行] 数据目录=${paths.dataDir}`);
   return runId;
 }
 
@@ -1923,14 +1960,41 @@ export async function endRun(runId: string, force = false, options: { stopRunner
     throw new Error('运行 ID 不匹配');
   }
   if (current?.runId && options.stopRunner !== false) {
+    db.prepare("UPDATE loop_runs SET status = 'stopping', stop_requested_at = CURRENT_TIMESTAMP WHERE run_id = ?").run(current.runId);
     const { stopAgentRun } = await import('../infrastructure/agent-runner');
     await stopAgentRun(current.runId);
   }
   if (current?.runId) {
     const reason = options.reason || (force ? '异常终止' : '用户停止');
+    const { reconcileInterruptedExecutions } = await import('./executions');
+    const recovered = await reconcileInterruptedExecutions(current.runId, `Loop 已停止（${reason}），执行尚未返回结构化结果，可安全重试`);
+    await reconcileStaleTaskLanes();
     await appendLoopRunLog(current.runId, `[运行] Loop 已停止：${reason}`);
+    await appendLoopRunLog(current.runId, `[恢复] ${recovered.failedCount} 个无结果执行转为可重试，${recovered.recoverableCount + recovered.pendingResultCount} 个已有结果执行将在下次运行继续`);
+    db.prepare(`
+      UPDATE loop_runs
+      SET status = ?, finished_at = CURRENT_TIMESTAMP, failure_reason = ?
+      WHERE run_id = ?
+    `).run(force ? 'crashed' : 'stopped', force ? reason : null, current.runId);
   }
   db.prepare("DELETE FROM loop_meta WHERE key = 'active_run'").run();
+}
+
+type LoopRunRow = {
+  run_id: string;
+  owner: string;
+  status: 'starting' | 'running' | 'stopping' | 'stopped' | 'crashed';
+  process_kind: string | null;
+  runner_pid: number | null;
+  started_at: string;
+  heartbeat_at: string | null;
+};
+
+const RUN_HEARTBEAT_TIMEOUT_MS = 45_000;
+
+function databaseTimestampMs(value: string | null | undefined) {
+  if (!value) return 0;
+  return new Date(value.includes('T') ? value : `${value.replace(' ', 'T')}Z`).getTime();
 }
 
 function getRunStatusFromDb(db: Awaited<ReturnType<typeof databaseConnection>>) {
@@ -1938,9 +2002,24 @@ function getRunStatusFromDb(db: Awaited<ReturnType<typeof databaseConnection>>) 
   if (!row) return null;
   try {
     const parsed = JSON.parse(row.value) as { runId: string; owner: string; startedAt: string };
-    const pid = readRunPid(parsed.runId);
-    const starting = !pid && Date.now() - new Date(parsed.startedAt).getTime() < 15_000;
-    return { ...parsed, pid, active: starting || isRunProcessAlive(parsed.runId) } satisfies NonNullable<RunStatus>;
+    const persisted = db.prepare('SELECT * FROM loop_runs WHERE run_id = ?').get(parsed.runId) as LoopRunRow | undefined;
+    const pid = persisted?.runner_pid || readRunPid(parsed.runId);
+    const startedAt = persisted?.started_at || parsed.startedAt;
+    const heartbeatAt = persisted?.heartbeat_at || null;
+    const starting = !heartbeatAt && Date.now() - databaseTimestampMs(startedAt) < 15_000;
+    const heartbeatFresh = Boolean(heartbeatAt) && Date.now() - databaseTimestampMs(heartbeatAt) <= RUN_HEARTBEAT_TIMEOUT_MS;
+    const active = persisted?.status !== 'stopped' && persisted?.status !== 'crashed'
+      && (starting || (isProcessAlive(pid) && heartbeatFresh));
+    return {
+      runId: parsed.runId,
+      owner: persisted?.owner || parsed.owner,
+      startedAt,
+      heartbeatAt,
+      processKind: persisted?.process_kind || null,
+      status: persisted?.status || 'starting',
+      pid,
+      active,
+    } satisfies NonNullable<RunStatus>;
   } catch {
     return null;
   }
@@ -1949,6 +2028,34 @@ function getRunStatusFromDb(db: Awaited<ReturnType<typeof databaseConnection>>) 
 export async function getRunStatus(): Promise<RunStatus> {
   const db = await databaseConnection();
   return getRunStatusFromDb(db);
+}
+
+export async function registerRunProcess(runId: string, processKind: 'agent-runner' | 'dispatch-waiter', pid: number) {
+  const db = await databaseConnection();
+  db.prepare(`
+    UPDATE loop_runs
+    SET status = 'running', process_kind = ?, runner_pid = ?, heartbeat_at = CURRENT_TIMESTAMP
+    WHERE run_id = ? AND status IN ('starting', 'running')
+  `).run(processKind, pid, runId);
+}
+
+export async function heartbeatRun(runId: string, processKind: 'agent-runner' | 'dispatch-waiter', pid = process.pid) {
+  const db = await databaseConnection();
+  db.prepare(`
+    UPDATE loop_runs
+    SET status = 'running', process_kind = ?, runner_pid = ?, heartbeat_at = CURRENT_TIMESTAMP
+    WHERE run_id = ? AND status IN ('starting', 'running')
+      AND (runner_pid IS NULL OR runner_pid = ?)
+  `).run(processKind, pid, runId, pid);
+}
+
+export async function startRunHeartbeat(runId: string, processKind: 'agent-runner' | 'dispatch-waiter') {
+  await heartbeatRun(runId, processKind);
+  const timer = setInterval(() => {
+    void heartbeatRun(runId, processKind).catch(() => { /* main runner owns error reporting */ });
+  }, 10_000);
+  timer.unref();
+  return () => clearInterval(timer);
 }
 
 export async function requireActiveRun(runId: string) {

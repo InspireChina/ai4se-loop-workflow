@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  agentExecutionLeaseMinutes,
   DEFAULT_AGENT_EXECUTOR_IDLE_TIMEOUT_MS,
   DEFAULT_AGENT_EXECUTOR_TIMEOUT_MS,
   resolveAgentExecutionLimits,
@@ -14,13 +13,11 @@ test('allows flow agents to run for four hours by default', () => {
     maxRuntimeMs: 4 * 60 * 60 * 1000,
     idleTimeoutMs: DEFAULT_AGENT_EXECUTOR_IDLE_TIMEOUT_MS,
   });
-  assert.equal(agentExecutionLeaseMinutes({}), 250);
 });
 
-test('uses one validated timeout source for execution and its lease', () => {
+test('uses one validated timeout source for agent execution', () => {
   const env = { AGENT_EXECUTOR_TIMEOUT_MS: '18000000', AGENT_EXECUTOR_IDLE_TIMEOUT_MS: '1200000' };
   assert.deepEqual(resolveAgentExecutionLimits(env), { maxRuntimeMs: 18_000_000, idleTimeoutMs: 1_200_000 });
-  assert.equal(agentExecutionLeaseMinutes(env), 310);
   assert.equal(resolveAgentExecutionLimits({ AGENT_EXECUTOR_TIMEOUT_MS: 'invalid' }).maxRuntimeMs, DEFAULT_AGENT_EXECUTOR_TIMEOUT_MS);
   assert.equal(resolveAgentExecutionLimits({ CURSOR_AGENT_TIMEOUT_MS: '7200000' }).maxRuntimeMs, 7_200_000);
 });

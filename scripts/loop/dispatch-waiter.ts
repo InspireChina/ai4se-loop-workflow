@@ -1,6 +1,6 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
-import { appendLoopRunLog, createLoopDispatch, getRunStatus } from '../../src/application/tasks';
+import { appendLoopRunLog, getRunStatus, startRunHeartbeat } from '../../src/application/tasks';
 import { enqueueSoftwareMaintenance } from '../../src/application/software-maintenance';
 import { recordRuntimeException } from '../../src/application/runtime-events';
 import { startAgentRun } from '../../src/infrastructure/agent-runner';
@@ -23,32 +23,29 @@ async function isRunActive() {
 
 async function main() {
   await appendLoopRunLog(runId, `[运行] 当前 0 个 agent，${retryDelayLabel}后自动重试`);
-  let attempt = 1;
 
   while (await isRunActive()) {
     await sleep(retryMs);
     if (!(await isRunActive())) return;
 
-    await appendLoopRunLog(runId, `[运行] 第 ${attempt} 次重试派发`);
-    const dispatch = await createLoopDispatch(runId, { includeRunHeader: false });
-    if (dispatch.delegations.length > 0) {
-      await appendLoopRunLog(runId, `[运行] 重试发现 ${dispatch.delegations.length} 个 Lane Agent，启动调度执行器`);
-      await startAgentRun(runId);
-      return;
-    }
-    await appendLoopRunLog(runId, `[运行] 当前 0 个 agent，${retryDelayLabel}后自动重试`);
-    attempt += 1;
+    await appendLoopRunLog(runId, '[运行] 定时唤醒统一调度 Runner');
+    await appendLoopRunLog(runId, '[运行] 唤醒统一调度 Runner，优先恢复已有结果，再计算新派发');
+    await startAgentRun(runId);
+    return;
   }
 }
 
 async function run() {
   let failure: unknown;
+  let stopHeartbeat: (() => void) | undefined;
   try {
+    stopHeartbeat = await startRunHeartbeat(runId, 'dispatch-waiter');
     await main();
   } catch (error) {
     failure = error;
     await appendLoopRunLog(runId, `[错误] 空队列重试 runner 退出：${error instanceof Error ? error.message : String(error)}`);
   } finally {
+    stopHeartbeat?.();
     if (!failure) return;
     try {
       const eventId = await recordRuntimeException({ runId, component: 'dispatch-waiter', stage: 'finally', error: failure, fatal: true });

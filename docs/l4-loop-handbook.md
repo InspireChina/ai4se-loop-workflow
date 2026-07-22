@@ -207,7 +207,7 @@ LoopWork 主要保存以下信息：
 
 长期无人值守不意味着系统不会失败，而是失败后不需要人重新理解整个过程。
 
-LoopWork 中，每次 Agent 调用都对应一个持久化的 `execution_attempt`。系统在调用前保存输入、Prompt 版本、起始 Git HEAD 和租约；Agent Result、Harness Run 和状态应用分别保存 Receipt。
+LoopWork 中，每次 Agent 调用都对应一个持久化的 `execution_attempt`。系统在调用前保存输入、Prompt 版本和起始 Git HEAD；Agent Result、Harness Run 和状态应用分别保存 Receipt。Execution 不使用超时租约，Loop Run 通过 Runner 进程存活和短周期心跳识别主动停止、崩溃与突然关机。
 
 系统根据失败位置选择不同的恢复方式：
 
@@ -217,6 +217,8 @@ LoopWork 中，每次 Agent 调用都对应一个持久化的 `execution_attempt
 - 发现业务歧义：进入 `waiting_for_answers`，回答后回到 Analyst 重建规格。
 - 缺少测试地址、账号配置或测试数据等运行信息：进入 `waiting_for_runtime_input`，补充后恢复原 Agent。
 - 执行环境、工具协议或恢复机制异常：进入 `system_blocked`，保留完整诊断信息。
+
+应用启动新一轮前会收尾已经失去 Runner 的旧 Run：`planned/running` 且没有持久化结果的 attempt 转为 `retryable_failed`；存在待消费结果或处于 `output_received/verifying/applying` 的 attempt 保持原检查点，由新的 `agent-runner` 优先恢复。主动停止使用同一套收尾规则，因此不会留下长期占用 Lane 的运行记录。
 
 当前主流程记录执行前后的 Git HEAD，并允许 Dev Agent 按仓库规范创建本轮 Commit；Runner 不强制创建 checkpoint，也不代理提交。Git 状态、结构化 Result、数据库 Receipt 和 Trace 共同构成恢复边界。
 

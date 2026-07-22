@@ -1,6 +1,5 @@
 export const DEFAULT_AGENT_EXECUTOR_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 export const DEFAULT_AGENT_EXECUTOR_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
-export const AGENT_EXECUTION_LEASE_BUFFER_MINUTES = 10;
 
 type RuntimeLimitEnvironment = Record<string, string | undefined>;
 
@@ -18,8 +17,4 @@ export function resolveAgentExecutionLimits(env: RuntimeLimitEnvironment = proce
     ?? positiveNumber(env.CURSOR_AGENT_IDLE_TIMEOUT_MS)
     ?? DEFAULT_AGENT_EXECUTOR_IDLE_TIMEOUT_MS;
   return { maxRuntimeMs, idleTimeoutMs };
-}
-
-export function agentExecutionLeaseMinutes(env: RuntimeLimitEnvironment = process.env) {
-  return Math.ceil(resolveAgentExecutionLimits(env).maxRuntimeMs / 60_000) + AGENT_EXECUTION_LEASE_BUFFER_MINUTES;
 }

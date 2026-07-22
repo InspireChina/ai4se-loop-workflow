@@ -467,8 +467,7 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
       if (row.execution_id) {
         db.prepare(`
           UPDATE execution_attempts
-          SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP,
-              lease_expires_at = NULL
+          SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
           WHERE execution_id = ?
         `).run(row.execution_id);
       }
@@ -490,8 +489,7 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
     if (execution?.execution_id) {
       db.prepare(`
         UPDATE execution_attempts
-        SET status = 'applied', finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP,
-            lease_expires_at = NULL
+        SET status = 'applied', finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
         WHERE execution_id = ?
       `).run(execution.execution_id);
       db.prepare(`

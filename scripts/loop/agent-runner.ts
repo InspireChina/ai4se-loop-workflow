@@ -20,12 +20,11 @@ import {
   failExecution,
   markExecutionOutput,
   markExecutionStage,
-  reconcileStaleExecutions,
   recordExecutionReceipt,
   recoverNextExecutionAttempt,
   type ExecutionAttempt,
 } from '../../src/application/executions';
-import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTask, getTaskContext, markDelegationLaneRunning, reconcileStaleTaskLanes, rewindTask, settleDelegationLane, type DelegationEnvelope } from '../../src/application/tasks';
+import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTask, getTaskContext, markDelegationLaneRunning, reconcileStaleTaskLanes, rewindTask, settleDelegationLane, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
 import { laneForAgent } from '../../src/application/task-lanes';
 import { runHarnessVerification, type HarnessVerificationOutcome } from '../../src/application/verifications';
 import { parseAgentResult } from '../../src/domain/agent-result';
@@ -34,7 +33,7 @@ import { agentLabel, deliveryUnitLabel } from '../../src/domain/terminology';
 import { getAgentExecutor, type AgentExecutor } from '../../src/infrastructure/agent-executor';
 import { executeDelegation } from '../../src/infrastructure/delegation-execution';
 import { startDispatchRetryRun } from '../../src/infrastructure/agent-runner';
-import { agentExecutionLeaseMinutes, resolveAgentExecutionLimits } from '../../src/infrastructure/agent-execution-limits';
+import { resolveAgentExecutionLimits } from '../../src/infrastructure/agent-execution-limits';
 import { paths } from '../../src/infrastructure/database';
 import { gitHead } from '../../src/infrastructure/git';
 import { createLangfuseTelemetry } from '../../src/infrastructure/langfuse';
@@ -409,7 +408,6 @@ async function executeDelegationStep(
       memoryRevision: builtPrompt.runtime.memoryRevision,
       memoryHash: builtPrompt.runtime.memoryHash,
       evolutionCandidateId: builtPrompt.runtime.evolutionCandidateId,
-      leaseMinutes: agentExecutionLeaseMinutes(process.env),
     });
     attempt = durable.attempt;
     await markDelegationLaneRunning(delegation);
@@ -512,8 +510,6 @@ async function main() {
   const settings = await getAgentExecutorSettings();
   const executor = getAgentExecutor(settings.executorId);
   const executionOptions = agentExecutionOptions(settings);
-  const staleCount = await reconcileStaleExecutions();
-  if (staleCount) await appendLoopRunLog(runId, `[恢复] 已回收 ${staleCount} 个失去租约且尚无输出的 execution attempt`);
   const staleLanes = await reconcileStaleTaskLanes();
   if (staleLanes) await appendLoopRunLog(runId, `[恢复] 已恢复 ${staleLanes} 条失去活跃 execution 的 Lane`);
   let recoverable = await recoverNextExecutionAttempt();
@@ -550,9 +546,11 @@ async function main() {
   }
 
   const active = new Map<string, Promise<void>>();
+  let firstDispatch = true;
   while (await isRunActive()) {
     const queuedWaiting = await drainQueuedAgentResults();
-    const dispatch = await createLoopDispatch(runId, { includeRunHeader: false, logDelegations: false });
+    const dispatch = await createLoopDispatch(runId, { includeRunHeader: false, logDelegations: firstDispatch });
+    firstDispatch = false;
     let started = 0;
     for (const rawDelegation of dispatch.delegations) {
       const delegation = normalizeDelegation(rawDelegation);
@@ -586,12 +584,16 @@ async function main() {
 }
 
 async function run() {
+  let stopHeartbeat: (() => void) | undefined;
   try {
+    stopHeartbeat = await startRunHeartbeat(runId, 'agent-runner');
     await main();
   } catch (error) {
     await appendLoopRunLog(runId, `[执行器错误] ${error instanceof Error ? error.message : String(error)}`);
     await endRun(runId, true, { stopRunner: false, reason: error instanceof Error ? error.message : String(error) });
     await enqueueRunnerFailureMaintenance(error);
+  } finally {
+    stopHeartbeat?.();
   }
 }
 

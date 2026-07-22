@@ -12,7 +12,6 @@ import {
   answerRuntimeInput,
   beginRun,
   cancelTask,
-  createLoopDispatch,
   endRun,
   createTask,
   getRunStatus,
@@ -24,7 +23,7 @@ import {
   rewindTask,
   transitionTask,
 } from '../src/application/tasks';
-import { startAgentRun, startDispatchRetryRun } from '../src/infrastructure/agent-runner';
+import { startAgentRun } from '../src/infrastructure/agent-runner';
 import { paths } from '../src/infrastructure/database';
 
 export async function createTaskAction(formData: FormData) {
@@ -95,9 +94,7 @@ export async function startLoopRunAction(formData?: FormData) {
   const runId = await beginRun('agent-runner');
   const redirectTo = String(formData?.get('redirectTo') || '/');
   try {
-    const dispatch = await createLoopDispatch(runId);
-    if (!dispatch.delegations.length) await startDispatchRetryRun(runId);
-    else await startAgentRun(runId);
+    await startAgentRun(runId);
   } catch (error) {
     await endRun(runId, true);
     throw error;

@@ -22,11 +22,15 @@ test('materializes persistent task lanes and execution lane correlation', async 
   const db = await databaseConnection();
   const laneColumns = db.prepare('PRAGMA table_info(task_lanes)').all() as { name: string }[];
   const executionColumns = db.prepare('PRAGMA table_info(execution_attempts)').all() as { name: string }[];
+  const runColumns = db.prepare('PRAGMA table_info(loop_runs)').all() as { name: string }[];
   assert.deepEqual(laneColumns.map((column) => column.name), [
     'task_id', 'lane', 'status', 'current_agent', 'current_story_index',
     'blocked_reason', 'resume_pending', 'ready_at', 'updated_at',
   ]);
   assert.equal(executionColumns.some((column) => column.name === 'lane'), true);
+  assert.equal(executionColumns.some((column) => column.name === 'lease_owner'), false);
+  assert.equal(executionColumns.some((column) => column.name === 'lease_expires_at'), false);
+  assert.equal(runColumns.some((column) => column.name === 'heartbeat_at'), true);
 });
 
 test('migrates legacy waiting and blocked task state into isolated lanes without moving cursors', () => {

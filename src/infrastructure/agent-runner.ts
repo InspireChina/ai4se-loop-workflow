@@ -2,9 +2,29 @@ import { spawn } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
-import { appendLoopRunLog } from '../application/tasks';
+import { appendLoopRunLog, registerRunProcess } from '../application/tasks';
 import { paths } from './database';
 import { readRunPid, runPidPath } from './run-process';
+
+function waitForProcessExit(pid: number, timeoutMs: number) {
+  return new Promise<boolean>((resolve) => {
+    const deadline = Date.now() + timeoutMs;
+    const poll = () => {
+      try {
+        process.kill(pid, 0);
+      } catch {
+        resolve(true);
+        return;
+      }
+      if (Date.now() >= deadline) {
+        resolve(false);
+        return;
+      }
+      setTimeout(poll, 50);
+    };
+    poll();
+  });
+}
 
 export function resolveRunnerCommand(runId: string, scriptName: string) {
   const script = join(paths.appRoot, 'scripts/loop', scriptName);
@@ -43,6 +63,8 @@ async function startDetachedRunner(runId: string, scriptName: string) {
   if (!child.pid) throw new Error(`无法启动 ${scriptName}：未获得进程 ID`);
   await mkdir(join(paths.runsDir, runId), { recursive: true });
   await writeFile(runPidPath(runId), String(child.pid), 'utf8');
+  const processKind = scriptName === 'dispatch-waiter.ts' ? 'dispatch-waiter' : 'agent-runner';
+  await registerRunProcess(runId, processKind, child.pid);
   return child.pid;
 }
 
@@ -82,4 +104,11 @@ export async function stopAgentRun(runId: string) {
       return;
     }
   }
+  if (await waitForProcessExit(pid, 3_000)) return;
+  try {
+    process.kill(-pid, 'SIGKILL');
+  } catch {
+    try { process.kill(pid, 'SIGKILL'); } catch { /* process already stopped */ }
+  }
+  await waitForProcessExit(pid, 2_000);
 }
