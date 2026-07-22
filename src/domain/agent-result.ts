@@ -30,16 +30,28 @@ const runtimeInputSchema = z.object({
 
 const deliveryUnitSchema = z.object({ title: z.string().min(1).max(200) });
 
-const feedbackResultSchema = z.discriminatedUnion('mode', [
-  z.object({
-    mode: z.literal('triage'),
+const feedbackTriageDecisionSchema = z.object({
     commentId: z.string().min(1).max(200),
     disposition: z.enum(['no_change', 'reply', 'revise', 'rewind', 'learning_only']),
-    targetStage: z.enum(['plan', 'analysis', 'dev', 'test', 'review']).optional(),
-    targetAgent: z.string().min(1).max(120).optional(),
+    targetStage: z.enum(['context', 'repro', 'plan', 'analysis', 'dev', 'test', 'review']).optional(),
     targetDeliveryUnit: z.number().int().positive().optional(),
     reason: z.string().min(1).max(4000),
     acceptance: z.array(z.string().min(1).max(2000)).max(30).default([]),
+});
+
+const feedbackResultSchema = z.preprocess((value) => {
+  if (!value || typeof value !== 'object') return value;
+  const candidate = value as Record<string, unknown>;
+  // Read-only compatibility for a result produced before batch Triage.
+  if (candidate.mode === 'triage' && !candidate.decisions && candidate.commentId) {
+    const { mode: _mode, ...decision } = candidate;
+    return { mode: 'triage', decisions: [decision] };
+  }
+  return value;
+}, z.discriminatedUnion('mode', [
+  z.object({
+    mode: z.literal('triage'),
+    decisions: z.array(feedbackTriageDecisionSchema).min(1).max(100),
   }),
   z.object({
     mode: z.literal('verify'),
@@ -48,7 +60,7 @@ const feedbackResultSchema = z.discriminatedUnion('mode', [
     reason: z.string().min(1).max(4000),
     evidence: z.array(z.string().min(1).max(2000)).max(50).default([]),
   }),
-]);
+]));
 
 const verificationStepBase = {
   criterionId: z.string().min(1).max(120),
@@ -279,12 +291,8 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
       break;
     case 'review-agent':
       if (!result.artifact) throw new Error('review-agent 结果缺少 artifact');
-      if (result.verdict === 'changes_requested') {
-        if (!result.rewindTo) throw new Error('Review Agent 请求修改时必须提供 rewindTo');
-        if (result.rewindTo !== 'plan' && !result.rewindDeliveryUnit) throw new Error('Review Agent 回退单元阶段时必须提供 rewindDeliveryUnit');
-      } else if (result.verdict !== 'report_ready') {
-        throw new Error('Review Agent 必须返回 verdict=report_ready 或 changes_requested');
-      }
+      if (result.verdict !== 'report_ready') throw new Error('Review Agent 只能返回 verdict=report_ready；反馈回退由 Feedback Agent 和 Harness 负责');
+      if (result.rewindTo || result.rewindDeliveryUnit) throw new Error('Review Agent 不得返回回退决策');
       break;
     case 'feedback-agent':
       if (!result.feedback) throw new Error('feedback-agent 结果缺少 feedback');

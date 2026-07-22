@@ -28,3 +28,25 @@ test('Agents cannot create system blocks, while the Harness can record one', () 
   assert.throws(() => assertUpdate(state, 'dev-agent', { agile_status: 'blocked' }, ['agile_status']), /无权设置状态 blocked/);
   assert.doesNotThrow(() => assertUpdate(state, 'system', { agile_status: 'blocked' }, ['agile_status']));
 });
+
+test('dispatches the Harness-selected task-level Agent after a rewind that retains the code slot', () => {
+  const task = resumedDevTask();
+  task.resume_pending = 0;
+  task.analysis_index = 0;
+  task.dev_index = 0;
+  task.test_index = 0;
+  task.total_stories = 0;
+  task.spec_resolved_index = 0;
+  task.agile_status = 'in dev';
+
+  for (const [agent, pipeline] of [
+    ['backlog-agent', 'backlog'],
+    ['repro-agent', 'repro'],
+    ['story-splitter-agent', 'split'],
+  ] as const) {
+    task.current_subagent = agent;
+    const delegation = nextDelegation(task, true);
+    assert.equal(delegation?.agent, agent);
+    assert.equal(delegation?.pipeline, pipeline);
+  }
+});

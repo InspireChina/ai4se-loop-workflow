@@ -88,7 +88,7 @@ export function ArtifactDocument({
         {comments.map((comment) => <article className={`artifact-comment ${comment.status}`} key={comment.comment_id}>
           <div className="artifact-comment-meta">
             <span>{comment.anchor_type === 'selection' ? '选区评论' : '文件评论'} · revision {comment.document_revision}</span>
-            <small>{comment.feedback_status === 'resolved' ? '已解决' : comment.feedback_status === 'verifying' ? '等待反馈验证' : comment.feedback_status === 'in_progress' ? '处理中' : comment.feedback_status === 'triaged' ? '已分流' : comment.feedback_status === 'reopened' ? '已重新打开' : '等待分流'} · {comment.intent === 'change_request' ? '要求修改' : comment.intent === 'question' ? '需要回复' : '备注建议'} · {comment.evolution_status === 'analyzed' ? '已用于演化分析' : '尚未沉淀'}</small>
+            <small>{comment.feedback_status === 'resolved' ? '已解决' : comment.feedback_status === 'verifying' ? '等待反馈验证' : comment.feedback_needs_rebase ? '等待新交付单元重新绑定' : comment.feedback_status === 'in_progress' ? comment.feedback_is_rewind_frontier ? '本轮最早回退点' : `等待 ${comment.target_stage || '目标阶段'} 处理` : comment.feedback_status === 'triaged' ? '已分流' : comment.feedback_status === 'reopened' ? '已重新打开' : '等待分流'} · {comment.intent === 'change_request' ? '要求修改' : comment.intent === 'question' ? '需要回复' : '备注建议'} · {comment.evolution_status === 'analyzed' ? '已用于演化分析' : '尚未沉淀'}</small>
           </div>
           {comment.quoted_text && <blockquote className="comment-anchor"><Quote size={13}/><span>{comment.quoted_text}</span></blockquote>}
           <p>{comment.content}</p>

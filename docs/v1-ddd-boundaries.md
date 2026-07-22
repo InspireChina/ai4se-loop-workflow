@@ -79,7 +79,7 @@ Loop 的等待策略属于编排规则：本轮有 Agent 执行时，1 分钟后
 - 模型：`VerificationRun`、`VerificationEvidence`、`ClosureReport`、`ClosureAcknowledgement`
 - 关键命令：执行 Harness、记录证据、生成结卡报告、确认已阅读当前报告
 
-Harness 以与 Agent 相同的 bypass 权限执行 resolved Slice Spec 中的命令，并把每条结果绑定到验收标准、规格版本和 execution；若 Agent 创建了 Commit 则同时记录其哈希。失败自动回退，不请求人工裁决。Review Agent 汇总最终事实，也负责核对用户对结卡报告的评论：表述或报告遗漏直接形成新版报告；评论揭示交付边界、规格、实现或验证问题时，Application 按其结构化结论回退 plan、analysis、dev 或 test。Review 不能请求审批，也不能自行修改代码。每轮报告生成后进入 `ready_to_close` 并释放代码槽；存在开放评论时不能结卡，评论保持开放到后续流程完成并生成新版报告。用户最终只确认已阅读无开放评论的最新版本。
+Harness 以与 Agent 相同的 bypass 权限执行 resolved Slice Spec 中的命令，并把每条结果绑定到验收标准、规格版本和 execution；若 Agent 创建了 Commit 则同时记录其哈希。失败自动回退，不请求人工裁决。Feedback Agent 批量判断当前任务评论的 target stage，Harness 合并游标并只执行一次最早回退；较晚阶段反馈随正常 Loop 到达对应 Agent，任务级回退后的单元反馈先重新绑定。Review Agent 只汇总最终事实和已处理的反馈，不再发起第二次回退。存在未验证反馈时不能结卡。
 
 ### 2.5 文档管理（Document Management）
 
@@ -212,7 +212,7 @@ classDiagram
 | 语义和黑盒验证是否通过 | 验证 Agent + Application |
 | 最终事实如何呈现 | Review Agent |
 | 是否已阅读结卡报告 | 用户的 Closure Acknowledgement |
-| 结卡报告评论如何处理 | Review Agent 判断仅修订报告或回退 plan / analysis / dev / test；Application 执行路由 |
+| 文档评论如何处理 | Feedback Agent 批量返回每条评论的 target stage；Harness 合并为一次最早回退，后续反馈按阶段等待；Review Agent 只生成更新后报告 |
 | 工具调用、subagent 使用 | 当前 Agent |
 | 文档、确认事项和结果入库 | Application |
 | 运行信息请求、回答与原阶段恢复 | 当前 Agent 提出；Application 持久化和恢复；用户仅补充事实 |

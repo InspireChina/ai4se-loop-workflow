@@ -95,7 +95,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
   const runtime = await loadAgentRuntime(delegation.agent, delegation.pipeline);
   const full = await getTaskContext(delegation.taskId);
   const relevantStory = delegation.storyIndex ? full.stories.find((story) => story.story_index === delegation.storyIndex) : null;
-  const includeAll = delegation.agent === 'review-agent';
+  const includeAll = delegation.agent === 'review-agent' || delegation.agent === 'feedback-agent';
   const relevant = <T extends { story_index: number | null }>(items: T[]) => includeAll ? items : items.filter((item) => item.story_index === null || item.story_index === delegation.storyIndex);
   const exposeUnitIndex = <T extends { story_index: number | null }>(items: T[]) => items.map(({ story_index, ...item }) => ({ ...item, delivery_unit_index: story_index }));
   const relevantVerificationRuns = relevant(full.verificationRuns);
@@ -105,8 +105,12 @@ async function buildPrompt(delegation: DelegationEnvelope) {
   const currentFeedback = delegation.feedbackId
     ? full.documentComments.find((comment) => comment.comment_id === delegation.feedbackId) || null
     : null;
+  const currentFeedbackBatch = (delegation.feedbackIds || [])
+    .map((commentId) => full.documentComments.find((comment) => comment.comment_id === commentId))
+    .filter((comment): comment is NonNullable<typeof comment> => Boolean(comment));
   const activeFeedback = full.documentComments.filter((comment) =>
     comment.feedback_status === 'in_progress'
+    && comment.feedback_needs_rebase === 0
     && comment.target_agent === delegation.agent
     && (comment.target_story_index == null || comment.target_story_index === delegation.storyIndex));
   const taskContext = {
@@ -138,6 +142,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     executionAttempts: exposeUnitIndex(relevant(full.executionAttempts)),
     questions: exposeUnitIndex(relevant(full.questions)),
     currentFeedback,
+    currentFeedbackBatch,
   };
   const prompt = [
     `你是 ${agentLabel(delegation.agent)}，只完成当前执行步骤的专业工作。`,
@@ -172,6 +177,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
       agent: delegation.agent,
       delivery_unit_index: delegation.storyIndex,
       feedback_id: delegation.feedbackId || null,
+      feedback_ids: delegation.feedbackIds || [],
       description: delegation.description,
     }, null, 2),
     '',
@@ -222,14 +228,14 @@ async function buildPrompt(delegation: DelegationEnvelope) {
         dependencies: [],
         changeBudget: { capabilities: ['允许改变的能力'], paths: ['允许影响的路径'] },
       } : undefined,
-      verdict: delegation.agent === 'review-agent' ? 'report_ready | changes_requested' : 'passed | failed',
-      rewindTo: 'plan | analysis | dev | test',
-      rewindDeliveryUnit: delegation.storyIndex,
+      verdict: delegation.agent === 'review-agent' ? 'report_ready' : 'passed | failed',
+      rewindTo: delegation.agent === 'test-agent' ? 'analysis | dev' : undefined,
+      rewindDeliveryUnit: delegation.agent === 'test-agent' ? delegation.storyIndex : undefined,
       changedFiles: ['文件路径'],
       feedback: delegation.agent === 'feedback-agent'
         ? delegation.pipeline === 'feedback-verify'
           ? { mode: 'verify', commentId: delegation.feedbackId, verdict: 'resolved | reopened', reason: '验证结论', evidence: ['实际证据'] }
-          : { mode: 'triage', commentId: delegation.feedbackId, disposition: 'no_change | reply | revise | rewind | learning_only', targetStage: 'plan | analysis | dev | test | review', targetAgent: '负责执行的 Agent', targetDeliveryUnit: delegation.storyIndex, reason: '影响判断', acceptance: ['反馈完成标准'] }
+          : { mode: 'triage', decisions: (delegation.feedbackIds || []).map((commentId) => ({ commentId, disposition: 'no_change | reply | revise | rewind | learning_only', targetStage: 'context | repro | plan | analysis | dev | test | review', targetDeliveryUnit: delegation.storyIndex, reason: '影响判断', acceptance: ['反馈完成标准'] })) }
         : undefined,
       feedbackResolutions: activeFeedback.map((comment) => ({ commentId: comment.comment_id, summary: '如何处理了该反馈', evidence: ['新文档、代码或验证证据'] })),
       tests: [{ command: '测试命令', passed: true, summary: '结果' }],

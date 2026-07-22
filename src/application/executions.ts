@@ -70,6 +70,7 @@ function retrySignature(delegation: DelegationEnvelope) {
     agent: delegation.agent,
     pipeline: delegation.pipeline,
     feedbackId: delegation.feedbackId || null,
+    feedbackIds: delegation.feedbackIds || null,
   };
   if (delegation.lane === 'analysis') return JSON.stringify({
     ...base,

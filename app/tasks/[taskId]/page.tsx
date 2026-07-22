@@ -76,7 +76,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const waitingForRuntimeInput = waitingRuntimeLanes.length > 0;
   const blockedLanes = lanes.filter((lane) => lane.status === 'system_blocked');
   const reviewDocument = task.review_document_id ? documents.find((document) => document.document_id === task.review_document_id) : null;
-  const blockingFeedback = documentComments.filter((comment) => comment.intent === 'change_request' && comment.feedback_status !== 'resolved');
+  const blockingFeedback = documentComments.filter((comment) => comment.feedback_status !== 'resolved');
   const deliveryDocuments = documents.filter((document) => document.document_id !== reviewDocument?.document_id);
   const progressStatus = task.agile_status === 'blocked' ? task.resume_status || 'backlog' : task.agile_status;
   const currentStep = taskSteps.findIndex((step) => step.statuses.some((status) => status === progressStatus));
@@ -342,7 +342,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             /></div> : <div className="empty">结卡报告不可用，请重新运行 Review Agent。</div>}
           </div>
           {task.agile_status === 'ready_to_close' && reviewDocument && blockingFeedback.length > 0 && <div className="release-block">
-            <p className="muted">当前有 {blockingFeedback.length} 条修改请求等待 Feedback Agent 分流、处理和验证。它们会在下一次正常 Agent 派发前优先执行。</p>
+            <p className="muted">当前有 {blockingFeedback.length} 条反馈等待 Feedback Agent 分流、处理和验证。它们会在下一次正常 Agent 派发前优先执行。</p>
           </div>}
           {task.agile_status === 'ready_to_close' && reviewDocument && blockingFeedback.length === 0 && <form action={acknowledgeClosureAction} className="release-block">
             <input type="hidden" name="taskId" value={task.task_id}/>

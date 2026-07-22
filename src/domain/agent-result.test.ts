@@ -211,16 +211,26 @@ test('parses Feedback Agent triage and verification decisions', () => {
     summary: 'Route the feedback back to implementation.',
     feedback: {
       mode: 'triage',
-      commentId: 'feedback-1',
-      disposition: 'rewind',
-      targetStage: 'dev',
-      targetAgent: 'dev-agent',
-      targetDeliveryUnit: 1,
-      reason: 'The comment identifies an implementation defect.',
-      acceptance: ['The behavior is restored and tested.'],
+      decisions: [{
+        commentId: 'feedback-1',
+        disposition: 'rewind',
+        targetStage: 'dev',
+        targetDeliveryUnit: 1,
+        reason: 'The comment identifies an implementation defect.',
+        acceptance: ['The behavior is restored and tested.'],
+      }, {
+        commentId: 'feedback-2',
+        disposition: 'revise',
+        targetStage: 'test',
+        targetDeliveryUnit: 1,
+        reason: 'The test evidence is incomplete.',
+        acceptance: ['The missing evidence is recorded.'],
+      }],
     },
   }));
   assert.equal(triage.feedback?.mode, 'triage');
+  if (triage.feedback?.mode === 'triage') assert.equal(triage.feedback.decisions.length, 2);
+  assert.equal('targetAgent' in (triage.feedback || {}), false);
   const verification = parseAgentResult(JSON.stringify({
     outcome: 'completed',
     summary: 'Feedback resolution verified.',
@@ -233,6 +243,21 @@ test('parses Feedback Agent triage and verification decisions', () => {
     },
   }));
   assert.equal(verification.feedback?.mode, 'verify');
+});
+
+test('keeps feedback rewind decisions out of the Review Agent contract', () => {
+  const result = parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'The report requests another implementation rewind.',
+    artifact: { title: 'Review', content: 'Rewind requested.' },
+    verdict: 'changes_requested',
+    rewindTo: 'dev',
+    rewindDeliveryUnit: 1,
+  }));
+  assert.throws(
+    () => assertAgentResultRoleContract(result, 'review-agent'),
+    /Feedback Agent 和 Harness/,
+  );
 });
 
 test('rejects Feedback Agent attempts to enter product or runtime input flows', () => {

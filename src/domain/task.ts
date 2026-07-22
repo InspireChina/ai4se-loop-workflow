@@ -131,6 +131,7 @@ export type Delegation = {
   resource: 'none' | 'browser';
   description: string;
   feedbackId?: string | null;
+  feedbackIds?: string[] | null;
 };
 
 export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Delegation | null {
@@ -150,6 +151,18 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
     if (agent === 'dev-agent' && !codeSlotAvailable) return null;
     const storyIndex = agent === 'analyst-agent' && a < total ? a + 1 : agent === 'dev-agent' && d < a ? d + 1 : agent === 'test-agent' && t < d ? t + 1 : null;
     return line('resume', agent, storyIndex, '读取人工输入，并安全恢复需求推进');
+  }
+  // A task-level rewind can preserve `in dev` temporarily to retain the code
+  // slot. In that state the Harness-selected control Agent is authoritative;
+  // routing from agile_status alone would incorrectly fall through to Plan.
+  if (total === 0 && task.current_subagent === 'backlog-agent') {
+    return line('backlog', 'backlog-agent', null, '重新收集上下文并完成分类');
+  }
+  if (total === 0 && task.current_subagent === 'repro-agent') {
+    return line('repro', 'repro-agent', null, '重新复现 Bug 并定位根因');
+  }
+  if (total === 0 && task.current_subagent === 'story-splitter-agent') {
+    return line('split', 'story-splitter-agent', null, '重新拆分为可独立验收的交付单元');
   }
   if (status === 'backlog') return line('backlog', 'backlog-agent', null, '收集上下文并完成分类');
   if (status === 'in repro') return line('repro', 'repro-agent', null, '复现 Bug 并定位根因');

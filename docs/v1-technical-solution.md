@@ -152,7 +152,7 @@ Agent 最终返回统一结构化 JSON，包含可选的：
 - `runtimeInputs`：任何 Agent 可返回的非敏感运行信息请求；存在时必须 `outcome=needs_input`，不能与设计问题混用。
 - `rewind` / `rewindDeliveryUnit`：需要回退时的建议。
 
-Review Agent 首次结卡时返回完整 artifact 和 `verdict=report_ready`。处理用户结卡评论时，它逐条核对事实：只需修订报告则仍返回 `report_ready`；需要前序工作时返回 `verdict=changes_requested`、`rewindTo=plan|analysis|dev|test` 和单元阶段所需的 `rewindDeliveryUnit`。Application 只允许存在开放结卡评论时使用该回退结论。Review 不能请求审批或自行修改代码；缺少非敏感运行信息时仍使用 `runtimeInputs`。
+Review Agent 只返回完整 artifact 和 `verdict=report_ready`。Feedback Agent 一次读取任务当前评论快照，为每条评论返回 `targetStage`；Harness 映射目标 Agent、合并单元游标并只执行一次最早回退。后续阶段评论保持待处理，到达目标阶段时统一注入；任务级回退使交付单元失效时，单元评论在重新拆分后再次绑定，但不跳转到后续阶段。Review Agent 不得再次返回回退决策。
 
 Application 负责校验结果、写入数据库和推进状态。对 Analyst，Application 还会拒绝缺失关键决策树、使用 `safe_default`、缺少证据、选项不一致或隐藏未决分支的规格。Agent 不调用 `loopctl`，不写 `.project` 文档，不直接写 SQLite，也不主动写运行日志。
 
@@ -162,7 +162,7 @@ Application 负责校验结果、写入数据库和推进状态。对 Analyst，
 
 Runner 按 `Core Contract → Role Prompt → Durable Memory → recent daily memory → task context → Result Submission Contract` 组装最终输入，并把 Prompt/Memory 的版本和哈希写入 execution attempt。Core Contract、结果 Schema 和提交通道不开放编辑，避免自定义 Prompt 改写权限、状态机或结构化协议。每次 execution 获得一个私有临时结果通道；Agent 将 Result Receipt 写入临时 JSON 后调用 `submit-agent-result`，CLI 同步加载领域 Zod Schema 和当前 Agent 的静态角色契约。校验失败时命令返回非零退出码且不删除临时输入，Agent 可在当前 execution 内修正并重提；成功后 CLI 投递规范化结果，Runner 再防御性复验和持久化。Agent 的普通最终回复不承载状态迁移，最终文本 JSON 只保留为兼容 fallback。
 
-Evolution Evaluator 是主执行后的 best-effort 旁路：它在同类型 Agent 的一次结果成功应用后运行，而不是在评论保存时运行。结卡报告的开放评论会触发当前任务重新执行 Review；Review 完成“修订报告或发起回退”的判断后，Evaluator 立即读取评论作为演化证据。业务评论的 `status=open` 会一直保留到必要流程完成并生成新版报告，和 `evolution_status=analyzed` 相互独立。成功恢复时，已使用的运行信息问答也会作为 evidence 输入，但不得把具体用户数据、具体卡号、地址、账号或凭据写入 Memory；明确的仓库级模板和通用占位符可以提炼。观察首先进入 daily memory 与去重 occurrence 表；只有 `occurrence >= 3`、`distinct requirements >= 2`、`confidence >= 0.75` 且通过安全规则时才提升。Memory 直接形成新 revision；Prompt 形成 candidate，并只由带匹配 `evolution_candidate_id` 的真实 execution attempt 消耗三次 Canary。失败立即回滚，成功三次才激活。Evaluator 失败不改变主执行结果。
+Evolution Evaluator 是主执行后的 best-effort 旁路：它在同类型 Agent 的一次结果成功应用后运行，而不是在评论保存时运行。开放评论按任务形成 Triage 批次，再由 Harness 生成唯一回退计划；Evaluator 读取评论、批次、处理声明和验证结果作为演化证据。业务评论的 `status=open` 会一直保留到必要流程完成并通过独立验证，和 `evolution_status=analyzed` 相互独立。成功恢复时，已使用的运行信息问答也会作为 evidence 输入，但不得把具体用户数据、具体卡号、地址、账号或凭据写入 Memory；明确的仓库级模板和通用占位符可以提炼。观察首先进入 daily memory 与去重 occurrence 表；只有 `occurrence >= 3`、`distinct requirements >= 2`、`confidence >= 0.75` 且通过安全规则时才提升。Memory 直接形成新 revision；Prompt 形成 candidate，并只由带匹配 `evolution_candidate_id` 的真实 execution attempt 消耗三次 Canary。失败立即回滚，成功三次才激活。Evaluator 失败不改变主执行结果。
 
 数据库文档以 Markdown 预览呈现，并允许文件级或选区级评论。评论保存文档 revision、引用原文和渲染文本偏移；文档更新只增加 revision，不改写历史锚点。Runner 把当前交付单元的评论放进 Agent task context；Evolution Evaluator 另外读取该 Agent 全局尚未分析的评论，并通过 `evidenceCommentIds` 显式关联 observation。成功评估后评论才转为 analyzed，评估失败继续保留为 pending。评论只是高价值证据，仍受跨需求阈值、Prompt candidate 和 Canary 约束。
 
@@ -254,7 +254,7 @@ Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。A
 - runtime event 必须关联 run/execution 并在落库前脱敏 secret；原始异常不得泄露到维护 Prompt。
 - 软件修复只在独立 worktree 发生，保护边界、变更预算、test/build 或 clean-baseline 任一失败都不得自动落地主仓库。
 - Review 生成报告后释放代码槽并进入 `ready_to_close`；阅读动作不产生 approve/reject。
-- 当前报告有开放评论时，关闭动作被服务端拒绝；用户提交评论后回到 `in review`。Review 可直接修订报告，也可回退 plan / analysis / dev / test。评论在后续工作与新版报告完成前保持开放；新版报告再次进入 `ready_to_close` 等待用户评论或确认。
+- 当前报告有未验证反馈时，关闭动作被服务端拒绝。Feedback Agent 批量选择 target stage，Harness 合并为一次最早回退；后续阶段反馈等待正常推进，Review 只生成更新后报告。反馈在处理与独立验证完成前保持开放。
 - 开发实现完成后由 Runner 创建独立 Git commit；代码槽繁忙会自动排队。
 - 运行面板能观察 Agent、工具调用、辅助 subagent、警告和错误。
 - 任一 UI 命令都不能绕过状态、进度、确认和资源约束。
