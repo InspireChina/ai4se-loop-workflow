@@ -34,6 +34,7 @@ import { agentLabel, deliveryUnitLabel } from '../../src/domain/terminology';
 import { getAgentExecutor, type AgentExecutor } from '../../src/infrastructure/agent-executor';
 import { executeDelegation } from '../../src/infrastructure/delegation-execution';
 import { startDispatchRetryRun } from '../../src/infrastructure/agent-runner';
+import { agentExecutionLeaseMinutes, resolveAgentExecutionLimits } from '../../src/infrastructure/agent-execution-limits';
 import { paths } from '../../src/infrastructure/database';
 import { gitHead } from '../../src/infrastructure/git';
 import { createLangfuseTelemetry } from '../../src/infrastructure/langfuse';
@@ -250,8 +251,7 @@ async function isRunActive() {
 }
 
 async function runDelegation(delegation: DelegationEnvelope, prompt: string, executor: AgentExecutor, executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' }) {
-  const maxRuntimeMs = Number(process.env.AGENT_EXECUTOR_TIMEOUT_MS || process.env.CURSOR_AGENT_TIMEOUT_MS || 30 * 60 * 1000);
-  const idleTimeoutMs = Number(process.env.AGENT_EXECUTOR_IDLE_TIMEOUT_MS || process.env.CURSOR_AGENT_IDLE_TIMEOUT_MS || 10 * 60 * 1000);
+  const { maxRuntimeMs, idleTimeoutMs } = resolveAgentExecutionLimits(process.env);
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
   const diagnostics: string[] = [];
   const execution = await executeDelegation({
@@ -409,7 +409,7 @@ async function executeDelegationStep(
       memoryRevision: builtPrompt.runtime.memoryRevision,
       memoryHash: builtPrompt.runtime.memoryHash,
       evolutionCandidateId: builtPrompt.runtime.evolutionCandidateId,
-      leaseMinutes: Math.ceil(Number(process.env.AGENT_EXECUTOR_TIMEOUT_MS || 30 * 60 * 1000) / 60_000) + 10,
+      leaseMinutes: agentExecutionLeaseMinutes(process.env),
     });
     attempt = durable.attempt;
     await markDelegationLaneRunning(delegation);
