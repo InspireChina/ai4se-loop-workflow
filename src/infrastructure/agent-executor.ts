@@ -248,6 +248,7 @@ function toolNameFromCursor(event: Record<string, unknown>) {
 
 function summarizeCommand(command: string) {
   if (!command) return '';
+  if (command.includes(' agent-context ')) return '按需读取 execution Context Snapshot';
   if (command.includes(' task-context ')) return '读取数据库需求上下文';
   if (command.includes(' document-list ')) return '列出数据库文档';
   if (command.includes(' document-get ')) return '读取数据库文档';

@@ -63,6 +63,7 @@ LoopWork 只在以下情况请求人介入：
 不同项目的 Prompt 和业务知识不同，但底层 Workflow 基本相同。LoopWork 统一提供：
 
 - Agent 调度和节点间上下文交接。
+- execution 级 Context Snapshot、精简 Working Pack 和按需只读上下文检索。
 - Workflow 状态机、任务队列和代码槽。
 - 版本化 Prompt、Memory、项目知识和 Slice Spec。
 - 结构化 Agent Result、Test Evidence 和 Trace。

@@ -252,6 +252,6 @@ Agent 通过 Runner 为当前 execution 注入的 `submit-agent-result --input <
 - Server Action 不承载状态机判断；判断放在 application/domain 层。
 - domain 不依赖 Next、SQLite driver、React 或文件系统。
 - infrastructure 只负责数据库、迁移、执行器适配、Runner、Git 和路径解析。
-- Agent 不读写旧工作文档或数据库；Runner 注入上下文，Application 解释结果。
+- Agent 不直接读写数据库或旧工作文档；Runner 注入高信号 Working Pack，并通过 execution-bound 的只读 `agent-context` 接口提供冻结快照中的按需资料，Application 解释结果和执行状态迁移。
 - 每个 UI 操作必须映射到明确用例，不能绕过状态、确认和资源约束。
 - 产品统一语言与物理存储命名通过映射层隔离；新增界面和 Prompt 必须使用产品术语。

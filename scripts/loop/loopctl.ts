@@ -27,6 +27,15 @@ import {
 import { databaseConnection, paths } from '../../src/infrastructure/database';
 import type { Actor, TaskStatus } from '../../src/domain/task';
 import type { TaskLaneKind } from '../../src/application/task-lanes';
+import {
+  getExecutionAgentContextSnapshot,
+  renderAgentContextEvidence,
+  renderAgentContextHistory,
+  renderAgentContextList,
+  renderAgentContextOverview,
+  renderAgentContextResource,
+  renderAgentContextSearch,
+} from '../../src/application/agent-context';
 
 type Args = { _: string[]; [key: string]: string | boolean | string[] | undefined };
 
@@ -281,6 +290,20 @@ async function main() {
     case 'task-context':
       console.log(JSON.stringify(await getTaskContext(requireValue(args, 'taskId')), null, 2));
       return;
+    case 'agent-context': {
+      const executionId = process.env.LOOP_EXECUTION_ID;
+      if (!executionId) throw new Error('agent-context 只能在流程 Agent execution 内使用');
+      const snapshot = await getExecutionAgentContextSnapshot(executionId);
+      const action = args._[0] || 'overview';
+      if (action === 'overview') console.log(renderAgentContextOverview(snapshot));
+      else if (action === 'list') console.log(renderAgentContextList(snapshot, { kind: optional(args, 'kind'), scope: optional(args, 'scope') }));
+      else if (action === 'get') console.log(renderAgentContextResource(snapshot, args._[1] || requireValue(args, 'ref')));
+      else if (action === 'search') console.log(renderAgentContextSearch(snapshot, args._[1] || requireValue(args, 'query')));
+      else if (action === 'evidence') console.log(renderAgentContextEvidence(snapshot, optional(args, 'stage')));
+      else if (action === 'history') console.log(renderAgentContextHistory(snapshot, args._[1] || requireValue(args, 'ref')));
+      else throw new Error(`unknown agent-context action: ${action}`);
+      return;
+    }
     case 'document-upsert': {
       const payload = await jsonArg(args);
       const input = payload || {

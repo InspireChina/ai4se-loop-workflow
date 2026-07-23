@@ -115,7 +115,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         <strong>推进进度</strong>
         <span>{Math.max(currentStep + 1, 1)} / {taskSteps.length}</span>
       </div>
-      <ol>
+      <ol style={{ gridTemplateColumns: `repeat(${taskSteps.length}, minmax(0, 1fr))` }}>
         {taskSteps.map((step, index) => {
           const completed = task.agile_status === 'done' ? index <= currentStep : index < currentStep;
           const current = index === currentStep;

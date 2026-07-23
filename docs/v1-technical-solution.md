@@ -136,10 +136,10 @@ Runner 的控制循环：
 
 每次 CLI 获得：
 
-- `requirement`：需求描述、状态和进度。
-- `currentDeliveryUnit` 与全部 `deliveryUnits`。
-- 已有交付文档、当前 Slice Spec、设计澄清及答复、运行信息请求及答复、验证证据和 execution attempt 摘要。
-- 当前 Agent、推进阶段、资源和明确目标。
+- 冻结的 `Working Context Pack`：当前 Agent、阶段、交付单元、明确目标、权威需求、当前 Slice Spec、用户决定、Active Obligations 和最近 Handoff。
+- 紧凑的 `Context Index`：文档、规格、决定、运行信息、反馈、恢复项和 execution evidence 的 ref、scope、revision、status、authority 与摘要，不默认放入全部正文。
+- execution-bound 的只读 `agent-context` 命令：Agent 可按 ref 读取、搜索、列出资料及查看证据和历史；命令只读取本次 execution 开始时持久化的 Context Snapshot。
+- 仓库、Git 和测试环境的实时 Ground Truth；它们由 Agent 使用原生命令行和文件工具检查，不由数据库快照替代。
 - 最终 JSON Schema 与角色约束。
 
 Agent 最终返回统一结构化 JSON，包含可选的：
@@ -154,17 +154,17 @@ Agent 最终返回统一结构化 JSON，包含可选的：
 
 Review Agent 只返回完整 artifact 和 `verdict=report_ready`。Feedback Agent 一次读取任务当前评论快照，为评论返回 `targetStage`；Application 应用本轮有效决策、映射目标 Agent、合并单元游标并只执行一次最早回退，遗漏或无效评论继续留在队列。后续阶段评论保持待处理，到达目标阶段时统一注入；任务级回退使交付单元失效时，单元评论在重新拆分后再次绑定，但不跳转到后续阶段。Review Agent 不得再次返回回退决策。
 
-Application 负责校验最小结果协议、写入数据库和推进状态。对 Analyst，Application 只检查决策引用有效、待确认规格不能冒充 resolved，以及仍有未决歧义时不能推进；完整性和专业语义由 Analyst Prompt、用户对齐和后续 Test 流程保证。Agent 不调用 `loopctl`，不写 `.project` 文档，不直接写 SQLite，也不主动写运行日志。
+Application 负责校验最小结果协议、写入数据库和推进状态。对 Analyst，Application 只检查决策引用有效、待确认规格不能冒充 resolved，以及仍有未决歧义时不能推进；完整性和专业语义由 Analyst Prompt、用户对齐和后续 Test 流程保证。Agent 只能调用 `loopctl agent-context` 读取当前 execution 的冻结快照，不能调用其他 `loopctl` 命令、写 `.project` 文档、直接写 SQLite 或主动写运行日志。
 
 ## 7. Agent Runtime 与演化
 
 应用启动 Loop 前初始化 `data/<repo-hash>/agent-runtime`。它位于应用数据目录、被 Git 忽略且按目标 repo 隔离；种子 Prompt 只在 Agent Profile 首次创建时使用，此后的事实由版本表和本地 Runtime 文件共同物化。每次执行前检测本地文件哈希，外部编辑会形成 `source=local` 的新版本。
 
-Runner 按 `Core Contract → Role Prompt → Durable Memory → recent daily memory → task context → Result Submission Contract` 组装最终输入，并把 Prompt/Memory 的版本和哈希写入 execution attempt。Core Contract、最小结果协议和提交通道不开放编辑，避免自定义 Prompt 改写权限或状态机。每次 execution 获得一个私有临时结果通道；Agent 将 Result Receipt 写入临时 JSON 后调用 `submit-agent-result`，CLI 校验结果可解析、角色推进所需的最小字段和安全边界，失败时保留临时输入供 Agent 修正重提；成功后 Runner 持久化结果并进入 Application 用例。专业语义不由 Runner 重复判断。Agent 的普通最终回复不承载状态迁移，最终文本 JSON 只保留为兼容 fallback。
+Runner 按 `Core Contract → Role Prompt → Durable Memory → recent daily memory → Working Context Pack → Context Index / Commands → Result Submission Contract` 组装最终输入，并把 Prompt、Memory 和完整 Context Snapshot 写入 execution attempt。启动 Prompt 只内联当前工作的高信号事实；完整资料保存在快照中，通过 `LOOP_EXECUTION_ID` 绑定的只读命令按需展开。运行期间产生的新评论或状态变化不改变本次快照，由下一次 execution 获取。Core Contract、最小结果协议和提交通道不开放编辑，避免自定义 Prompt 改写权限或状态机。每次 execution 获得一个私有临时结果通道；Agent 将 Result Receipt 写入临时 JSON 后调用 `submit-agent-result`，CLI 校验结果可解析、角色推进所需的最小字段和安全边界，失败时保留临时输入供 Agent 修正重提；成功后 Runner 持久化结果并进入 Application 用例。专业语义不由 Runner 重复判断。Agent 的普通最终回复不承载状态迁移，最终文本 JSON 只保留为兼容 fallback。
 
 Evolution Evaluator 是主执行后的 best-effort 旁路：它在同类型 Agent 的一次结果成功应用后运行，而不是在评论保存时运行。开放评论按任务形成 Triage 批次，再由 Application 应用有效决策并生成唯一回退计划；Evaluator 读取评论、批次、处理声明和验证结果作为演化证据。业务评论的 `status=open` 会一直保留到必要流程完成并通过独立验证，和 `evolution_status=analyzed` 相互独立。成功恢复时，已使用的运行信息问答也会作为 evidence 输入，但不得把具体用户数据、具体卡号、地址、账号或凭据写入 Memory；明确的仓库级模板和通用占位符可以提炼。观察首先进入 daily memory 与去重 occurrence 表；只有 `occurrence >= 3`、`distinct requirements >= 2`、`confidence >= 0.75` 且通过安全规则时才提升。Memory 直接形成新 revision；Prompt 形成 candidate，并只由带匹配 `evolution_candidate_id` 的真实 execution attempt 消耗三次 Canary。失败立即回滚，成功三次才激活。Evaluator 失败不改变主执行结果。
 
-数据库文档以 Markdown 预览呈现，并允许文件级或选区级评论。评论保存文档 revision、引用原文和渲染文本偏移；文档更新只增加 revision，不改写历史锚点。Runner 把当前交付单元的评论放进 Agent task context；Evolution Evaluator 另外读取该 Agent 全局尚未分析的评论，并通过 `evidenceCommentIds` 显式关联 observation。成功评估后评论才转为 analyzed，评估失败继续保留为 pending。评论只是高价值证据，仍受跨需求阈值、Prompt candidate 和 Canary 约束。
+数据库文档以 Markdown 预览呈现，并允许文件级或选区级评论。评论保存文档 revision、引用原文和渲染文本偏移；文档更新只增加 revision，不改写历史锚点。Runner 把当前活动评论作为 Obligation 内联，并把任务资料以 ref 写入 Context Index；Agent 只在需要时读取正文。Evolution Evaluator 另外读取该 Agent 全局尚未分析的评论，并通过 `evidenceCommentIds` 显式关联 observation。成功评估后评论才转为 analyzed，评估失败继续保留为 pending。评论只是高价值证据，仍受跨需求阈值、Prompt candidate 和 Canary 约束。
 
 ## 8. 软件自维护与结构化日志
 

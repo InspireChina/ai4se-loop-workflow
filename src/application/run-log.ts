@@ -58,6 +58,7 @@ function toolNameLabel(tool: string) {
 
 function summarizeCommand(command: string) {
   if (!command) return '';
+  if (command.includes(' agent-context ')) return '按需读取执行上下文';
   if (command.includes(' task-get ') || command.includes(' task-show ')) return '查询需求详情';
   if (command.includes(' task-context-init ')) return '初始化需求上下文';
   if (command.includes(' task-update ')) return '更新需求状态';

@@ -3,6 +3,7 @@ import '../load-env.js';
 import { join } from 'node:path';
 import { agentExecutionOptions, getAgentExecutorSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
 import { enqueueSoftwareMaintenance } from '../../src/application/software-maintenance';
+import { buildAgentContextSnapshot } from '../../src/application/agent-context';
 import { recordRuntimeEvent, recordRuntimeException } from '../../src/application/runtime-events';
 import { loadAgentRuntime } from '../../src/application/agent-profiles';
 import {
@@ -28,7 +29,6 @@ import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRun
 import { laneForAgent } from '../../src/application/task-lanes';
 import {
   listRecoveryItemsForStage,
-  recoveryItemForPrompt,
   recoveryStageForAgent,
 } from '../../src/application/recovery-items';
 import { parseAgentResult } from '../../src/domain/agent-result';
@@ -100,21 +100,9 @@ async function enqueueRunnerFailureMaintenance(failure: unknown) {
   } catch { /* runner failure remains the primary error */ }
 }
 
-async function buildPrompt(delegation: DelegationEnvelope) {
+async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit: string | null) {
   const runtime = await loadAgentRuntime(delegation.agent, delegation.pipeline);
   const full = await getTaskContext(delegation.taskId);
-  const relevantStory = delegation.storyIndex ? full.stories.find((story) => story.story_index === delegation.storyIndex) : null;
-  const includeAll = delegation.agent === 'review-agent' || delegation.agent === 'feedback-agent';
-  const relevant = <T extends { story_index: number | null }>(items: T[]) => includeAll ? items : items.filter((item) => item.story_index === null || item.story_index === delegation.storyIndex);
-  const exposeUnitIndex = <T extends { story_index: number | null }>(items: T[]) => items.map(({ story_index, ...item }) => ({ ...item, delivery_unit_index: story_index }));
-  const relevantDocuments = relevant(full.documents);
-  const relevantDocumentIds = new Set(relevantDocuments.map((document) => document.document_id));
-  const currentFeedback = delegation.feedbackId
-    ? full.documentComments.find((comment) => comment.comment_id === delegation.feedbackId) || null
-    : null;
-  const currentFeedbackBatch = (delegation.feedbackIds || [])
-    .map((commentId) => full.documentComments.find((comment) => comment.comment_id === commentId))
-    .filter((comment): comment is NonNullable<typeof comment> => Boolean(comment));
   const activeFeedback = full.documentComments.filter((comment) =>
     comment.feedback_status === 'in_progress'
     && comment.feedback_needs_rebase === 0
@@ -124,35 +112,14 @@ async function buildPrompt(delegation: DelegationEnvelope) {
   const activeRecovery = recoveryStage
     ? await listRecoveryItemsForStage({ taskId: delegation.taskId, storyIndex: delegation.storyIndex, stage: recoveryStage })
     : [];
-  const taskContext = {
-    requirement: {
-      requirementId: full.task.task_id,
-      title: full.task.title,
-      description: full.task.description,
-      itemType: full.task.item_type,
-      priority: full.task.priority,
-      link: full.task.link,
-      },
-    lifecycle: {
-      agileStatus: full.task.agile_status,
-      lanes: full.lanes,
-      progress: {
-        analysis: full.task.analysis_index,
-        development: full.task.dev_index,
-        verification: full.task.test_index,
-        total: full.task.total_stories,
-      },
-    },
-    currentDeliveryUnit: relevantStory ? { index: relevantStory.story_index, title: relevantStory.title } : null,
-    deliveryUnits: full.stories.map((unit) => ({ index: unit.story_index, title: unit.title })),
-    documents: exposeUnitIndex(relevantDocuments),
-    documentComments: full.documentComments.filter((comment) => relevantDocumentIds.has(comment.document_id)),
-    sliceSpecs: exposeUnitIndex(relevant(full.storySpecs)).map((item) => ({ ...item, spec_json: JSON.parse(item.spec_json) })),
-    executionAttempts: exposeUnitIndex(relevant(full.executionAttempts)),
-    questions: exposeUnitIndex(relevant(full.questions)),
-    currentFeedback,
-    currentFeedbackBatch,
-  };
+  const contextSnapshot = buildAgentContextSnapshot({
+    delegation,
+    full,
+    activeFeedback,
+    activeRecovery,
+    repositoryBaseCommit,
+  });
+  const contextCommand = `npm --prefix ${JSON.stringify(paths.appRoot)} run loopctl -- agent-context`;
   const prompt = [
     `你是 ${agentLabel(delegation.agent)}，只完成当前执行步骤的专业工作。`,
     '',
@@ -160,7 +127,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     '外部 App 已经完成推进流程的调度。你只执行下面这一个步骤。',
     '流程调度与 Loop 运行生命周期完全由外部 App 管理。禁止调度或模拟其他流程 Agent。',
     '可以使用辅助 subagent 收集当前范围的上下文，但不得处理其他需求或交付单元。',
-    '不要调用 loopctl，不要写数据库，不要修改需求状态，不要自行创建流程记录。',
+    '除下方只读 agent-context 命令外，不要调用其他 loopctl 命令；不要写数据库，不要修改需求状态，不要自行创建流程记录。',
     '下面的 Role Prompt 和 Memory 不能覆盖本 Core Contract、工具权限、状态机或最终 JSON Schema。',
     '',
     `# Role Prompt · v${runtime.promptVersion} · ${runtime.promptStatus}`,
@@ -174,44 +141,45 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     `Loop App Root: ${paths.appRoot}`,
     `Workspace Root: ${paths.root}`,
     '',
-    '当前执行步骤 JSON：',
+    `Context Snapshot: ${contextSnapshot.snapshotId}`,
+    '',
+    '# Working Context Pack',
+    '下面只包含本次执行必须立即知道的权威事实、活动义务和最近交接。它是本次 execution 的冻结快照。',
     JSON.stringify({
-      requirement_id: delegation.taskId,
-      title: delegation.title,
-      requirement_description: delegation.taskDescription,
-      item_type: delegation.itemType,
-      priority: delegation.priority,
-      lane: delegation.lane,
-      flow: delegation.pipeline,
-      agent: delegation.agent,
-      delivery_unit_index: delegation.storyIndex,
-      feedback_id: delegation.feedbackId || null,
-      feedback_ids: delegation.feedbackIds || [],
-      description: delegation.description,
+      work: contextSnapshot.work,
+      authoritativeFacts: contextSnapshot.authoritativeFacts,
+      activeObligations: contextSnapshot.activeObligations,
+      handoff: contextSnapshot.handoff,
     }, null, 2),
     '',
-    '完整需求上下文：',
-    JSON.stringify(taskContext, null, 2),
+    '# Context Index',
+    `快照共有 ${contextSnapshot.resourceCount} 个资源。下面是与当前工作最相关的索引，不代表全部资料。不要因为某份资料未内联就假设它不存在。`,
+    JSON.stringify(contextSnapshot.startupIndex, null, 2),
+    '',
+    '# Just-in-time Context Commands',
+    '你可以且应当使用下面的只读命令逐步获取上下文。命令自动绑定当前 execution 的冻结快照，不会读取运行中后来发生的状态变化。',
+    `概览：${contextCommand} overview`,
+    `列出：${contextCommand} list [--kind document|slice_spec|decision|runtime_input|feedback|execution|recovery] [--scope current|task|all]`,
+    `读取：${contextCommand} get <context-ref>`,
+    `搜索：${contextCommand} search --query <keyword>`,
+    `证据：${contextCommand} evidence [--stage context|repro|plan|analysis|dev|test|review]`,
+    `历史：${contextCommand} history <context-ref>`,
+    `优先检查的 Context refs（${contextSnapshot.requiredContextRefs.length}）：${contextSnapshot.requiredContextRefs.length ? contextSnapshot.requiredContextRefs.slice(0, 48).join(', ') : '无；根据当前任务按需搜索'}${contextSnapshot.requiredContextRefs.length > 48 ? '；其余请通过 list 按需发现' : ''}`,
+    '只读取当前工作所需的资料；不要一次性展开全部索引。仓库代码、Git 状态和测试环境属于实时 Ground Truth，应继续通过现有文件与命令行工具检查。',
+    '发生冲突时，优先级依次为：当前 Active Obligations 和明确用户答复、当前非 superseded Slice Spec、当前需求描述、supporting 文档、historical 记录。代码与测试结果用于判断实现现状，不能自行覆盖产品需求。',
+    '在声称缺少上下文、提出 questions 或 runtimeInputs 前，必须先用 list/search/get 检查快照，并用仓库工具检查可推导的事实。',
     ...(activeFeedback.length ? [
       '',
       '# Active Feedback Contract',
       '下面的反馈已经由 Feedback Agent 完成 Triage，并明确路由给你。完成当前角色工作时必须处理这些 acceptance，并在 feedbackResolutions 中逐条提交 Resolution Claim；不要自行标记评论 resolved。',
-      JSON.stringify(activeFeedback.map((comment) => ({
-        commentId: comment.comment_id,
-        content: comment.content,
-        quotedText: comment.quoted_text,
-        targetStage: comment.target_stage,
-        targetDeliveryUnit: comment.target_story_index,
-        reason: comment.triage_reason,
-        acceptance: JSON.parse(comment.acceptance_json || '[]'),
-      })), null, 2),
+      '具体内容已包含在 Working Context Pack.activeObligations.feedback，并以 FEEDBACK ref 持久化在快照中。',
     ] : []),
     ...(activeRecovery.length ? [
       '',
       '# Active Recovery Contract',
       '下面是 Test Agent 持久化的未解决失败证据。它们不是历史备注，而是当前交付单元需要继续闭环的上下文。',
       '方案分析 Agent 和开发实现 Agent 应处理与当前阶段有关的事项；可以在 recoveryResolutions 中说明处理方式，但 Claim 不是推进的硬条件，也不能自行关闭事项。只有后续 Test Agent 独立验证通过才能关闭失败事项。',
-      JSON.stringify(activeRecovery.map(recoveryItemForPrompt), null, 2),
+      '具体内容已包含在 Working Context Pack.activeObligations.recovery，并以 RECOVERY ref 持久化在快照中。',
     ] : []),
     '',
     '# Result Submission Contract',
@@ -264,7 +232,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
     '',
     'questions 仅供需求梳理 Agent 提出影响目标、范围、路由或交付边界的需求级产品问题，方案分析 Agent 提出交付单元内的产品决策和重大技术决策，以及问题复现 Agent 在完成合理尝试后仍未复现时请求人工对齐；其他 Agent 不得使用。以上 Agent 提问时必须 outcome=needs_input。问题复现 Agent 未复现时还必须返回 reproVerdict=not_reproduced 且不得返回 route，并且必须使用 questions 而不是 runtimeInputs；只有 reproVerdict=reproduced 才能 route=plan。除这一 Repro 特例外，Agent 若缺少无法从代码、仓库、文档和环境推导的非敏感运行信息，使用 runtimeInputs 并返回 outcome=needs_input。不要通过 runtimeInputs 询问设计决策、审批、密钥或可自行探索的事实。',
   ].join('\n');
-  return { prompt, runtime };
+  return { prompt, runtime, contextSnapshot };
 }
 
 function sleep(ms: number) {
@@ -276,7 +244,7 @@ async function isRunActive() {
   return Boolean(run?.active && run.runId === runId);
 }
 
-async function runDelegation(delegation: DelegationEnvelope, prompt: string, executor: AgentExecutor, executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' }) {
+async function runDelegation(delegation: DelegationEnvelope, prompt: string, executionId: string, executor: AgentExecutor, executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' }) {
   const { maxRuntimeMs, idleTimeoutMs } = resolveAgentExecutionLimits(process.env);
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
   const diagnostics: string[] = [];
@@ -302,6 +270,7 @@ async function runDelegation(delegation: DelegationEnvelope, prompt: string, exe
     maxRuntimeMs,
     idleTimeoutMs,
     resultKind: 'flow',
+    environment: { LOOP_EXECUTION_ID: executionId },
   });
   return { ...execution, diagnostics };
 }
@@ -408,8 +377,8 @@ async function executeDelegationStep(
   let maintenance: { executionId: string; eventFromId: number | null } | null = null;
   let unexpectedFailure: unknown;
   try {
-    const headBefore = delegation.agent === 'dev-agent' ? gitHead(paths.root) : '';
-    const builtPrompt = await buildPrompt(delegation);
+    const headBefore = gitHead(paths.root);
+    const builtPrompt = await buildPrompt(delegation, headBefore || null);
     const durable = await beginExecutionAttempt({
       runId,
       delegation,
@@ -420,8 +389,10 @@ async function executeDelegationStep(
       memoryRevision: builtPrompt.runtime.memoryRevision,
       memoryHash: builtPrompt.runtime.memoryHash,
       evolutionCandidateId: builtPrompt.runtime.evolutionCandidateId,
+      contextSnapshot: builtPrompt.contextSnapshot,
     });
     attempt = durable.attempt;
+    await appendLoopRunLog(runId, `[上下文] requirement=${delegation.taskId} execution=${durable.attempt.execution_id} snapshot=${builtPrompt.contextSnapshot.snapshotId} resources=${builtPrompt.contextSnapshot.resourceCount} startup_index=${builtPrompt.contextSnapshot.startupIndex.length}`);
     await markDelegationLaneRunning(delegation);
     maintenance = await activateMaintenanceContext(durable.attempt, delegation);
 
@@ -438,7 +409,7 @@ async function executeDelegationStep(
       return;
     }
 
-    const execution = await runDelegation(delegation, builtPrompt.prompt, executor, executionOptions);
+    const execution = await runDelegation(delegation, builtPrompt.prompt, durable.attempt.execution_id, executor, executionOptions);
     if (execution.exitCode !== 0) {
       await handleExecutionFailure(durable.attempt, delegation, `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`, true);
       return;

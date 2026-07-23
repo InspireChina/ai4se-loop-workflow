@@ -326,7 +326,7 @@ main{padding:28px 20px}
 .task-steps-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:17px;color:#354056}
 .task-steps-head>strong{font-size:13px}
 .task-steps-head>span{border-radius:99px;background:#f1f4f8;color:#768096;padding:3px 8px;font-size:11px;font-weight:700}
-.task-steps ol{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));list-style:none;margin:0;padding:0}
+.task-steps ol{display:grid;list-style:none;margin:0;padding:0}
 .task-steps li{position:relative;display:flex;flex-direction:column;align-items:center;gap:8px;min-width:0;color:#98a1b2;text-align:center}
 .task-steps li:not(:last-child):after{content:'';position:absolute;z-index:0;top:11px;left:calc(50% + 16px);width:calc(100% - 32px);height:2px;border-radius:99px;background:#e4e8ef}
 .step-marker{position:relative;z-index:1;display:grid;place-items:center;width:24px;height:24px;flex:none;border:1.5px solid #d4dae4;border-radius:50%;background:#fff;color:#8a94a6;font-size:11px;font-weight:750}

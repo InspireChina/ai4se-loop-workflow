@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { hash } from '../infrastructure/database';
 import { databaseConnection } from '../infrastructure/database';
 import type { DelegationEnvelope } from './tasks';
+import type { AgentContextSnapshot } from './agent-context';
 import { laneForAgent } from './task-lanes';
 
 export type ExecutionStatus =
@@ -153,9 +154,14 @@ export async function beginExecutionAttempt(input: {
   memoryRevision?: number;
   memoryHash?: string;
   evolutionCandidateId?: string | null;
+  contextSnapshot?: AgentContextSnapshot;
 }) {
   const db = await databaseConnection();
-  const inputJson = JSON.stringify({ delegation: input.delegation, prompt: input.prompt });
+  const inputJson = JSON.stringify({
+    delegation: input.delegation,
+    prompt: input.prompt,
+    contextSnapshot: input.contextSnapshot,
+  });
   const inputHash = hash(inputJson);
   let key = delegationKey(input.delegation, inputHash);
   let previous = db.prepare(`

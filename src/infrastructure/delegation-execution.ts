@@ -20,6 +20,7 @@ export type DelegationExecutionInput = {
   maxRuntimeMs: number;
   idleTimeoutMs: number;
   resultKind?: AgentResultKind;
+  environment?: AgentEnvironment;
   spawn?: typeof crossSpawn;
 };
 
@@ -110,6 +111,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     const invocationPrompt = temporaryPrompt?.reference ?? prompt;
     const launch = buildAgentProcessLaunch(executor, invocationPrompt, workspaceRoot, executionOptions, {
       ...process.env,
+      ...(input.environment || {}),
       ...(resultChannel ? agentResultChannelEnv(resultChannel, context.agent) : {}),
     });
     await appendLog(`[Agent] 开始 lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - ${description}`);

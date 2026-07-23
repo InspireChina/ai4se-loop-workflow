@@ -74,6 +74,14 @@ test('streams the complete Claude prompt through stdin without placing it in pro
   assert.equal(result.finalText, original);
 });
 
+test('injects execution-scoped context environment into the Agent process', async () => {
+  const executor = fixtureExecutor('codex', 'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:process.env.LOOP_EXECUTION_ID || "missing"}}))');
+  const { result } = await run(executor, recordedTelemetry().telemetry, {
+    environment: { LOOP_EXECUTION_ID: 'EXEC-context-fixture' },
+  });
+  assert.equal(result.finalText, 'EXEC-context-fixture');
+});
+
 function recordedTelemetry() {
   const traces: Array<Record<string, unknown>> = [];
   const events: Array<Record<string, unknown>> = [];
