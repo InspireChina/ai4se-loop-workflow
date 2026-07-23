@@ -1212,7 +1212,7 @@ export async function submitRuntimeInputs(taskId: string, requestedLane?: TaskLa
   try {
     db.prepare(`
       UPDATE tasks
-      SET run_state = 'runnable', resume_pending = 1, blocked_reason = NULL,
+      SET run_state = 'runnable', resume_pending = 0, blocked_reason = NULL,
           next_step = ?, last_actor = 'human', updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(`运行信息已补充，交回 ${lane.current_agent} 从当前阶段继续`, taskId);
@@ -1365,11 +1365,12 @@ export async function submitClarificationAnswers(taskId: string) {
   try {
     db.prepare(`
       UPDATE tasks
-      SET run_state = 'runnable', resume_pending = 1, blocked_reason = NULL,
+      SET run_state = 'runnable', resume_pending = ?, blocked_reason = NULL,
           next_step = ?,
           last_actor = 'human', updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(
+      controlAgent ? 1 : 0,
       controlAgent === 'backlog-agent'
         ? '用户回答已提交，交回需求梳理 Agent 更新需求边界'
         : controlAgent === 'repro-agent'
@@ -1977,9 +1978,14 @@ function controlLine(task: Task, codeSlotAvailable: boolean, lanes: TaskLane[]) 
         description: '全部交付单元已完成，进入整体验收',
       } satisfies Delegation;
     }
-    return null;
+    if (!task.resume_pending) return null;
   }
-  return nextDelegation(task, codeSlotAvailable);
+  if (task.resume_pending
+    || task.total_stories === 0
+    || ['backlog', 'in repro', 'in plan', 'in review'].includes(task.agile_status)) {
+    return nextDelegation(task, codeSlotAvailable);
+  }
+  return null;
 }
 
 function analysisPriority(task: Task, lane: TaskLane) {
@@ -2086,7 +2092,7 @@ export async function setTaskLaneState(input: {
     if (input.status === 'system_blocked') {
       db.prepare(`
         UPDATE tasks SET current_subagent = ?, blocked_reason = ?, next_step = ?,
-          last_actor = 'system', updated_at = CURRENT_TIMESTAMP
+          resume_pending = 0, last_actor = 'system', updated_at = CURRENT_TIMESTAMP
         WHERE task_id = ?
       `).run(
         input.currentAgent || null,

@@ -76,3 +76,28 @@ test('migrates legacy waiting and blocked task state into isolated lanes without
   assert.equal(execution.lane, 'analysis');
   db.close();
 });
+
+test('removes legacy task-level resume ownership from lane agents', () => {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE tasks (
+      task_id TEXT PRIMARY KEY,
+      current_subagent TEXT,
+      resume_pending INTEGER NOT NULL DEFAULT 0
+    );
+    INSERT INTO tasks(task_id, current_subagent, resume_pending)
+    VALUES
+      ('analysis-resume', 'analyst-agent', 1),
+      ('delivery-resume', 'test-agent', 1),
+      ('control-resume', 'backlog-agent', 1);
+  `);
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/034_lane_owned_resume_state.sql'), 'utf8'));
+
+  const rows = db.prepare('SELECT task_id, resume_pending FROM tasks ORDER BY task_id').all() as { task_id: string; resume_pending: number }[];
+  assert.deepEqual(rows, [
+    { task_id: 'analysis-resume', resume_pending: 0 },
+    { task_id: 'control-resume', resume_pending: 1 },
+    { task_id: 'delivery-resume', resume_pending: 0 },
+  ]);
+  db.close();
+});

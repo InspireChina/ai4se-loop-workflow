@@ -404,10 +404,104 @@ test('submits answered analysis clarifications back to the analyst without appro
   assert.equal(detail?.task.agile_status, 'ready for dev');
   assert.equal(detail?.task.current_subagent, 'analyst-agent');
   assert.equal(detail?.task.run_state, 'runnable');
-  assert.equal(detail?.task.resume_pending, 1);
+  assert.equal(detail?.task.resume_pending, 0);
   assert.equal(detail?.task.resume_status, null);
   assert.equal(detail?.task.analysis_index, 0);
   assert.equal(detail?.task.spec_resolved_index, 0);
+  assert.deepEqual(detail?.lanes.map((lane) => [lane.lane, lane.resume_pending]), [
+    ['analysis', 1],
+    ['delivery', 0],
+  ]);
+});
+
+test('resumes Analysis by lane ownership when Delivery leaves test-agent at task level', async () => {
+  const { applyAgentResult } = await import('./agent-results');
+  const { parseAgentResult } = await import('../domain/agent-result');
+  const { addQuestion, answerQuestion, getTask, pipelineForTask, submitClarificationAnswers } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = 'TASK-analysis-resume-with-test-owner';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+    ) VALUES(?, 'Concurrent Analysis resume', 'feature', 'in dev', 'analyst-agent', 1, 1, 1, 2, 1, '')
+  `).run(taskId);
+  db.prepare(`
+    INSERT INTO stories(task_id, story_index, title, directory)
+    VALUES(?, 1, 'Completed unit', 'story-001'), (?, 2, 'Clarified unit', 'story-002')
+  `).run(taskId, taskId);
+
+  const questionId = await addQuestion({
+    taskId,
+    storyIndex: 2,
+    actor: 'analyst-agent',
+    kind: 'analysis',
+    title: 'Confirm guide scope',
+    question: 'Should the guide expand its scope?',
+    decisionKey: 'guide-scope',
+    blockTask: true,
+  });
+  db.prepare("UPDATE tasks SET current_subagent = 'test-agent' WHERE task_id = ?").run(taskId);
+  await answerQuestion({ taskId, questionId, answer: 'Keep the existing scope.' });
+  await submitClarificationAnswers(taskId);
+
+  let detail = await getTask(taskId);
+  assert.equal(detail?.task.current_subagent, 'test-agent');
+  assert.equal(detail?.task.resume_pending, 0);
+  assert.deepEqual(
+    detail?.lanes.map((lane) => [lane.lane, lane.status, lane.current_agent, lane.resume_pending]),
+    [
+      ['analysis', 'runnable', 'analyst-agent', 1],
+      ['delivery', 'pending', null, 0],
+    ],
+  );
+  const resumed = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
+  assert.deepEqual([resumed.lane, resumed.pipeline, resumed.agent, resumed.storyIndex], ['analysis', 'resume', 'analyst-agent', 2]);
+
+  await applyAgentResult('run-concurrent-analysis-resume', resumed, parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'The answered scope decision is now reflected in the resolved specification.',
+    artifact: {
+      title: 'Resolved guide scope',
+      content: 'The guide keeps its existing scope according to the user answer.',
+    },
+    spec: {
+      goal: 'Keep the guide within its confirmed scope.',
+      scope: { included: ['Existing guide surface'], excluded: ['Unrelated pages'] },
+      behaviors: [{ scenario: 'The guide is displayed', expected: 'Only the confirmed scope is shown' }],
+      decisions: [{ key: 'guide-scope', decision: 'Keep the existing scope', rationale: 'User answer', source: 'user' }],
+      decisionTree: [{
+        key: 'guide-scope',
+        question: 'Should the guide expand its scope?',
+        impact: 'Changes the visible guide surface.',
+        options: [
+          { id: 'keep', label: 'Keep scope', consequences: ['No unrelated expansion'] },
+          { id: 'expand', label: 'Expand scope', consequences: ['Additional pages are included'] },
+        ],
+        status: 'resolved_from_context',
+        selectedOption: 'keep',
+        source: 'user',
+        evidence: ['The user answered: Keep the existing scope.'],
+      }],
+      ambiguities: [],
+      acceptanceCriteria: [{ id: 'AC-1', description: 'The guide remains scoped', oracle: 'Inspect the rendered guide' }],
+      verificationPlan: [{ criterionId: 'AC-1', kind: 'inspection', instruction: 'Inspect the guide scope' }],
+      dependencies: [],
+      changeBudget: { capabilities: ['Guide scope'], paths: [] },
+    },
+  })));
+
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.analysis_index, 2);
+  assert.equal(detail?.task.spec_resolved_index, 2);
+  assert.equal(detail?.task.resume_pending, 0);
+  assert.equal(detail?.storySpecs.find((spec) => spec.story_index === 2)?.status, 'resolved');
+  db.prepare(`
+    UPDATE tasks
+    SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle', current_subagent = NULL
+    WHERE task_id = ?
+  `).run(taskId);
 });
 
 test('acknowledges the current review report as read without an approval decision', async () => {
@@ -1444,6 +1538,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
   assert.equal(detail?.runtimeInputs[0]?.status, 'pending');
   await answerRuntimeInput({ taskId, requestId: detail!.runtimeInputs[0].request_id, answer: '#N/A' });
   await submitRuntimeInputs(taskId);
+  assert.equal((await getTask(taskId))?.task.resume_pending, 0);
   assert.deepEqual((await pipelineForTask(taskId))[0], {
     taskId,
     lane: 'delivery',
@@ -1491,6 +1586,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
   assert.equal(detail?.task.run_state, 'waiting_for_runtime_input');
   await answerRuntimeInput({ taskId, requestId: testInput.request_id, answer: '使用本地预览环境。' });
   await submitRuntimeInputs(taskId);
+  assert.equal((await getTask(taskId))?.task.resume_pending, 0);
   assert.equal((await pipelineForTask(taskId))[0]?.agent, 'test-agent');
   assert.equal((await pipelineForTask(taskId))[0]?.pipeline, 'resume');
 

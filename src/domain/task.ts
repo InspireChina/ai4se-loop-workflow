@@ -71,6 +71,9 @@ export function assertState(state: TaskState) {
   if (!(0 <= state.test_index && state.test_index <= state.dev_index && state.dev_index <= state.analysis_index && state.analysis_index <= state.total_stories)) {
     throw new Error('无效交付单元游标：必须满足 verification <= implementation <= analysis <= total');
   }
+  if (state.resume_pending && ['analyst-agent', 'dev-agent', 'test-agent'].includes(state.current_subagent || '')) {
+    throw new Error('Analysis 与 Delivery 的恢复所有权必须保存在对应 Lane，不能占用任务级恢复标记');
+  }
   if (state.spec_resolved_index !== state.analysis_index) throw new Error('方案分析进度必须对应已解决的 Slice Spec');
   if (state.agile_status === 'ready for dev' && state.total_stories === 0) throw new Error('进入单元推进前必须已有交付单元');
   if (state.agile_status === 'in review' && !(state.total_stories > 0 && state.test_index === state.dev_index && state.dev_index === state.analysis_index && state.analysis_index === state.total_stories)) {
@@ -148,9 +151,8 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
   if (status === 'done' || status === 'cancelled' || status === 'blocked' || status === 'ready_to_close' || task.run_state !== 'runnable') return null;
   if (task.resume_pending) {
     const agent = task.current_subagent!;
-    if (agent === 'dev-agent' && !codeSlotAvailable) return null;
-    const storyIndex = agent === 'analyst-agent' && a < total ? a + 1 : agent === 'dev-agent' && d < a ? d + 1 : agent === 'test-agent' && t < d ? t + 1 : null;
-    return line('resume', agent, storyIndex, '读取人工输入，并安全恢复需求推进');
+    if (['analyst-agent', 'dev-agent', 'test-agent'].includes(agent)) return null;
+    return line('resume', agent, null, '读取人工输入，并安全恢复任务级流程');
   }
   // A task-level rewind can preserve `in dev` temporarily to retain the code
   // slot. In that state the Harness-selected control Agent is authoritative;

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertUpdate, nextDelegation, type TaskState } from './task';
+import { assertState, assertUpdate, nextDelegation, type TaskState } from './task';
 
 function resumedDevTask(): TaskState {
   return {
@@ -13,14 +13,10 @@ function resumedDevTask(): TaskState {
   };
 }
 
-test('queues a resumed dev agent while another task owns the code slot', () => {
+test('does not dispatch lane agents from the legacy task-level resume owner', () => {
+  assert.throws(() => assertState(resumedDevTask()), /恢复所有权必须保存在对应 Lane/);
   assert.equal(nextDelegation(resumedDevTask(), false), null);
-});
-
-test('dispatches a resumed dev agent after the code slot is released', () => {
-  const delegation = nextDelegation(resumedDevTask(), true);
-  assert.equal(delegation?.agent, 'dev-agent');
-  assert.equal(delegation?.storyIndex, 4);
+  assert.equal(nextDelegation(resumedDevTask(), true), null);
 });
 
 test('Agents cannot create system blocks, while the Harness can record one', () => {
