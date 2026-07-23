@@ -21,13 +21,19 @@ import {
 
 export const dynamic = 'force-dynamic';
 
-const taskSteps = [
-  { label: '需求整理', statuses: ['backlog', 'in repro'] },
+const standardTaskSteps = [
+  { label: '需求整理', statuses: ['backlog'] },
   { label: '交付拆分', statuses: ['in plan'] },
   { label: '单元推进', statuses: ['ready for dev', 'in dev'] },
   { label: '整体验收', statuses: ['in review'] },
   { label: '阅读结卡', statuses: ['ready_to_close'] },
   { label: '完成', statuses: ['done'] },
+] as const;
+
+const bugTaskSteps = [
+  { label: '需求整理', statuses: ['backlog'] },
+  { label: '问题复现', statuses: ['in repro'] },
+  ...standardTaskSteps.slice(1),
 ] as const;
 
 function stepDetail(task: { agile_status: string; run_state: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number }, lanes: { lane: string; status: string; current_agent: string | null }[]) {
@@ -69,8 +75,9 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const pipeline = await pipelineForTask(taskId);
   const contextChat = await getTaskContextChat(taskId);
   const unansweredQuestions = questions.filter((question) => question.status === 'pending');
-  const waitingForRequirementAnswers = task.run_state === 'waiting_for_answers' && task.current_subagent === 'backlog-agent';
-  const waitingForAnswers = waitingForRequirementAnswers || analysisLane.status === 'waiting_for_answers';
+  const waitingForControlAnswers = task.run_state === 'waiting_for_answers'
+    && (task.current_subagent === 'backlog-agent' || task.current_subagent === 'repro-agent');
+  const waitingForAnswers = waitingForControlAnswers || analysisLane.status === 'waiting_for_answers';
   const unansweredRuntimeInputs = runtimeInputs.filter((input) => input.status === 'pending');
   const waitingRuntimeLanes = lanes.filter((lane) => lane.status === 'waiting_for_runtime_input');
   const waitingForRuntimeInput = waitingRuntimeLanes.length > 0;
@@ -79,6 +86,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const blockingFeedback = documentComments.filter((comment) => comment.feedback_status !== 'resolved');
   const deliveryDocuments = documents.filter((document) => document.document_id !== reviewDocument?.document_id);
   const progressStatus = task.agile_status === 'blocked' ? task.resume_status || 'backlog' : task.agile_status;
+  const taskSteps = task.item_type === 'bug' || progressStatus === 'in repro' ? bugTaskSteps : standardTaskSteps;
   const currentStep = taskSteps.findIndex((step) => step.statuses.some((status) => status === progressStatus));
   const currentSpecs = storySpecs.filter((spec) => spec.status !== 'superseded');
 
@@ -282,11 +290,11 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
 
         <section className="task-section">
           <div className="section-head">
-            <h2>设计澄清</h2>
+            <h2>人工对齐</h2>
             <small>{questions.length} 个问题</small>
           </div>
           <div className="question-list">
-            {questions.length === 0 ? <div className="card empty">当前没有待回答的设计歧义。</div> : questions.map((question) => <article className="question card" key={question.question_id}>
+            {questions.length === 0 ? <div className="card empty">当前没有待回答的对齐问题。</div> : questions.map((question) => <article className="question card" key={question.question_id}>
               <div className="question-title">
                 <AlertTriangle size={18}/>
                 <div>
@@ -312,7 +320,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           </div>
           {waitingForAnswers && unansweredQuestions.length === 0 && <form action={submitClarificationAnswersAction} className="release-block">
             <input type="hidden" name="taskId" value={task.task_id}/>
-            <button className="button success">提交全部回答并交回方案分析 Agent</button>
+            <button className="button success">提交全部回答并交回 {agentLabel(waitingForControlAnswers ? task.current_subagent : 'analyst-agent')}</button>
           </form>}
         </section>
 

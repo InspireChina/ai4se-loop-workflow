@@ -269,15 +269,23 @@ type ApplyOutcome = 'advanced' | 'blocked' | 'rewound' | 'discarded';
 async function applyResultEffects(delegation: DelegationEnvelope, result: AgentResult, sourceResultId?: string, sourceExecutionId?: string): Promise<ApplyOutcome> {
   await ensureCodeSlotForDelegation(delegation, result);
 
-  const canAskAlignmentQuestions = delegation.agent === 'backlog-agent' || delegation.agent === 'analyst-agent';
+  const canAskAlignmentQuestions = delegation.agent === 'backlog-agent' || delegation.agent === 'analyst-agent' || delegation.agent === 'repro-agent';
   if (result.questions.length && !canAskAlignmentQuestions) {
     throw new Error(`${delegation.agent} 不允许创建设计澄清问题；运行所需信息请使用 runtimeInputs`);
+  }
+  if (delegation.agent === 'repro-agent' && result.runtimeInputs.length) {
+    throw new Error('repro-agent 未复现时必须通过 questions 请求人工对齐，不能使用 runtimeInputs');
   }
   if (result.questions.length && result.runtimeInputs.length) throw new Error('同一次结果不能混合设计澄清问题和运行信息请求');
   if (result.runtimeInputs.length) {
     if (result.outcome !== 'needs_input') throw new Error('包含 runtimeInputs 时 outcome 必须为 needs_input');
     await saveRuntimeInputs(delegation, result, sourceExecutionId);
     return 'blocked' as const;
+  }
+  if (delegation.agent === 'repro-agent' && result.outcome === 'needs_input') {
+    if (result.reproVerdict !== 'not_reproduced' || !result.artifact || !result.questions.length || result.route) {
+      throw new Error('未复现问题时必须保存证据、请求人工对齐且不能进入后续路由');
+    }
   }
   const hasTestFailureVerdict = delegation.agent === 'test-agent' && result.verdict === 'failed';
   if (result.outcome !== 'completed' && !(canAskAlignmentQuestions && result.questions.length) && !hasTestFailureVerdict) {
@@ -388,7 +396,14 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     }
     case 'repro-agent': {
       requireArtifact(result, delegation.agent);
-      if (result.route !== 'plan') throw new Error('repro-agent 完成后必须 route=plan');
+      if (result.reproVerdict === 'not_reproduced') {
+        if (result.outcome !== 'needs_input' || !result.questions.length) throw new Error('未复现问题时必须请求人工对齐');
+        if (result.route) throw new Error('未复现问题时不能进入后续路由');
+        await saveQuestions(delegation, result);
+        return 'blocked' as const;
+      }
+      if (result.reproVerdict !== 'reproduced') throw new Error('repro-agent 结果缺少 reproVerdict');
+      if (result.outcome !== 'completed' || result.route !== 'plan') throw new Error('只有成功复现后才能 route=plan');
       const detail = await getTask(delegation.taskId);
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
       const retainsCodeSlot = detail.task.agile_status === 'in dev' && detail.task.total_stories === 0;

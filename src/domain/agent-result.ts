@@ -152,6 +152,7 @@ export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object
   runtimeInputs: z.array(runtimeInputSchema).max(50).optional().default([]),
   classification: z.enum(['feature', 'bug', 'tech', 'intake', 'other']).optional(),
   route: z.enum(['plan', 'repro']).optional(),
+  reproVerdict: z.enum(['reproduced', 'not_reproduced']).optional(),
   deliveryUnits: z.array(deliveryUnitSchema).max(50).optional(),
   spec: sliceSpecSchema.optional(),
   // Read-only compatibility for results queued before the terminology change.
@@ -245,9 +246,12 @@ export function assertSliceSpecDecisionCoverage(spec: SliceSpec, questions?: Age
 }
 
 export function assertAgentResultRoleContract(result: AgentResult, agent: string) {
-  const canAskAlignmentQuestions = agent === 'backlog-agent' || agent === 'analyst-agent';
+  const canAskAlignmentQuestions = agent === 'backlog-agent' || agent === 'analyst-agent' || agent === 'repro-agent';
   if (agent === 'feedback-agent' && (result.questions.length || result.runtimeInputs.length)) {
     throw new Error('feedback-agent 不能创建设计问题或运行信息请求');
+  }
+  if (agent === 'repro-agent' && result.runtimeInputs.length) {
+    throw new Error('repro-agent 未复现时必须通过 questions 请求人工对齐，不能使用 runtimeInputs');
   }
   if (result.questions.length && !canAskAlignmentQuestions) {
     throw new Error(`${agent} 不允许创建设计澄清问题；运行所需信息请使用 runtimeInputs`);
@@ -259,6 +263,11 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
   if (result.runtimeInputs.length) {
     if (result.outcome !== 'needs_input') throw new Error('包含 runtimeInputs 时 outcome 必须为 needs_input');
     return;
+  }
+  if (agent === 'repro-agent' && result.outcome === 'needs_input') {
+    if (result.reproVerdict !== 'not_reproduced' || !result.artifact || !result.questions.length || result.route) {
+      throw new Error('未复现问题时必须保存证据、请求人工对齐且不能进入后续路由');
+    }
   }
   if (agent === 'analyst-agent' && result.outcome === 'needs_input' && !result.questions.length) {
     throw new Error('方案分析 Agent 返回 needs_input 时必须提供与未决决策一一对应的 questions');
@@ -280,7 +289,13 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
       break;
     case 'repro-agent':
       if (!result.artifact) throw new Error('repro-agent 结果缺少 artifact');
-      if (result.route !== 'plan') throw new Error('repro-agent 完成后必须 route=plan');
+      if (result.reproVerdict === 'not_reproduced') {
+        if (result.outcome !== 'needs_input' || !result.questions.length) throw new Error('未复现问题时必须请求人工对齐');
+        if (result.route) throw new Error('未复现问题时不能进入后续路由');
+        break;
+      }
+      if (result.reproVerdict !== 'reproduced') throw new Error('repro-agent 结果缺少 reproVerdict');
+      if (result.outcome !== 'completed' || result.route !== 'plan') throw new Error('只有成功复现后才能 route=plan');
       break;
     case 'test-agent':
       if (!result.verdict) throw new Error('验证 Agent 结果缺少 verdict');

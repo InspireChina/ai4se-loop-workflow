@@ -1339,15 +1339,17 @@ export async function submitClarificationAnswers(taskId: string) {
   const task = fetchTask(db, taskId);
   if (!task) throw new Error('需求不存在');
   const lane = taskLaneInDb(db, task, 'analysis');
-  const requirementLevel = task.run_state === 'waiting_for_answers'
-    && task.current_subagent === 'backlog-agent';
-  const analysisLevel = !requirementLevel && lane.status === 'waiting_for_answers';
-  if (!requirementLevel && !analysisLevel) throw new Error('当前需求不在等待澄清回答状态');
-  const pending = requirementLevel
+  const controlAgent = task.run_state === 'waiting_for_answers'
+    && (task.current_subagent === 'backlog-agent' || task.current_subagent === 'repro-agent')
+    ? task.current_subagent
+    : null;
+  const analysisLevel = !controlAgent && lane.status === 'waiting_for_answers';
+  if (!controlAgent && !analysisLevel) throw new Error('当前需求不在等待澄清回答状态');
+  const pending = controlAgent
     ? (db.prepare(`
         SELECT COUNT(*) AS count FROM questions
-        WHERE task_id = ? AND story_index IS NULL AND source_agent = 'backlog-agent' AND status = 'pending'
-      `).get(taskId) as { count: number }).count
+        WHERE task_id = ? AND story_index IS NULL AND source_agent = ? AND status = 'pending'
+      `).get(taskId, controlAgent) as { count: number }).count
     : (db.prepare(`
         SELECT COUNT(*) AS count FROM questions
         WHERE task_id = ? AND story_index = ? AND source_agent = 'analyst-agent' AND status = 'pending'
@@ -1362,9 +1364,11 @@ export async function submitClarificationAnswers(taskId: string) {
           last_actor = 'human', updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(
-      requirementLevel
+      controlAgent === 'backlog-agent'
         ? '用户回答已提交，交回需求梳理 Agent 更新需求边界'
-        : '用户回答已提交，交回方案分析 Agent 重建完整规格',
+        : controlAgent === 'repro-agent'
+          ? '用户回答已提交，交回问题复现 Agent 重新复现并核对证据'
+          : '用户回答已提交，交回方案分析 Agent 重建完整规格',
       taskId,
     );
     if (analysisLevel) {
@@ -1382,7 +1386,11 @@ export async function submitClarificationAnswers(taskId: string) {
       taskId,
       'human',
       'ClarificationAnswersSubmitted',
-      requirementLevel ? '提交全部需求级澄清回答，等待 AI 更新需求边界。' : '提交全部单元级澄清回答，等待 AI 重建规格。',
+      controlAgent === 'backlog-agent'
+        ? '提交全部需求级澄清回答，等待 AI 更新需求边界。'
+        : controlAgent === 'repro-agent'
+          ? '提交全部复现对齐回答，等待 AI 重新复现并核对证据。'
+          : '提交全部单元级澄清回答，等待 AI 重建规格。',
     );
     db.exec('COMMIT');
   } catch (error) {
@@ -1507,12 +1515,23 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
     && before.current_subagent === 'backlog-agent'
     && before.total_stories === 0
     && (changes.current_subagent === 'story-splitter-agent' || changes.current_subagent === 'repro-agent');
+  const completingReproClarification = actor === 'repro-agent'
+    && before.current_subagent === 'repro-agent'
+    && changes.current_subagent === 'story-splitter-agent'
+    && changes.agile_status === 'in plan';
   if (completingRequirementClarification) {
     const pending = (db.prepare(`
       SELECT COUNT(*) AS count FROM questions
       WHERE task_id = ? AND story_index IS NULL AND source_agent = 'backlog-agent' AND status = 'pending'
     `).get(taskId) as { count: number }).count;
     if (pending) throw new Error('仍有未回答的需求级产品歧义，不能完成需求梳理');
+  }
+  if (completingReproClarification) {
+    const pending = (db.prepare(`
+      SELECT COUNT(*) AS count FROM questions
+      WHERE task_id = ? AND story_index IS NULL AND source_agent = 'repro-agent' AND status = 'pending'
+    `).get(taskId) as { count: number }).count;
+    if (pending) throw new Error('仍有未回答的复现对齐问题，不能进入交付拆分');
   }
   if (changes.analysis_index !== undefined && changes.analysis_index > before.analysis_index && prospective.spec_resolved_index < changes.analysis_index) {
     throw new Error(`交付单元 ${changes.analysis_index} 尚无已解决的 Slice Spec`);
@@ -1572,6 +1591,14 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
         WHERE task_id = ? AND story_index IS NULL AND source_agent = 'backlog-agent' AND status = 'answered'
       `).run(taskId);
       if (resolved.changes) addEvent(db, taskId, 'backlog-agent', 'RequirementClarificationsResolved', '需求级澄清回答已纳入最新需求上下文。');
+    }
+    if (completingReproClarification) {
+      const resolved = db.prepare(`
+        UPDATE questions
+        SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ? AND story_index IS NULL AND source_agent = 'repro-agent' AND status = 'answered'
+      `).run(taskId);
+      if (resolved.changes) addEvent(db, taskId, 'repro-agent', 'ReproClarificationsResolved', '复现对齐回答已纳入最新复现证据。');
     }
     const after = fetchTask(db, taskId);
     if (after) refreshTaskLaneStatesInDb(db, after);

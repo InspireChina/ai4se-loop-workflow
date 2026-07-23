@@ -225,12 +225,13 @@ async function buildPrompt(delegation: DelegationEnvelope) {
       outcome: 'completed | needs_input | failed',
       summary: '本步骤简要结论',
       artifact: delegation.agent === 'feedback-agent' ? undefined : { title: '文档标题', content: 'Markdown 正文' },
-      questions: delegation.agent === 'backlog-agent' || delegation.agent === 'analyst-agent' ? [
+      questions: ['backlog-agent', 'analyst-agent', 'repro-agent'].includes(delegation.agent) ? [
         { decisionKey: 'output-mode', title: '确认输出方式', question: '结果应使用结构化输出还是可读文本？', why: '该选择会改变用户可观察行为和兼容契约', recommendation: '使用结构化输出', recommendationReason: '更容易稳定消费和验证', alternatives: [{ id: 'structured', label: '结构化输出', consequences: ['调用方可以稳定解析'] }, { id: 'text', label: '可读文本', consequences: ['便于直接阅读但解析契约较弱'] }], dependsOn: [] },
       ] : undefined,
       runtimeInputs: delegation.agent === 'feedback-agent' ? undefined : [{ title: '缺少的运行信息', question: '需要用户补充的非产品信息', why: '为什么无法从仓库或环境推导', recommendation: '安全的推荐答案或处理方式' }],
       classification: 'feature | bug | tech | intake | other',
       route: 'plan | repro',
+      reproVerdict: delegation.agent === 'repro-agent' ? 'reproduced | not_reproduced' : undefined,
       deliveryUnits: [{ title: '可独立交付和验收的最小业务闭环' }],
       spec: delegation.agent === 'analyst-agent' ? {
         goal: '当前交付单元的用户可观察目标',
@@ -261,7 +262,7 @@ async function buildPrompt(delegation: DelegationEnvelope) {
       tests: [{ command: '测试命令', passed: true, summary: '结果' }],
     }, null, 2),
     '',
-    'questions 仅供需求梳理 Agent 提出影响目标、范围、路由或交付边界的需求级产品问题，以及方案分析 Agent 提出交付单元内的产品决策和重大技术决策；其他 Agent 不得使用。需求梳理 Agent 或方案分析 Agent 提问时必须 outcome=needs_input。任何 Agent 若缺少无法从代码、仓库、文档和环境推导的非敏感运行信息，使用 runtimeInputs 并返回 outcome=needs_input。不要通过 runtimeInputs 询问设计决策、审批、密钥或可自行探索的事实。',
+    'questions 仅供需求梳理 Agent 提出影响目标、范围、路由或交付边界的需求级产品问题，方案分析 Agent 提出交付单元内的产品决策和重大技术决策，以及问题复现 Agent 在完成合理尝试后仍未复现时请求人工对齐；其他 Agent 不得使用。以上 Agent 提问时必须 outcome=needs_input。问题复现 Agent 未复现时还必须返回 reproVerdict=not_reproduced 且不得返回 route，并且必须使用 questions 而不是 runtimeInputs；只有 reproVerdict=reproduced 才能 route=plan。除这一 Repro 特例外，Agent 若缺少无法从代码、仓库、文档和环境推导的非敏感运行信息，使用 runtimeInputs 并返回 outcome=needs_input。不要通过 runtimeInputs 询问设计决策、审批、密钥或可自行探索的事实。',
   ].join('\n');
   return { prompt, runtime };
 }

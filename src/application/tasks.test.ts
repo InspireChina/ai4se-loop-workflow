@@ -289,6 +289,72 @@ test('pauses requirement intake for user alignment and resumes the same backlog 
   assert.equal((await pipelineForTask(taskId))[0]?.agent, 'story-splitter-agent');
 });
 
+test('keeps an unreproduced Bug in Repro until a human aligns the missing conditions', async () => {
+  const { applyAgentResult } = await import('./agent-results');
+  const { parseAgentResult } = await import('../domain/agent-result');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { answerQuestion, createTask, getTask, pipelineForTask, submitClarificationAnswers } = await import('./tasks');
+  const taskId = await createTask({ title: 'Bug must be reproduced before planning' });
+  const db = await databaseConnection();
+  db.prepare(`
+    UPDATE tasks
+    SET item_type = 'bug', agile_status = 'in repro', current_subagent = 'repro-agent'
+    WHERE task_id = ?
+  `).run(taskId);
+
+  const repro = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
+  assert.deepEqual([repro.pipeline, repro.agent], ['repro', 'repro-agent']);
+  const blocked = await applyAgentResult('run-repro-not-reproduced', repro, parseAgentResult(JSON.stringify({
+    outcome: 'needs_input',
+    summary: 'The reported failure did not occur with the available entry point, data, and environment.',
+    artifact: {
+      title: 'Unsuccessful reproduction evidence',
+      content: 'Expected, actual, environment, attempted steps, observations, and excluded conditions.',
+    },
+    reproVerdict: 'not_reproduced',
+    questions: [{
+      title: '确认问题发生条件',
+      question: '请确认问题发生时使用的入口、数据和环境，并指出与当前复现条件的差异。',
+      why: '当前没有观察到报告中的行为，无法确认修复目标。',
+      recommendation: '提供最接近问题发生时的入口、样例数据和环境信息。',
+    }],
+  })));
+  assert.equal(blocked, 'blocked');
+
+  let detail = await getTask(taskId);
+  const question = detail?.questions.find((item) => item.source_agent === 'repro-agent');
+  assert.equal(detail?.task.agile_status, 'in repro');
+  assert.equal(detail?.task.run_state, 'waiting_for_answers');
+  assert.equal(detail?.task.current_subagent, 'repro-agent');
+  assert.equal(question?.status, 'pending');
+  assert.deepEqual(await pipelineForTask(taskId), []);
+
+  await answerQuestion({
+    taskId,
+    questionId: question!.question_id,
+    answer: '问题只出现在管理员入口，并且需要使用一条已归档的数据。',
+  });
+  await submitClarificationAnswers(taskId);
+  const resumed = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
+  assert.deepEqual([resumed.pipeline, resumed.agent, resumed.storyIndex], ['resume', 'repro-agent', null]);
+
+  await applyAgentResult('run-repro-after-alignment', resumed, parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'The issue is now reproduced through the administrator entry point with archived data.',
+    artifact: {
+      title: 'Confirmed reproduction evidence',
+      content: 'Expected, actual, exact steps, archived data condition, evidence, and root-cause scope.',
+    },
+    reproVerdict: 'reproduced',
+    route: 'plan',
+  })));
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'in plan');
+  assert.equal(detail?.task.current_subagent, 'story-splitter-agent');
+  assert.equal(detail?.questions.find((item) => item.question_id === question?.question_id)?.status, 'resolved');
+  assert.ok(detail?.events.some((event) => event.event_type === 'ReproClarificationsResolved'));
+});
+
 test('submits answered analysis clarifications back to the analyst without approving or advancing', async () => {
   const { addQuestion, answerQuestion, getTask, submitClarificationAnswers } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
@@ -1160,6 +1226,7 @@ test('lets Feedback Agent choose only a stage while the Harness routes context a
         outcome: 'completed',
         summary: '已复现问题并定位根因。',
         artifact: { title: 'Bug repro', content: 'Reproduction and root-cause evidence.' },
+        reproVerdict: 'reproduced',
         route: 'plan',
         feedbackResolutions: [{ commentId, summary: '复现与根因证据已补齐。', evidence: ['repro document'] }],
       }));
@@ -1809,7 +1876,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 13);
+  assert.equal(original.profile.prompt_seed_revision, 14);
   assert.ok(original.currentPrompt.content.length > 800);
   assert.match(original.currentPrompt.content, /# 角色目标/);
   assert.match(original.currentPrompt.content, /# 完成条件/);
@@ -1827,7 +1894,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
   await ensureAgentRuntimeWorkspace();
   const upgradedSeed = await getAgentProfile('backlog-agent');
-  assert.equal(upgradedSeed.profile.prompt_seed_revision, 13);
+  assert.equal(upgradedSeed.profile.prompt_seed_revision, 14);
   assert.equal(upgradedSeed.currentPrompt.source, 'seed');
   assert.ok(upgradedSeed.currentPrompt.version > 1);
   assert.match(upgradedSeed.currentPrompt.content, /# 输入与证据优先级/);
@@ -1852,7 +1919,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const preservedHumanPrompt = await getAgentProfile('dev-agent');
   assert.equal(preservedHumanPrompt.currentPrompt.version, promptVersion);
   assert.equal(preservedHumanPrompt.currentPrompt.source, 'human');
-  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 13);
+  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 14);
 
   const localPrompt = `${promptContent}\n- 本地文件修改也必须形成版本。`;
   writeFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), localPrompt);

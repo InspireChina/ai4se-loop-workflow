@@ -78,7 +78,7 @@ test('accepts a batch of more than ten design questions', () => {
   assert.equal(result.questions.length, 12);
 });
 
-test('allows only requirement intake and analysis agents to ask product questions', () => {
+test('allows requirement intake, analysis, and unsuccessful repro agents to ask alignment questions', () => {
   const requirementQuestion = parseAgentResult(JSON.stringify({
     outcome: 'needs_input',
     summary: 'The requested boundary changes how the requirement should be split.',
@@ -100,6 +100,38 @@ test('allows only requirement intake and analysis agents to ask product question
   assert.throws(
     () => assertAgentResultRoleContract({ ...requirementQuestion, outcome: 'completed' }, 'backlog-agent'),
     /outcome 必须为 needs_input/,
+  );
+
+  const reproQuestion = parseAgentResult(JSON.stringify({
+    outcome: 'needs_input',
+    summary: 'The reported behavior did not occur under the available conditions.',
+    artifact: { title: 'Repro attempt', content: 'Recorded environment, steps, observations, and exclusions.' },
+    reproVerdict: 'not_reproduced',
+    questions: [{
+      title: '确认问题发生条件',
+      question: '请确认发生问题时使用的入口、数据和环境与本次复现条件有何不同？',
+      why: '当前条件下没有观察到报告中的行为，不能安全进入开发。',
+    }],
+  }));
+  assert.doesNotThrow(() => assertAgentResultRoleContract(reproQuestion, 'repro-agent'));
+  assert.throws(
+    () => assertAgentResultRoleContract({ ...reproQuestion, questions: [] }, 'repro-agent'),
+    /请求人工对齐/,
+  );
+});
+
+test('allows Repro to advance only after the issue is reproduced', () => {
+  const reproduced = parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'The issue is reproduced with stable evidence.',
+    artifact: { title: 'Repro evidence', content: 'Expected, actual, steps, evidence, and root-cause scope.' },
+    reproVerdict: 'reproduced',
+    route: 'plan',
+  }));
+  assert.doesNotThrow(() => assertAgentResultRoleContract(reproduced, 'repro-agent'));
+  assert.throws(
+    () => assertAgentResultRoleContract({ ...reproduced, reproVerdict: undefined }, 'repro-agent'),
+    /缺少 reproVerdict/,
   );
 });
 

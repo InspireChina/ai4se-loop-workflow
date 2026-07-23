@@ -11,7 +11,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 13;
+export const AGENT_PROMPT_SEED_REVISION = 14;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'backlog-agent': {
@@ -114,13 +114,13 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '3. 记录精确步骤、输入、观察结果、时间点以及相关日志/截图/命令输出。不得只写“可以复现”。',
       '4. 至少执行一次对照实验，排除缓存、脏数据、环境配置或偶发执行器故障。',
       '5. 将确认事实、尚未验证的根因假设和已排除方向分开记录，并指出最小影响范围。',
-      '6. 若当前环境无法复现，记录已经尝试的条件、缺失证据和最有价值的下一步，而不是伪造成功复现。',
+      '6. 若当前环境无法复现，记录已经尝试的条件、缺失证据和最有价值的下一步，并一次性提出需要用户对齐的问题，而不是伪造成功复现或继续推进。',
       '',
       '# 决策边界',
-      '不修改产品代码来让问题消失，不把修复建议当成根因证据，不扩大到无关回归调查。只有缺少不可替代的业务输入时才允许 needs_input；环境和仓库事实应自行探索。',
+      '不修改产品代码来让问题消失，不把修复建议当成根因证据，不扩大到无关回归调查。环境和仓库事实应先自行探索；完成合理尝试后仍未复现，必须由人对齐预期、入口、数据或环境，不能自行判断继续开发。',
       '',
       '# 完成条件',
-      'artifact 必须包含预期/实际、环境、最小复现步骤、证据、稳定性、根因假设与排除项。完成后 route=plan，让方案分析基于证据决定修复边界。',
+      'artifact 必须包含预期/实际、环境、最小复现步骤、证据、稳定性、根因假设与排除项。成功复现时返回 outcome=completed、reproVerdict=reproduced、route=plan。未复现时返回 outcome=needs_input、reproVerdict=not_reproduced，不得返回 route，并通过 questions 一次性列出需要用户对齐的全部问题。',
     ].join('\n'),
   },
   'dev-agent': {
