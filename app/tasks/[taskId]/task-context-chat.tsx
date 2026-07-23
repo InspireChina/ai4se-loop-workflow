@@ -81,7 +81,7 @@ export function TaskContextChat({
       {messages.length === 0 && <div className="context-chat-empty">
         <Bot size={22}/>
         <strong>查询上下文，或完成一个轻量调整</strong>
-        <p>Dev/Test 运行时只读；工作区空闲时可直接修改不违背需求的 UI、样式和 wording，并提交自己的代码。</p>
+        <p>当前需求的 Dev/Test 运行时只读；否则可直接修改不违背需求的 UI、样式和 wording，并提交自己的代码。其他需求的状态不影响本对话。</p>
       </div>}
       {messages.map((message) => <article className={`context-chat-message ${message.role}`} key={message.messageId}>
         <small>{message.role === 'user' ? '你' : '上下文 Agent'}</small>

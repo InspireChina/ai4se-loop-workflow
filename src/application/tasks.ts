@@ -1918,7 +1918,7 @@ function activeLaneExecutions(db: Awaited<ReturnType<typeof databaseConnection>>
   `).all() as ActiveLaneExecution[];
 }
 
-function laneLine(task: Task, lane: TaskLane, codeSlotAvailable: boolean, deliveryWorkspaceAvailable = true): Delegation | null {
+function laneLine(task: Task, lane: TaskLane, codeSlotAvailable: boolean, deliveryTaskAvailable = true): Delegation | null {
   const line = (pipeline: string, agent: string, storyIndex: number | null, resource: 'none' | 'browser', description: string): Delegation => ({
     taskId: task.task_id,
     lane: lane.lane,
@@ -1943,7 +1943,7 @@ function laneLine(task: Task, lane: TaskLane, codeSlotAvailable: boolean, delive
       `分析交付单元 ${task.analysis_index + 1} 的需求和方案`,
     );
   }
-  if (!deliveryWorkspaceAvailable) return null;
+  if (!deliveryTaskAvailable) return null;
   if (lane.resume_pending && lane.current_agent) {
     const storyIndex = lane.current_story_index || (lane.current_agent === 'test-agent' ? task.test_index + 1 : task.dev_index + 1);
     if (lane.current_agent === 'dev-agent' && !codeSlotAvailable) return null;
@@ -2005,13 +2005,13 @@ export async function pipelineForTask(taskId: string): Promise<Delegation[]> {
   if (feedback && feedbackCanDispatch(task, lanes)) return active.length ? [] : [feedbackDelegation(task, feedback)];
   if (task.agile_status === 'blocked') return [];
   const otherActive = db.prepare(`${taskSelect} WHERE task_id != ?`).all(taskId) as Task[];
-  const deliveryWorkspaceAvailable = !taskContextChatIsRunning(db);
+  const deliveryTaskAvailable = !taskContextChatIsRunning(db, taskId);
   const codeSlotAvailable = !otherActive.some(occupiesCodeSlot) && !allActive.some((item) => item.task_id !== taskId && item.agent === 'dev-agent');
   const control = controlLine(task, codeSlotAvailable, lanes);
   if (control) return active.length ? [] : [control];
   const lines = lanes
     .filter((lane) => !active.some((item) => item.lane === lane.lane))
-    .map((lane) => laneLine(task, lane, codeSlotAvailable, deliveryWorkspaceAvailable))
+    .map((lane) => laneLine(task, lane, codeSlotAvailable, deliveryTaskAvailable))
     .filter((line): line is Delegation => Boolean(line));
   return lines;
 }
@@ -2141,7 +2141,6 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
     updated_at DESC`).all() as Task[];
   const active = activeLaneExecutions(db);
   const activeKeys = new Set(active.map((item) => `${item.task_id}:${item.lane}`));
-  const deliveryWorkspaceAvailable = !taskContextChatIsRunning(db);
   let analysisSlots = Math.max(0, 4 - active.filter((item) => item.lane === 'analysis').length);
   let codeAvailable = !tasks.some(occupiesCodeSlot) && !active.some((item) => item.agent === 'dev-agent');
   const readyDev = !codeAvailable ? null : tasks.find((task) => task.agile_status === 'ready for dev' && task.dev_index < task.analysis_index)?.task_id || null;
@@ -2149,6 +2148,7 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
   const lines: DelegationEnvelope[] = [];
   const analysisCandidates: { task: Task; lane: TaskLane }[] = [];
   for (const task of tasks) {
+    const deliveryTaskAvailable = !taskContextChatIsRunning(db, task.task_id);
     refreshTaskLaneStatesInDb(db, task);
     const lanes = taskLanesInDb(db, task);
     const taskCodeAvailable = occupiesCodeSlot(task) || (codeAvailable && (!readyDev || task.task_id === readyDev));
@@ -2168,10 +2168,10 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
       continue;
     }
     const analysis = lanes.find((lane) => lane.lane === 'analysis');
-    if (analysis && !activeKeys.has(`${task.task_id}:analysis`) && laneLine(task, analysis, taskCodeAvailable, deliveryWorkspaceAvailable)) analysisCandidates.push({ task, lane: analysis });
+    if (analysis && !activeKeys.has(`${task.task_id}:analysis`) && laneLine(task, analysis, taskCodeAvailable, deliveryTaskAvailable)) analysisCandidates.push({ task, lane: analysis });
     const delivery = lanes.find((lane) => lane.lane === 'delivery');
     if (!delivery || activeKeys.has(`${task.task_id}:delivery`)) continue;
-    const deliveryLine = laneLine(task, delivery, taskCodeAvailable, deliveryWorkspaceAvailable);
+    const deliveryLine = laneLine(task, delivery, taskCodeAvailable, deliveryTaskAvailable);
     if (!deliveryLine) continue;
     if (deliveryLine.resource === 'browser' && browserUsed) continue;
     if (deliveryLine.resource === 'browser') browserUsed = true;
@@ -2180,7 +2180,8 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
   }
   for (const candidate of analysisCandidates.sort(compareAnalysisCandidates)) {
     if (!analysisSlots) break;
-    const line = laneLine(candidate.task, candidate.lane, true, deliveryWorkspaceAvailable);
+    const deliveryTaskAvailable = !taskContextChatIsRunning(db, candidate.task.task_id);
+    const line = laneLine(candidate.task, candidate.lane, true, deliveryTaskAvailable);
     if (!line) continue;
     lines.push(toEnvelope(candidate.task, line));
     analysisSlots -= 1;

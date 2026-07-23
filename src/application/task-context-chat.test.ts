@@ -38,7 +38,7 @@ test('keeps one executor-bound context chat per task and persists its transcript
   });
 });
 
-test('switches to the read-only prompt while Dev or Test is running', async () => {
+test('uses only the current task Dev or Test execution to choose the Chat mode', async () => {
   const { createTask } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const { beginTaskContextChatTurn, completeTaskContextChatTurn } = await import('./task-context-chat');
@@ -52,20 +52,37 @@ test('switches to the read-only prompt while Dev or Test is running', async () =
     ) VALUES('EXEC-chat-dev', 'RUN-chat-dev', ?, 'dev-agent', 'dev', 'chat-dev-key', 1, 'running', 'hash', '{}')
   `).run(devTaskId);
   const claimed = await beginTaskContextChatTurn(taskId, 'Change this button label', 'codex');
-  assert.equal(claimed.writeAllowed, false);
+  assert.equal(claimed.writeAllowed, true);
   await completeTaskContextChatTurn({
     sessionId: claimed.session.sessionId,
-    content: 'Dev is active, so this turn is read-only.',
+    content: 'Another task does not affect this lightweight change.',
     providerSessionId: 'codex-session-1',
   });
+
+  db.prepare(`
+    INSERT INTO execution_attempts(
+      execution_id, run_id, task_id, agent, pipeline, delegation_key,
+      attempt, status, input_hash, input_json
+    ) VALUES('EXEC-chat-current-test', 'RUN-chat-current-test', ?, 'test-agent', 'test', 'chat-current-test-key', 1, 'running', 'hash', '{}')
+  `).run(taskId);
+  const readOnly = await beginTaskContextChatTurn(taskId, 'Change it again', 'codex');
+  assert.equal(readOnly.writeAllowed, false);
+  await completeTaskContextChatTurn({
+    sessionId: readOnly.session.sessionId,
+    content: 'This task is under Test, so this turn is read-only.',
+    providerSessionId: 'codex-session-1',
+  });
+
   db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE execution_id = 'EXEC-chat-dev'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE execution_id = 'EXEC-chat-current-test'").run();
 });
 
-test('holds new Delivery work during a writable Chat turn while Analysis can continue', async () => {
+test('holds only the current task Delivery during a writable Chat turn while other work can continue', async () => {
   const { createTask, pipelineForTask } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const { beginTaskContextChatTurn, completeTaskContextChatTurn } = await import('./task-context-chat');
   const taskId = await createTask({ title: 'Context chat workspace coordination' });
+  const otherTaskId = await createTask({ title: 'Other task delivery remains available' });
   const db = await databaseConnection();
   db.prepare(`
     UPDATE tasks
@@ -73,11 +90,19 @@ test('holds new Delivery work during a writable Chat turn while Analysis can con
         spec_resolved_index = 1, dev_index = 0, test_index = 0
     WHERE task_id = ?
   `).run(taskId);
+  db.prepare(`
+    UPDATE tasks
+    SET agile_status = 'ready for dev', total_stories = 1, analysis_index = 1,
+        spec_resolved_index = 1, dev_index = 0, test_index = 0
+    WHERE task_id = ?
+  `).run(otherTaskId);
   const chat = await beginTaskContextChatTurn(taskId, 'Tighten the empty-state wording', 'codex');
   assert.equal(chat.writeAllowed, true);
 
   const pipeline = await pipelineForTask(taskId);
   assert.deepEqual(pipeline.map((item) => [item.agent, item.storyIndex]), [['analyst-agent', 2]]);
+  const otherPipeline = await pipelineForTask(otherTaskId);
+  assert.deepEqual(otherPipeline.map((item) => [item.agent, item.storyIndex]), [['dev-agent', 1]]);
 
   await completeTaskContextChatTurn({
     sessionId: chat.session.sessionId,

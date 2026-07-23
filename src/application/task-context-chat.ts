@@ -69,26 +69,31 @@ export async function getTaskContextChat(taskId: string) {
   };
 }
 
-function devOrTestIsRunning(db: Database.Database) {
+function devOrTestIsRunning(db: Database.Database, taskId: string) {
   return Boolean(db.prepare(`
     SELECT 1
     FROM execution_attempts
-    WHERE agent IN ('dev-agent', 'test-agent')
+    WHERE task_id = ?
+      AND agent IN ('dev-agent', 'test-agent')
       AND status IN ('planned', 'running', 'output_received', 'verifying', 'applying')
     UNION ALL
     SELECT 1
     FROM agent_results
-    WHERE agent IN ('dev-agent', 'test-agent') AND application_status = 'pending'
+    WHERE task_id = ?
+      AND agent IN ('dev-agent', 'test-agent')
+      AND application_status = 'pending'
     LIMIT 1
-  `).get());
+  `).get(taskId, taskId));
 }
 
-export function taskContextChatIsRunning(db: Database.Database) {
+export function taskContextChatIsRunning(db: Database.Database, taskId: string) {
   return Boolean(db.prepare(`
     SELECT 1 FROM task_context_chat_sessions
-    WHERE state = 'running' AND datetime(updated_at) >= datetime('now', '-30 minutes')
+    WHERE task_id = ?
+      AND state = 'running'
+      AND datetime(updated_at) >= datetime('now', '-30 minutes')
     LIMIT 1
-  `).get());
+  `).get(taskId));
 }
 
 export async function beginTaskContextChatTurn(taskId: string, content: unknown, requestedExecutor: AgentExecutorId) {
@@ -110,7 +115,7 @@ export async function beginTaskContextChatTurn(taskId: string, content: unknown,
       const stale = db.prepare("SELECT datetime(?) < datetime('now', '-30 minutes') AS stale").get(row.updated_at) as { stale: number };
       if (!stale.stale) throw new Error('上下文 Agent 正在回答上一条消息，请稍后再试');
     }
-    const writeAllowed = !devOrTestIsRunning(db) && !taskContextChatIsRunning(db);
+    const writeAllowed = !devOrTestIsRunning(db, taskId) && !taskContextChatIsRunning(db, taskId);
     const messageId = randomUUID();
     db.prepare(`
       INSERT INTO task_context_chat_messages(message_id, session_id, role, content)
