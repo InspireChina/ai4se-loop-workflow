@@ -1,7 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useRef, useState } from 'react';
-import { Bot, LoaderCircle, Send, ShieldCheck } from 'lucide-react';
+import { Bot, LoaderCircle, Send, WandSparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { TaskContextChatMessage, TaskContextChatSession } from '../../../src/application/task-context-chat';
@@ -75,13 +75,13 @@ export function TaskContextChat({
         <h2><Bot size={16}/>上下文对话</h2>
         <small>当前需求唯一会话{executor ? ` · ${executor}` : ''}</small>
       </div>
-      <span className="read-only-chip"><ShieldCheck size={13}/>只读</span>
+      <span className="read-only-chip"><WandSparkles size={13}/>安全模式</span>
     </div>
     <div className="context-chat-messages" aria-live="polite">
       {messages.length === 0 && <div className="context-chat-empty">
         <Bot size={22}/>
-        <strong>询问当前需求或代码上下文</strong>
-        <p>Agent 会重新读取交付文档、活动记录和仓库代码，不会修改 Loop 状态。</p>
+        <strong>查询上下文，或完成一个轻量调整</strong>
+        <p>Dev/Test 运行时只读；工作区空闲时可直接修改不违背需求的 UI、样式和 wording，并提交自己的代码。</p>
       </div>}
       {messages.map((message) => <article className={`context-chat-message ${message.role}`} key={message.messageId}>
         <small>{message.role === 'user' ? '你' : '上下文 Agent'}</small>
@@ -89,7 +89,7 @@ export function TaskContextChat({
           ? <div className="markdown-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
           : <p>{message.content}</p>}
       </article>)}
-      {busy && <div className="context-chat-thinking"><LoaderCircle size={14}/>正在读取最新上下文…</div>}
+      {busy && <div className="context-chat-thinking"><LoaderCircle size={14}/>Agent 正在读取最新上下文并处理…</div>}
       <div ref={endRef}/>
     </div>
     {error && <p className="context-chat-error">{error}</p>}
@@ -105,13 +105,13 @@ export function TaskContextChat({
         }}
         disabled={busy}
         maxLength={20_000}
-        placeholder="例如：为什么这个交付单元还没有进入开发？"
+        placeholder="例如：把这个按钮文案改得更清楚，并直接提交"
         aria-label="向上下文 Agent 提问"
       />
       <button className="button" type="submit" disabled={busy || !draft.trim()} aria-label="发送">
         <Send size={15}/>
       </button>
     </form>
-    <small className="context-chat-note">Enter 发送 · Shift + Enter 换行 · 对话不会直接改变 Loop</small>
+    <small className="context-chat-note">Enter 发送 · Shift + Enter 换行 · 可修改轻量 UI / wording，不会改变 Loop 状态</small>
   </section>;
 }

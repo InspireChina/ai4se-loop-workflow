@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import type Database from 'better-sqlite3';
 import { z } from 'zod';
 import type { AgentExecutorId } from '../domain/agent-executor';
 import { databaseConnection } from '../infrastructure/database';
@@ -68,6 +69,28 @@ export async function getTaskContextChat(taskId: string) {
   };
 }
 
+function devOrTestIsRunning(db: Database.Database) {
+  return Boolean(db.prepare(`
+    SELECT 1
+    FROM execution_attempts
+    WHERE agent IN ('dev-agent', 'test-agent')
+      AND status IN ('planned', 'running', 'output_received', 'verifying', 'applying')
+    UNION ALL
+    SELECT 1
+    FROM agent_results
+    WHERE agent IN ('dev-agent', 'test-agent') AND application_status = 'pending'
+    LIMIT 1
+  `).get());
+}
+
+export function taskContextChatIsRunning(db: Database.Database) {
+  return Boolean(db.prepare(`
+    SELECT 1 FROM task_context_chat_sessions
+    WHERE state = 'running' AND datetime(updated_at) >= datetime('now', '-30 minutes')
+    LIMIT 1
+  `).get());
+}
+
 export async function beginTaskContextChatTurn(taskId: string, content: unknown, requestedExecutor: AgentExecutorId) {
   const message = messageSchema.parse(content);
   const db = await databaseConnection();
@@ -87,6 +110,7 @@ export async function beginTaskContextChatTurn(taskId: string, content: unknown,
       const stale = db.prepare("SELECT datetime(?) < datetime('now', '-30 minutes') AS stale").get(row.updated_at) as { stale: number };
       if (!stale.stale) throw new Error('上下文 Agent 正在回答上一条消息，请稍后再试');
     }
+    const writeAllowed = !devOrTestIsRunning(db) && !taskContextChatIsRunning(db);
     const messageId = randomUUID();
     db.prepare(`
       INSERT INTO task_context_chat_messages(message_id, session_id, role, content)
@@ -97,12 +121,24 @@ export async function beginTaskContextChatTurn(taskId: string, content: unknown,
       SET state = 'running', last_error = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE session_id = ?
     `).run(row.session_id);
-    return { session: { ...mapSession(row), state: 'running' as const, lastError: null }, message, messageId };
+    return {
+      session: { ...mapSession(row), state: 'running' as const, lastError: null },
+      message,
+      messageId,
+      writeAllowed,
+    };
   })();
 }
 
-export async function completeTaskContextChatTurn(sessionId: string, content: string, providerSessionId: string) {
-  const answer = content.trim();
+export async function completeTaskContextChatTurn(input: {
+  sessionId: string;
+  content: string;
+  providerSessionId: string;
+  taskId?: string;
+  commitHash?: string | null;
+  changedFiles?: string[];
+}) {
+  const answer = input.content.trim();
   if (!answer) throw new Error('上下文 Agent 没有返回回答');
   const db = await databaseConnection();
   return db.transaction(() => {
@@ -110,12 +146,19 @@ export async function completeTaskContextChatTurn(sessionId: string, content: st
     db.prepare(`
       INSERT INTO task_context_chat_messages(message_id, session_id, role, content)
       VALUES(?, ?, 'assistant', ?)
-    `).run(messageId, sessionId, answer);
+    `).run(messageId, input.sessionId, answer);
     db.prepare(`
       UPDATE task_context_chat_sessions
       SET provider_session_id = ?, state = 'idle', last_error = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE session_id = ?
-    `).run(providerSessionId, sessionId);
+    `).run(input.providerSessionId, input.sessionId);
+    if (input.taskId && input.commitHash) {
+      const files = input.changedFiles?.length ? `；${input.changedFiles.join('、')}` : '';
+      db.prepare(`
+        INSERT INTO task_events(event_id, task_id, actor, event_type, summary)
+        VALUES(?, ?, 'context-chat-agent', 'ContextChatCodeChanged', ?)
+      `).run(randomUUID(), input.taskId, `轻量修改已提交 ${input.commitHash.slice(0, 10)}${files}`);
+    }
     const row = db.prepare('SELECT created_at FROM task_context_chat_messages WHERE message_id = ?').get(messageId) as { created_at: string };
     return { messageId, role: 'assistant' as const, content: answer, createdAt: row.created_at };
   })();

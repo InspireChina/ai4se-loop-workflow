@@ -9,20 +9,27 @@ test('configures non-interactive bypass permissions for every context chat execu
   assert.deepEqual(taskContextChatPermissionArgs('codex'), ['--dangerously-bypass-approvals-and-sandbox']);
 });
 
-test('builds a task-bound native CLI read-only context chat contract', () => {
-  const prompt = buildTaskContextChatPrompt('TASK-chat-contract', 'Where is the evidence?', true);
+test('builds a task-bound native CLI lightweight change contract', () => {
+  const prompt = buildTaskContextChatPrompt('TASK-chat-contract', 'Make the wording clearer', true, {
+    writeAllowed: true,
+  });
   assert.match(prompt, /当前需求固定为 TASK-chat-contract/);
   assert.match(prompt, new RegExp(`npm --prefix ${JSON.stringify(paths.appRoot).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} run loopctl -- task-context TASK-chat-contract`));
-  assert.match(prompt, /rg、sed/);
   assert.match(prompt, /git status --short/);
   assert.match(prompt, /禁止调用 task-update、task-context-init、task-rewind、task-cancel、system-unblock/);
-  assert.match(prompt, /不能修改代码、文件、Git、数据库、需求状态/);
-  assert.match(prompt, /用户问题：\nWhere is the evidence\?/);
+  assert.match(prompt, /UI 呈现、布局、样式、可访问性和 wording/);
+  assert.match(prompt, /只暂存并提交自己本轮的修改/);
+  assert.match(prompt, /如果无法让验证通过，必须撤销自己本轮产生的全部文件修改/);
+  assert.match(prompt, /用户问题：\nMake the wording clearer/);
 });
 
 test('refreshes task facts on every resumed context chat turn', () => {
-  const prompt = buildTaskContextChatPrompt('TASK-chat-resume', 'What changed?', false);
-  assert.match(prompt, /继续遵守本会话首轮的只读职责/);
+  const prompt = buildTaskContextChatPrompt('TASK-chat-resume', 'What changed?', false, {
+    writeAllowed: false,
+  });
+  assert.match(prompt, /覆盖旧轮次中已经过时的只读说明/);
   assert.match(prompt, /必须重新运行只读命令获取最新事实/);
   assert.match(prompt, /task-context TASK-chat-resume/);
+  assert.match(prompt, /本轮只允许读取和解释/);
+  assert.match(prompt, /Dev Agent、Test Agent 或另一个轻量修改 Chat/);
 });

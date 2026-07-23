@@ -7,3 +7,8 @@ function git(args: string[], workspaceRoot: string) {
 export function gitHead(workspaceRoot: string) {
   try { return git(['rev-parse', 'HEAD'], workspaceRoot); } catch { return ''; }
 }
+
+export function gitChangedFilesBetween(workspaceRoot: string, from: string, to: string) {
+  if (!from || !to || from === to) return [];
+  try { return git(['diff', '--name-only', `${from}..${to}`], workspaceRoot).split(/\r?\n/).filter(Boolean); } catch { return []; }
+}

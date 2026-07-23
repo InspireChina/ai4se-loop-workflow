@@ -22,6 +22,7 @@ const agentLabels: Record<string, string> = {
   'test-agent': '验证 Agent',
   'review-agent': '结卡报告 Agent',
   'feedback-agent': '反馈处理 Agent',
+  'context-chat-agent': '上下文 Chat Agent',
 };
 
 const itemTypeLabels: Record<string, string> = {
