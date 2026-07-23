@@ -62,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_software_maintenance_queue
   ON software_maintenance_jobs(status, created_at);
 
 INSERT OR IGNORE INTO project_settings(setting_key, setting_value)
-VALUES('software_maintenance_enabled', 'true');
+VALUES('software_maintenance_enabled', 'false');
 
 INSERT OR IGNORE INTO project_settings(setting_key, setting_value)
 VALUES('software_maintenance_auto_apply', 'true');

@@ -63,7 +63,7 @@ export default async function MaintenancePage() {
               {diagnosis.followUp && <p>{diagnosis.followUp}</p>}
             </details>}
           </article>;
-        }) : <div className="card empty">尚无维护任务。新的 execution 完成后会自动产生一次独立检查。</div>}
+        }) : <div className="card empty">尚无维护任务。启用软件演化后，新的 execution 完成时会自动产生一次独立检查。</div>}
       </div>
     </section>
   </>;

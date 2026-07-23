@@ -2028,8 +2028,14 @@ test('correlates and redacts structured runtime events before queuing a durable 
   const { createTask, appendLoopRunLog } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const { clearRuntimeEventContext, recordRuntimeEvent, setRuntimeEventContext } = await import('./runtime-events');
-  const { claimNextSoftwareMaintenanceJob, enqueueSoftwareMaintenance, updateSoftwareMaintenanceJob } = await import('./software-maintenance');
+  const {
+    claimNextSoftwareMaintenanceJob,
+    enqueueSoftwareMaintenance,
+    setSoftwareMaintenanceSettings,
+    updateSoftwareMaintenanceJob,
+  } = await import('./software-maintenance');
   const db = await databaseConnection();
+  await setSoftwareMaintenanceSettings({ enabled: true, autoApply: true });
   const taskId = await createTask({ title: 'Structured maintenance evidence' });
   const executionId = 'execution-structured-maintenance';
   db.prepare(`
@@ -2068,6 +2074,7 @@ test('correlates and redacts structured runtime events before queuing a durable 
     await updateSoftwareMaintenanceJob(claimed!.job_id, { status: 'no_issue', summary: 'test cleanup', finished: true });
   } finally {
     clearRuntimeEventContext();
+    await setSoftwareMaintenanceSettings({ enabled: false, autoApply: false });
   }
 });
 
@@ -2407,12 +2414,13 @@ test('fallback-evidence: falls back to run_id when window query returns empty', 
   }
 });
 
-test('settings-gate: skips non-manual enqueue when software_maintenance_enabled is false', async () => {
+test('settings-gate: software maintenance defaults off and skips non-manual enqueue', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { enqueueSoftwareMaintenance } = await import('./software-maintenance');
+  const { enqueueSoftwareMaintenance, getSoftwareMaintenanceSettings } = await import('./software-maintenance');
   const db = await databaseConnection();
 
-  db.prepare(`UPDATE project_settings SET setting_value = 'false' WHERE setting_key = 'software_maintenance_enabled'`).run();
+  const initial = await getSoftwareMaintenanceSettings();
+  assert.equal(initial.enabled, false);
   try {
     const nonManual = await enqueueSoftwareMaintenance({ triggerKind: 'execution_finally' });
     assert.equal(nonManual, null);
@@ -2420,7 +2428,7 @@ test('settings-gate: skips non-manual enqueue when software_maintenance_enabled 
     assert.ok(manual, 'manual trigger should bypass enabled check');
     assert.match(manual!, /^[a-f0-9-]{36}$/);
   } finally {
-    db.prepare(`UPDATE project_settings SET setting_value = 'true' WHERE setting_key = 'software_maintenance_enabled'`).run();
+    db.prepare(`UPDATE project_settings SET setting_value = 'false' WHERE setting_key = 'software_maintenance_enabled'`).run();
   }
 });
 

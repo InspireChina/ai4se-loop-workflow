@@ -55,7 +55,7 @@ type RuntimeEventRow = {
   exception_fingerprint: string | null;
 };
 
-function enabled(value: string | undefined, fallback = true) {
+function enabled(value: string | undefined, fallback = false) {
   return value === undefined ? fallback : /^(?:1|true|yes|on)$/i.test(value);
 }
 
