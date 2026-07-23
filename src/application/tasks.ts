@@ -1793,7 +1793,7 @@ export async function rewindTask(input: unknown) {
   refreshPages('/', `/tasks/${value.taskId}`);
 }
 
-const cancelSchema = z.object({ taskId: z.string().min(1), reason: z.string().min(1).max(500), confirmCodeClean: z.coerce.boolean().default(false) });
+const cancelSchema = z.object({ taskId: z.string().min(1), reason: z.string().min(1).max(500) });
 
 export async function cancelTask(input: unknown) {
   const value = cancelSchema.parse(input);
@@ -1802,19 +1802,31 @@ export async function cancelTask(input: unknown) {
   if (!task) throw new Error('需求不存在');
   if (task.agile_status === 'done') throw new Error('已完成需求不能取消');
   if (task.agile_status === 'cancelled') return;
-  if (occupiesCodeSlot(task) && !value.confirmCodeClean) throw new Error('需求占用代码槽，请确认代码已清理后再取消');
   db.exec('BEGIN');
   try {
     db.prepare(`
       UPDATE tasks
       SET agile_status = 'cancelled', current_subagent = NULL, next_step = ?,
           blocked_reason = NULL, resume_status = NULL, resume_pending = 0,
-          last_actor = 'human',
+          run_state = 'idle', last_actor = 'human',
           completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(`已取消：${value.reason}`, value.taskId);
     setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'analysis', status: 'completed' });
     setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'delivery', status: 'completed' });
+    db.prepare(`
+      UPDATE agent_results
+      SET application_status = 'applied', application_error = NULL,
+          effect_outcome = 'discarded', applied_at = CURRENT_TIMESTAMP
+      WHERE task_id = ? AND application_status = 'pending'
+    `).run(value.taskId);
+    db.prepare(`
+      UPDATE execution_attempts
+      SET status = 'cancelled', last_error = '需求已取消',
+          finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
+      WHERE task_id = ?
+        AND status IN ('planned', 'output_received', 'verifying', 'applying', 'retryable_failed', 'system_blocked')
+    `).run(value.taskId);
     addEvent(db, value.taskId, 'human', 'TaskCancelled', value.reason);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId, { createClearedBlock: true });
@@ -2033,6 +2045,8 @@ export async function pipelineAll(): Promise<Delegation[]> {
 export async function markDelegationLaneRunning(delegation: DelegationEnvelope) {
   if (delegation.lane === 'control') return;
   const db = await databaseConnection();
+  const task = fetchTask(db, delegation.taskId);
+  if (!task || task.agile_status === 'cancelled' || task.agile_status === 'done') return;
   markTaskLaneRunningInDb(db, {
     taskId: delegation.taskId,
     lane: delegation.lane,

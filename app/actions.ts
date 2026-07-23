@@ -85,7 +85,6 @@ export async function cancelTaskAction(formData: FormData) {
   await cancelTask({
     taskId,
     reason: formData.get('reason'),
-    confirmCodeClean: formData.get('confirmCodeClean') === 'on',
   });
   redirect('/tasks');
 }

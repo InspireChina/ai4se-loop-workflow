@@ -107,6 +107,20 @@ function storedRetrySignature(attempt: ExecutionAttempt) {
 export async function reconcileInterruptedExecutions(runId: string | null, reason: string) {
   const db = await databaseConnection();
   const scope = runId ? 'AND execution_attempts.run_id = ?' : '';
+  db.prepare(`
+    UPDATE execution_attempts
+    SET status = 'cancelled',
+        last_error = '需求已取消',
+        finished_at = CURRENT_TIMESTAMP,
+        heartbeat_at = CURRENT_TIMESTAMP
+    WHERE status IN ('planned', 'running', 'output_received', 'verifying', 'applying')
+      ${scope}
+      AND EXISTS (
+        SELECT 1 FROM tasks
+        WHERE tasks.task_id = execution_attempts.task_id
+          AND tasks.agile_status = 'cancelled'
+      )
+  `).run(...(runId ? [runId] : []));
   const pendingResultCount = (db.prepare(`
     SELECT COUNT(*) AS count
     FROM execution_attempts
@@ -279,6 +293,27 @@ export async function completeExecution(executionId: string) {
     SET status = 'applied', finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
     WHERE execution_id = ?
   `).run(executionId);
+}
+
+export async function executionCancellationRequested(executionId: string) {
+  const db = await databaseConnection();
+  const row = db.prepare(`
+    SELECT execution_attempts.status AS execution_status, tasks.agile_status AS task_status
+    FROM execution_attempts
+    JOIN tasks ON tasks.task_id = execution_attempts.task_id
+    WHERE execution_attempts.execution_id = ?
+  `).get(executionId) as { execution_status: ExecutionStatus; task_status: string } | undefined;
+  return !row || row.execution_status === 'cancelled' || row.task_status === 'cancelled';
+}
+
+export async function cancelExecution(executionId: string, reason = '需求已取消') {
+  const db = await databaseConnection();
+  db.prepare(`
+    UPDATE execution_attempts
+    SET status = 'cancelled', last_error = ?, finished_at = CURRENT_TIMESTAMP,
+        heartbeat_at = CURRENT_TIMESTAMP
+    WHERE execution_id = ? AND status != 'applied'
+  `).run(reason, executionId);
 }
 
 export async function failExecution(executionId: string, error: string, blocked = false) {

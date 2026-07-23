@@ -332,7 +332,7 @@ async function main() {
       console.log(`rewound ${args._[0]}`);
       return;
     case 'task-cancel':
-      await cancelTask({ taskId: args._[0], reason: requireValue(args, 'reason'), confirmCodeClean: boolArg(args, 'confirmCodeClean') });
+      await cancelTask({ taskId: args._[0], reason: requireValue(args, 'reason') });
       console.log(`cancelled ${args._[0]}`);
       return;
     case 'task-context-init':

@@ -37,6 +37,27 @@ test('recovers interrupted executions by durable checkpoint instead of a lease',
   ]);
 });
 
+test('releases a cancelled requirement execution when its runner has already exited', async () => {
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Cancelled execution recovery' });
+  db.prepare("UPDATE tasks SET agile_status = 'cancelled', run_state = 'idle' WHERE task_id = ?").run(taskId);
+  db.prepare(`
+    INSERT INTO execution_attempts(
+      execution_id, run_id, task_id, agent, pipeline, lane, delegation_key,
+      attempt, status, input_hash, input_json
+    ) VALUES('execution-cancelled-run', 'run-cancelled', ?, 'dev-agent', 'dev', 'delivery',
+      'key-cancelled-run', 1, 'running', 'hash-cancelled-run', '{}')
+  `).run(taskId);
+
+  const recovered = await reconcileInterruptedExecutions('run-cancelled', 'runner crashed');
+
+  assert.deepEqual(recovered, { failedCount: 0, recoverableCount: 0, pendingResultCount: 0 });
+  assert.equal(
+    (db.prepare("SELECT status FROM execution_attempts WHERE execution_id = 'execution-cancelled-run'").get() as { status: string }).status,
+    'cancelled',
+  );
+});
+
 test('marks a dead previous run crashed before starting a new run', async () => {
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Dead run replacement' });

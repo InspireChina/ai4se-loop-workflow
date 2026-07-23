@@ -1692,6 +1692,93 @@ test('records a late Agent result after cancellation without reopening task lane
   assert.deepEqual(recorded, { application_status: 'applied', effect_outcome: 'discarded' });
 });
 
+test('cancels an active Dev requirement and automatically releases its execution code slot', async () => {
+  const {
+    beginExecutionAttempt,
+    cancelExecution,
+    executionCancellationRequested,
+  } = await import('./executions');
+  const { cancelTask, getTask, pipelineAllEnvelopes } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+  const taskId = 'TASK-cancel-active-dev';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+    ) VALUES(?, 'Cancel active Dev', 'feature', 'in dev', 'dev-agent', 1, 0, 0, 1, 1, '')
+  `).run(taskId);
+  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Cancelable unit', 'story-001')").run(taskId);
+  const delegation = {
+    taskId,
+    lane: 'delivery' as const,
+    pipeline: 'dev',
+    agent: 'dev-agent',
+    storyIndex: 1,
+    resource: 'none' as const,
+    description: 'Implement cancelable unit',
+    title: 'Cancel active Dev',
+    taskDescription: null,
+    itemType: 'feature',
+    priority: '',
+    link: '',
+    externalId: '',
+    externalStatus: '',
+    agileStatus: 'in dev',
+    currentSubagent: 'dev-agent',
+    resumePending: 0,
+    specResolvedIndex: 1,
+    runState: 'runnable',
+    closureStatus: 'none',
+    reviewRevision: 0,
+    reviewDocumentId: '',
+    lastActor: '',
+    analysisIndex: 1,
+    devIndex: 0,
+    testIndex: 0,
+    totalStories: 1,
+    nextStep: '',
+    blockedReason: '',
+    owner: '',
+    evidence: '',
+    risk: '',
+  };
+  const execution = await beginExecutionAttempt({
+    runId: 'run-cancel-active-dev',
+    delegation,
+    prompt: 'Implement until cancelled.',
+  });
+  db.prepare(`
+    INSERT INTO agent_results(
+      result_id, run_id, task_id, story_index, agent, pipeline, outcome,
+      result_json, application_status, execution_id
+    ) VALUES(
+      'RESULT-cancel-active-dev', 'run-cancel-active-dev', ?, 1, 'dev-agent', 'dev', 'completed',
+      '{"outcome":"completed","summary":"queued"}', 'pending', NULL
+    )
+  `).run(taskId);
+
+  await cancelTask({ taskId, reason: 'Requirement withdrawn' });
+
+  const detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'cancelled');
+  assert.equal(detail?.task.run_state, 'idle');
+  assert.deepEqual(detail?.lanes.map((lane) => lane.status), ['completed', 'completed']);
+  assert.equal(await executionCancellationRequested(execution.attempt.execution_id), true);
+  const pending = db.prepare(`
+    SELECT application_status, effect_outcome FROM agent_results WHERE result_id = 'RESULT-cancel-active-dev'
+  `).get() as { application_status: string; effect_outcome: string };
+  assert.deepEqual(pending, { application_status: 'applied', effect_outcome: 'discarded' });
+
+  await cancelExecution(execution.attempt.execution_id);
+  const status = db.prepare('SELECT status FROM execution_attempts WHERE execution_id = ?').get(execution.attempt.execution_id) as { status: string };
+  assert.equal(status.status, 'cancelled');
+  assert.equal((await pipelineAllEnvelopes()).some((item) => item.taskId === taskId), false);
+});
+
 test('isolates feedback scheduling per task and emits one concurrent delegation for each task queue', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { addDocumentComment, createTask, pipelineAllEnvelopes, upsertDocument } = await import('./tasks');

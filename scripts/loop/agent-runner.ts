@@ -17,7 +17,9 @@ import {
 import { applyAgentResult, applyNextQueuedAgentResult, blockDelegation } from '../../src/application/agent-results';
 import {
   beginExecutionAttempt,
+  cancelExecution,
   completeExecution,
+  executionCancellationRequested,
   failExecution,
   markExecutionOutput,
   markExecutionStage,
@@ -279,6 +281,7 @@ async function runDelegation(delegation: DelegationEnvelope, prompt: string, exe
     idleTimeoutMs,
     resultKind: 'flow',
     environment: { LOOP_EXECUTION_ID: executionId },
+    cancellationRequested: () => executionCancellationRequested(executionId),
   });
   return { ...execution, diagnostics };
 }
@@ -379,6 +382,11 @@ async function executeDelegationStep(
   executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' },
 ) {
   if (!(await isRunActive())) return;
+  const task = await getTask(delegation.taskId);
+  if (!task || task.task.agile_status === 'cancelled') {
+    await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 已取消，跳过尚未启动的 ${agentLabel(delegation.agent)}`);
+    return;
+  }
   await appendLoopRunLog(runId, `[运行] 执行任务级 Agent：requirement=${delegation.taskId} agent=${delegation.agent}`);
 
   let attempt: ExecutionAttempt | null = null;
@@ -401,6 +409,11 @@ async function executeDelegationStep(
     });
     attempt = durable.attempt;
     await appendLoopRunLog(runId, `[上下文] requirement=${delegation.taskId} execution=${durable.attempt.execution_id} snapshot=${builtPrompt.contextSnapshot.snapshotId} resources=${builtPrompt.contextSnapshot.resourceCount} startup_index=${builtPrompt.contextSnapshot.startupIndex.length}`);
+    if (await executionCancellationRequested(durable.attempt.execution_id)) {
+      await cancelExecution(durable.attempt.execution_id);
+      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 已取消，跳过尚未启动的 ${agentLabel(delegation.agent)}，代码槽已释放`);
+      return;
+    }
     await markDelegationLaneRunning(delegation);
     maintenance = await activateMaintenanceContext(durable.attempt, delegation);
 
@@ -423,6 +436,11 @@ async function executeDelegationStep(
     }
 
     const execution = await runDelegation(delegation, builtPrompt.prompt, durable.attempt.execution_id, executor, executionOptions);
+    if (execution.cancelled) {
+      await cancelExecution(durable.attempt.execution_id);
+      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 已随需求取消，代码槽已释放`);
+      return;
+    }
     if (execution.exitCode !== 0) {
       await handleExecutionFailure(durable.attempt, delegation, `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`, true);
       return;

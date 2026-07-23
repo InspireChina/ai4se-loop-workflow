@@ -21,6 +21,7 @@ export type DelegationExecutionInput = {
   idleTimeoutMs: number;
   resultKind?: AgentResultKind;
   environment?: AgentEnvironment;
+  cancellationRequested?: () => boolean | Promise<boolean>;
   spawn?: typeof crossSpawn;
 };
 
@@ -29,6 +30,7 @@ export type DelegationExecutionResult = {
   finalText: string;
   submittedResult?: string | null;
   resultSubmissionError?: string | null;
+  cancelled?: true;
 };
 
 type TemporaryPrompt = { directory: string; file: string; reference: string };
@@ -81,6 +83,8 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   });
   let lastOutputAt = Date.now();
   let timedOut = false;
+  let cancelled = false;
+  let terminationRequested = false;
   let logQueue = Promise.resolve();
   let telemetryQueue = Promise.resolve();
   let telemetrySequence = 0;
@@ -122,6 +126,8 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       stdio: [executor.promptMode === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
+    let childExited = false;
+    child.once('exit', () => { childExited = true; });
     if (executor.promptMode === 'stdin') child.stdin?.end(prompt);
 
     let stdoutBuffer = '';
@@ -149,17 +155,35 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       }
     });
 
-    const terminate = async (reason: string) => {
-      if (timedOut) return;
-      timedOut = true;
+    const terminate = async (reason: string, kind: 'timeout' | 'cancelled') => {
+      if (terminationRequested) return;
+      terminationRequested = true;
+      timedOut = kind === 'timeout';
+      cancelled = kind === 'cancelled';
       await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - ${reason}，正在终止`);
       child.kill('SIGTERM');
-      setTimeout(() => { if (!child.killed) child.kill('SIGKILL'); }, 5000).unref();
+      setTimeout(() => { if (!childExited) child.kill('SIGKILL'); }, 5000).unref();
     };
-    const maxTimer = setTimeout(() => void terminate(`超过最大运行时间 ${Math.round(maxRuntimeMs / 1000)} 秒`), maxRuntimeMs);
+    const maxTimer = setTimeout(() => void terminate(`超过最大运行时间 ${Math.round(maxRuntimeMs / 1000)} 秒`, 'timeout'), maxRuntimeMs);
     const idleTimer = setInterval(() => {
-      if (Date.now() - lastOutputAt > idleTimeoutMs) void terminate(`超过空闲时间 ${Math.round(idleTimeoutMs / 1000)} 秒`);
+      if (Date.now() - lastOutputAt > idleTimeoutMs) void terminate(`超过空闲时间 ${Math.round(idleTimeoutMs / 1000)} 秒`, 'timeout');
     }, Math.min(30000, idleTimeoutMs));
+    let cancellationCheckRunning = false;
+    const checkCancellation = async () => {
+      if (!input.cancellationRequested || cancellationCheckRunning || terminationRequested) return;
+      cancellationCheckRunning = true;
+      try {
+        if (await input.cancellationRequested()) await terminate('需求已取消', 'cancelled');
+      } catch {
+        // Cancellation polling is best-effort; execution remains authoritative.
+      } finally {
+        cancellationCheckRunning = false;
+      }
+    };
+    const cancellationTimer = input.cancellationRequested
+      ? setInterval(() => void checkCancellation(), 500)
+      : null;
+    if (cancellationTimer) void checkCancellation();
     try {
       terminalExitCode = await new Promise<number | null>((resolve, reject) => {
         child.once('error', reject);
@@ -172,6 +196,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     } finally {
       clearTimeout(maxTimer);
       clearInterval(idleTimer);
+      if (cancellationTimer) clearInterval(cancellationTimer);
     }
     if (stdoutBuffer.trim()) {
       enqueueLog(executor.parseStdout(stdoutBuffer, context));
@@ -196,13 +221,15 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       }
     }
     await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - ${executor.label} CLI 已退出 code=${terminalExitCode ?? 'signal'}`);
-    if (terminalExitCode && terminalExitCode !== 0) await appendLog(`[错误] ${context.agent} 执行失败 code=${terminalExitCode}`);
+    if (cancelled) await appendLog(`[Agent] 已取消 lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId}`);
+    else if (terminalExitCode && terminalExitCode !== 0) await appendLog(`[错误] ${context.agent} 执行失败 code=${terminalExitCode}`);
     else await appendLog(`[Agent] 完成 lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - 处理完成`);
     traceStatus = timedOut ? 'timed_out' : executionFailed ? 'execution_error' : terminalExitCode === 0 ? 'completed' : terminalExitCode === null ? 'cancelled' : 'failed';
     return {
       exitCode: terminalExitCode ?? 1,
       finalText,
       ...(input.resultKind ? { submittedResult, resultSubmissionError } : {}),
+      ...(cancelled ? { cancelled: true as const } : {}),
     };
   } finally {
     try {

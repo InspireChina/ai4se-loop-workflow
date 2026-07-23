@@ -391,7 +391,6 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             <p className="muted">仅用于业务目标已经撤回、重复或无效；正常反馈请使用文档评论或澄清回答。</p>
             <input type="hidden" name="taskId" value={task.task_id}/>
             <label>原因<input name="reason" required placeholder="重复、撤回或无效"/></label>
-            <label className="checkbox"><input type="checkbox" name="confirmCodeClean"/>代码槽已清理</label>
             <button className="button danger" type="submit">取消需求</button>
           </form>
         </details>}

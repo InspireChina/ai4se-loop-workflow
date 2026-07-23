@@ -211,6 +211,27 @@ test('maps non-zero, spawn error, timeout, and signal exits without telemetry af
   }
 });
 
+test('terminates the CLI when its requirement is cancelled', async () => {
+  let checks = 0;
+  const { result, logs } = await run(
+    fixtureExecutor('codex', 'setInterval(() => {}, 1000)'),
+    recordedTelemetry().telemetry,
+    {
+      maxRuntimeMs: 5_000,
+      idleTimeoutMs: 5_000,
+      cancellationRequested: () => {
+        checks += 1;
+        return checks >= 2;
+      },
+    },
+  );
+
+  assert.equal(result.cancelled, true);
+  assert.notEqual(result.exitCode, 0);
+  assert.ok(logs.some((line) => line.includes('需求已取消')));
+  assert.ok(logs.some((line) => line.includes('已取消 lane=')));
+});
+
 test('telemetry initialization, event/update, network, and bounded flush failures cannot block the CLI or leak secrets', async () => {
   const diagnostics: string[] = [];
   const telemetry = createLangfuseTelemetry({
