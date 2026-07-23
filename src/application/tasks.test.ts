@@ -170,6 +170,29 @@ test('creates title-only and described Tasks without blocking delegation and ser
   assert.equal(describedAgentInput.description, '收集上下文并完成分类');
 });
 
+test('always creates a new UUID requirement without title, URL, external ID, or terminal-state deduplication', async () => {
+  const { cancelTask, createTask, getTask } = await import('./tasks');
+  const input = {
+    title: 'Repeated requirement',
+    link: 'https://example.test/requirements/repeated',
+    externalId: 'EXT-REPEATED',
+  };
+
+  const cancelledId = await createTask(input);
+  await cancelTask({ taskId: cancelledId, reason: 'Create a fresh requirement instead' });
+  const secondId = await createTask(input);
+  const thirdId = await createTask(input);
+
+  const uuidRequirement = /^REQ-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  assert.match(cancelledId, uuidRequirement);
+  assert.match(secondId, uuidRequirement);
+  assert.match(thirdId, uuidRequirement);
+  assert.equal(new Set([cancelledId, secondId, thirdId]).size, 3);
+  assert.equal((await getTask(cancelledId))?.task.agile_status, 'cancelled');
+  assert.equal((await getTask(secondId))?.task.agile_status, 'backlog');
+  assert.equal((await getTask(thirdId))?.task.agile_status, 'backlog');
+});
+
 test('lists only completed Tasks in completion order while preserving terminal Task details', async () => {
   const { getTask, listCompletedTasks, listTasks } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');

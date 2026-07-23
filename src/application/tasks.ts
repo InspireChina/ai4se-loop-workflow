@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { AgentResultContractError, assertSliceSpecDecisionCoverage, sliceSpecSchema } from '../domain/agent-result';
@@ -261,11 +261,6 @@ function refreshPages(...pagePaths: string[]) {
       // CLI usage runs outside Next's request context; database/file writes are still complete.
     }
   }
-}
-
-function taskIdFromTitleLink(title: string, link?: string | null) {
-  const seed = link || title;
-  return `REQ-${createHash('sha1').update(seed).digest('hex').slice(0, 8)}`;
 }
 
 async function syncTaskFiles(_db: Awaited<ReturnType<typeof databaseConnection>>, _taskId: string, _options: { createClearedBlock?: boolean } = {}) {
@@ -874,14 +869,13 @@ const createTaskSchema = z.object({
   actor: z.enum(['human']).default('human'),
   status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'ready_to_close', 'done', 'cancelled', 'blocked']).default('backlog'),
   currentSubagent: z.string().trim().optional().nullable(),
-  taskId: z.string().trim().optional().nullable(),
 });
 
 export async function createTask(input: unknown) {
   const value = createTaskSchema.parse(input);
   const description = value.description?.trim() || null;
   const link = value.link || null;
-  const taskId = value.taskId || taskIdFromTitleLink(value.title, link);
+  const taskId = `REQ-${randomUUID()}`;
   const currentSubagent = value.currentSubagent || null;
   assertActorCanCreate(value.actor, value.status, currentSubagent);
   const state: TaskState = {
@@ -907,14 +901,14 @@ export async function createTask(input: unknown) {
   db.exec('BEGIN');
   try {
     db.prepare(`
-      INSERT OR IGNORE INTO tasks(
+      INSERT INTO tasks(
         task_id, title, description, link, external_id, external_status, item_type, priority,
         agile_status, current_subagent, analysis_index, dev_index, test_index,
         total_stories, spec_resolved_index, next_step,
         work_dir, blocked_reason, last_actor
       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, '', ?, ?)
     `).run(taskId, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, value.priority || null, value.status, currentSubagent, '新建需求，等待 Loop 梳理', state.blocked_reason, value.actor);
-    const task = link ? (db.prepare(`${taskSelect} WHERE link = ?`).get(link) as Task | undefined) : fetchTask(db, taskId);
+    const task = fetchTask(db, taskId);
     if (!task) throw new Error('需求创建失败');
     ensureTaskLanesInDb(db, task);
     addEvent(db, task.task_id, value.actor, 'TaskCreated', `创建需求：${task.title}`);

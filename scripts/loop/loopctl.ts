@@ -224,7 +224,6 @@ async function main() {
     case 'task-add':
       const taskId = await createTask({
         actor: requireValue(args, 'actor') as Actor,
-        taskId: optional(args, 'taskId'),
         title: requireValue(args, 'title'),
         link: optional(args, 'link'),
         externalId: optional(args, 'externalId'),

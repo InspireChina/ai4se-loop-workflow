@@ -227,7 +227,7 @@ Agent 通过 Runner 为当前 execution 注入的 `submit-agent-result --input <
 
 | 产品模型 | 当前物理实现 |
 |---|---|
-| Requirement | `tasks`，主键当前仍为 `task_id`；新 ID 使用 `REQ-` 前缀。 |
+| Requirement | `tasks`，主键当前仍为 `task_id`；新 ID 使用 `REQ-<UUID>`，创建时不按标题、URL 或外部 ID 去重。 |
 | Delivery Unit | `stories`，序号列当前仍为 `story_index`。 |
 | Clarification Question / Decision Fact | `questions`。 |
 | Slice Spec | `story_specs`。 |
