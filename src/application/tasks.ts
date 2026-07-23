@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
-import { assertSliceSpecDecisionCoverage, sliceSpecSchema } from '../domain/agent-result';
+import { AgentResultContractError, assertSliceSpecDecisionCoverage, sliceSpecSchema } from '../domain/agent-result';
 import { databaseConnection, paths } from '../infrastructure/database';
 import { isProcessAlive, readRunPid } from '../infrastructure/run-process';
 import { toUtcIsoString } from './event-time';
@@ -1035,7 +1035,11 @@ export async function saveStorySpec(input: unknown) {
     `).all(value.taskId, value.storyIndex) as { decision_key: string }[]).map((row) => row.decision_key);
     const decisionKeys = new Set(value.spec.decisions.map((decision) => decision.key));
     const missingDecisions = answeredKeys.filter((key) => !decisionKeys.has(key));
-    if (missingDecisions.length) throw new Error(`用户回答尚未写入规格决策：${missingDecisions.join(', ')}`);
+    if (missingDecisions.length) {
+      throw new AgentResultContractError(
+        `已回答问题的 decisionKey 是跨轮次稳定 ID，resolved Slice Spec 必须在 decisionTree 和 decisions 中原样复用，禁止改名或创建别名；缺少：${missingDecisions.join(', ')}`,
+      );
+    }
   }
   const revision = ((db.prepare('SELECT COALESCE(MAX(revision), 0) AS revision FROM story_specs WHERE task_id = ? AND story_index = ?').get(value.taskId, value.storyIndex) as { revision: number }).revision || 0) + 1;
   const specId = randomUUID();

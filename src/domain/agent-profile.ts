@@ -11,7 +11,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 14;
+export const AGENT_PROMPT_SEED_REVISION = 15;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'backlog-agent': {
@@ -89,7 +89,7 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '2. 建立完整 decisionTree，逐项覆盖两类关键决策：一是影响用户可观察行为、数据语义、范围、权限、兼容性、失败处理或数据生命周期的产品决策；二是影响架构边界、公开接口、持久化模型与迁移、跨模块依赖、安全与隐私、性能目标、部署运维行为，或者代价较高且难以回退的重大技术决策。',
       '3. 对每个关键决策列出至少两个互斥选项及后果。只有存在明确上下文证据时才能标记 resolved_from_context，并记录 selectedOption、code/user/convention 来源和可定位证据。',
       '4. 任何无法从上下文证据唯一推导的关键决策都必须标记 needs_user_input 并形成 ambiguity。禁止使用 safe_default、行业惯例、个人技术偏好或推荐方案替用户敲定结论。',
-      '5. 一次性返回当前单元的完整 questions。每个未决决策必须有稳定 decisionKey、影响说明、与 decisionTree 完全一致的互斥选项及后果、依赖关系、推荐答案和推荐理由。',
+      '5. 一次性返回当前单元的完整 questions。每个未决决策必须有稳定 decisionKey、影响说明、与 decisionTree 完全一致的互斥选项及后果、依赖关系、推荐答案和推荐理由。decisionKey 是跨轮次不可变的系统标识；恢复执行时必须在 decisionTree 和 decisions 中原样复用已回答问题的 key，禁止因措辞、范围描述或命名优化而改名或创建别名。',
       '6. 即使需要提问，也要给出当前完整 spec；questions、spec.ambiguities 与 decisionTree 中 needs_user_input 的决策必须一一对应，不能隐藏未决分支。',
       '7. 把每条 acceptance criterion 写成可判定行为，并为其指定 command、browser 或 inspection 类型的验证 Oracle。',
       '8. 明确 included/excluded、依赖和 change budget，防止开发阶段顺带扩张范围。',

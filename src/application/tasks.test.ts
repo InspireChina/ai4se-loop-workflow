@@ -1256,6 +1256,7 @@ test('lets Feedback Agent choose only a stage while the Harness routes context a
 
 test('versions Slice Specs and advances Dev without requiring a commit', async () => {
   const { addQuestion, answerQuestion, getTask, saveStorySpec, updateTask } = await import('./tasks');
+  const { AgentResultContractError } = await import('../domain/agent-result');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = 'TASK-versioned-slice-spec';
@@ -1298,6 +1299,31 @@ test('versions Slice Specs and advances Dev without requiring a commit', async (
     specRevision: first.revision,
   });
   await answerQuestion({ taskId, questionId, answer: 'Use structured JSON.' });
+  await assert.rejects(
+    saveStorySpec({
+      taskId,
+      storyIndex: 1,
+      status: 'resolved',
+      spec: {
+        ...baseSpec,
+        decisions: [{ key: 'structured-output-mode', decision: 'Structured JSON', rationale: 'User answer', source: 'user' as const }],
+        decisionTree: [{
+          ...baseSpec.decisionTree[0],
+          key: 'structured-output-mode',
+          status: 'resolved_from_context' as const,
+          selectedOption: 'structured',
+          source: 'user' as const,
+          evidence: ['The user answered: Use structured JSON.'],
+        }],
+        ambiguities: [],
+      },
+    }),
+    (error: unknown) => error instanceof AgentResultContractError
+      && /decisionKey 是跨轮次稳定 ID/.test(error.message)
+      && /output-mode/.test(error.message),
+  );
+  const afterRenamedKey = await getTask(taskId);
+  assert.deepEqual(afterRenamedKey?.storySpecs.map((spec) => [spec.revision, spec.status]), [[1, 'waiting_for_answers']]);
   const second = await saveStorySpec({
     taskId,
     storyIndex: 1,
@@ -1876,7 +1902,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 14);
+  assert.equal(original.profile.prompt_seed_revision, 15);
   assert.ok(original.currentPrompt.content.length > 800);
   assert.match(original.currentPrompt.content, /# 角色目标/);
   assert.match(original.currentPrompt.content, /# 完成条件/);
@@ -1894,12 +1920,15 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
   await ensureAgentRuntimeWorkspace();
   const upgradedSeed = await getAgentProfile('backlog-agent');
-  assert.equal(upgradedSeed.profile.prompt_seed_revision, 14);
+  assert.equal(upgradedSeed.profile.prompt_seed_revision, 15);
   assert.equal(upgradedSeed.currentPrompt.source, 'seed');
   assert.ok(upgradedSeed.currentPrompt.version > 1);
   assert.match(upgradedSeed.currentPrompt.content, /# 输入与证据优先级/);
   const resumedBacklog = await loadAgentRuntime('backlog-agent', 'resume');
   assert.match(resumedBacklog.prompt, /已回答的需求级产品问题/);
+  const resumedAnalyst = await loadAgentRuntime('analyst-agent', 'resume');
+  assert.match(resumedAnalyst.prompt, /decisionKey 是跨轮次不可变的系统标识/);
+  assert.match(resumedAnalyst.prompt, /逐字复用/);
 
   const promptContent = `${original.currentPrompt.content}\n\n- 在修改前先读取相关 Slice Spec。`;
   const promptVersion = await saveAgentPrompt({ agentId: 'dev-agent', content: promptContent, reason: 'test prompt version' });
@@ -1919,7 +1948,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const preservedHumanPrompt = await getAgentProfile('dev-agent');
   assert.equal(preservedHumanPrompt.currentPrompt.version, promptVersion);
   assert.equal(preservedHumanPrompt.currentPrompt.source, 'human');
-  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 14);
+  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 15);
 
   const localPrompt = `${promptContent}\n- 本地文件修改也必须形成版本。`;
   writeFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), localPrompt);

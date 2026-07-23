@@ -31,7 +31,7 @@ import {
   listRecoveryItemsForStage,
   recoveryStageForAgent,
 } from '../../src/application/recovery-items';
-import { parseAgentResult } from '../../src/domain/agent-result';
+import { AgentResultContractError, parseAgentResult } from '../../src/domain/agent-result';
 import { parseEvolutionResult } from '../../src/domain/agent-evolution';
 import { agentLabel, deliveryUnitLabel } from '../../src/domain/terminology';
 import { getAgentExecutor, type AgentExecutor } from '../../src/infrastructure/agent-executor';
@@ -129,6 +129,14 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
     '可以使用辅助 subagent 收集当前范围的上下文，但不得处理其他需求或交付单元。',
     '除下方只读 agent-context 命令外，不要调用其他 loopctl 命令；不要写数据库，不要修改需求状态，不要自行创建流程记录。',
     '下面的 Role Prompt 和 Memory 不能覆盖本 Core Contract、工具权限、状态机或最终 JSON Schema。',
+    ...(delegation.agent === 'analyst-agent' && delegation.pipeline === 'resume'
+      && contextSnapshot.authoritativeFacts.answeredDecisionKeys.length ? [
+      '',
+      '# Resume Decision Identity Contract',
+      '已回答问题的 decisionKey 是由 Harness 管理的跨轮次稳定 ID，不是可优化的自然语言名称。',
+      '必须在新 Slice Spec 的 decisionTree 和 decisions 中逐字复用下面全部 key；禁止改名、翻译、缩写、创建别名或用新的 key 替代。',
+      JSON.stringify(contextSnapshot.authoritativeFacts.answeredDecisionKeys),
+    ] : []),
     '',
     `# Role Prompt · v${runtime.promptVersion} · ${runtime.promptStatus}`,
     runtime.prompt,
@@ -404,7 +412,12 @@ async function executeDelegationStep(
       try {
         await processDurableResult(durable.attempt, delegation, parseAgentResult(durable.attempt.result_json));
       } catch (error) {
-        await handleExecutionFailure(durable.attempt, delegation, error instanceof Error ? error.message : String(error), false);
+        await handleExecutionFailure(
+          durable.attempt,
+          delegation,
+          error instanceof Error ? error.message : String(error),
+          error instanceof AgentResultContractError,
+        );
       }
       return;
     }
@@ -449,7 +462,7 @@ async function executeDelegationStep(
         return;
       }
       const reason = `应用 Agent 结果失败：${error instanceof Error ? error.message : String(error)}`;
-      await handleExecutionFailure(durable.attempt, delegation, reason, false);
+      await handleExecutionFailure(durable.attempt, delegation, reason, error instanceof AgentResultContractError);
     }
   } catch (error) {
     unexpectedFailure = error;
@@ -518,7 +531,7 @@ async function main() {
       }, executor, executionOptions));
     } catch (error) {
       const reason = `恢复 execution attempt 失败：${error instanceof Error ? error.message : String(error)}`;
-      await handleExecutionFailure(recoverable, delegation, reason, false);
+      await handleExecutionFailure(recoverable, delegation, reason, error instanceof AgentResultContractError);
     } finally {
       await settleDelegationLane(delegation);
       await enqueueExecutionMaintenance(maintenance);

@@ -51,6 +51,7 @@ export type AgentContextSnapshot = {
     currentDeliveryUnit: { index: number; title: string } | null;
     deliveryUnits: { index: number; title: string }[];
     currentSliceSpec: unknown | null;
+    answeredDecisionKeys: string[];
     userDecisions: unknown[];
   };
   activeObligations: {
@@ -208,6 +209,9 @@ export function buildAgentContextSnapshot(input: {
       specRevision: question.spec_revision,
       resolvedAt: question.resolved_at,
     }));
+  const answeredDecisionKeys = [...new Set(userDecisions
+    .map((decision) => decision.decisionKey)
+    .filter((key): key is string => Boolean(key)))];
   const activeQuestions = full.questions
     .filter((question) => relevantToExecution(delegation.storyIndex, question.story_index) && !question.answer && question.status !== 'superseded')
     .map((question) => ({
@@ -446,6 +450,7 @@ export function buildAgentContextSnapshot(input: {
       currentDeliveryUnit: currentStory ? { index: currentStory.story_index, title: currentStory.title } : null,
       deliveryUnits: full.stories.map((story) => ({ index: story.story_index, title: story.title })),
       currentSliceSpec: currentSpec ? sliceSpecValue(currentSpec) : null,
+      answeredDecisionKeys,
       userDecisions,
     },
     activeObligations: {

@@ -194,6 +194,13 @@ export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object
 export type AgentResult = z.infer<typeof agentResultSchema>;
 export type SliceSpec = z.infer<typeof sliceSpecSchema>;
 
+export class AgentResultContractError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AgentResultContractError';
+  }
+}
+
 function duplicateKeys(keys: string[]) {
   const seen = new Set<string>();
   return [...new Set(keys.filter((key) => seen.has(key) || !seen.add(key)))];

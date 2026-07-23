@@ -101,6 +101,7 @@ test('builds a compact execution snapshot while preserving full context for just
   assert.equal(startup.includes('FULL-CONTEXT-TAIL'), false);
   assert.equal(startup.includes('FUTURE-UNIT-ONLY'), false);
   assert.match(startup, /Reuse the original configuration/);
+  assert.deepEqual(snapshot.authoritativeFacts.answeredDecisionKeys, ['retry-policy']);
   assert.match(startup, /Use fixture B/);
   assert.equal(snapshot.resourceCount > snapshot.startupIndex.length, true);
   assert.equal(snapshot.requiredContextRefs.includes(`DOC:${currentDocumentId}`), true);
