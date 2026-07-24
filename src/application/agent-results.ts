@@ -11,20 +11,26 @@ import {
 import {
   addQuestion,
   addRuntimeInputRequest,
-  applyFeedbackTriageBatch,
-  applyFeedbackVerification,
   addStory,
   CodeSlotBusyError,
   getTask,
   rewindTask,
   resolveRuntimeInputs,
-  recordFeedbackProgress,
   saveStorySpec,
   setTaskLaneState,
   updateTask,
   upsertDocument,
   type DelegationEnvelope,
 } from './tasks';
+import {
+  applyFeedbackReproResult,
+  applyFeedbackSplitResult,
+  applyFeedbackTriageGroups,
+  applyFeedbackVerificationV2,
+  markFeedbackBatchWaitingForAnswers,
+  markFeedbackReportGenerated,
+  recordFeedbackUnitTestPassed,
+} from './feedback';
 
 const artifactKinds: Record<string, string> = {
   'backlog-agent': 'context',
@@ -40,6 +46,7 @@ function questionKind(agent: string) {
   if (agent === 'analyst-agent') return 'analysis' as const;
   if (agent === 'test-agent') return 'test' as const;
   if (agent === 'review-agent') return 'review' as const;
+  if (agent === 'feedback-agent') return 'feedback' as const;
   return 'local' as const;
 }
 
@@ -198,12 +205,12 @@ function restoreFeedbackSnapshot(
   delegation: DelegationEnvelope,
 ) {
   if (row.agent !== 'feedback-agent') return delegation;
-  let stored: Pick<DelegationEnvelope, 'feedbackId' | 'feedbackIds'> | null = null;
+  let stored: Pick<DelegationEnvelope, 'feedbackId' | 'feedbackIds' | 'feedbackBatchId' | 'feedbackGroupId'> | null = null;
   if (row.execution_id) {
     const attempt = db.prepare('SELECT input_json FROM execution_attempts WHERE execution_id = ?').get(row.execution_id) as { input_json: string } | undefined;
     if (attempt?.input_json) {
       try {
-        const parsed = JSON.parse(attempt.input_json) as { delegation?: Pick<DelegationEnvelope, 'feedbackId' | 'feedbackIds'> };
+        const parsed = JSON.parse(attempt.input_json) as { delegation?: Pick<DelegationEnvelope, 'feedbackId' | 'feedbackIds' | 'feedbackBatchId' | 'feedbackGroupId'> };
         stored = parsed.delegation || null;
       } catch {
         // Legacy attempts may not contain a readable delegation snapshot.
@@ -213,11 +220,23 @@ function restoreFeedbackSnapshot(
   if (result.feedback?.mode === 'triage') {
     const feedbackIds = stored?.feedbackIds?.length
       ? stored.feedbackIds
-      : result.feedback.decisions.map((decision) => decision.commentId);
-    return { ...delegation, feedbackId: stored?.feedbackId || feedbackIds[0] || null, feedbackIds };
+      : result.feedback.groups.flatMap((group) => group.commentIds);
+    return {
+      ...delegation,
+      feedbackId: stored?.feedbackId || feedbackIds[0] || null,
+      feedbackIds,
+      feedbackBatchId: stored?.feedbackBatchId || delegation.feedbackBatchId || null,
+      feedbackGroupId: stored?.feedbackGroupId || delegation.feedbackGroupId || null,
+    };
   }
   if (result.feedback?.mode === 'verify') {
-    return { ...delegation, feedbackId: stored?.feedbackId || result.feedback.commentId, feedbackIds: null };
+    return {
+      ...delegation,
+      feedbackId: stored?.feedbackId || result.feedback.commentId,
+      feedbackIds: stored?.feedbackIds || null,
+      feedbackBatchId: stored?.feedbackBatchId || delegation.feedbackBatchId || null,
+      feedbackGroupId: stored?.feedbackGroupId || delegation.feedbackGroupId || null,
+    };
   }
   return delegation;
 }
@@ -235,6 +254,7 @@ async function ensureCodeSlotForDelegation(delegation: DelegationEnvelope, resul
     WHERE task_id != ?
       AND (
         agile_status = 'in dev'
+        OR (agile_status = 'in feedback' AND dev_index > test_index)
         OR (agile_status = 'blocked' AND resume_status = 'in dev')
         OR (run_state = 'waiting_for_runtime_input' AND current_subagent = 'dev-agent')
       )
@@ -269,7 +289,10 @@ type ApplyOutcome = 'advanced' | 'blocked' | 'rewound' | 'discarded';
 async function applyResultEffects(delegation: DelegationEnvelope, result: AgentResult, sourceResultId?: string, sourceExecutionId?: string): Promise<ApplyOutcome> {
   await ensureCodeSlotForDelegation(delegation, result);
 
-  const canAskAlignmentQuestions = delegation.agent === 'backlog-agent' || delegation.agent === 'analyst-agent' || delegation.agent === 'repro-agent';
+  const canAskAlignmentQuestions = delegation.agent === 'backlog-agent'
+    || delegation.agent === 'analyst-agent'
+    || delegation.agent === 'repro-agent'
+    || delegation.agent === 'feedback-agent';
   if (result.questions.length && !canAskAlignmentQuestions) {
     throw new Error(`${delegation.agent} 不允许创建设计澄清问题；运行所需信息请使用 runtimeInputs`);
   }
@@ -294,23 +317,30 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
   }
 
   if (delegation.agent === 'feedback-agent') {
+    if (result.questions.length) {
+      if (result.feedback) throw new Error('Feedback Agent 不能同时提问和提交反馈分组');
+      if (!delegation.feedbackBatchId) throw new Error('Feedback Agent 提问缺少反馈批次');
+      await saveQuestions(delegation, result);
+      await markFeedbackBatchWaitingForAnswers(delegation.taskId, delegation.feedbackBatchId);
+      return 'blocked';
+    }
     if (!result.feedback) throw new Error('Feedback Agent 缺少反馈结果');
     if (delegation.pipeline === 'feedback-triage' && result.feedback.mode !== 'triage') throw new Error('Feedback Triage 必须返回 mode=triage');
     if (delegation.pipeline === 'feedback-verify' && result.feedback.mode !== 'verify') throw new Error('Feedback Verify 必须返回 mode=verify');
     if (result.feedback.mode === 'triage') {
-      const expected = new Set(delegation.feedbackIds || (delegation.feedbackId ? [delegation.feedbackId] : []));
-      const seen = new Set<string>();
-      const applicable = result.feedback.decisions.filter((decision) => {
-        if (!expected.has(decision.commentId) || seen.has(decision.commentId)) return false;
-        seen.add(decision.commentId);
-        return true;
+      if (!delegation.feedbackBatchId) throw new Error('Feedback Triage 缺少反馈批次');
+      await applyFeedbackTriageGroups({
+        taskId: delegation.taskId,
+        batchId: delegation.feedbackBatchId,
+        groups: result.feedback.groups,
+        summary: result.summary,
+        executionId: sourceExecutionId,
       });
-      if (applicable.length) await applyFeedbackTriageBatch(delegation.taskId, applicable, sourceExecutionId);
     } else {
       if (!delegation.feedbackId || result.feedback.commentId !== delegation.feedbackId) throw new Error('Feedback Agent 返回了错误的 commentId');
-      await applyFeedbackVerification(delegation.taskId, result.feedback, sourceExecutionId);
+      await applyFeedbackVerificationV2(delegation.taskId, result.feedback, sourceExecutionId);
     }
-    return result.feedback.mode === 'verify' && result.feedback.verdict === 'reopened' ? 'rewound' : 'advanced';
+    return 'advanced';
   }
 
   const artifactDocumentId = await saveArtifact(delegation, result);
@@ -325,22 +355,28 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       const detail = await getTask(delegation.taskId);
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
       const retainsCodeSlot = detail.task.agile_status === 'in dev' && detail.task.total_stories === 0;
-      const pendingReproFeedback = detail.documentComments.some((comment) =>
-        comment.feedback_status === 'in_progress'
-        && comment.feedback_needs_rebase === 0
-        && comment.target_stage === 'repro');
-      const nextRoute = pendingReproFeedback ? 'repro' : result.route;
+      const nextRoute = result.route;
       await updateTask(delegation.taskId, actor, {
         item_type: result.classification,
         ...(retainsCodeSlot ? {} : { agile_status: nextRoute === 'repro' ? 'in repro' as const : 'in plan' as const }),
         current_subagent: nextRoute === 'repro' ? 'repro-agent' : 'story-splitter-agent',
         next_step: result.summary,
       });
-      await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, executionId: sourceExecutionId, claims: result.feedbackResolutions });
       return 'advanced' as const;
     }
     case 'story-splitter-agent': {
       if (!result.deliveryUnits?.length) throw new Error('交付规划 Agent 结果缺少 deliveryUnits');
+      if (delegation.pipeline === 'feedback-split') {
+        if (!delegation.feedbackBatchId || !delegation.feedbackGroupId) throw new Error('反馈追加拆分缺少批次或分组');
+        await applyFeedbackSplitResult({
+          taskId: delegation.taskId,
+          batchId: delegation.feedbackBatchId,
+          groupId: delegation.feedbackGroupId,
+          deliveryUnits: result.deliveryUnits,
+          executionId: sourceExecutionId,
+        });
+        return 'advanced';
+      }
       const detail = await getTask(delegation.taskId);
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
       if (detail.stories.length) throw new Error('当前需求已存在交付单元，拒绝重复拆分');
@@ -350,7 +386,6 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         current_subagent: 'analyst-agent',
         next_step: `已拆分 ${result.deliveryUnits.length} 个交付单元，等待逐个进行方案分析`,
       });
-      await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, executionId: sourceExecutionId, claims: result.feedbackResolutions });
       return 'advanced' as const;
     }
     case 'analyst-agent': {
@@ -384,7 +419,6 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
           ? `交付单元 ${delegation.storyIndex} 的方案已按人工答复更新`
           : `交付单元 ${delegation.storyIndex} 的方案分析完成，无待确认设计决策`,
       });
-      await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, executionId: sourceExecutionId, claims: result.feedbackResolutions });
       await recordRecoveryClaims({
         taskId: delegation.taskId,
         storyIndex: delegation.storyIndex,
@@ -400,10 +434,25 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         if (result.outcome !== 'needs_input' || !result.questions.length) throw new Error('未复现问题时必须请求人工对齐');
         if (result.route) throw new Error('未复现问题时不能进入后续路由');
         await saveQuestions(delegation, result);
+        if (delegation.pipeline === 'feedback-repro') {
+          if (!delegation.feedbackBatchId) throw new Error('反馈复现缺少反馈批次');
+          await markFeedbackBatchWaitingForAnswers(delegation.taskId, delegation.feedbackBatchId);
+        }
         return 'blocked' as const;
       }
       if (result.reproVerdict !== 'reproduced') throw new Error('repro-agent 结果缺少 reproVerdict');
       if (result.outcome !== 'completed' || result.route !== 'plan') throw new Error('只有成功复现后才能 route=plan');
+      if (delegation.pipeline === 'feedback-repro') {
+        if (!delegation.feedbackBatchId || !delegation.feedbackGroupId) throw new Error('反馈复现缺少批次或分组');
+        await applyFeedbackReproResult({
+          taskId: delegation.taskId,
+          batchId: delegation.feedbackBatchId,
+          groupId: delegation.feedbackGroupId,
+          result,
+          executionId: sourceExecutionId,
+        });
+        return 'advanced';
+      }
       const detail = await getTask(delegation.taskId);
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
       const retainsCodeSlot = detail.task.agile_status === 'in dev' && detail.task.total_stories === 0;
@@ -412,18 +461,18 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         current_subagent: 'story-splitter-agent',
         next_step: result.summary,
       });
-      await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, executionId: sourceExecutionId, claims: result.feedbackResolutions });
       return 'advanced' as const;
     }
     case 'dev-agent': {
       if (!delegation.storyIndex) throw new Error('开发实现 Agent 缺少交付单元序号');
+      const detail = await getTask(delegation.taskId);
+      if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
       await updateTask(delegation.taskId, actor, {
-        agile_status: 'in dev',
+        agile_status: detail.task.agile_status === 'in feedback' ? 'in feedback' : 'in dev',
         current_subagent: 'dev-agent',
         dev_index: delegation.storyIndex,
         next_step: result.summary,
       });
-      await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, executionId: sourceExecutionId, claims: result.feedbackResolutions });
       await recordRecoveryClaims({
         taskId: delegation.taskId,
         storyIndex: delegation.storyIndex,
@@ -439,13 +488,20 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         const detail = await getTask(delegation.taskId);
         if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
         const complete = delegation.storyIndex === detail.task.total_stories && detail.task.dev_index === detail.task.total_stories && detail.task.analysis_index === detail.task.total_stories;
+        const inFeedback = detail.task.agile_status === 'in feedback';
         await updateTask(delegation.taskId, actor, {
-          agile_status: complete ? 'in review' : 'in dev',
-          current_subagent: complete ? 'review-agent' : 'test-agent',
+          agile_status: inFeedback ? 'in feedback' : complete ? 'in review' : 'in dev',
+          current_subagent: inFeedback ? 'test-agent' : complete ? 'review-agent' : 'test-agent',
           test_index: delegation.storyIndex,
           next_step: result.summary,
         });
-        await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, verdict: result.verdict, executionId: sourceExecutionId, claims: result.feedbackResolutions });
+        if (inFeedback) {
+          await recordFeedbackUnitTestPassed({
+            taskId: delegation.taskId,
+            storyIndex: delegation.storyIndex,
+            executionId: sourceExecutionId,
+          });
+        }
         await resolveActiveRecoveryItems({
           taskId: delegation.taskId,
           storyIndex: delegation.storyIndex,
@@ -493,6 +549,23 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
       if (result.verdict !== 'report_ready') throw new Error('Review Agent 只能返回 verdict=report_ready');
       const reviewRevision = detail.task.review_revision + 1;
+      if (delegation.pipeline === 'feedback-report') {
+        if (!delegation.feedbackBatchId || !delegation.feedbackGroupId) throw new Error('反馈报告更正缺少批次或分组');
+        await updateTask(delegation.taskId, actor, {
+          current_subagent: 'review-agent',
+          closure_status: 'none',
+          review_revision: reviewRevision,
+          review_document_id: artifactDocumentId,
+          next_step: `结卡报告 v${reviewRevision} 已按反馈修订，等待独立验证`,
+        });
+        await markFeedbackReportGenerated({
+          taskId: delegation.taskId,
+          batchId: delegation.feedbackBatchId,
+          groupId: delegation.feedbackGroupId,
+          executionId: sourceExecutionId,
+        });
+        return 'advanced';
+      }
       await updateTask(delegation.taskId, actor, {
         agile_status: 'ready_to_close',
         current_subagent: null,
@@ -502,7 +575,6 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         review_document_id: artifactDocumentId,
         next_step: `结卡报告 v${reviewRevision} 已生成，等待用户阅读并关闭需求`,
       });
-      await recordFeedbackProgress({ taskId: delegation.taskId, agent: delegation.agent, storyIndex: delegation.storyIndex, summary: result.summary, verdict: result.verdict, executionId: sourceExecutionId, claims: result.feedbackResolutions });
       return 'advanced' as const;
     }
     default:

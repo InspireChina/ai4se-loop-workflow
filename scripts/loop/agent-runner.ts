@@ -105,11 +105,7 @@ async function enqueueRunnerFailureMaintenance(failure: unknown) {
 async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit: string | null) {
   const runtime = await loadAgentRuntime(delegation.agent, delegation.pipeline);
   const full = await getTaskContext(delegation.taskId);
-  const activeFeedback = full.documentComments.filter((comment) =>
-    comment.feedback_status === 'in_progress'
-    && comment.feedback_needs_rebase === 0
-    && comment.target_agent === delegation.agent
-    && (comment.target_story_index == null || comment.target_story_index === delegation.storyIndex));
+  const activeFeedback: typeof full.documentComments = [];
   const recoveryStage = recoveryStageForAgent(delegation.agent);
   const activeRecovery = recoveryStage
     ? await listRecoveryItemsForStage({ taskId: delegation.taskId, storyIndex: delegation.storyIndex, stage: recoveryStage })
@@ -231,7 +227,19 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
       feedback: delegation.agent === 'feedback-agent'
         ? delegation.pipeline === 'feedback-verify'
           ? { mode: 'verify', commentId: delegation.feedbackId, verdict: 'resolved | reopened', reason: '验证结论', evidence: ['实际证据'] }
-          : { mode: 'triage', decisions: (delegation.feedbackIds || []).map((commentId) => ({ commentId, disposition: 'no_change | reply | revise | rewind | learning_only', targetStage: 'context | repro | plan | analysis | dev | test | review', targetDeliveryUnit: delegation.storyIndex, reason: '影响判断', acceptance: ['反馈完成标准'] })) }
+          : {
+              mode: 'triage',
+              groups: [{
+                groupKey: '稳定的批次内分组标识',
+                commentIds: delegation.feedbackIds || [],
+                workType: 'reply | historical_correction | report_correction | bug | behavior_change | scope_addition | technical_change | learning_only',
+                title: '需要工程工作时的新增交付单元标题',
+                affectedDeliveryUnits: [1],
+                reason: '分组及处理类型判断',
+                acceptance: ['需要工程工作时的客观完成标准'],
+                response: '无需工程工作时给用户的明确回复',
+              }],
+            }
         : undefined,
       feedbackResolutions: activeFeedback.map((comment) => ({ commentId: comment.comment_id, summary: '如何处理了该反馈', evidence: ['新文档、代码或验证证据'] })),
       recoveryResolutions: activeRecovery
@@ -240,7 +248,7 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
       tests: [{ command: '测试命令', passed: true, summary: '结果' }],
     }, null, 2),
     '',
-    'questions 仅供需求梳理 Agent 提出影响目标、范围、路由或交付边界的需求级产品问题，方案分析 Agent 提出交付单元内的产品决策和重大技术决策，以及问题复现 Agent 在完成合理尝试后仍未复现时请求人工对齐；其他 Agent 不得使用。以上 Agent 提问时必须 outcome=needs_input。问题复现 Agent 未复现时还必须返回 reproVerdict=not_reproduced 且不得返回 route，并且必须使用 questions 而不是 runtimeInputs；只有 reproVerdict=reproduced 才能 route=plan。除这一 Repro 特例外，Agent 若缺少无法从代码、仓库、文档和环境推导的非敏感运行信息，使用 runtimeInputs 并返回 outcome=needs_input。不要通过 runtimeInputs 询问设计决策、审批、密钥或可自行探索的事实。',
+    'questions 仅供需求梳理 Agent 提出影响目标、范围、路由或交付边界的需求级产品问题，方案分析 Agent 提出交付单元内的产品决策和重大技术决策，问题复现 Agent 在完成合理尝试后仍未复现时请求人工对齐，以及 Feedback Agent 在无法安全分组冻结评论时请求最少必要信息；其他 Agent 不得使用。以上 Agent 提问时必须 outcome=needs_input。问题复现 Agent 未复现时还必须返回 reproVerdict=not_reproduced 且不得返回 route，并且必须使用 questions 而不是 runtimeInputs；只有 reproVerdict=reproduced 才能 route=plan。除这一 Repro 特例外，Agent 若缺少无法从代码、仓库、文档和环境推导的非敏感运行信息，使用 runtimeInputs 并返回 outcome=needs_input。不要通过 runtimeInputs 询问设计决策、审批、密钥或可自行探索的事实。',
   ].join('\n');
   return { prompt, runtime, contextSnapshot };
 }

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
 test('ships rigorous versioned seed prompts for every flow Agent', () => {
-  assert.equal(AGENT_PROMPT_SEED_REVISION, 15);
+  assert.equal(AGENT_PROMPT_SEED_REVISION, 16);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
     assert.ok(prompt.length >= 450, `${agentId} seed prompt is too small to define a reliable role contract`);
@@ -27,13 +27,13 @@ test('ships rigorous versioned seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /runtimeInputs/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /runtimeInputs/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /逐条说明如何处理/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /反馈的阶段判断由 Feedback Agent 负责，Application 执行明确路由/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /Application 只向前追加交付单元/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /不得返回 changes_requested/);
   assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /Triage/);
   assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /Verify/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /context/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /repro/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /禁止返回 targetAgent/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /scope_addition/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /bug/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /不返回 targetStage、targetAgent、rewindTo/);
   assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /currentFeedbackBatch/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /只执行一次最早回退/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /追加交付单元/);
 });

@@ -237,31 +237,33 @@ test('keeps unresolved analysis decisions in the question flow without requiring
   assert.doesNotThrow(() => assertAgentResultRoleContract(unsafe, 'analyst-agent'));
 });
 
-test('parses Feedback Agent triage and verification decisions', () => {
+test('parses forward-only Feedback Agent groups and verification decisions', () => {
   const triage = parseAgentResult(JSON.stringify({
     outcome: 'completed',
-    summary: 'Route the feedback back to implementation.',
+    summary: 'Create forward feedback work.',
     feedback: {
       mode: 'triage',
-      decisions: [{
-        commentId: 'feedback-1',
-        disposition: 'rewind',
-        targetStage: 'dev',
-        targetDeliveryUnit: 1,
+      groups: [{
+        groupKey: 'behavior-fix',
+        commentIds: ['feedback-1'],
+        workType: 'behavior_change',
+        title: 'Correct the behavior',
+        affectedDeliveryUnits: [1],
         reason: 'The comment identifies an implementation defect.',
         acceptance: ['The behavior is restored and tested.'],
       }, {
-        commentId: 'feedback-2',
-        disposition: 'revise',
-        targetStage: 'test',
-        targetDeliveryUnit: 1,
+        groupKey: 'evidence-answer',
+        commentIds: ['feedback-2'],
+        workType: 'reply',
+        affectedDeliveryUnits: [1],
         reason: 'The test evidence is incomplete.',
-        acceptance: ['The missing evidence is recorded.'],
+        acceptance: [],
+        response: 'The evidence is available in the Test result.',
       }],
     },
   }));
   assert.equal(triage.feedback?.mode, 'triage');
-  if (triage.feedback?.mode === 'triage') assert.equal(triage.feedback.decisions.length, 2);
+  if (triage.feedback?.mode === 'triage') assert.equal(triage.feedback.groups.length, 2);
   assert.equal('targetAgent' in (triage.feedback || {}), false);
   const verification = parseAgentResult(JSON.stringify({
     outcome: 'completed',
@@ -313,18 +315,17 @@ test('keeps feedback rewind decisions out of the Review Agent contract', () => {
   );
 });
 
-test('rejects Feedback Agent attempts to enter product or runtime input flows', () => {
+test('lets Feedback Agent ask for minimum grouping context but rejects runtime input flows', () => {
+  const question = parseAgentResult(JSON.stringify({
+    outcome: 'needs_input',
+    summary: 'The referenced behavior is ambiguous.',
+    questions: [{ title: 'Expected behavior', question: 'Which visible state is intended?' }],
+  }));
+  assert.doesNotThrow(() => assertAgentResultRoleContract(question, 'feedback-agent'));
   const result = parseAgentResult(JSON.stringify({
     outcome: 'needs_input',
-    summary: 'Ask the user instead of triaging feedback.',
+    summary: 'Request runtime input instead of triaging feedback.',
     runtimeInputs: [{ title: 'Need a decision', question: 'What should happen?' }],
-    feedback: {
-      mode: 'triage',
-      commentId: 'feedback-1',
-      disposition: 'no_change',
-      reason: 'No change proposed.',
-      acceptance: [],
-    },
   }));
-  assert.throws(() => assertAgentResultRoleContract(result, 'feedback-agent'), /不能创建设计问题或运行信息请求/);
+  assert.throws(() => assertAgentResultRoleContract(result, 'feedback-agent'), /不能创建运行信息请求/);
 });

@@ -37,7 +37,8 @@ test('updates an existing task-level document instead of inserting a duplicate N
 });
 
 test('anchors verified file feedback to document revisions and supplies it to Agent evolution', async () => {
-  const { addDocumentComment, applyFeedbackTriage, applyFeedbackVerification, createTask, getTask, upsertDocument } = await import('./tasks');
+  const { addDocumentComment, createTask, getTask, pipelineForTask, upsertDocument } = await import('./tasks');
+  const { applyFeedbackTriageGroups } = await import('./feedback');
   const { applyEvolutionResult, beginEvolutionRun } = await import('./agent-evolution');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -72,17 +73,20 @@ test('anchors verified file feedback to document revisions and supplies it to Ag
   assert.equal(detail?.documentComments[0].quoted_text, 'needs a clearer boundary');
   assert.equal(detail?.documentComments[0].status, 'open');
 
-  await applyFeedbackTriage(taskId, {
-    commentId,
-    disposition: 'learning_only',
-    reason: 'The report was already updated; preserve the convention as learning evidence.',
-    acceptance: [],
-  });
-  await applyFeedbackVerification(taskId, {
-    commentId,
-    verdict: 'resolved',
-    reason: 'Revision 2 states the boundary explicitly.',
-    evidence: ['Review report revision 2 contains an explicit boundary statement.'],
+  const feedbackDelegation = (await pipelineForTask(taskId))[0];
+  assert.ok(feedbackDelegation.feedbackBatchId);
+  await applyFeedbackTriageGroups({
+    taskId,
+    batchId: feedbackDelegation.feedbackBatchId,
+    summary: 'The report was already updated; preserve the convention as learning evidence.',
+    groups: [{
+      groupKey: 'explicit-boundary-learning',
+      commentIds: [commentId],
+      workType: 'learning_only',
+      affectedDeliveryUnits: [],
+      reason: 'Revision 2 already states the boundary explicitly.',
+      acceptance: [],
+    }],
   });
   db.prepare(`
     INSERT INTO execution_attempts(
@@ -528,7 +532,8 @@ test('resumes Analysis by lane ownership when Delivery leaves test-agent at task
 });
 
 test('acknowledges the current review report as read without an approval decision', async () => {
-  const { acknowledgeClosure, addDocumentComment, addQuestion, applyFeedbackTriage, applyFeedbackVerification, getTask } = await import('./tasks');
+  const { acknowledgeClosure, addDocumentComment, addQuestion, getTask, pipelineForTask } = await import('./tasks');
+  const { applyFeedbackTriageGroups } = await import('./feedback');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = 'TASK-closure-acknowledgement';
@@ -561,23 +566,20 @@ test('acknowledges the current review report as read without an approval decisio
     content: '请在后续报告中保留这个表述约定。',
   });
   await assert.rejects(() => acknowledgeClosure({ taskId, reviewRevision: 1 }), /1 条反馈尚未通过/);
-  await applyFeedbackTriage(taskId, {
-    commentId: noteId,
-    disposition: 'learning_only',
-    reason: '该评论是长期表述建议，不需要修改当前交付。',
-    acceptance: [],
-  });
-  await applyFeedbackVerification(taskId, {
-    commentId: noteId,
-    verdict: 'resolved',
-    reason: '已记录为可演化的长期证据。',
-    evidence: ['Feedback triage record'],
-  });
-  await applyFeedbackVerification(taskId, {
-    commentId: noteId,
-    verdict: 'resolved',
-    reason: '已记录为可演化的长期证据。',
-    evidence: ['Feedback triage record'],
+  const feedbackDelegation = (await pipelineForTask(taskId))[0];
+  assert.ok(feedbackDelegation.feedbackBatchId);
+  await applyFeedbackTriageGroups({
+    taskId,
+    batchId: feedbackDelegation.feedbackBatchId,
+    summary: '该评论是长期表述建议，不需要修改当前交付。',
+    groups: [{
+      groupKey: 'report-language-learning',
+      commentIds: [noteId],
+      workType: 'learning_only',
+      affectedDeliveryUnits: [],
+      reason: '已记录为可演化的长期证据。',
+      acceptance: [],
+    }],
   });
 
   await acknowledgeClosure({ taskId, reviewRevision: 1 });
@@ -593,783 +595,7 @@ test('acknowledges the current review report as read without an approval decisio
   await assert.rejects(() => acknowledgeClosure({ taskId, reviewRevision: 1 }), /没有等待阅读/);
 });
 
-test('routes closure feedback through triage, implementation, testing, and independent verification', async () => {
-  const { applyAgentResult } = await import('./agent-results');
-  const { parseAgentResult } = await import('../domain/agent-result');
-  const {
-    acknowledgeClosure,
-    addDocumentComment,
-    getTask,
-    pipelineForTask,
-  } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-  const taskId = 'TASK-closure-feedback-loop';
-  const documentId = 'DOC-closure-feedback-v1';
-  db.prepare(`
-    INSERT INTO tasks(
-      task_id, title, item_type, agile_status, current_subagent,
-      analysis_index, dev_index, test_index, total_stories, spec_resolved_index,
-      run_state, closure_status, review_revision, review_document_id, work_dir
-    ) VALUES(?, 'Closure feedback loop', 'feature', 'ready_to_close', NULL, 1, 1, 1, 1, 1, 'idle', 'awaiting_read', 1, ?, '')
-  `).run(taskId, documentId);
-  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Compatibility behavior', 'story-001')").run(taskId);
-  db.prepare(`
-    INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json)
-    VALUES('SPEC-closure-feedback', ?, 1, 1, 'resolved', '{}')
-  `).run(taskId);
-  db.prepare(`
-    INSERT INTO documents(document_id, task_id, kind, title, content, source_agent)
-    VALUES(?, ?, 'review_v1', '结卡报告 v1', '遗漏了一个重要限制。', 'review-agent')
-  `).run(documentId, taskId);
-  const commentId = await addDocumentComment({
-    taskId,
-    documentId,
-    anchorType: 'file',
-    content: '旧接口现在已经无法使用，这不是报告表述问题，请修复兼容性实现并重新验证。',
-  });
-
-  await assert.rejects(
-    () => acknowledgeClosure({ taskId, reviewRevision: 1 }),
-    /还有 1 条反馈尚未通过反馈闭环验证/,
-  );
-  const feedbackDelegation = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
-  assert.equal(feedbackDelegation.agent, 'feedback-agent');
-  assert.equal(feedbackDelegation.pipeline, 'feedback-triage');
-  await applyAgentResult('run-feedback-triage', feedbackDelegation, parseAgentResult(JSON.stringify({
-    outcome: 'completed',
-    summary: '评论指出实现兼容性缺陷，应回退开发阶段。',
-    artifact: {
-      title: '不应保存的 Feedback Agent 临时说明',
-      content: 'Feedback Agent 只提交结构化判断，不创建交付文档。',
-    },
-    feedback: {
-      mode: 'triage',
-      commentId,
-      disposition: 'rewind',
-      targetStage: 'dev',
-      targetDeliveryUnit: 1,
-      reason: '旧接口行为属于实现兼容性问题。',
-      acceptance: ['旧接口恢复可用', '兼容性回归测试通过'],
-    },
-  })));
-  let detail = await getTask(taskId);
-  assert.equal(detail?.task.agile_status, 'in dev');
-  assert.equal(detail?.task.current_subagent, 'dev-agent');
-  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.feedback_status, 'in_progress');
-  assert.equal(detail?.documents.some((document) => document.title === '不应保存的 Feedback Agent 临时说明'), false);
-
-  const delegation = {
-    taskId,
-    pipeline: 'review',
-    agent: 'review-agent',
-    storyIndex: null,
-    resource: 'none' as const,
-    description: '根据用户评论更新结卡报告',
-    title: 'Closure feedback loop',
-    taskDescription: null,
-    itemType: 'feature',
-    priority: '',
-    link: '',
-    externalId: '',
-    externalStatus: '',
-    agileStatus: 'in review',
-    currentSubagent: 'review-agent',
-    resumePending: 0,
-    specResolvedIndex: 1,
-    runState: 'runnable',
-    closureStatus: 'none',
-    reviewRevision: 1,
-    reviewDocumentId: '',
-    lastActor: 'human',
-    analysisIndex: 1,
-    devIndex: 1,
-    testIndex: 1,
-    totalStories: 1,
-    nextStep: '根据评论更新报告',
-    blockedReason: '',
-    owner: '',
-    evidence: '',
-    risk: '',
-  };
-  await applyAgentResult('run-closure-feedback-dev', {
-    ...delegation,
-    pipeline: 'dev',
-    agent: 'dev-agent',
-    storyIndex: 1,
-    description: '修复用户在结卡评论中指出的兼容性问题',
-    agileStatus: 'in dev',
-    currentSubagent: 'dev-agent',
-    devIndex: 0,
-    testIndex: 0,
-  }, parseAgentResult(JSON.stringify({
-    outcome: 'completed',
-    summary: '已恢复旧接口兼容性。',
-    changedFiles: ['src/compatibility.ts'],
-    tests: [{ command: 'npm test', passed: true }],
-  })));
-  detail = await getTask(taskId);
-  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.resolution_claim_json, null);
-  await applyAgentResult('run-closure-feedback-test', {
-    ...delegation,
-    pipeline: 'test',
-    agent: 'test-agent',
-    storyIndex: 1,
-    resource: 'browser',
-    description: '重新验证兼容性行为',
-    agileStatus: 'in dev',
-    currentSubagent: 'test-agent',
-    devIndex: 1,
-    testIndex: 0,
-  }, parseAgentResult(JSON.stringify({
-    outcome: 'completed',
-    summary: '旧接口兼容性验证通过。',
-    verdict: 'passed',
-    tests: [{ command: 'npm test', passed: true }],
-  })));
-  detail = await getTask(taskId);
-  assert.equal(detail?.task.agile_status, 'in review');
-  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.status, 'open');
-  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.feedback_status, 'verifying');
-
-  const verifyDelegation = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
-  assert.equal(verifyDelegation.agent, 'feedback-agent');
-  assert.equal(verifyDelegation.pipeline, 'feedback-verify');
-  await applyAgentResult('run-feedback-verify', verifyDelegation, parseAgentResult(JSON.stringify({
-    outcome: 'completed',
-    summary: '兼容性反馈已经处理并通过验证。',
-    feedback: {
-      mode: 'verify',
-      commentId,
-      verdict: 'resolved',
-      reason: '实现已修复且兼容性回归验证通过。',
-      evidence: ['src/compatibility.ts', 'npm test passed'],
-    },
-  })));
-
-  await applyAgentResult('run-closure-feedback-review-v2', {
-    ...delegation,
-    description: '在修复和重新验证后生成新版结卡报告',
-    agileStatus: 'in review',
-    lastActor: 'test-agent',
-  }, parseAgentResult(JSON.stringify({
-    outcome: 'completed',
-    summary: '实现已修复并重新验证，生成新版结卡报告。',
-    artifact: {
-      title: '结卡报告 v2',
-      content: '## 兼容性\n\n旧接口兼容性已经恢复并通过重新验证。\n\n## 评论处理\n\n用户指出的实现问题已修复。',
-    },
-    verdict: 'report_ready',
-  })));
-
-  detail = await getTask(taskId);
-  assert.equal(detail?.task.agile_status, 'ready_to_close');
-  assert.equal(detail?.task.closure_status, 'awaiting_read');
-  assert.equal(detail?.task.review_revision, 2);
-  assert.notEqual(detail?.task.review_document_id, documentId);
-  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.status, 'resolved');
-  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.feedback_status, 'resolved');
-  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentId)?.evolution_status, 'pending');
-  assert.equal(detail?.closureAcknowledgements.length, 0);
-
-  await acknowledgeClosure({ taskId, reviewRevision: 2 });
-  detail = await getTask(taskId);
-  assert.equal(detail?.task.agile_status, 'done');
-  assert.equal(detail?.closureAcknowledgements[0]?.review_revision, 2);
-});
-
-test('clears stale delivery units when the Harness routes feedback back to planning', async () => {
-  const { getTask, pipelineForTask, rewindTask } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-  const taskId = 'TASK-review-rewind-plan';
-  db.prepare(`
-    INSERT INTO tasks(
-      task_id, title, item_type, agile_status, current_subagent,
-      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
-    ) VALUES(?, 'Review replan', 'feature', 'in review', 'review-agent', 1, 1, 1, 1, 1, '')
-  `).run(taskId);
-  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Old boundary', 'story-001')").run(taskId);
-  db.prepare(`
-    INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json)
-    VALUES('SPEC-review-replan', ?, 1, 1, 'resolved', '{}')
-  `).run(taskId);
-
-  await rewindTask({ taskId, actor: 'system', to: 'plan', reason: '用户评论要求重新划分交付边界' });
-  const detail = await getTask(taskId);
-  assert.equal(detail?.task.total_stories, 0);
-  assert.equal(detail?.task.analysis_index, 0);
-  assert.equal(detail?.task.dev_index, 0);
-  assert.equal(detail?.task.test_index, 0);
-  assert.equal(detail?.stories.length, 0);
-  assert.equal(detail?.storySpecs.length, 0);
-  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'story-splitter-agent');
-  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id = ?").run(taskId);
-});
-
-test('queues a feedback rewind outside the code slot when another task already owns it', async () => {
-  const { getTask, pipelineForTask, rewindTask } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-  const ownerId = 'TASK-feedback-code-owner';
-  const rewoundId = 'TASK-feedback-code-waiter';
-  db.prepare(`
-    INSERT INTO tasks(
-      task_id, title, item_type, agile_status, current_subagent,
-      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
-    ) VALUES(?, 'Code owner', 'feature', 'in dev', 'dev-agent', 1, 1, 0, 1, 1, '')
-  `).run(ownerId);
-  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Owner unit', 'story-001')").run(ownerId);
-  db.prepare(`
-    INSERT INTO tasks(
-      task_id, title, item_type, agile_status, current_subagent,
-      analysis_index, dev_index, test_index, total_stories, spec_resolved_index,
-      run_state, closure_status, review_revision, review_document_id, work_dir
-    ) VALUES(?, 'Feedback waiter', 'feature', 'ready_to_close', NULL, 1, 1, 1, 1, 1,
-      'idle', 'awaiting_read', 1, 'DOC-feedback-code-waiter', '')
-  `).run(rewoundId);
-  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Waiter unit', 'story-001')").run(rewoundId);
-  db.prepare(`
-    INSERT INTO documents(document_id, task_id, kind, title, content, source_agent)
-    VALUES('DOC-feedback-code-waiter', ?, 'review', 'Review', 'Report', 'review-agent')
-  `).run(rewoundId);
-
-  await rewindTask({ taskId: rewoundId, actor: 'system', to: 'context', reason: '需要重新确认需求范围' });
-  const detail = await getTask(rewoundId);
-  assert.equal(detail?.task.agile_status, 'backlog');
-  assert.equal(detail?.task.current_subagent, 'backlog-agent');
-  assert.equal((await pipelineForTask(rewoundId))[0]?.agent, 'backlog-agent');
-  const codeOwners = db.prepare("SELECT task_id FROM tasks WHERE agile_status = 'in dev'").all() as { task_id: string }[];
-  assert.deepEqual(codeOwners.map((item) => item.task_id), [ownerId]);
-
-  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle', current_subagent = NULL WHERE task_id IN (?, ?)").run(ownerId, rewoundId);
-});
-
-test('defers feedback across user waits and recovers a durable triaged handoff', async () => {
-  const { addDocumentComment, getTask, pipelineForTask, reopenDocumentComment } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-  const taskId = 'TASK-feedback-wait-gate';
-  const documentId = 'DOC-feedback-wait-gate';
-  db.prepare(`
-    INSERT INTO tasks(
-      task_id, title, item_type, agile_status, current_subagent,
-      run_state, resume_pending, blocked_reason, work_dir
-    ) VALUES(?, 'Feedback wait gate', 'feature', 'backlog', 'backlog-agent',
-      'waiting_for_answers', 0, 'Need product answer', '')
-  `).run(taskId);
-  db.prepare(`
-    INSERT INTO documents(document_id, task_id, kind, title, content, source_agent)
-    VALUES(?, ?, 'context', 'Context', 'Context with an open question.', 'backlog-agent')
-  `).run(documentId, taskId);
-  const commentId = await addDocumentComment({
-    taskId,
-    documentId,
-    anchorType: 'file',
-    content: '这条反馈必须等当前澄清恢复完成后再分流。',
-  });
-  assert.deepEqual(await pipelineForTask(taskId), []);
-
-  db.prepare(`
-    UPDATE tasks SET run_state = 'runnable', resume_pending = 1, blocked_reason = NULL
-    WHERE task_id = ?
-  `).run(taskId);
-  let delegation = (await pipelineForTask(taskId))[0];
-  assert.equal(delegation.agent, 'backlog-agent');
-  assert.equal(delegation.pipeline, 'resume');
-
-  db.prepare(`
-    UPDATE tasks SET agile_status = 'in plan', current_subagent = 'story-splitter-agent', resume_pending = 0
-    WHERE task_id = ?
-  `).run(taskId);
-  delegation = (await pipelineForTask(taskId))[0];
-  assert.equal(delegation.agent, 'feedback-agent');
-  assert.equal(delegation.pipeline, 'feedback-triage');
-
-  db.prepare("UPDATE document_comments SET feedback_status = 'triaged' WHERE comment_id = ?").run(commentId);
-  delegation = (await pipelineForTask(taskId))[0];
-  assert.equal(delegation.agent, 'feedback-agent');
-  assert.equal(delegation.pipeline, 'feedback-triage');
-  assert.equal((await getTask(taskId))?.documentComments[0]?.feedback_status, 'triaged');
-
-  db.prepare(`
-    UPDATE document_comments
-    SET status = 'resolved', feedback_status = 'resolved', disposition = 'rewind',
-        target_stage = 'dev', target_agent = 'dev-agent', target_story_index = 1,
-        acceptance_json = '["old"]', triage_reason = 'old',
-        resolution_claim_json = '{"summary":"old"}', triaged_at = CURRENT_TIMESTAMP
-    WHERE comment_id = ?
-  `).run(commentId);
-  await reopenDocumentComment({ taskId, commentId });
-  const reopened = (await getTask(taskId))?.documentComments[0];
-  assert.equal(reopened?.feedback_status, 'reopened');
-  assert.equal(reopened?.target_stage, null);
-  assert.equal(reopened?.target_agent, null);
-  assert.equal(reopened?.resolution_claim_json, null);
-  db.prepare("UPDATE document_comments SET status = 'resolved', feedback_status = 'resolved' WHERE comment_id = ?").run(commentId);
-  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle', current_subagent = NULL WHERE task_id = ?").run(taskId);
-});
-
-test('holds review-targeted feedback until the normal forward flow reaches Review', async () => {
-  const { addDocumentComment, applyFeedbackTriage, getTask, pipelineForTask } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-  const taskId = 'TASK-feedback-review-deferred';
-  const documentId = 'DOC-feedback-review-deferred';
-  db.prepare(`
-    INSERT INTO tasks(
-      task_id, title, item_type, agile_status, current_subagent,
-      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
-    ) VALUES(?, 'Deferred review feedback', 'feature', 'in dev', 'test-agent', 1, 1, 0, 1, 1, '')
-  `).run(taskId);
-  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Reviewed unit', 'story-001')").run(taskId);
-  db.prepare(`
-    INSERT INTO documents(document_id, task_id, kind, title, content, source_agent)
-    VALUES(?, ?, 'test_result', 'Test result', 'The final report should use clearer wording.', 'test-agent')
-  `).run(documentId, taskId);
-  const commentId = await addDocumentComment({ taskId, documentId, anchorType: 'file', content: '请在最终报告中澄清这个表述。' });
-
-  await applyFeedbackTriage(taskId, {
-    commentId,
-    disposition: 'revise',
-    targetStage: 'review',
-    reason: '只需在最终报告中修订表述。',
-    acceptance: ['最终报告使用无歧义表述'],
-  });
-  const detail = await getTask(taskId);
-  assert.equal(detail?.task.agile_status, 'in dev');
-  assert.equal(detail?.documentComments[0]?.target_agent, 'review-agent');
-  assert.equal(detail?.documentComments[0]?.feedback_status, 'in_progress');
-  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'test-agent');
-
-  db.prepare("UPDATE document_comments SET status = 'resolved', feedback_status = 'resolved' WHERE comment_id = ?").run(commentId);
-  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle', current_subagent = NULL WHERE task_id = ?").run(taskId);
-});
-
-test('applies valid Feedback decisions and leaves omitted comments queued for the next turn', async () => {
-  const { parseAgentResult } = await import('../domain/agent-result');
-  const { applyAgentResult } = await import('./agent-results');
-  const { addDocumentComment, getTask, pipelineForTask } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-  const taskId = 'TASK-feedback-partial-batch';
-  const documentId = 'DOC-feedback-partial-batch';
-  db.prepare(`
-    INSERT INTO tasks(
-      task_id, title, item_type, agile_status, current_subagent,
-      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
-    ) VALUES(?, 'Partial feedback batch', 'feature', 'in review', 'review-agent', 1, 1, 1, 1, 1, '')
-  `).run(taskId);
-  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Reviewed unit', 'story-001')").run(taskId);
-  db.prepare(`
-    INSERT INTO documents(document_id, task_id, story_index, kind, title, content, source_agent)
-    VALUES(?, ?, 1, 'test_result', 'Verification result', 'Evidence', 'test-agent')
-  `).run(documentId, taskId);
-  const first = await addDocumentComment({ taskId, documentId, anchorType: 'file', content: '补充第一个测试说明。' });
-  const second = await addDocumentComment({ taskId, documentId, anchorType: 'file', content: '补充第二个测试说明。' });
-  const delegation = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
-  await applyAgentResult('run-feedback-partial-batch', delegation, parseAgentResult(JSON.stringify({
-    outcome: 'completed',
-    summary: '本轮只形成了第一条评论的有效判断。',
-    feedback: {
-      mode: 'triage',
-      decisions: [{
-        commentId: first,
-        disposition: 'revise',
-        targetStage: 'test',
-        targetDeliveryUnit: 1,
-        reason: '需要补充验证证据。',
-        acceptance: ['验证结果包含对应证据'],
-      }],
-    },
-  })));
-  const detail = await getTask(taskId);
-  const comments = new Map(detail?.documentComments.map((comment) => [comment.comment_id, comment]));
-  assert.equal(comments.get(first)?.feedback_status, 'in_progress');
-  assert.equal(comments.get(second)?.feedback_status, 'submitted');
-  const next = (await pipelineForTask(taskId))[0];
-  assert.equal(next?.agent, 'feedback-agent');
-  assert.deepEqual(next?.feedbackIds, [second]);
-  db.prepare("UPDATE document_comments SET status = 'resolved', feedback_status = 'resolved' WHERE task_id = ?").run(taskId);
-  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle', current_subagent = NULL WHERE task_id = ?").run(taskId);
-});
-
-test('triages one task feedback snapshot as a batch, rewinds once, and defers downstream comments by stage', async () => {
-  const { parseAgentResult } = await import('../domain/agent-result');
-  const { applyAgentResult } = await import('./agent-results');
-  const { addDocumentComment, getTask, pipelineForTask } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-  const taskId = 'TASK-feedback-batch-frontier';
-  db.prepare(`
-    INSERT INTO tasks(
-      task_id, title, item_type, agile_status, current_subagent,
-      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
-    ) VALUES(?, 'Feedback batch frontier', 'feature', 'in review', 'review-agent', 2, 2, 2, 2, 2, '')
-  `).run(taskId);
-  for (let index = 1; index <= 2; index += 1) {
-    db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, ?, ?, ?)').run(taskId, index, `Old unit ${index}`, `old-${index}`);
-  }
-  const documents = [
-    { id: 'DOC-feedback-batch-context', story: null, kind: 'context', title: 'Requirement context' },
-    { id: 'DOC-feedback-batch-dev', story: 1, kind: 'dev_note', title: 'Implementation note' },
-    { id: 'DOC-feedback-batch-test', story: 2, kind: 'test_result', title: 'Test result' },
-  ];
-  for (const document of documents) {
-    db.prepare(`
-      INSERT INTO documents(document_id, task_id, story_index, kind, title, content, source_agent)
-      VALUES(?, ?, ?, ?, ?, 'Old evidence', 'review-agent')
-    `).run(document.id, taskId, document.story, document.kind, document.title);
-  }
-  const contextComment = await addDocumentComment({ taskId, documentId: documents[0].id, anchorType: 'file', content: '需求范围需要重新确认。' });
-  const devComment = await addDocumentComment({ taskId, documentId: documents[1].id, anchorType: 'file', content: '实现需要修正。' });
-  const testComment = await addDocumentComment({ taskId, documentId: documents[2].id, anchorType: 'file', content: '测试证据需要补充。' });
-
-  const triage = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
-  assert.equal(triage.agent, 'feedback-agent');
-  assert.equal(triage.pipeline, 'feedback-triage');
-  assert.deepEqual(new Set(triage.feedbackIds), new Set([contextComment, devComment, testComment]));
-  await applyAgentResult('run-feedback-batch-frontier', triage, parseAgentResult(JSON.stringify({
-    outcome: 'completed',
-    summary: '三个评论已完成批量分流。',
-    feedback: {
-      mode: 'triage',
-      decisions: [
-        { commentId: contextComment, disposition: 'rewind', targetStage: 'context', reason: '需求范围失效。', acceptance: ['重新确认需求范围'] },
-        { commentId: devComment, disposition: 'revise', targetStage: 'dev', targetDeliveryUnit: 1, reason: '实现需要修正。', acceptance: ['实现符合更新后的规格'] },
-        { commentId: testComment, disposition: 'revise', targetStage: 'test', targetDeliveryUnit: 2, reason: '测试证据不足。', acceptance: ['补齐测试证据'] },
-      ],
-    },
-  })));
-
-  let detail = await getTask(taskId);
-  assert.equal(detail?.task.total_stories, 0);
-  assert.equal(detail?.task.current_subagent, 'backlog-agent');
-  const comments = new Map(detail?.documentComments.map((comment) => [comment.comment_id, comment]));
-  assert.equal(comments.get(contextComment)?.feedback_is_rewind_frontier, 1);
-  assert.equal(comments.get(contextComment)?.feedback_needs_rebase, 0);
-  assert.equal(comments.get(devComment)?.feedback_is_rewind_frontier, 0);
-  assert.equal(comments.get(devComment)?.feedback_needs_rebase, 1);
-  assert.equal(comments.get(testComment)?.feedback_needs_rebase, 1);
-  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'backlog-agent');
-
-  const lateComment = await addDocumentComment({ taskId, documentId: documents[2].id, anchorType: 'file', content: '回退期间新增的测试评论。' });
-  const lateTriage = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
-  assert.deepEqual(lateTriage.feedbackIds, [lateComment]);
-  await applyAgentResult('run-feedback-batch-late-comment', lateTriage, parseAgentResult(JSON.stringify({
-    outcome: 'completed',
-    summary: '后续阶段评论只登记，不跳转。',
-    feedback: {
-      mode: 'triage',
-      decisions: [{ commentId: lateComment, disposition: 'revise', targetStage: 'test', targetDeliveryUnit: 2, reason: '应在 Test 阶段处理。', acceptance: ['覆盖新增测试意见'] }],
-    },
-  })));
-  detail = await getTask(taskId);
-  assert.equal(detail?.task.current_subagent, 'backlog-agent');
-  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === lateComment)?.feedback_needs_rebase, 1);
-  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'backlog-agent');
-
-  for (let index = 1; index <= 2; index += 1) {
-    db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, ?, ?, ?)').run(taskId, index, `New unit ${index}`, `new-${index}`);
-  }
-  db.prepare(`
-    UPDATE tasks
-    SET agile_status = 'ready for dev', current_subagent = 'analyst-agent',
-        total_stories = 2, analysis_index = 0, dev_index = 0, test_index = 0, spec_resolved_index = 0
-    WHERE task_id = ?
-  `).run(taskId);
-  const rebase = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
-  assert.equal(rebase.agent, 'feedback-agent');
-  assert.deepEqual(new Set(rebase.feedbackIds), new Set([devComment, testComment, lateComment]));
-  await applyAgentResult('run-feedback-batch-rebase', rebase, parseAgentResult(JSON.stringify({
-    outcome: 'completed',
-    summary: '后续评论已绑定到新交付单元，不产生新的跳转。',
-    feedback: {
-      mode: 'triage',
-      decisions: [
-        { commentId: devComment, disposition: 'revise', targetStage: 'dev', targetDeliveryUnit: 1, reason: '绑定新单元 1。', acceptance: ['实现符合更新后的规格'] },
-        { commentId: testComment, disposition: 'revise', targetStage: 'test', targetDeliveryUnit: 2, reason: '绑定新单元 2。', acceptance: ['补齐测试证据'] },
-        { commentId: lateComment, disposition: 'revise', targetStage: 'test', targetDeliveryUnit: 2, reason: '绑定新单元 2。', acceptance: ['覆盖新增测试意见'] },
-      ],
-    },
-  })));
-  detail = await getTask(taskId);
-  assert.equal(detail?.task.analysis_index, 0);
-  assert.equal(detail?.task.dev_index, 0);
-  assert.equal(detail?.task.test_index, 0);
-  assert.ok(detail?.documentComments.filter((comment) => [devComment, testComment, lateComment].includes(comment.comment_id)).every((comment) => comment.feedback_needs_rebase === 0));
-  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'analyst-agent');
-
-  db.prepare("UPDATE document_comments SET status = 'resolved', feedback_status = 'resolved' WHERE task_id = ?").run(taskId);
-  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle', current_subagent = NULL WHERE task_id = ?").run(taskId);
-});
-
-test('merges feedback for different delivery units into one cursor rewind', async () => {
-  const { applyFeedbackTriageBatch, addDocumentComment, getTask } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-  const taskId = 'TASK-feedback-vector-rewind';
-  db.prepare(`
-    INSERT INTO tasks(
-      task_id, title, item_type, agile_status, current_subagent,
-      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
-    ) VALUES(?, 'Feedback vector rewind', 'feature', 'in review', 'review-agent', 3, 3, 3, 3, 3, '')
-  `).run(taskId);
-  const commentIds: string[] = [];
-  for (let index = 1; index <= 3; index += 1) {
-    db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, ?, ?, ?)').run(taskId, index, `Unit ${index}`, `unit-${index}`);
-    const documentId = `DOC-feedback-vector-${index}`;
-    db.prepare(`
-      INSERT INTO documents(document_id, task_id, story_index, kind, title, content, source_agent)
-      VALUES(?, ?, ?, 'review', ?, 'Evidence', 'review-agent')
-    `).run(documentId, taskId, index, `Unit ${index} review`);
-    commentIds.push(await addDocumentComment({ taskId, documentId, anchorType: 'file', content: `Comment ${index}` }));
-  }
-  await applyFeedbackTriageBatch(taskId, [
-    { commentId: commentIds[2], disposition: 'rewind', targetStage: 'analysis', targetDeliveryUnit: 3, reason: 'Unit 3 analysis changed.', acceptance: ['Reanalyze unit 3'] },
-    { commentId: commentIds[0], disposition: 'rewind', targetStage: 'dev', targetDeliveryUnit: 1, reason: 'Unit 1 implementation changed.', acceptance: ['Reimplement unit 1'] },
-    { commentId: commentIds[1], disposition: 'rewind', targetStage: 'test', targetDeliveryUnit: 2, reason: 'Unit 2 verification changed.', acceptance: ['Retest unit 2'] },
-  ], 'execution-feedback-vector');
-
-  const detail = await getTask(taskId);
-  assert.equal(detail?.task.analysis_index, 2);
-  assert.equal(detail?.task.dev_index, 0);
-  assert.equal(detail?.task.test_index, 0);
-  assert.equal(detail?.documentComments.find((comment) => comment.comment_id === commentIds[0])?.feedback_is_rewind_frontier, 1);
-  assert.equal(detail?.events.filter((event) => event.event_type === 'FeedbackBatchRewound').length, 1);
-  assert.equal(detail?.events.filter((event) => event.event_type === 'TaskRewound').length, 0);
-
-  db.prepare("UPDATE document_comments SET status = 'resolved', feedback_status = 'resolved' WHERE task_id = ?").run(taskId);
-  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle', current_subagent = NULL WHERE task_id = ?").run(taskId);
-});
-
-test('preserves a pending repro stage after an earlier context feedback rewind', async () => {
-  const { parseAgentResult } = await import('../domain/agent-result');
-  const { applyAgentResult } = await import('./agent-results');
-  const { addDocumentComment, applyFeedbackTriageBatch, pipelineForTask } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-  const taskId = 'TASK-feedback-context-then-repro';
-  const documentId = 'DOC-feedback-context-then-repro';
-  db.prepare(`
-    INSERT INTO tasks(
-      task_id, title, item_type, agile_status, current_subagent,
-      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
-    ) VALUES(?, 'Context then repro', 'bug', 'in review', 'review-agent', 1, 1, 1, 1, 1, '')
-  `).run(taskId);
-  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Old unit', 'old-unit')").run(taskId);
-  db.prepare(`
-    INSERT INTO documents(document_id, task_id, kind, title, content, source_agent)
-    VALUES(?, ?, 'review', 'Review', 'Evidence', 'review-agent')
-  `).run(documentId, taskId);
-  const contextComment = await addDocumentComment({ taskId, documentId, anchorType: 'file', content: '重新确认需求。' });
-  const reproComment = await addDocumentComment({ taskId, documentId, anchorType: 'file', content: '重新复现问题。' });
-  await applyFeedbackTriageBatch(taskId, [
-    { commentId: contextComment, disposition: 'rewind', targetStage: 'context', reason: 'Context changed.', acceptance: ['Context refreshed'] },
-    { commentId: reproComment, disposition: 'rewind', targetStage: 'repro', reason: 'Repro evidence missing.', acceptance: ['Repro refreshed'] },
-  ], 'execution-context-repro');
-
-  const backlog = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
-  assert.equal(backlog.agent, 'backlog-agent');
-  await applyAgentResult('run-context-repro-backlog', backlog, parseAgentResult(JSON.stringify({
-    outcome: 'completed',
-    summary: '上下文已更新；通常会直接进入规划。',
-    classification: 'bug',
-    route: 'plan',
-    feedbackResolutions: [{ commentId: contextComment, summary: '上下文已更新。', evidence: ['context'] }],
-  })));
-  const repro = (await pipelineForTask(taskId))[0];
-  assert.equal(repro.agent, 'repro-agent');
-  assert.equal(repro.pipeline, 'repro');
-
-  db.prepare("UPDATE document_comments SET status = 'resolved', feedback_status = 'resolved' WHERE task_id = ?").run(taskId);
-  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle', current_subagent = NULL WHERE task_id = ?").run(taskId);
-});
-
-test('recovers the original feedback batch snapshot when applying a queued result', async () => {
-  const { parseAgentResult } = await import('../domain/agent-result');
-  const { applyNextQueuedAgentResult } = await import('./agent-results');
-  const { beginExecutionAttempt } = await import('./executions');
-  const { addDocumentComment, createTask, pipelineForTask, upsertDocument, getTask } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
-  const taskId = await createTask({ title: 'Recover feedback batch snapshot' });
-  const documentId = await upsertDocument({ taskId, kind: 'context', title: 'Context', content: 'Context', actor: 'backlog-agent' });
-  const firstComment = await addDocumentComment({ taskId, documentId, anchorType: 'file', content: 'First comment' });
-  const secondComment = await addDocumentComment({ taskId, documentId, anchorType: 'file', content: 'Second comment' });
-  const delegation = (await pipelineForTask(taskId))[0] as Parameters<typeof beginExecutionAttempt>[0]['delegation'];
-  assert.deepEqual(new Set(delegation.feedbackIds), new Set([firstComment, secondComment]));
-  const attempt = await beginExecutionAttempt({ runId: 'run-feedback-batch-recovery', delegation, prompt: 'feedback batch prompt' });
-  const result = parseAgentResult(JSON.stringify({
-    outcome: 'completed',
-    summary: 'Both comments only need a recorded reply.',
-    feedback: {
-      mode: 'triage',
-      decisions: [
-        { commentId: firstComment, disposition: 'reply', reason: 'Answered by existing evidence.', acceptance: [] },
-        { commentId: secondComment, disposition: 'no_change', reason: 'No delivery change is needed.', acceptance: [] },
-      ],
-    },
-  }));
-  db.prepare(`
-    INSERT INTO agent_results(
-      result_id, run_id, task_id, story_index, agent, pipeline, outcome,
-      result_json, application_status, execution_id
-    ) VALUES('RESULT-feedback-batch-recovery', 'run-feedback-batch-recovery', ?, NULL,
-      'feedback-agent', 'feedback-triage', 'completed', ?, 'pending', ?)
-  `).run(taskId, JSON.stringify(result), attempt.attempt.execution_id);
-
-  const applied = await applyNextQueuedAgentResult();
-  assert.equal(applied.status, 'applied');
-  const detail = await getTask(taskId);
-  assert.ok(detail?.documentComments.every((comment) => comment.feedback_batch_id === attempt.attempt.execution_id));
-  assert.ok(detail?.documentComments.every((comment) => comment.feedback_status === 'verifying'));
-
-  db.prepare("UPDATE document_comments SET status = 'resolved', feedback_status = 'resolved' WHERE task_id = ?").run(taskId);
-  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle', current_subagent = NULL WHERE task_id = ?").run(taskId);
-});
-
-test('lets Feedback Agent choose only a stage while the Harness routes context and repro work', async () => {
-  const { parseAgentResult } = await import('../domain/agent-result');
-  const { applyAgentResult } = await import('./agent-results');
-  const {
-    FEEDBACK_STAGE_AGENTS,
-    answerQuestion,
-    addDocumentComment,
-    applyFeedbackTriage,
-    getTask,
-    pipelineForTask,
-    submitClarificationAnswers,
-  } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-
-  assert.deepEqual(FEEDBACK_STAGE_AGENTS, {
-    context: 'backlog-agent',
-    repro: 'repro-agent',
-    plan: 'story-splitter-agent',
-    analysis: 'analyst-agent',
-    dev: 'dev-agent',
-    test: 'test-agent',
-    review: 'review-agent',
-  });
-
-  for (const stage of ['context', 'repro'] as const) {
-    const taskId = `TASK-feedback-stage-${stage}`;
-    const documentId = `DOC-feedback-stage-${stage}`;
-    db.prepare(`
-      INSERT INTO tasks(
-        task_id, title, item_type, agile_status, current_subagent,
-        analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
-      ) VALUES(?, ?, 'bug', 'in review', 'review-agent', 1, 1, 1, 1, 1, '')
-    `).run(taskId, `Feedback ${stage} routing`);
-    db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Old unit', 'story-001')").run(taskId);
-    db.prepare(`
-      INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json)
-      VALUES(?, ?, 1, 1, 'resolved', '{}')
-    `).run(`SPEC-feedback-stage-${stage}`, taskId);
-    db.prepare(`
-      INSERT INTO documents(document_id, task_id, kind, title, content, source_agent)
-      VALUES(?, ?, 'review', 'Review report', 'The report needs correction.', 'review-agent')
-    `).run(documentId, taskId);
-    const commentId = await addDocumentComment({
-      taskId,
-      documentId,
-      anchorType: 'file',
-      content: stage === 'context' ? '需求范围理解错误，请重新收集上下文。' : '缺少可靠的 Bug 复现与根因证据。',
-    });
-
-    await applyFeedbackTriage(taskId, {
-      commentId,
-      disposition: 'rewind',
-      targetStage: stage,
-      reason: `Feedback requires ${stage}`,
-      acceptance: [`${stage} evidence is refreshed`],
-    });
-    await applyFeedbackTriage(taskId, {
-      commentId,
-      disposition: 'rewind',
-      targetStage: stage,
-      reason: `Feedback requires ${stage}`,
-      acceptance: [`${stage} evidence is refreshed`],
-    });
-
-    let detail = await getTask(taskId);
-    const comment = detail?.documentComments.find((item) => item.comment_id === commentId);
-    assert.equal(comment?.target_stage, stage);
-    assert.equal(comment?.target_agent, FEEDBACK_STAGE_AGENTS[stage]);
-    assert.equal(detail?.task.current_subagent, FEEDBACK_STAGE_AGENTS[stage]);
-    assert.equal(detail?.task.total_stories, 0);
-    const routed = (await pipelineForTask(taskId))[0];
-    assert.equal(routed?.agent, FEEDBACK_STAGE_AGENTS[stage]);
-    assert.equal(routed?.pipeline, stage === 'context' ? 'backlog' : 'repro');
-
-    let targetDelegation = routed;
-    if (stage === 'context') {
-      await applyAgentResult('run-feedback-stage-context-question', targetDelegation as Parameters<typeof applyAgentResult>[1], parseAgentResult(JSON.stringify({
-        outcome: 'needs_input',
-        summary: '原始上下文无法确定该需求是否仍需要保留旧兼容行为。',
-        questions: [{
-          decisionKey: 'legacy-compatibility',
-          title: '确认兼容范围',
-          question: '本轮是否仍要求保留旧兼容行为？',
-          why: '答案会改变需求边界。',
-          recommendation: '保留旧兼容行为。',
-          alternatives: [
-            { id: 'keep', label: '保留', consequences: ['继续支持旧调用方'] },
-            { id: 'remove', label: '移除', consequences: ['旧调用方需迁移'] },
-          ],
-        }],
-      })));
-      detail = await getTask(taskId);
-      const question = detail?.questions.find((item) => item.source_agent === 'backlog-agent' && item.status === 'pending');
-      assert.ok(question);
-      await answerQuestion({ taskId, questionId: question!.question_id, answer: '保留旧兼容行为。' });
-      await submitClarificationAnswers(taskId);
-      targetDelegation = (await pipelineForTask(taskId))[0];
-      assert.equal(targetDelegation.pipeline, 'resume');
-    }
-
-    const result = stage === 'context'
-      ? parseAgentResult(JSON.stringify({
-        outcome: 'completed',
-        summary: '已重新确认需求范围与任务分类。',
-        classification: 'bug',
-        route: 'plan',
-        feedbackResolutions: [{ commentId, summary: '上下文已更新。', evidence: ['context document'] }],
-      }))
-      : parseAgentResult(JSON.stringify({
-        outcome: 'completed',
-        summary: '已复现问题并定位根因。',
-        artifact: { title: 'Bug repro', content: 'Reproduction and root-cause evidence.' },
-        reproVerdict: 'reproduced',
-        route: 'plan',
-        feedbackResolutions: [{ commentId, summary: '复现与根因证据已补齐。', evidence: ['repro document'] }],
-      }));
-    await applyAgentResult(`run-feedback-stage-${stage}`, targetDelegation as Parameters<typeof applyAgentResult>[1], result);
-    detail = await getTask(taskId);
-    assert.ok(detail?.documentComments.find((item) => item.comment_id === commentId)?.resolution_claim_json);
-    if (stage === 'context') assert.equal(detail?.questions.find((item) => item.source_agent === 'backlog-agent')?.status, 'resolved');
-    assert.equal(detail?.task.agile_status, 'in dev');
-    assert.equal(detail?.task.current_subagent, 'story-splitter-agent');
-
-    const split = (await pipelineForTask(taskId))[0];
-    assert.equal(split?.agent, 'story-splitter-agent');
-    await applyAgentResult(`run-feedback-stage-${stage}-split`, split as Parameters<typeof applyAgentResult>[1], parseAgentResult(JSON.stringify({
-      outcome: 'completed',
-      summary: '已根据更新后的上下文重新拆分交付单元。',
-      deliveryUnits: [{ title: 'Updated delivery unit' }],
-    })));
-    detail = await getTask(taskId);
-    assert.equal(detail?.task.agile_status, 'in dev');
-    assert.equal(detail?.task.current_subagent, 'analyst-agent');
-    assert.equal(detail?.task.total_stories, 1);
-
-    db.prepare("UPDATE document_comments SET status = 'resolved', feedback_status = 'resolved' WHERE comment_id = ?").run(commentId);
-    db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle', current_subagent = NULL WHERE task_id = ?").run(taskId);
-  }
-});
+// 评论驱动的逆向回退契约已由 forward-feedback.test.ts 中的前向追加场景取代。
 
 test('versions Slice Specs and advances Dev without requiring a commit', async () => {
   const { addQuestion, answerQuestion, getTask, saveStorySpec, updateTask } = await import('./tasks');
@@ -1509,6 +735,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
   `).run(executionId, taskId, agent, pipeline, `key-${executionId}`, `hash-${executionId}`);
   const envelope = (agent: 'dev-agent' | 'test-agent', pipeline: string) => ({
     taskId,
+    lane: 'delivery' as const,
     pipeline,
     agent,
     storyIndex: 1,
@@ -2108,7 +1335,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 15);
+  assert.equal(original.profile.prompt_seed_revision, 16);
   assert.ok(original.currentPrompt.content.length > 800);
   assert.match(original.currentPrompt.content, /# 角色目标/);
   assert.match(original.currentPrompt.content, /# 完成条件/);
@@ -2126,7 +1353,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
   await ensureAgentRuntimeWorkspace();
   const upgradedSeed = await getAgentProfile('backlog-agent');
-  assert.equal(upgradedSeed.profile.prompt_seed_revision, 15);
+  assert.equal(upgradedSeed.profile.prompt_seed_revision, 16);
   assert.equal(upgradedSeed.currentPrompt.source, 'seed');
   assert.ok(upgradedSeed.currentPrompt.version > 1);
   assert.match(upgradedSeed.currentPrompt.content, /# 输入与证据优先级/);
@@ -2154,7 +1381,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const preservedHumanPrompt = await getAgentProfile('dev-agent');
   assert.equal(preservedHumanPrompt.currentPrompt.version, promptVersion);
   assert.equal(preservedHumanPrompt.currentPrompt.source, 'human');
-  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 15);
+  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 16);
 
   const localPrompt = `${promptContent}\n- 本地文件修改也必须形成版本。`;
   writeFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), localPrompt);

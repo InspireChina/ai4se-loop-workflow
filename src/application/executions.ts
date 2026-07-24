@@ -55,6 +55,8 @@ function delegationKey(delegation: DelegationEnvelope, inputHash: string) {
     storyIndex: delegation.storyIndex,
     agent: delegation.agent,
     pipeline: delegation.pipeline,
+    feedbackBatchId: delegation.feedbackBatchId || null,
+    feedbackGroupId: delegation.feedbackGroupId || null,
     analysisIndex: delegation.analysisIndex,
     devIndex: delegation.devIndex,
     testIndex: delegation.testIndex,
@@ -72,6 +74,8 @@ function retrySignature(delegation: DelegationEnvelope) {
     pipeline: delegation.pipeline,
     feedbackId: delegation.feedbackId || null,
     feedbackIds: delegation.feedbackIds || null,
+    feedbackBatchId: delegation.feedbackBatchId || null,
+    feedbackGroupId: delegation.feedbackGroupId || null,
   };
   if (delegation.lane === 'analysis') return JSON.stringify({
     ...base,

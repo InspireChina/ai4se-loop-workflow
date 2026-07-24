@@ -158,7 +158,7 @@ test('returns the full contract error to the Agent and accepts a corrected resub
   assert.equal(readAgentResultChannel(channel), null);
   assert.equal(existsSync(input), true);
 
-  result.spec.verificationPlan[1].command = 'node --version';
+  (result.spec.verificationPlan[1] as { command: string | null }).command = 'node --version';
   writeFileSync(input, JSON.stringify(result));
   const accepted = execFileSync(process.execPath, [join(process.cwd(), 'scripts', 'loop', 'submit-agent-result.mjs'), '--input', input, '--consume'], {
     cwd: process.cwd(),

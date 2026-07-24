@@ -4,6 +4,7 @@ const statusLabels: Record<string, string> = {
   'in plan': '交付拆分',
   'ready for dev': '等待推进',
   'in dev': '单元推进',
+  'in feedback': '反馈追加',
   'in review': '整体验收',
   ready_to_close: '等待阅读结卡',
   done: '已完成',
@@ -43,6 +44,9 @@ const flowLabels: Record<string, string> = {
   review: '结卡报告',
   'feedback-triage': '反馈分流',
   'feedback-verify': '反馈验证',
+  'feedback-repro': '反馈问题复现',
+  'feedback-split': '反馈交付拆分',
+  'feedback-report': '反馈报告修订',
   resume: '恢复推进',
 };
 
@@ -54,6 +58,7 @@ const documentKindLabels: Record<string, string> = {
   dev_note: '开发记录',
   test_result: '验证结果',
   review: '整体验收',
+  feedback: '反馈澄清',
 };
 
 const confirmationKindLabels: Record<string, string> = {

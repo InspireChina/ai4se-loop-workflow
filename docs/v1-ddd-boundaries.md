@@ -79,7 +79,7 @@ Loop 的等待策略属于编排规则：本轮有 Agent 执行时，1 分钟后
 - 模型：`TestResult`、`RecoveryItem`、`ClosureReport`、`ClosureAcknowledgement`
 - 关键命令：保存 Test 证据、记录失败恢复事项、生成结卡报告、确认已阅读当前报告
 
-Test Agent 独立读取 resolved Slice Spec、实际仓库和运行环境，将 verification plan 当作线索而不是可直接执行的真相，自行选择验证方法并保存证据。实现失败明确回退 Dev，规格失败明确回退 Analysis；环境问题和无法判断不会默认解释为实现失败，而是保持 Test 阶段阻塞并等待恢复。Feedback Agent 批量判断当前任务评论的 target stage，Application 合并游标并只执行一次最早回退；较晚阶段反馈随正常 Loop 到达对应 Agent，任务级回退后的单元反馈先重新绑定。Review Agent 只汇总最终事实和已处理的反馈，不再发起第二次回退。存在未验证反馈时不能结卡。
+Test Agent 独立读取 resolved Slice Spec、实际仓库和运行环境，将 verification plan 当作线索而不是可直接执行的真相，自行选择验证方法并保存证据。实现失败明确回退 Dev，规格失败明确回退 Analysis；环境问题和无法判断不会默认解释为实现失败，而是保持 Test 阶段阻塞并等待恢复。Feedback Agent 批量把当前评论整理为向前工作组；Application 对工程类工作只追加新交付单元，不改写历史文档、旧 Slice Spec 或既有游标。新单元仍完整经过 Analysis、Dev、Test，随后由 Feedback Agent 独立验证。Review Agent 汇总原始需求、历史交付与后续修订的最终事实。存在未验证反馈或活动反馈批次时不能结卡。
 
 ### 2.5 文档管理（Document Management）
 
@@ -211,7 +211,7 @@ classDiagram
 | 验收与黑盒验证是否通过 | 验证 Agent；Application 只保存结论并执行明确路由 |
 | 最终事实如何呈现 | Review Agent |
 | 是否已阅读结卡报告 | 用户的 Closure Acknowledgement |
-| 文档评论如何处理 | Feedback Agent 批量返回每条评论的 target stage；Application 合并有效决策为一次最早回退，遗漏反馈留到下轮；Review Agent 只生成更新后报告 |
+| 文档评论如何处理 | Feedback Agent 冻结并分组评论；直接回复类就地闭环，工程类追加新交付单元，报告类生成新版本；旧交付不回退，Review 最终汇总 |
 | 工具调用、subagent 使用 | 当前 Agent |
 | 文档、确认事项和结果入库 | Application |
 | 运行信息请求、回答与原阶段恢复 | 当前 Agent 提出；Application 持久化和恢复；用户仅补充事实 |

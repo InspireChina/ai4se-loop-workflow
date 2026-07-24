@@ -32,6 +32,11 @@ import {
 } from '../domain/task';
 import type { RecoveryItem } from './recovery-items';
 import { taskContextChatIsRunning } from './task-context-chat';
+import {
+  cancelFeedbackForTask,
+  nextFeedbackDispatchInDb,
+  type FeedbackDispatch,
+} from './feedback';
 
 export type Task = TaskState & {
   title: string;
@@ -52,7 +57,15 @@ export type Task = TaskState & {
 };
 export type TaskWithLanes = Task & { lanes: TaskLane[] };
 
-export type Story = { task_id: string; story_index: number; title: string; directory: string };
+export type Story = {
+  task_id: string;
+  story_index: number;
+  title: string;
+  directory: string;
+  origin_type: 'original' | 'feedback_behavior' | 'feedback_bug' | 'feedback_scope' | 'feedback_technical';
+  origin_feedback_batch_id: string | null;
+  corrects_story_indexes_json: string | null;
+};
 export type StorySpec = { spec_id: string; task_id: string; story_index: number; revision: number; status: 'draft' | 'waiting_for_answers' | 'resolved' | 'superseded'; spec_json: string; source_result_id: string | null; created_at: string; resolved_at: string | null };
 export type Document = {
   document_id: string;
@@ -98,6 +111,35 @@ export type DocumentComment = {
   resolved_at: string | null;
   created_at: string;
   updated_at: string;
+};
+export type FeedbackBatch = {
+  batch_id: string;
+  task_id: string;
+  status: 'triaging' | 'waiting_for_answers' | 'executing' | 'verifying' | 'reporting' | 'completed' | 'cancelled' | 'system_blocked';
+  source_execution_id: string | null;
+  summary: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+};
+export type FeedbackGroup = {
+  group_id: string;
+  batch_id: string;
+  group_key: string;
+  work_type: 'reply' | 'historical_correction' | 'report_correction' | 'bug' | 'behavior_change' | 'scope_addition' | 'technical_change' | 'learning_only';
+  status: 'planned' | 'waiting_for_repro' | 'waiting_for_plan' | 'executing' | 'ready_for_verification' | 'completed' | 'reopened' | 'cancelled' | 'system_blocked';
+  title: string | null;
+  reason: string;
+  acceptance_json: string;
+  affected_story_indexes_json: string;
+  response_text: string | null;
+  source_execution_id: string | null;
+  created_at: string;
+  updated_at: string;
+  completed_at: string | null;
+  comment_ids?: string[];
+  delivery_unit_indexes?: number[];
 };
 export type Question = {
   question_id: string;
@@ -319,6 +361,25 @@ export async function getTask(taskId: string) {
   const runtimeInputs = db.prepare('SELECT * FROM runtime_input_requests WHERE task_id = ? ORDER BY created_at').all(taskId) as RuntimeInputRequest[];
   const documents = db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[];
   const documentComments = db.prepare('SELECT * FROM document_comments WHERE task_id = ? ORDER BY created_at').all(taskId) as DocumentComment[];
+  const feedbackBatches = db.prepare(`
+    SELECT * FROM feedback_batches WHERE task_id = ? ORDER BY created_at, batch_id
+  `).all(taskId) as FeedbackBatch[];
+  const feedbackGroups = db.prepare(`
+    SELECT feedback_group.*
+    FROM feedback_groups feedback_group
+    JOIN feedback_batches feedback_batch ON feedback_batch.batch_id = feedback_group.batch_id
+    WHERE feedback_batch.task_id = ?
+    ORDER BY feedback_group.created_at, feedback_group.group_id
+  `).all(taskId) as FeedbackGroup[];
+  for (const group of feedbackGroups) {
+    group.comment_ids = (db.prepare(`
+      SELECT comment_id FROM feedback_group_comments WHERE group_id = ? ORDER BY comment_id
+    `).all(group.group_id) as { comment_id: string }[]).map((row) => row.comment_id);
+    group.delivery_unit_indexes = (db.prepare(`
+      SELECT story_index FROM feedback_group_delivery_units
+      WHERE group_id = ? AND task_id = ? ORDER BY story_index
+    `).all(group.group_id, taskId) as { story_index: number }[]).map((row) => row.story_index);
+  }
   const closureAcknowledgements = db.prepare('SELECT * FROM closure_acknowledgements WHERE task_id = ? ORDER BY review_revision').all(taskId) as ClosureAcknowledgement[];
   refreshTaskLaneStatesInDb(db, task);
   const lanes = taskLanesInDb(db, task);
@@ -339,7 +400,22 @@ export async function getTask(taskId: string) {
     ORDER BY created_at, recovery_id
   `).all(taskId) as RecoveryItem[];
   const events = db.prepare('SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at DESC').all(taskId) as Event[];
-  return { task, lanes, stories, storySpecs, questions, runtimeInputs, documents, documentComments, closureAcknowledgements, executionAttempts, recoveryItems, events };
+  return {
+    task,
+    lanes,
+    stories,
+    storySpecs,
+    questions,
+    runtimeInputs,
+    documents,
+    documentComments,
+    feedbackBatches,
+    feedbackGroups,
+    closureAcknowledgements,
+    executionAttempts,
+    recoveryItems,
+    events,
+  };
 }
 
 export async function getTaskContext(taskId: string) {
@@ -485,376 +561,12 @@ export async function reopenDocumentComment(input: unknown) {
   refreshPages(`/tasks/${value.taskId}`);
 }
 
-export type FeedbackTriageDecision = {
-  commentId: string;
-  disposition: 'no_change' | 'reply' | 'revise' | 'rewind' | 'learning_only';
-  targetStage?: 'context' | 'repro' | 'plan' | 'analysis' | 'dev' | 'test' | 'review';
-  targetDeliveryUnit?: number;
-  reason: string;
-  acceptance: string[];
-};
-
 export type FeedbackVerificationDecision = {
   commentId: string;
   verdict: 'resolved' | 'reopened';
   reason: string;
   evidence: string[];
 };
-
-export const FEEDBACK_STAGE_AGENTS = {
-  context: 'backlog-agent',
-  repro: 'repro-agent',
-  plan: 'story-splitter-agent',
-  analysis: 'analyst-agent',
-  dev: 'dev-agent',
-  test: 'test-agent',
-  review: 'review-agent',
-} as const;
-
-function stageAgent(stage: FeedbackTriageDecision['targetStage']) {
-  return stage ? FEEDBACK_STAGE_AGENTS[stage] : null;
-}
-
-async function reopenReviewForFeedback(taskId: string, reason: string) {
-  const db = await databaseConnection();
-  const task = fetchTask(db, taskId);
-  if (!task) throw new Error('需求不存在');
-  if (task.agile_status === 'in review') return;
-  // Feedback about report wording can be triaged before the normal Review
-  // stage. Keep it in progress and let the existing forward flow reach Review.
-  if (task.agile_status !== 'ready_to_close') return;
-  const prospective: TaskState = {
-    ...task,
-    agile_status: 'in review',
-    current_subagent: 'review-agent',
-    run_state: 'runnable',
-    closure_status: 'none',
-    review_document_id: null,
-    closure_acknowledged_at: null,
-  };
-  assertState(prospective);
-  db.transaction(() => {
-    db.prepare(`
-      UPDATE tasks
-      SET agile_status = 'in review', current_subagent = 'review-agent', run_state = 'runnable',
-          closure_status = 'none', review_document_id = NULL, closure_acknowledged_at = NULL,
-          resume_pending = 0, next_step = ?, last_actor = 'system', completed_at = NULL,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE task_id = ?
-    `).run(reason, taskId);
-    addEvent(db, taskId, 'system', 'FeedbackRouted', reason);
-  })();
-  await syncTaskFiles(db, taskId);
-}
-
-type PreparedFeedbackTriage = {
-  decision: FeedbackTriageDecision;
-  comment: DocumentComment & { story_index: number | null };
-  actionable: boolean;
-  targetStory: number | null;
-  targetAgent: string | null;
-};
-
-const FEEDBACK_STAGE_ORDER = ['context', 'repro', 'plan', 'analysis', 'dev', 'test', 'review'] as const;
-
-function feedbackStageRank(stage: NonNullable<FeedbackTriageDecision['targetStage']>) {
-  return FEEDBACK_STAGE_ORDER.indexOf(stage);
-}
-
-function feedbackDecisionNeedsRoute(task: Task, prepared: PreparedFeedbackTriage) {
-  const stage = prepared.decision.targetStage;
-  if (!prepared.actionable || !stage) return false;
-  if (stage === 'review') return task.agile_status === 'ready_to_close';
-  if (stage === 'context') return !(task.total_stories === 0 && task.current_subagent === 'backlog-agent');
-  if (stage === 'repro') {
-    if (task.total_stories > 0) return true;
-    return task.current_subagent !== 'backlog-agent' && task.current_subagent !== 'repro-agent';
-  }
-  if (stage === 'plan') return task.total_stories > 0;
-  if (!prepared.targetStory || task.total_stories === 0) return false;
-  if (stage === 'analysis') return task.analysis_index >= prepared.targetStory;
-  if (stage === 'dev') return task.dev_index >= prepared.targetStory;
-  return task.test_index >= prepared.targetStory;
-}
-
-function feedbackFrontier(left: PreparedFeedbackTriage, right: PreparedFeedbackTriage) {
-  const leftStage = left.decision.targetStage!;
-  const rightStage = right.decision.targetStage!;
-  const leftTaskLevel = ['context', 'repro', 'plan'].includes(leftStage);
-  const rightTaskLevel = ['context', 'repro', 'plan'].includes(rightStage);
-  if (leftTaskLevel !== rightTaskLevel) return leftTaskLevel ? -1 : 1;
-  if (leftTaskLevel) return feedbackStageRank(leftStage) - feedbackStageRank(rightStage);
-  const storyDifference = (left.targetStory || Number.MAX_SAFE_INTEGER) - (right.targetStory || Number.MAX_SAFE_INTEGER);
-  return storyDifference || feedbackStageRank(leftStage) - feedbackStageRank(rightStage);
-}
-
-async function rewindFeedbackUnitBatch(taskId: string, routed: PreparedFeedbackTriage[], reason: string) {
-  const db = await databaseConnection();
-  const task = fetchTask(db, taskId);
-  if (!task) throw new Error('需求不存在');
-  if (task.total_stories <= 0) return;
-  let analysisIndex = task.analysis_index;
-  let devIndex = task.dev_index;
-  let testIndex = task.test_index;
-  for (const item of routed) {
-    const stage = item.decision.targetStage;
-    if (!item.targetStory) continue;
-    const boundary = item.targetStory - 1;
-    if (stage === 'analysis') analysisIndex = Math.min(analysisIndex, boundary);
-    if (stage === 'dev') devIndex = Math.min(devIndex, boundary);
-    if (stage === 'test') testIndex = Math.min(testIndex, boundary);
-  }
-  devIndex = Math.min(devIndex, analysisIndex);
-  testIndex = Math.min(testIndex, devIndex);
-  const resolvedSpecIndex = Math.min(task.spec_resolved_index, analysisIndex);
-  if (analysisIndex === task.analysis_index && devIndex === task.dev_index && testIndex === task.test_index) return;
-  const otherCodeOwner = db.prepare(`
-    ${taskSelect}
-    WHERE task_id != ? AND (
-      agile_status = 'in dev'
-      OR (agile_status = 'blocked' AND resume_status = 'in dev')
-      OR (run_state = 'waiting_for_runtime_input' AND current_subagent = 'dev-agent')
-    )
-    LIMIT 1
-  `).get(taskId) as Task | undefined;
-  const keepsCodeSlot = occupiesCodeSlot(task) || (task.dev_index > 0 && !otherCodeOwner);
-  const nextStatus: TaskStatus = keepsCodeSlot ? 'in dev' : 'ready for dev';
-  const frontier = [...routed].sort(feedbackFrontier)[0];
-  const targetAgent = stageAgent(frontier.decision.targetStage);
-  const prospective: TaskState = {
-    ...task,
-    agile_status: nextStatus,
-    current_subagent: targetAgent,
-    analysis_index: analysisIndex,
-    dev_index: devIndex,
-    test_index: testIndex,
-    spec_resolved_index: resolvedSpecIndex,
-    run_state: 'runnable',
-    closure_status: 'none',
-    review_document_id: null,
-    closure_acknowledged_at: null,
-  };
-  assertState(prospective);
-  db.transaction(() => {
-    db.prepare(`
-      UPDATE tasks
-      SET agile_status = ?, current_subagent = ?, analysis_index = ?, dev_index = ?,
-          test_index = ?, spec_resolved_index = ?, next_step = ?, blocked_reason = NULL,
-          resume_status = NULL, resume_pending = 0, run_state = 'runnable',
-          closure_status = 'none', review_document_id = NULL, closure_acknowledged_at = NULL,
-          last_actor = 'system', completed_at = NULL, updated_at = CURRENT_TIMESTAMP
-      WHERE task_id = ?
-    `).run(nextStatus, targetAgent, analysisIndex, devIndex, testIndex, resolvedSpecIndex, reason, taskId);
-    setTaskLaneStateInDb(db, {
-      taskId,
-      lane: 'analysis',
-      status: analysisIndex < task.total_stories ? 'runnable' : 'completed',
-    });
-    const deliveryStatus = testIndex < devIndex || devIndex < analysisIndex
-      ? 'runnable'
-      : analysisIndex === task.total_stories && testIndex === task.total_stories ? 'completed' : 'pending';
-    setTaskLaneStateInDb(db, { taskId, lane: 'delivery', status: deliveryStatus });
-    addEvent(db, taskId, 'system', 'FeedbackBatchRewound', reason);
-  })();
-  await syncTaskFiles(db, taskId, { createClearedBlock: true });
-}
-
-export async function applyFeedbackTriageBatch(taskId: string, decisions: FeedbackTriageDecision[], executionId?: string) {
-  if (!decisions.length) return;
-  const uniqueDecisions = [...new Map(decisions.map((decision) => [decision.commentId, decision])).values()];
-  const db = await databaseConnection();
-  const placeholders = uniqueDecisions.map(() => '?').join(', ');
-  const comments = db.prepare(`
-    SELECT comment.*, document.story_index
-    FROM document_comments comment
-    JOIN documents document ON document.document_id = comment.document_id
-    WHERE comment.task_id = ? AND comment.comment_id IN (${placeholders})
-  `).all(taskId, ...uniqueDecisions.map((decision) => decision.commentId)) as (DocumentComment & { story_index: number | null })[];
-  if (!comments.length) return;
-  const commentsById = new Map(comments.map((comment) => [comment.comment_id, comment]));
-  const taskLevelStages: FeedbackTriageDecision['targetStage'][] = ['context', 'repro', 'plan', 'review'];
-  const task = fetchTask(db, taskId);
-  if (!task) throw new Error('需求不存在');
-  const prepared = uniqueDecisions.flatMap((decision): PreparedFeedbackTriage[] => {
-    const comment = commentsById.get(decision.commentId);
-    if (!comment) return [];
-    const allowed = ['submitted', 'triaged', 'reopened'].includes(comment.feedback_status)
-      || (comment.feedback_status === 'in_progress' && comment.feedback_needs_rebase === 1);
-    const actionable = decision.disposition === 'revise' || decision.disposition === 'rewind';
-    const targetStory = decision.targetStage && taskLevelStages.includes(decision.targetStage)
-      ? null
-      : decision.targetDeliveryUnit || comment.story_index || null;
-    const targetAgent = actionable ? stageAgent(decision.targetStage) : null;
-    const sameAppliedDecision = comment.feedback_status === 'in_progress'
-      && comment.feedback_needs_rebase === 0
-      && comment.disposition === decision.disposition
-      && comment.target_stage === (decision.targetStage || null)
-      && comment.target_agent === targetAgent
-      && comment.target_story_index === targetStory;
-    if (!allowed && !sameAppliedDecision) return [];
-    if (actionable && (!decision.targetStage || !decision.acceptance.length)) return [];
-    if (decision.targetStage && !taskLevelStages.includes(decision.targetStage) && !targetStory) return [];
-    if (actionable && targetStory && task.total_stories > 0 && targetStory > task.total_stories) return [];
-    return [{ decision, comment, actionable, targetStory, targetAgent }];
-  });
-  if (!prepared.length) return;
-  if (prepared.every((item) => item.comment.feedback_status === 'in_progress'
-    && item.comment.feedback_needs_rebase === 0
-    && item.comment.disposition === item.decision.disposition
-    && item.comment.target_stage === (item.decision.targetStage || null)
-    && item.comment.target_agent === item.targetAgent
-    && item.comment.target_story_index === item.targetStory)) return;
-  const batchId = executionId || randomUUID();
-  const routed = prepared.filter((item) => feedbackDecisionNeedsRoute(task, item)).sort(feedbackFrontier);
-  const frontier = routed[0] || null;
-  try {
-    db.transaction(() => {
-      if (frontier) {
-        db.prepare(`
-          UPDATE document_comments
-          SET feedback_is_rewind_frontier = 0, updated_at = CURRENT_TIMESTAMP
-          WHERE task_id = ? AND feedback_status = 'in_progress'
-        `).run(taskId);
-      }
-      for (const item of prepared) {
-        db.prepare(`
-          UPDATE document_comments
-          SET feedback_status = ?, disposition = ?, target_stage = ?, target_agent = ?,
-              target_story_index = ?, acceptance_json = ?, triage_reason = ?, triaged_at = CURRENT_TIMESTAMP,
-              resolution_claim_json = ?, verification_json = NULL, feedback_batch_id = ?,
-              feedback_is_rewind_frontier = ?, feedback_needs_rebase = 0, updated_at = CURRENT_TIMESTAMP
-          WHERE comment_id = ?
-        `).run(
-          item.actionable ? 'in_progress' : 'verifying',
-          item.decision.disposition,
-          item.decision.targetStage || null,
-          item.targetAgent,
-          item.targetStory,
-          JSON.stringify(item.decision.acceptance),
-          item.decision.reason,
-          null,
-          batchId,
-          frontier?.decision.commentId === item.decision.commentId ? 1 : 0,
-          item.decision.commentId,
-        );
-      }
-      addEvent(db, taskId, 'feedback-agent', 'FeedbackBatchTriaged', `${prepared.length} 条反馈，${frontier ? `最早回退点 ${frontier.decision.targetStage}` : '无需立即回退'}`);
-    })();
-    if (frontier?.decision.targetStage === 'review') {
-      await reopenReviewForFeedback(taskId, `反馈批次 ${batchId} 要求重新处理 Review`);
-    } else if (frontier && ['context', 'repro', 'plan'].includes(frontier.decision.targetStage!)) {
-      await rewindTask({
-        taskId,
-        actor: 'system',
-        to: frontier.decision.targetStage,
-        reason: `反馈批次 ${batchId}：回退到最早阶段 ${frontier.decision.targetStage}`,
-      });
-    } else if (routed.length) {
-      await rewindFeedbackUnitBatch(taskId, routed, `反馈批次 ${batchId}：合并回退 ${routed.length} 条单元反馈`);
-    }
-    const afterRoute = fetchTask(db, taskId);
-    if (afterRoute?.total_stories === 0) {
-      db.prepare(`
-        UPDATE document_comments
-        SET feedback_needs_rebase = 1, feedback_is_rewind_frontier = 0, updated_at = CURRENT_TIMESTAMP
-        WHERE task_id = ? AND feedback_status = 'in_progress'
-          AND target_stage IN ('analysis', 'dev', 'test')
-      `).run(taskId);
-    }
-  } catch (error) {
-    db.prepare(`
-      UPDATE document_comments
-      SET feedback_status = 'reopened', triage_reason = ?, feedback_is_rewind_frontier = 0,
-          feedback_needs_rebase = 0, updated_at = CURRENT_TIMESTAMP
-      WHERE feedback_batch_id = ?
-    `).run(`Triage 批次路由失败：${error instanceof Error ? error.message : String(error)}`, batchId);
-    throw error;
-  }
-  refreshPages(`/tasks/${taskId}`);
-}
-
-export async function applyFeedbackTriage(taskId: string, decision: FeedbackTriageDecision, executionId?: string) {
-  return applyFeedbackTriageBatch(taskId, [decision], executionId);
-}
-
-export async function recordFeedbackProgress(input: {
-  taskId: string;
-  agent: string;
-  storyIndex: number | null;
-  summary: string;
-  verdict?: string;
-  executionId?: string;
-  claims?: { commentId: string; summary: string; evidence: string[] }[];
-}) {
-  if (input.agent === 'feedback-agent') return;
-  const db = await databaseConnection();
-  const active = db.prepare(`
-    SELECT comment_id, target_stage, target_agent, target_story_index, resolution_claim_json
-    FROM document_comments
-    WHERE task_id = ? AND feedback_status = 'in_progress' AND feedback_needs_rebase = 0
-    ORDER BY created_at
-  `).all(input.taskId) as Pick<DocumentComment, 'comment_id' | 'target_stage' | 'target_agent' | 'target_story_index' | 'resolution_claim_json'>[];
-  const claims = new Map((input.claims || []).map((claim) => [claim.commentId, claim]));
-  for (const feedback of active) {
-    if (feedback.target_agent === input.agent && (feedback.target_story_index == null || feedback.target_story_index === input.storyIndex)) {
-      const claim = claims.get(feedback.comment_id);
-      if (claim) {
-        db.prepare(`
-          UPDATE document_comments SET resolution_claim_json = ?, updated_at = CURRENT_TIMESTAMP
-          WHERE comment_id = ?
-        `).run(JSON.stringify({ ...claim, executionId: input.executionId || null, agent: input.agent }), feedback.comment_id);
-        feedback.resolution_claim_json = JSON.stringify(claim);
-      }
-    }
-    const testReady = input.agent === 'test-agent' && input.verdict === 'passed'
-      && feedback.target_story_index === input.storyIndex
-      && ['analysis', 'dev', 'test'].includes(feedback.target_stage || '');
-    const reviewReady = input.agent === 'review-agent' && input.verdict === 'report_ready'
-      && ['context', 'repro', 'plan', 'review'].includes(feedback.target_stage || '');
-    if (testReady || reviewReady) {
-      db.prepare(`
-        UPDATE document_comments SET feedback_status = 'verifying', updated_at = CURRENT_TIMESTAMP
-        WHERE comment_id = ?
-      `).run(feedback.comment_id);
-      addEvent(db, input.taskId, 'system', 'FeedbackVerificationQueued', `反馈 ${feedback.comment_id} 已具备验证条件`);
-    }
-  }
-  refreshPages(`/tasks/${input.taskId}`);
-}
-
-export async function applyFeedbackVerification(taskId: string, decision: FeedbackVerificationDecision, executionId?: string) {
-  const db = await databaseConnection();
-  const comment = db.prepare(`
-    SELECT comment_id, feedback_status, verification_json FROM document_comments
-    WHERE comment_id = ? AND task_id = ?
-  `).get(decision.commentId, taskId) as { comment_id: string; feedback_status: string; verification_json: string | null } | undefined;
-  if (!comment) throw new Error('反馈不存在');
-  if (['resolved', 'reopened'].includes(comment.feedback_status) && comment.verification_json) {
-    const applied = JSON.parse(comment.verification_json) as FeedbackVerificationDecision;
-    if (applied.verdict === decision.verdict
-      && applied.reason === decision.reason
-      && JSON.stringify(applied.evidence) === JSON.stringify(decision.evidence)) return;
-  }
-  if (comment.feedback_status !== 'verifying') throw new Error(`反馈当前不能验证：${comment.feedback_status}`);
-  const resolved = decision.verdict === 'resolved';
-  if (resolved && !decision.evidence.length) throw new Error('反馈标记 resolved 前必须提供验证证据');
-  db.transaction(() => {
-    db.prepare(`
-      UPDATE document_comments
-      SET status = ?, feedback_status = ?, verification_json = ?,
-          evolution_status = 'pending', resolved_at = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE comment_id = ?
-    `).run(
-      resolved ? 'resolved' : 'open',
-      resolved ? 'resolved' : 'reopened',
-      JSON.stringify({ ...decision, executionId: executionId || null }),
-      resolved ? toUtcIsoString(new Date()) : null,
-      decision.commentId,
-    );
-    addEvent(db, taskId, 'feedback-agent', resolved ? 'FeedbackResolved' : 'FeedbackReopened', `${decision.commentId}：${decision.reason}`);
-  })();
-  refreshPages(`/tasks/${taskId}`);
-}
 
 const createTaskSchema = z.object({
   title: z.string().min(1).max(300),
@@ -867,7 +579,7 @@ const createTaskSchema = z.object({
   itemType: z.enum(['feature', 'bug', 'tech', 'intake', 'other']).default('feature'),
   priority: z.string().trim().optional().nullable(),
   actor: z.enum(['human']).default('human'),
-  status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'ready_to_close', 'done', 'cancelled', 'blocked']).default('backlog'),
+  status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'in feedback', 'ready_to_close', 'done', 'cancelled', 'blocked']).default('backlog'),
   currentSubagent: z.string().trim().optional().nullable(),
 });
 
@@ -926,7 +638,7 @@ const contextSchema = z.object({
   taskId: z.string().min(1),
   kind: z.enum(['feature', 'bug', 'tech', 'intake']).default('feature'),
   slug: z.string().trim().optional().nullable(),
-  status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'ready_to_close', 'done', 'cancelled', 'blocked']).optional().nullable(),
+  status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'in feedback', 'ready_to_close', 'done', 'cancelled', 'blocked']).optional().nullable(),
   currentSubagent: z.string().trim().optional().nullable(),
   nextStep: z.string().trim().optional().nullable(),
   blockedReason: z.string().trim().optional().nullable(),
@@ -1250,7 +962,7 @@ export async function resolveRuntimeInputs(input: {
 const questionSchema = z.object({
   taskId: z.string().min(1),
   storyIndex: z.coerce.number().int().positive().optional().nullable(),
-  kind: z.enum(['local', 'analysis', 'test', 'review']).default('local'),
+  kind: z.enum(['local', 'analysis', 'test', 'review', 'feedback']).default('local'),
   title: z.string().min(1).max(200),
   question: z.string().min(1).max(4000),
   why: z.string().max(1000).optional().nullable(),
@@ -1266,7 +978,7 @@ const questionSchema = z.object({
   specRevision: z.coerce.number().int().positive().default(1),
   blockedReason: z.string().max(1000).optional().nullable(),
   blockTask: z.coerce.boolean().default(true),
-  actor: z.enum(['human', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent']).default('human'),
+  actor: z.enum(['human', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent', 'feedback-agent']).default('human'),
 });
 
 export async function addQuestion(input: unknown) {
@@ -1340,7 +1052,7 @@ export async function submitClarificationAnswers(taskId: string) {
   if (!task) throw new Error('需求不存在');
   const lane = taskLaneInDb(db, task, 'analysis');
   const controlAgent = task.run_state === 'waiting_for_answers'
-    && (task.current_subagent === 'backlog-agent' || task.current_subagent === 'repro-agent')
+    && (task.current_subagent === 'backlog-agent' || task.current_subagent === 'repro-agent' || task.current_subagent === 'feedback-agent')
     ? task.current_subagent
     : null;
   const analysisLevel = !controlAgent && lane.status === 'waiting_for_answers';
@@ -1369,6 +1081,8 @@ export async function submitClarificationAnswers(taskId: string) {
         ? '用户回答已提交，交回需求梳理 Agent 更新需求边界'
         : controlAgent === 'repro-agent'
           ? '用户回答已提交，交回问题复现 Agent 重新复现并核对证据'
+          : controlAgent === 'feedback-agent'
+            ? '用户回答已提交，交回 Feedback Agent 继续当前反馈批次'
           : '用户回答已提交，交回方案分析 Agent 重建完整规格',
       taskId,
     );
@@ -1391,6 +1105,8 @@ export async function submitClarificationAnswers(taskId: string) {
         ? '提交全部需求级澄清回答，等待 AI 更新需求边界。'
         : controlAgent === 'repro-agent'
           ? '提交全部复现对齐回答，等待 AI 重新复现并核对证据。'
+          : controlAgent === 'feedback-agent'
+            ? '提交全部反馈澄清回答，等待 Feedback Agent 继续当前批次。'
           : '提交全部单元级澄清回答，等待 AI 重建规格。',
     );
     db.exec('COMMIT');
@@ -1464,12 +1180,15 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
     ${taskSelect}
     WHERE task_id != ? AND (
       agile_status = 'in dev'
+      OR (agile_status = 'in feedback' AND dev_index > test_index)
       OR (agile_status = 'blocked' AND resume_status = 'in dev')
       OR (run_state = 'waiting_for_runtime_input' AND current_subagent = 'dev-agent')
     )
     LIMIT 1
   `).get(taskId) as Task | undefined;
-  if (active && resumeStatus === 'in dev') throw new Error(`代码槽已被 ${active.task_id} 占用`);
+  if (active && (resumeStatus === 'in dev' || (resumeStatus === 'in feedback' && task.dev_index > task.test_index))) {
+    throw new Error(`代码槽已被 ${active.task_id} 占用`);
+  }
 
   db.exec('BEGIN');
   try {
@@ -1554,11 +1273,13 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
     if (!resolvedSpec) throw new Error(`交付单元 ${changes.dev_index} 缺少 resolved Slice Spec`);
   }
   if (changes.agile_status === 'done' && before.closure_status !== 'acknowledged') throw new Error('当前版本的结卡报告尚未阅读');
-  if (prospective.agile_status === 'in dev') {
+  if (prospective.agile_status === 'in dev'
+    || (prospective.agile_status === 'in feedback' && prospective.dev_index > prospective.test_index)) {
     const active = db.prepare(`
       ${taskSelect}
       WHERE task_id != ? AND (
         agile_status = 'in dev'
+        OR (agile_status = 'in feedback' AND dev_index > test_index)
         OR (agile_status='blocked' AND resume_status = 'in dev')
         OR (run_state = 'waiting_for_runtime_input' AND current_subagent = 'dev-agent')
       )
@@ -1615,7 +1336,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
 
 const transitionSchema = z.object({
   taskId: z.string().min(1),
-  status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'ready_to_close', 'done', 'cancelled', 'blocked']),
+  status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'in feedback', 'ready_to_close', 'done', 'cancelled', 'blocked']),
   currentSubagent: z.string().trim().optional().nullable(),
   nextStep: z.string().trim().optional().nullable(),
 });
@@ -1645,6 +1366,11 @@ export async function acknowledgeClosure(input: unknown) {
     WHERE task_id = ? AND feedback_status != 'resolved'
   `).get(value.taskId) as { count: number }).count;
   if (openComments) throw new Error(`当前还有 ${openComments} 条反馈尚未通过反馈闭环验证`);
+  const activeFeedbackBatches = (db.prepare(`
+    SELECT COUNT(*) AS count FROM feedback_batches
+    WHERE task_id = ? AND status NOT IN ('completed', 'cancelled')
+  `).get(value.taskId) as { count: number }).count;
+  if (activeFeedbackBatches) throw new Error('当前反馈批次尚未完成，不能关闭需求');
   db.exec('BEGIN');
   try {
     db.prepare(`
@@ -1678,6 +1404,15 @@ const rewindSchema = z.object({
   actor: z.enum(['human', 'system', 'analyst-agent', 'dev-agent', 'test-agent', 'review-agent']).default('human'),
 });
 
+const REWIND_STAGE_AGENTS = {
+  context: 'backlog-agent',
+  repro: 'repro-agent',
+  plan: 'story-splitter-agent',
+  analysis: 'analyst-agent',
+  dev: 'dev-agent',
+  test: 'test-agent',
+} as const;
+
 export async function rewindTask(input: unknown) {
   const value = rewindSchema.parse(input);
   const db = await databaseConnection();
@@ -1695,13 +1430,14 @@ export async function rewindTask(input: unknown) {
     ${taskSelect}
     WHERE task_id != ? AND (
       agile_status = 'in dev'
+      OR (agile_status = 'in feedback' AND dev_index > test_index)
       OR (agile_status = 'blocked' AND resume_status = 'in dev')
       OR (run_state = 'waiting_for_runtime_input' AND current_subagent = 'dev-agent')
     )
     LIMIT 1
   `).get(value.taskId) as Task | undefined;
   const occupied = occupiesCodeSlot(task) || (task.dev_index > 0 && !otherCodeOwner);
-  const targetAgent = FEEDBACK_STAGE_AGENTS[value.to];
+  const targetAgent = REWIND_STAGE_AGENTS[value.to];
   let analysisIndex = task.analysis_index;
   let devIndex = task.dev_index;
   let testIndex = task.test_index;
@@ -1734,7 +1470,9 @@ export async function rewindTask(input: unknown) {
     } else {
       testIndex = Math.min(testIndex, boundary);
     }
-    nextStatus = occupied || devIndex > 0 ? 'in dev' : 'ready for dev';
+    nextStatus = task.agile_status === 'in feedback'
+      ? 'in feedback'
+      : occupied || devIndex > 0 ? 'in dev' : 'ready for dev';
     storyLabel = `交付单元 ${value.story}`;
   }
   const prospective = { ...task, agile_status: nextStatus, analysis_index: analysisIndex, dev_index: devIndex, test_index: testIndex, total_stories: totalStories, spec_resolved_index: resolvedSpecIndex };
@@ -1823,6 +1561,7 @@ export async function cancelTask(input: unknown) {
     `).run(value.taskId);
     addEvent(db, value.taskId, 'human', 'TaskCancelled', value.reason);
     db.exec('COMMIT');
+    await cancelFeedbackForTask(value.taskId);
     await syncTaskFiles(db, value.taskId, { createClearedBlock: true });
   } catch (error) {
     db.exec('ROLLBACK');
@@ -1831,75 +1570,40 @@ export async function cancelTask(input: unknown) {
   refreshPages('/', `/tasks/${value.taskId}`);
 }
 
-type FeedbackQueueRow = {
-  comment_id: string;
-  task_id: string;
-  intent: DocumentComment['intent'];
-  feedback_status: DocumentComment['feedback_status'];
-  story_index: number | null;
-  document_title: string;
-};
-
-type FeedbackWork = { mode: 'triage' | 'verify'; rows: FeedbackQueueRow[] };
-
-function nextFeedbackRow(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: string): FeedbackWork | undefined {
-  const verification = db.prepare(`
-    SELECT comment.comment_id, comment.task_id, comment.intent, comment.feedback_status,
-           document.story_index, document.title AS document_title
-    FROM document_comments comment
-    JOIN documents document ON document.document_id = comment.document_id
-    WHERE comment.feedback_status = 'verifying' AND comment.task_id = ?
-    ORDER BY
-      CASE comment.intent WHEN 'change_request' THEN 0 WHEN 'question' THEN 1 ELSE 2 END,
-      comment.created_at, comment.comment_id
-    LIMIT 1
-  `).get(taskId) as FeedbackQueueRow | undefined;
-  if (verification) return { mode: 'verify', rows: [verification] };
-  const triage = db.prepare(`
-    SELECT comment.comment_id, comment.task_id, comment.intent, comment.feedback_status,
-           document.story_index, document.title AS document_title
-    FROM document_comments comment
-    JOIN documents document ON document.document_id = comment.document_id
-    JOIN tasks task ON task.task_id = comment.task_id
-    WHERE comment.task_id = ? AND (
-      comment.feedback_status IN ('submitted', 'triaged', 'reopened')
-      OR (comment.feedback_status = 'in_progress' AND comment.feedback_needs_rebase = 1 AND task.total_stories > 0)
-    )
-    ORDER BY
-      CASE comment.feedback_status WHEN 'reopened' THEN 0 WHEN 'triaged' THEN 1 WHEN 'submitted' THEN 2 ELSE 3 END,
-      CASE comment.intent WHEN 'change_request' THEN 0 WHEN 'question' THEN 1 ELSE 2 END,
-      comment.created_at, comment.comment_id
-    LIMIT 100
-  `).all(taskId) as FeedbackQueueRow[];
-  return triage.length ? { mode: 'triage', rows: triage } : undefined;
-}
-
 function feedbackCanDispatch(task: Task, lanes: TaskLane[]) {
   if (task.agile_status === 'blocked') return false;
-  if (!['runnable', 'idle'].includes(task.run_state) || task.resume_pending) return false;
+  if (!['runnable', 'idle'].includes(task.run_state)) return false;
   return !lanes.some((lane) => lane.resume_pending || ['waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked'].includes(lane.status));
 }
 
-function feedbackDelegation(task: Task, work: FeedbackWork): DelegationEnvelope {
-  const row = work.rows[0];
-  const mode = work.mode;
-  const documentTitles = [...new Set(work.rows.map((item) => item.document_title))];
+function feedbackDelegation(task: Task, work: FeedbackDispatch): DelegationEnvelope {
+  const agent = work.kind === 'repro' ? 'repro-agent'
+    : work.kind === 'split' ? 'story-splitter-agent'
+      : work.kind === 'report' ? 'review-agent'
+        : 'feedback-agent';
+  const pipeline = work.kind === 'triage' ? 'feedback-triage'
+    : work.kind === 'verify' ? 'feedback-verify'
+      : work.kind === 'repro' ? 'feedback-repro'
+        : work.kind === 'split' ? 'feedback-split'
+          : 'feedback-report';
   return {
     ...toEnvelope(task, {
-      taskId: row.task_id,
+      taskId: task.task_id,
       lane: 'control',
-      pipeline: `feedback-${mode}`,
-      agent: 'feedback-agent',
-      storyIndex: row.story_index,
-      resource: 'none',
-      feedbackId: row.comment_id,
-      feedbackIds: mode === 'triage' ? work.rows.map((item) => item.comment_id) : null,
-      description: mode === 'verify'
-        ? `验证反馈处理结果：${row.document_title}`
-        : `批量判断 ${work.rows.length} 条反馈并计算一次最早回退点：${documentTitles.join('、')}`,
+      pipeline,
+      agent,
+      storyIndex: null,
+      resource: work.kind === 'repro' ? 'browser' : 'none',
+      feedbackId: work.feedbackId,
+      feedbackIds: work.commentIds,
+      feedbackBatchId: work.batchId,
+      feedbackGroupId: 'groupId' in work ? work.groupId : null,
+      description: work.description,
     }),
-    feedbackId: row.comment_id,
-    feedbackIds: mode === 'triage' ? work.rows.map((item) => item.comment_id) : null,
+    feedbackId: work.feedbackId,
+    feedbackIds: work.commentIds,
+    feedbackBatchId: work.batchId,
+    feedbackGroupId: 'groupId' in work ? work.groupId : null,
   };
 }
 
@@ -2017,7 +1721,7 @@ export async function pipelineForTask(taskId: string): Promise<Delegation[]> {
   const allActive = activeLaneExecutions(db);
   const active = allActive.filter((item) => item.task_id === taskId);
   const lanes = taskLanesInDb(db, task);
-  const feedback = nextFeedbackRow(db, taskId);
+  const feedback = nextFeedbackDispatchInDb(db, taskId);
   if (feedback && feedbackCanDispatch(task, lanes)) return active.length ? [] : [feedbackDelegation(task, feedback)];
   if (task.agile_status === 'blocked') return [];
   const otherActive = db.prepare(`${taskSelect} WHERE task_id != ?`).all(taskId) as Task[];
@@ -2170,7 +1874,7 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
     refreshTaskLaneStatesInDb(db, task);
     const lanes = taskLanesInDb(db, task);
     const taskCodeAvailable = occupiesCodeSlot(task) || (codeAvailable && (!readyDev || task.task_id === readyDev));
-    const feedback = nextFeedbackRow(db, task.task_id);
+    const feedback = nextFeedbackDispatchInDb(db, task.task_id);
     const taskHasActive = active.some((item) => item.task_id === task.task_id);
     if (feedback && feedbackCanDispatch(task, lanes)) {
       if (!taskHasActive) lines.push(feedbackDelegation(task, feedback));

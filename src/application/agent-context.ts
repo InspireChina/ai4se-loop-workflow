@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { databaseConnection } from '../infrastructure/database';
 import { documentKindLabel } from '../domain/terminology';
 import { recoveryItemForPrompt, type RecoveryItem } from './recovery-items';
-import type { DelegationEnvelope, DocumentComment, ExecutionAttemptView, RuntimeInputRequest } from './tasks';
+import type { DelegationEnvelope, DocumentComment, ExecutionAttemptView, FeedbackGroup, RuntimeInputRequest } from './tasks';
 
 export const agentContextProtocol = 'loop-agent-context/v1';
 
@@ -101,7 +101,7 @@ function relevantToExecution(storyIndex: number | null, itemStoryIndex: number |
   return itemStoryIndex == null || itemStoryIndex === storyIndex;
 }
 
-function feedbackPromptValue(comment: DocumentComment) {
+function feedbackPromptValue(comment: DocumentComment, group?: FeedbackGroup) {
   return {
     commentId: comment.comment_id,
     documentId: comment.document_id,
@@ -110,13 +110,16 @@ function feedbackPromptValue(comment: DocumentComment) {
     quotedText: comment.quoted_text,
     intent: comment.intent,
     feedbackStatus: comment.feedback_status,
-    disposition: comment.disposition,
-    targetStage: comment.target_stage,
-    targetAgent: comment.target_agent,
-    targetDeliveryUnit: comment.target_story_index,
-    reason: comment.triage_reason,
-    acceptance: parseJson(comment.acceptance_json, []),
-    resolutionClaim: parseJson(comment.resolution_claim_json),
+    batchId: group?.batch_id || comment.feedback_batch_id,
+    groupId: group?.group_id || null,
+    groupKey: group?.group_key || null,
+    workType: group?.work_type || null,
+    groupStatus: group?.status || null,
+    affectedDeliveryUnits: group ? parseJson(group.affected_story_indexes_json, []) : [],
+    appendedDeliveryUnits: group?.delivery_unit_indexes || [],
+    reason: group?.reason || comment.triage_reason,
+    acceptance: group ? parseJson(group.acceptance_json, []) : parseJson(comment.acceptance_json, []),
+    response: group?.response_text || null,
     verification: parseJson(comment.verification_json),
   };
 }
@@ -230,8 +233,17 @@ export function buildAgentContextSnapshot(input: {
       && ['pending', 'answered'].includes(runtimeInput.status))
     .map(runtimeInputValue);
   const feedbackBatchIds = new Set([delegation.feedbackId, ...(delegation.feedbackIds || [])].filter(Boolean));
+  const activeGroups = full.feedbackGroups.filter((group) =>
+    group.group_id === delegation.feedbackGroupId
+    || (delegation.storyIndex != null && group.delivery_unit_indexes?.includes(delegation.storyIndex)));
+  const groupByComment = new Map<string, FeedbackGroup>();
+  for (const group of full.feedbackGroups) {
+    for (const commentId of group.comment_ids || []) groupByComment.set(commentId, group);
+  }
+  const groupCommentIds = new Set(activeGroups.flatMap((group) => group.comment_ids || []));
   const activeFeedback = full.documentComments.filter((comment) =>
     feedbackBatchIds.has(comment.comment_id)
+    || groupCommentIds.has(comment.comment_id)
     || input.activeFeedback.some((active) => active.comment_id === comment.comment_id));
 
   const resources: AgentContextResource[] = [];
@@ -319,8 +331,9 @@ export function buildAgentContextSnapshot(input: {
     });
   }
   for (const comment of full.documentComments) {
-    const value = feedbackPromptValue(comment);
-    const commentStoryIndex = comment.target_story_index
+    const group = groupByComment.get(comment.comment_id);
+    const value = feedbackPromptValue(comment, group);
+    const commentStoryIndex = group?.delivery_unit_indexes?.[0]
       ?? full.documents.find((document) => document.document_id === comment.document_id)?.story_index
       ?? null;
     resources.push({
@@ -385,11 +398,15 @@ export function buildAgentContextSnapshot(input: {
     }
   }
   if (delegation.agent === 'feedback-agent') {
-    const affectedUnits = new Set(activeFeedback.map((comment) =>
-      comment.target_story_index
-      || full.documents.find((document) => document.document_id === comment.document_id)?.story_index
-      || null,
-    ).filter((value): value is number => Boolean(value)));
+    const affectedUnits = new Set(activeFeedback.flatMap((comment) => {
+      const group = groupByComment.get(comment.comment_id);
+      return group
+        ? [
+            ...(parseJson(group.affected_story_indexes_json, []) as number[]),
+            ...(group.delivery_unit_indexes || []),
+          ]
+        : [full.documents.find((document) => document.document_id === comment.document_id)?.story_index || null];
+    }).filter((value): value is number => Boolean(value)));
     for (const storyIndex of affectedUnits) {
       const latest = latestBy(
         full.storySpecs.filter((spec) => spec.story_index === storyIndex && spec.status !== 'superseded'),
@@ -456,7 +473,7 @@ export function buildAgentContextSnapshot(input: {
     activeObligations: {
       questions: activeQuestions,
       runtimeInputs: activeRuntimeInputs,
-      feedback: activeFeedback.map(feedbackPromptValue),
+      feedback: activeFeedback.map((comment) => feedbackPromptValue(comment, groupByComment.get(comment.comment_id))),
       recovery: input.activeRecovery.map(recoveryItemForPrompt),
     },
     handoff: handoffAttempts(delegation.agent, delegation.storyIndex, full.executionAttempts),

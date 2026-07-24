@@ -2,7 +2,7 @@
 
 import { useRef, useState } from 'react';
 import { MessageSquare, Quote, RotateCcw } from 'lucide-react';
-import type { DocumentComment } from '../../../src/application/tasks';
+import type { DocumentComment, FeedbackGroup } from '../../../src/application/tasks';
 import { MarkdownContent } from '../../../src/ui/markdown-content';
 import { addDocumentCommentAction, reopenDocumentCommentAction } from '../../actions';
 
@@ -19,6 +19,7 @@ export function ArtifactDocument({
   format,
   revision,
   comments,
+  feedbackGroups = [],
   allowReopen = true,
   allowComment = true,
 }: {
@@ -28,6 +29,7 @@ export function ArtifactDocument({
   format: string;
   revision: number;
   comments: DocumentComment[];
+  feedbackGroups?: FeedbackGroup[];
   allowReopen?: boolean;
   allowComment?: boolean;
 }) {
@@ -85,22 +87,38 @@ export function ArtifactDocument({
       </form>}
 
       {comments.length > 0 && <div className="artifact-comments">
-        {comments.map((comment) => <article className={`artifact-comment ${comment.status}`} key={comment.comment_id}>
+        {comments.map((comment) => {
+          const group = feedbackGroups.find((item) => item.comment_ids?.includes(comment.comment_id));
+          const feedbackStatus = comment.feedback_status === 'resolved' ? '已解决'
+            : comment.feedback_status === 'verifying' ? '等待独立验证'
+              : comment.feedback_status === 'in_progress'
+                ? group?.delivery_unit_indexes?.length
+                  ? `由新增交付单元 ${group.delivery_unit_indexes.join('、')} 处理中`
+                  : group?.status === 'waiting_for_repro' ? '等待问题复现'
+                    : group?.status === 'waiting_for_plan' ? '等待追加拆分'
+                      : group?.work_type === 'report_correction' ? '等待新版结卡报告'
+                        : '前向处理中'
+                : comment.feedback_status === 'triaged' ? '等待分组'
+                  : comment.feedback_status === 'reopened' ? '已重新打开，将进入新批次'
+                    : '等待分流';
+          return <article className={`artifact-comment ${comment.status}`} key={comment.comment_id}>
           <div className="artifact-comment-meta">
             <span>{comment.anchor_type === 'selection' ? '选区评论' : '文件评论'} · revision {comment.document_revision}</span>
-            <small>{comment.feedback_status === 'resolved' ? '已解决' : comment.feedback_status === 'verifying' ? '等待反馈验证' : comment.feedback_needs_rebase ? '等待新交付单元重新绑定' : comment.feedback_status === 'in_progress' ? comment.feedback_is_rewind_frontier ? '本轮最早回退点' : `等待 ${comment.target_stage || '目标阶段'} 处理` : comment.feedback_status === 'triaged' ? '已分流' : comment.feedback_status === 'reopened' ? '已重新打开' : '等待分流'} · {comment.intent === 'change_request' ? '要求修改' : comment.intent === 'question' ? '需要回复' : '备注建议'} · {comment.evolution_status === 'analyzed' ? '已用于演化分析' : '尚未沉淀'}</small>
+            <small>{feedbackStatus} · {comment.intent === 'change_request' ? '要求修改' : comment.intent === 'question' ? '需要回复' : '备注建议'} · {comment.evolution_status === 'analyzed' ? '已用于演化分析' : '尚未沉淀'}</small>
           </div>
           {comment.quoted_text && <blockquote className="comment-anchor"><Quote size={13}/><span>{comment.quoted_text}</span></blockquote>}
           <p>{comment.content}</p>
           {comment.triage_reason && <p className="muted"><b>分流结论：</b>{comment.triage_reason}</p>}
-          {comment.resolution_claim_json && <details><summary>处理声明</summary><pre>{JSON.stringify(JSON.parse(comment.resolution_claim_json), null, 2)}</pre></details>}
+          {group && <p className="muted"><b>处理方式：</b>{group.work_type} · {group.title || group.reason}</p>}
+          {group?.response_text && <p className="muted"><b>回复：</b>{group.response_text}</p>}
           {comment.verification_json && <details><summary>反馈验证</summary><pre>{JSON.stringify(JSON.parse(comment.verification_json), null, 2)}</pre></details>}
           {comment.feedback_status === 'resolved' && allowReopen && <form action={reopenDocumentCommentAction}>
             <input type="hidden" name="taskId" value={taskId}/>
             <input type="hidden" name="commentId" value={comment.comment_id}/>
             <button className="text-button" type="submit"><RotateCcw size={13}/>重新打开</button>
           </form>}
-        </article>)}
+        </article>;
+        })}
       </div>}
     </div>
   </div>;

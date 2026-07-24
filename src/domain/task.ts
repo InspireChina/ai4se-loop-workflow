@@ -1,5 +1,5 @@
 export const ACTORS = ['human', 'system', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent', 'feedback-agent'] as const;
-export const TASK_STATUSES = ['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'ready_to_close', 'done', 'cancelled', 'blocked'] as const;
+export const TASK_STATUSES = ['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'in feedback', 'ready_to_close', 'done', 'cancelled', 'blocked'] as const;
 export const RUN_STATES = ['runnable', 'waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked', 'idle'] as const;
 export type Actor = typeof ACTORS[number];
 export type TaskStatus = typeof TASK_STATUSES[number];
@@ -29,9 +29,10 @@ const transitions: Record<TaskStatus, TaskStatus[]> = {
   'in repro': ['in repro', 'in plan', 'blocked'],
   'in plan': ['in plan', 'ready for dev', 'blocked'],
   'ready for dev': ['ready for dev', 'in dev', 'blocked'],
-  'in dev': ['in dev', 'in review', 'blocked'],
-  'in review': ['in review', 'ready_to_close', 'blocked'],
-  ready_to_close: ['ready_to_close', 'done', 'cancelled'],
+  'in dev': ['in dev', 'in review', 'in feedback', 'blocked'],
+  'in review': ['in review', 'in feedback', 'ready_to_close', 'blocked'],
+  'in feedback': ['in feedback', 'in review', 'blocked'],
+  ready_to_close: ['ready_to_close', 'in feedback', 'done', 'cancelled'],
   done: ['done'],
   cancelled: ['cancelled'],
   blocked: ['blocked'],
@@ -52,8 +53,8 @@ const statusPermissions: Partial<Record<Actor, TaskStatus[]>> = {
   'story-splitter-agent': ['in plan', 'ready for dev', 'in dev'],
   'analyst-agent': ['ready for dev', 'in dev'],
   'repro-agent': ['in repro', 'in plan'],
-  'dev-agent': ['in dev'],
-  'test-agent': ['in dev', 'in review'],
+  'dev-agent': ['in dev', 'in feedback'],
+  'test-agent': ['in dev', 'in feedback', 'in review'],
   'review-agent': ['in review', 'ready_to_close'],
 };
 
@@ -122,6 +123,7 @@ export function assertActorCanCreate(actor: Actor, status: TaskStatus, currentSu
 export function occupiesCodeSlot(task: TaskState) {
   return (task.run_state === 'waiting_for_runtime_input' && task.current_subagent === 'dev-agent')
     || task.agile_status === 'in dev'
+    || (task.agile_status === 'in feedback' && task.dev_index > task.test_index)
     || (task.agile_status === 'blocked' && task.resume_status === 'in dev');
 }
 
@@ -135,6 +137,8 @@ export type Delegation = {
   description: string;
   feedbackId?: string | null;
   feedbackIds?: string[] | null;
+  feedbackBatchId?: string | null;
+  feedbackGroupId?: string | null;
 };
 
 export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Delegation | null {
@@ -172,7 +176,7 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
     if (total > 0) return null;
     return line('split', 'story-splitter-agent', null, '拆分为可独立验收的交付单元');
   }
-  if (status === 'ready for dev') {
+  if (status === 'ready for dev' || status === 'in feedback') {
     if (d < a && codeSlotAvailable) return line('dev', 'dev-agent', d + 1, `实现交付单元 ${d + 1}，并占用代码槽`);
     if (a < total) return line('analysis', 'analyst-agent', a + 1, `分析交付单元 ${a + 1} 的需求和方案`);
     if (total === 0) return line('split', 'story-splitter-agent', null, '拆分为可独立验收的交付单元');

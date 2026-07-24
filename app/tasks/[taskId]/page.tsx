@@ -24,7 +24,7 @@ export const dynamic = 'force-dynamic';
 const standardTaskSteps = [
   { label: '需求整理', statuses: ['backlog'] },
   { label: '交付拆分', statuses: ['in plan'] },
-  { label: '单元推进', statuses: ['ready for dev', 'in dev'] },
+  { label: '单元推进', statuses: ['ready for dev', 'in dev', 'in feedback'] },
   { label: '整体验收', statuses: ['in review'] },
   { label: '阅读结卡', statuses: ['ready_to_close'] },
   { label: '完成', statuses: ['done'] },
@@ -51,6 +51,7 @@ function stepDetail(task: { agile_status: string; run_state: string; current_sub
   if (task.agile_status === 'in plan') return '正在拆分交付单元';
   if (task.agile_status === 'ready for dev') return '准备逐个推进交付单元';
   if (task.agile_status === 'in dev') return `分析 ${task.analysis_index}/${task.total_stories} · 实现 ${task.dev_index}/${task.total_stories} · 验证 ${task.test_index}/${task.total_stories}`;
+  if (task.agile_status === 'in feedback') return `向前处理反馈 · 分析 ${task.analysis_index}/${task.total_stories} · 实现 ${task.dev_index}/${task.total_stories} · 验证 ${task.test_index}/${task.total_stories}`;
   if (task.agile_status === 'in review') return '正在进行整体验收';
   if (task.agile_status === 'ready_to_close') return '结卡报告已生成，等待阅读';
   if (task.agile_status === 'done') return '需求已完成交付';
@@ -69,14 +70,14 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const { taskId } = await params;
   const detail = await getTask(taskId);
   if (!detail) notFound();
-  const { task, lanes, stories, storySpecs, questions, runtimeInputs, documents, documentComments, closureAcknowledgements, executionAttempts, events } = detail;
+  const { task, lanes, stories, storySpecs, questions, runtimeInputs, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
   const analysisLane = lanes.find((lane) => lane.lane === 'analysis')!;
   const deliveryLane = lanes.find((lane) => lane.lane === 'delivery')!;
   const pipeline = await pipelineForTask(taskId);
   const contextChat = await getTaskContextChat(taskId);
   const unansweredQuestions = questions.filter((question) => question.status === 'pending');
   const waitingForControlAnswers = task.run_state === 'waiting_for_answers'
-    && (task.current_subagent === 'backlog-agent' || task.current_subagent === 'repro-agent');
+    && (task.current_subagent === 'backlog-agent' || task.current_subagent === 'repro-agent' || task.current_subagent === 'feedback-agent');
   const waitingForAnswers = waitingForControlAnswers || analysisLane.status === 'waiting_for_answers';
   const unansweredRuntimeInputs = runtimeInputs.filter((input) => input.status === 'pending');
   const waitingRuntimeLanes = lanes.filter((lane) => lane.status === 'waiting_for_runtime_input');
@@ -179,7 +180,9 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               </span>
               <div>
                 <strong>{deliveryUnitLabel(story.story_index)} · {story.title}</strong>
-                <small>{story.directory || 'DB'}</small>
+                <small>{story.origin_type === 'original'
+                  ? story.directory || 'DB'
+                  : `反馈追加 · ${story.origin_type === 'feedback_bug' ? 'Bug 修复' : story.origin_type === 'feedback_scope' ? '范围新增' : story.origin_type === 'feedback_technical' ? '技术调整' : '行为修订'}`}</small>
               </div>
               <em>{story.story_index <= task.test_index ? '测试完成' : story.story_index <= task.dev_index ? '等待测试' : story.story_index <= task.analysis_index ? '等待开发' : '等待分析'}</em>
             </div>)}
@@ -203,12 +206,53 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                 format={document.format}
                 revision={document.revision}
                 comments={documentComments.filter((comment) => comment.document_id === document.document_id)}
+                feedbackGroups={feedbackGroups}
                 allowReopen={task.agile_status !== 'done'}
                 allowComment={task.agile_status !== 'done'}
               />
             </details>)}</div>
           </div>
         </section>
+
+        {feedbackBatches.length > 0 && <section className="task-section">
+          <div className="section-head">
+            <h2>反馈批次</h2>
+            <small>{feedbackBatches.length} 个批次 · {feedbackGroups.filter((group) => !['completed', 'cancelled'].includes(group.status)).length} 个进行中工作组</small>
+          </div>
+          <div className="card story-list">
+            {feedbackGroups.length === 0 ? <div className="empty">评论已经冻结，等待 Feedback Agent 分组。</div> : feedbackGroups.map((group) => <div className="story" key={group.group_id}>
+              <span className={group.status === 'completed' ? 'done' : 'active'}>
+                {group.status === 'completed' ? <CheckCircle2 size={16}/> : <Clock3 size={16}/>}
+              </span>
+              <div>
+                <strong>{group.title || group.reason}</strong>
+                <small>{({
+                  reply: '直接回复',
+                  historical_correction: '历史说明',
+                  report_correction: '报告修订',
+                  bug: '问题修复',
+                  behavior_change: '行为修订',
+                  scope_addition: '范围新增',
+                  technical_change: '技术调整',
+                  learning_only: '长期建议',
+                } as Record<string, string>)[group.work_type] || group.work_type}
+                  {group.delivery_unit_indexes?.length ? ` · 新增交付单元 ${group.delivery_unit_indexes.join('、')}` : ''}
+                </small>
+              </div>
+              <em>{({
+                planned: '已规划',
+                waiting_for_repro: '等待复现',
+                waiting_for_plan: '等待拆分',
+                executing: '处理中',
+                ready_for_verification: '等待独立验证',
+                completed: '已完成',
+                reopened: '验证未通过',
+                cancelled: '已取消',
+                system_blocked: '系统阻塞',
+              } as Record<string, string>)[group.status] || group.status}</em>
+            </div>)}
+          </div>
+        </section>}
 
         <section className="task-section">
           <div className="section-head">
@@ -334,12 +378,13 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               format={reviewDocument.format}
               revision={reviewDocument.revision}
               comments={documentComments.filter((comment) => comment.document_id === reviewDocument.document_id)}
+              feedbackGroups={feedbackGroups}
               allowReopen={task.agile_status !== 'done'}
               allowComment={task.agile_status !== 'done'}
             /></div> : <div className="empty">结卡报告不可用，请重新运行 Review Agent。</div>}
           </div>
           {task.agile_status === 'ready_to_close' && reviewDocument && blockingFeedback.length > 0 && <div className="release-block">
-            <p className="muted">当前有 {blockingFeedback.length} 条反馈等待 Feedback Agent 分流、处理和验证。它们会在下一次正常 Agent 派发前优先执行。</p>
+            <p className="muted">当前有 {blockingFeedback.length} 条反馈尚未闭环。系统会冻结为一个批次；需要修改的反馈将追加新的交付单元，不会回退或改写既有交付。</p>
           </div>}
           {task.agile_status === 'ready_to_close' && reviewDocument && blockingFeedback.length === 0 && <form action={acknowledgeClosureAction} className="release-block">
             <input type="hidden" name="taskId" value={task.task_id}/>

@@ -44,6 +44,8 @@ flowchart LR
 
 交付拆分后，同一任务进入双 Lane：Analysis Lane 串行分析后续单元，Delivery Lane 串行执行 `Dev(N) → Test(N)`，二者独立推进。Analysis 全局最多并发 4 个；当前共享工作区仍保持全局 1 个 Dev 和 1 个浏览器型 Agent。任一 Lane 完成后立即重新调度，不等待其他 Lane 或任务结束。
 
+结卡前后的文档评论采用前向反馈流程：Feedback Agent 先把冻结批次按共同验收目标分组；直接回复和历史说明就地闭环，Bug 先复现，范围新增先拆分，行为修订、技术调整和已复现 Bug 则在现有单元之后追加新的交付单元。旧交付单元、旧 Slice Spec 和旧文档始终作为历史事实保留，不因评论回退或改写；新增单元重新经过 Analysis、Dev、Test 和 Feedback 独立验证，最后由 Review 生成反映最终状态的结卡报告。
+
 ## 人机边界
 
 LoopWork 只在以下情况请求人介入：
@@ -68,7 +70,7 @@ LoopWork 只在以下情况请求人介入：
 - 版本化 Prompt、Memory、项目知识和 Slice Spec。
 - 结构化 Agent Result、Test Evidence 和 Trace。
 - execution attempt、Receipt、中断恢复、重试和 rewind。
-- Feedback Agent 的评论分流、处理验证和确定性状态路由。
+- Feedback Agent 的批次分组、前向追加工作和独立处理验证。
 - 每个需求一个持久化 Chat 会话；Agent 重新读取交付文档、活动和代码，也可在安全窗口直接完成不改变需求语义的 UI / wording 小改动，验证后只提交自己的代码，始终不修改 Loop 状态。
 - 权限边界、人工介入和可插拔执行器。
 - 受限的 Prompt 演化和 LoopWork 自维护闭环。

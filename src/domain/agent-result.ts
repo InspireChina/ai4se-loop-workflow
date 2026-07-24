@@ -30,28 +30,30 @@ const runtimeInputSchema = z.object({
 
 const deliveryUnitSchema = z.object({ title: z.string().min(1).max(200) });
 
-const feedbackTriageDecisionSchema = z.object({
-    commentId: z.string().min(1).max(200),
-    disposition: z.enum(['no_change', 'reply', 'revise', 'rewind', 'learning_only']),
-    targetStage: z.enum(['context', 'repro', 'plan', 'analysis', 'dev', 'test', 'review']).optional(),
-    targetDeliveryUnit: z.number().int().positive().optional(),
-    reason: z.string().min(1).max(4000),
-    acceptance: z.array(z.string().min(1).max(2000)).max(30).default([]),
+const feedbackTriageGroupSchema = z.object({
+  groupKey: z.string().min(1).max(200),
+  commentIds: z.array(z.string().min(1).max(200)).min(1).max(100),
+  workType: z.enum([
+    'reply',
+    'historical_correction',
+    'report_correction',
+    'bug',
+    'behavior_change',
+    'scope_addition',
+    'technical_change',
+    'learning_only',
+  ]),
+  title: z.string().min(1).max(240).optional(),
+  affectedDeliveryUnits: z.array(z.number().int().positive()).max(50).default([]),
+  reason: z.string().min(1).max(4000),
+  acceptance: z.array(z.string().min(1).max(2000)).max(30).default([]),
+  response: z.string().min(1).max(4000).optional(),
 });
 
-const feedbackResultSchema = z.preprocess((value) => {
-  if (!value || typeof value !== 'object') return value;
-  const candidate = value as Record<string, unknown>;
-  // Read-only compatibility for a result produced before batch Triage.
-  if (candidate.mode === 'triage' && !candidate.decisions && candidate.commentId) {
-    const { mode: _mode, ...decision } = candidate;
-    return { mode: 'triage', decisions: [decision] };
-  }
-  return value;
-}, z.discriminatedUnion('mode', [
+const feedbackResultSchema = z.discriminatedUnion('mode', [
   z.object({
     mode: z.literal('triage'),
-    decisions: z.array(feedbackTriageDecisionSchema).min(1).max(100),
+    groups: z.array(feedbackTriageGroupSchema).min(1).max(100),
   }),
   z.object({
     mode: z.literal('verify'),
@@ -60,7 +62,7 @@ const feedbackResultSchema = z.preprocess((value) => {
     reason: z.string().min(1).max(4000),
     evidence: z.array(z.string().min(1).max(2000)).max(50).default([]),
   }),
-]));
+]);
 
 const verificationStepBase = {
   criterionId: z.string().min(1).max(120),
@@ -253,9 +255,15 @@ export function assertSliceSpecDecisionCoverage(spec: SliceSpec, questions?: Age
 }
 
 export function assertAgentResultRoleContract(result: AgentResult, agent: string) {
-  const canAskAlignmentQuestions = agent === 'backlog-agent' || agent === 'analyst-agent' || agent === 'repro-agent';
-  if (agent === 'feedback-agent' && (result.questions.length || result.runtimeInputs.length)) {
-    throw new Error('feedback-agent 不能创建设计问题或运行信息请求');
+  const canAskAlignmentQuestions = agent === 'backlog-agent'
+    || agent === 'analyst-agent'
+    || agent === 'repro-agent'
+    || agent === 'feedback-agent';
+  if (agent === 'feedback-agent' && result.runtimeInputs.length) {
+    throw new Error('feedback-agent 不能创建运行信息请求；无法安全分组时使用 questions');
+  }
+  if (agent === 'feedback-agent' && result.questions.length && result.feedback) {
+    throw new Error('feedback-agent 不能在同一结果中同时提问和提交反馈分组');
   }
   if (agent === 'repro-agent' && result.runtimeInputs.length) {
     throw new Error('repro-agent 未复现时必须通过 questions 请求人工对齐，不能使用 runtimeInputs');
@@ -313,7 +321,7 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
       if (result.rewindTo || result.rewindDeliveryUnit) throw new Error('Review Agent 不得返回回退决策');
       break;
     case 'feedback-agent':
-      if (!result.feedback) throw new Error('feedback-agent 结果缺少 feedback');
+      if (!result.questions.length && !result.feedback) throw new Error('feedback-agent 结果缺少 feedback');
       break;
   }
 }
