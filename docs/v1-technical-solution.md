@@ -152,7 +152,7 @@ Agent 最终返回统一结构化 JSON，包含可选的：
 - `runtimeInputs`：任何 Agent 可返回的非敏感运行信息请求；存在时必须 `outcome=needs_input`，不能与设计问题混用。
 - `rewind` / `rewindDeliveryUnit`：需要回退时的建议。
 
-Review Agent 只返回完整 artifact 和 `verdict=report_ready`。Feedback Agent 一次读取冻结的评论批次，将评论按共同验收目标分为直接回复、历史说明、报告修订、Bug、行为修订、范围新增、技术调整或长期建议。Application 不接受 `targetStage`、`targetAgent` 或评论驱动的 rewind；需要工程修改时只在既有交付单元之后追加新的交付单元，并重新经过 Analysis、Dev、Test 和 Feedback 独立验证。既有文档与 Slice Spec 保持为历史证据，只在最终结卡报告中汇总最终事实。
+Review Agent 只返回完整 artifact 和 `verdict=report_ready`。Feedback Agent 一次读取冻结的评论批次，将评论按共同验收目标分为直接回复、历史说明、报告修订、Bug、行为修订、范围新增、技术调整或长期建议。Application 不接受 `targetStage`、`targetAgent` 或评论驱动的 rewind；需要工程修改时只在既有交付单元之后追加新的交付单元，并重新经过 Analysis、Dev、Test 和 Feedback 独立验证。既有文档与 Slice Spec 保持为历史证据，只在最终结卡报告中汇总最终事实。反馈批次使用需求内递增的 `batch_number`，工作组使用批次内递增的 `group_order`，保证数据库、Agent 上下文和页面展示的执行顺序一致，不依赖时间戳或随机 UUID 排序。
 
 Application 负责校验最小结果协议、写入数据库和推进状态。对 Analyst，Application 只检查决策引用有效、待确认规格不能冒充 resolved，以及仍有未决歧义时不能推进；完整性和专业语义由 Analyst Prompt、用户对齐和后续 Test 流程保证。Agent 只能调用 `loopctl agent-context` 读取当前 execution 的冻结快照，不能调用其他 `loopctl` 命令、写 `.project` 文档、直接写 SQLite 或主动写运行日志。
 

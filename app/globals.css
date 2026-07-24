@@ -131,6 +131,12 @@ textarea{min-height:90px;resize:vertical}
 .checkbox input{width:auto;margin:0}
 .path-line{background:#f8fafc;border:1px solid var(--line);border-radius:7px;color:var(--muted);margin:0;padding:9px;overflow-wrap:anywhere}
 .story-list{overflow:hidden}
+.feedback-batch-list{display:grid;gap:12px}
+.feedback-batch{overflow:hidden}
+.feedback-batch-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:14px 16px;border-bottom:1px solid var(--line)}
+.feedback-batch-head>div{display:grid;gap:4px}
+.feedback-batch-head small{max-width:760px;line-height:1.45}
+.feedback-batch .story-list{border:0;border-radius:0}
 .story{display:flex;align-items:center;gap:12px;padding:15px;border-bottom:1px solid var(--line)}
 .story:last-child{border:0}
 .story>span{color:#94a0b4}

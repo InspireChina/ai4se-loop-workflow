@@ -123,3 +123,126 @@ test('builds a compact execution snapshot while preserving full context for just
   assert.equal(stored.snapshotId, snapshot.snapshotId);
   assert.match(renderAgentContextResource(stored, `DOC:${currentDocumentId}`), /FULL-CONTEXT-TAIL/);
 });
+
+test('prioritizes the latest forward feedback group while keeping old documents as historical execution context', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const {
+    addDocumentComment,
+    createTask,
+    getTaskContext,
+    upsertDocument,
+  } = await import('./tasks');
+  const { buildAgentContextSnapshot } = await import('./agent-context');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Forward feedback context priority' });
+  db.prepare(`
+    INSERT INTO stories(task_id, story_index, title, directory, origin_type)
+    VALUES(?, 1, 'Original delivery', 'story-001', 'original'),
+          (?, 2, 'Keyboard-accessible empty state', 'story-002', 'feedback_behavior')
+  `).run(taskId, taskId);
+  db.prepare(`
+    UPDATE tasks
+    SET agile_status = 'in feedback', total_stories = 2,
+        analysis_index = 1, dev_index = 1, test_index = 1
+    WHERE task_id = ?
+  `).run(taskId);
+  const documentId = await upsertDocument({
+    taskId,
+    storyIndex: 1,
+    kind: 'review_v1',
+    title: 'Historical closure report',
+    content: 'OLD-HISTORICAL-CONTENT: the first delivery only supported pointer input.',
+    actor: 'review-agent',
+  });
+  const commentId = await addDocumentComment({
+    taskId,
+    documentId,
+    anchorType: 'file',
+    content: 'The empty-state action must also support keyboard input.',
+    intent: 'change_request',
+  });
+  const firstBatchId = 'BATCH-context-priority-1';
+  const secondBatchId = 'BATCH-context-priority-2';
+  const firstGroupId = 'GROUP-context-priority-1';
+  const secondGroupId = 'GROUP-context-priority-2';
+  db.prepare(`
+    INSERT INTO feedback_batches(batch_id, task_id, batch_number, status, summary)
+    VALUES(?, ?, 1, 'completed', 'First attempt'),
+          (?, ?, 2, 'executing', 'Current correction')
+  `).run(firstBatchId, taskId, secondBatchId, taskId);
+  db.prepare(`
+    INSERT INTO feedback_groups(
+      group_id, batch_id, group_order, group_key, work_type, status, title, reason,
+      acceptance_json, affected_story_indexes_json
+    ) VALUES
+      (?, ?, 1, 'empty-state-v1', 'behavior_change', 'reopened',
+       'First pointer-only attempt', 'This is no longer the active correction',
+       '["Pointer input works"]', '[1]'),
+      (?, ?, 1, 'empty-state-v2', 'behavior_change', 'executing',
+       'Add keyboard input', 'The latest user feedback requires keyboard support',
+       '["Keyboard input works"]', '[1]')
+  `).run(firstGroupId, firstBatchId, secondGroupId, secondBatchId);
+  db.prepare(`
+    INSERT INTO feedback_group_comments(group_id, comment_id)
+    VALUES(?, ?), (?, ?)
+  `).run(firstGroupId, commentId, secondGroupId, commentId);
+  db.prepare(`
+    INSERT INTO feedback_group_delivery_units(group_id, task_id, story_index)
+    VALUES(?, ?, 2), (?, ?, 2)
+  `).run(firstGroupId, taskId, secondGroupId, taskId);
+  db.prepare(`
+    UPDATE document_comments
+    SET feedback_status = 'in_progress', feedback_batch_id = ?,
+        triage_reason = 'The latest user feedback requires keyboard support'
+    WHERE comment_id = ?
+  `).run(secondBatchId, commentId);
+
+  const full = await getTaskContext(taskId);
+  const snapshot = buildAgentContextSnapshot({
+    delegation: delegation(taskId, {
+      agent: 'analyst-agent',
+      lane: 'analysis',
+      pipeline: 'analysis',
+      storyIndex: 2,
+      description: 'Analyze the appended keyboard correction only.',
+      agileStatus: 'in feedback',
+      analysisIndex: 1,
+      devIndex: 1,
+      testIndex: 1,
+      totalStories: 2,
+    }),
+    full,
+    activeFeedback: [],
+    activeRecovery: [],
+    repositoryBaseCommit: 'feedback-base',
+  });
+
+  assert.equal(snapshot.authoritativeFacts.currentDeliveryUnit?.index, 2);
+  assert.doesNotMatch(JSON.stringify(snapshot.authoritativeFacts), /OLD-HISTORICAL-CONTENT/);
+  assert.equal(snapshot.activeObligations.feedback.length, 1);
+  assert.deepEqual(snapshot.activeObligations.feedback[0], {
+    commentId,
+    documentId,
+    documentRevision: 1,
+    content: 'The empty-state action must also support keyboard input.',
+    quotedText: null,
+    intent: 'change_request',
+    feedbackStatus: 'in_progress',
+    batchId: secondBatchId,
+    groupId: secondGroupId,
+    groupKey: 'empty-state-v2',
+    workType: 'behavior_change',
+    groupStatus: 'executing',
+    affectedDeliveryUnits: [1],
+    appendedDeliveryUnits: [2],
+    reason: 'The latest user feedback requires keyboard support',
+    acceptance: ['Keyboard input works'],
+    response: null,
+    verification: null,
+  });
+  const feedbackResource = snapshot.resources.find((resource) => resource.ref === `FEEDBACK:${commentId}`);
+  assert.equal(feedbackResource?.authority, 'active_obligation');
+  const oldDocument = snapshot.resources.find((resource) => resource.ref === `DOC:${documentId}`);
+  assert.equal(oldDocument?.authority, 'execution_evidence');
+  assert.match(JSON.stringify(oldDocument?.content), /OLD-HISTORICAL-CONTENT/);
+});

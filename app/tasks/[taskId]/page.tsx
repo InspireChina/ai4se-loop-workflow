@@ -4,7 +4,7 @@ import { AlertTriangle, Check, CheckCircle2, Clock3, FileText, GitBranch } from 
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
 import { getTaskContextChat } from '../../../src/application/task-context-chat';
-import { agentLabel, confirmationKindLabel, deliveryUnitLabel, documentKindLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
+import { agentLabel, confirmationKindLabel, deliveryUnitLabel, documentKindLabel, feedbackBatchStatusLabel, feedbackWorkTypeLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
 import { ArtifactDocument } from './artifact-document';
 import { TaskAutoRefresh } from './task-auto-refresh';
 import { TaskContextChat } from './task-context-chat';
@@ -64,6 +64,24 @@ function laneStatusLabel(status: string) {
     waiting_for_answers: '等待澄清', waiting_for_runtime_input: '等待运行信息',
     system_blocked: '系统阻塞', completed: '已完成',
   } as Record<string, string>)[status] || status;
+}
+
+function feedbackGroupStatusLabel(group: { status: string; work_type: string; delivery_unit_indexes?: number[] }) {
+  if (group.status === 'executing') {
+    if (group.work_type === 'report_correction') return '等待新版结卡报告';
+    if (group.delivery_unit_indexes?.length) return '追加单元推进中';
+    return '前向处理中';
+  }
+  return ({
+    planned: '已规划',
+    waiting_for_repro: '等待复现',
+    waiting_for_plan: '等待拆分',
+    ready_for_verification: '等待独立验证',
+    completed: '已完成',
+    reopened: '验证未通过，已进入新批次',
+    cancelled: '已取消',
+    system_blocked: '系统阻塞',
+  } as Record<string, string>)[group.status] || group.status;
 }
 
 export default async function TaskDetail({ params }: { params: Promise<{ taskId: string }> }) {
@@ -217,40 +235,35 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         {feedbackBatches.length > 0 && <section className="task-section">
           <div className="section-head">
             <h2>反馈批次</h2>
-            <small>{feedbackBatches.length} 个批次 · {feedbackGroups.filter((group) => !['completed', 'cancelled'].includes(group.status)).length} 个进行中工作组</small>
+            <small>{feedbackBatches.length} 个批次 · {feedbackBatches.filter((batch) => !['completed', 'cancelled'].includes(batch.status)).length} 个活动批次</small>
           </div>
-          <div className="card story-list">
-            {feedbackGroups.length === 0 ? <div className="empty">评论已经冻结，等待 Feedback Agent 分组。</div> : feedbackGroups.map((group) => <div className="story" key={group.group_id}>
-              <span className={group.status === 'completed' ? 'done' : 'active'}>
-                {group.status === 'completed' ? <CheckCircle2 size={16}/> : <Clock3 size={16}/>}
-              </span>
-              <div>
-                <strong>{group.title || group.reason}</strong>
-                <small>{({
-                  reply: '直接回复',
-                  historical_correction: '历史说明',
-                  report_correction: '报告修订',
-                  bug: '问题修复',
-                  behavior_change: '行为修订',
-                  scope_addition: '范围新增',
-                  technical_change: '技术调整',
-                  learning_only: '长期建议',
-                } as Record<string, string>)[group.work_type] || group.work_type}
-                  {group.delivery_unit_indexes?.length ? ` · 新增交付单元 ${group.delivery_unit_indexes.join('、')}` : ''}
-                </small>
-              </div>
-              <em>{({
-                planned: '已规划',
-                waiting_for_repro: '等待复现',
-                waiting_for_plan: '等待拆分',
-                executing: '处理中',
-                ready_for_verification: '等待独立验证',
-                completed: '已完成',
-                reopened: '验证未通过',
-                cancelled: '已取消',
-                system_blocked: '系统阻塞',
-              } as Record<string, string>)[group.status] || group.status}</em>
-            </div>)}
+          <div className="feedback-batch-list">
+            {feedbackBatches.map((batch) => {
+              const groups = feedbackGroups.filter((group) => group.batch_id === batch.batch_id);
+              return <article className="card feedback-batch" key={batch.batch_id}>
+                <header className="feedback-batch-head">
+                  <div>
+                    <strong>反馈批次 {batch.batch_number}</strong>
+                    {batch.summary && <small>{batch.summary}</small>}
+                  </div>
+                  <span className={`badge ${batch.status === 'completed' ? 'green' : batch.status === 'system_blocked' ? 'amber' : 'blue'}`}>{feedbackBatchStatusLabel(batch.status)}</span>
+                </header>
+                <div className="story-list">
+                  {groups.length === 0 ? <div className="empty">评论已经冻结，等待反馈处理 Agent 分组。</div> : groups.map((group) => <div className="story" key={group.group_id}>
+                    <span className={group.status === 'completed' ? 'done' : group.status === 'reopened' || group.status === 'cancelled' ? '' : 'active'}>
+                      {group.status === 'completed' ? <CheckCircle2 size={16}/> : <Clock3 size={16}/>}
+                    </span>
+                    <div>
+                      <strong>{group.title || group.reason}</strong>
+                      <small>{feedbackWorkTypeLabel(group.work_type)}
+                        {group.delivery_unit_indexes?.length ? ` · 新增交付单元 ${group.delivery_unit_indexes.join('、')}` : ''}
+                      </small>
+                    </div>
+                    <em>{feedbackGroupStatusLabel(group)}</em>
+                  </div>)}
+                </div>
+              </article>;
+            })}
           </div>
         </section>}
 

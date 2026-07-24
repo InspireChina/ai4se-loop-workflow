@@ -3,6 +3,7 @@
 import { useRef, useState } from 'react';
 import { MessageSquare, Quote, RotateCcw } from 'lucide-react';
 import type { DocumentComment, FeedbackGroup } from '../../../src/application/tasks';
+import { feedbackWorkTypeLabel } from '../../../src/domain/terminology';
 import { MarkdownContent } from '../../../src/ui/markdown-content';
 import { addDocumentCommentAction, reopenDocumentCommentAction } from '../../actions';
 
@@ -88,7 +89,10 @@ export function ArtifactDocument({
 
       {comments.length > 0 && <div className="artifact-comments">
         {comments.map((comment) => {
-          const group = feedbackGroups.find((item) => item.comment_ids?.includes(comment.comment_id));
+          const group = feedbackGroups.find((item) =>
+            item.batch_id === comment.feedback_batch_id
+            && item.comment_ids?.includes(comment.comment_id))
+            || [...feedbackGroups].reverse().find((item) => item.comment_ids?.includes(comment.comment_id));
           const feedbackStatus = comment.feedback_status === 'resolved' ? '已解决'
             : comment.feedback_status === 'verifying' ? '等待独立验证'
               : comment.feedback_status === 'in_progress'
@@ -104,12 +108,12 @@ export function ArtifactDocument({
           return <article className={`artifact-comment ${comment.status}`} key={comment.comment_id}>
           <div className="artifact-comment-meta">
             <span>{comment.anchor_type === 'selection' ? '选区评论' : '文件评论'} · revision {comment.document_revision}</span>
-            <small>{feedbackStatus} · {comment.intent === 'change_request' ? '要求修改' : comment.intent === 'question' ? '需要回复' : '备注建议'} · {comment.evolution_status === 'analyzed' ? '已用于演化分析' : '尚未沉淀'}</small>
+            <small>{feedbackStatus} · {comment.intent === 'change_request' ? '要求修改' : comment.intent === 'question' ? '需要回复' : '备注建议'} · {comment.evolution_status === 'analyzed' ? '已用于长期学习' : '待长期学习分析'}</small>
           </div>
           {comment.quoted_text && <blockquote className="comment-anchor"><Quote size={13}/><span>{comment.quoted_text}</span></blockquote>}
           <p>{comment.content}</p>
           {comment.triage_reason && <p className="muted"><b>分流结论：</b>{comment.triage_reason}</p>}
-          {group && <p className="muted"><b>处理方式：</b>{group.work_type} · {group.title || group.reason}</p>}
+          {group && <p className="muted"><b>处理方式：</b>{feedbackWorkTypeLabel(group.work_type)} · {group.title || group.reason}</p>}
           {group?.response_text && <p className="muted"><b>回复：</b>{group.response_text}</p>}
           {comment.verification_json && <details><summary>反馈验证</summary><pre>{JSON.stringify(JSON.parse(comment.verification_json), null, 2)}</pre></details>}
           {comment.feedback_status === 'resolved' && allowReopen && <form action={reopenDocumentCommentAction}>

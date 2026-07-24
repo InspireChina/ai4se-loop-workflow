@@ -4,7 +4,7 @@ const statusLabels: Record<string, string> = {
   'in plan': '交付拆分',
   'ready for dev': '等待推进',
   'in dev': '单元推进',
-  'in feedback': '反馈追加',
+  'in feedback': '反馈处理',
   'in review': '整体验收',
   ready_to_close: '等待阅读结卡',
   done: '已完成',
@@ -66,6 +66,29 @@ const confirmationKindLabels: Record<string, string> = {
   analysis: '方案分析',
   test: '验证',
   review: '整体验收',
+  feedback: '反馈处理',
+};
+
+const feedbackWorkTypeLabels: Record<string, string> = {
+  reply: '直接回复',
+  historical_correction: '历史说明',
+  report_correction: '报告修订',
+  bug: '问题修复',
+  behavior_change: '行为修订',
+  scope_addition: '范围新增',
+  technical_change: '技术调整',
+  learning_only: '长期建议',
+};
+
+const feedbackBatchStatusLabels: Record<string, string> = {
+  triaging: '等待分组',
+  waiting_for_answers: '等待澄清',
+  executing: '前向处理中',
+  verifying: '等待独立验证',
+  reporting: '生成新版结卡报告',
+  completed: '已完成',
+  cancelled: '已取消',
+  system_blocked: '系统阻塞',
 };
 
 export function statusLabel(status: string) {
@@ -91,6 +114,14 @@ export function documentKindLabel(kind: string) {
 
 export function confirmationKindLabel(kind: string) {
   return confirmationKindLabels[kind] || kind;
+}
+
+export function feedbackWorkTypeLabel(workType: string) {
+  return feedbackWorkTypeLabels[workType] || workType;
+}
+
+export function feedbackBatchStatusLabel(status: string) {
+  return feedbackBatchStatusLabels[status] || status;
 }
 
 export function deliveryUnitLabel(index: number | null | undefined) {

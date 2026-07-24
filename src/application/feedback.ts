@@ -91,7 +91,7 @@ function activeBatchInDb(db: Db, taskId: string) {
   return db.prepare(`
     SELECT * FROM feedback_batches
     WHERE task_id = ? AND status NOT IN ('completed', 'cancelled')
-    ORDER BY created_at, batch_id
+    ORDER BY batch_number
     LIMIT 1
   `).get(taskId) as FeedbackBatch | undefined;
 }
@@ -121,8 +121,18 @@ function activeGroups(db: Db, batchId: string) {
   return db.prepare(`
     SELECT * FROM feedback_groups
     WHERE batch_id = ?
-    ORDER BY created_at, group_id
+    ORDER BY group_order
   `).all(batchId) as FeedbackGroup[];
+}
+
+function batchNumber(db: Db, batchId: string) {
+  return (db.prepare(`
+    SELECT batch_number AS value FROM feedback_batches WHERE batch_id = ?
+  `).get(batchId) as { value: number } | undefined)?.value;
+}
+
+function groupDisplayName(group: Pick<FeedbackGroup, 'title' | 'reason'>) {
+  return group.title || group.reason;
 }
 
 function updateBatchStatusInDb(db: Db, batchId: string) {
@@ -195,7 +205,13 @@ function appendDeliveryUnitInDb(db: Db, input: {
         next_step = ?, last_actor = 'feedback-agent', updated_at = CURRENT_TIMESTAMP
     WHERE task_id = ?
   `).run(nextIndex, `反馈新增交付单元 ${nextIndex}：${input.title}`, input.taskId);
-  addEvent(db, input.taskId, 'feedback-agent', 'FeedbackDeliveryUnitAdded', `反馈批次 ${input.batchId} 新增交付单元 ${nextIndex}：${input.title}`);
+  addEvent(
+    db,
+    input.taskId,
+    'feedback-agent',
+    'FeedbackDeliveryUnitAdded',
+    `反馈批次 ${batchNumber(db, input.batchId) || '当前'} 新增交付单元 ${nextIndex}：${input.title}`,
+  );
   return nextIndex;
 }
 
@@ -229,10 +245,15 @@ export function ensureFeedbackBatchInDb(db: Db, taskId: string) {
   if (!comments.length) return undefined;
   const batchId = randomUUID();
   db.transaction(() => {
+    const batchNumber = (db.prepare(`
+      SELECT COALESCE(MAX(batch_number), 0) + 1 AS value
+      FROM feedback_batches
+      WHERE task_id = ?
+    `).get(taskId) as { value: number }).value;
     db.prepare(`
-      INSERT INTO feedback_batches(batch_id, task_id, status)
-      VALUES(?, ?, 'triaging')
-    `).run(batchId, taskId);
+      INSERT INTO feedback_batches(batch_id, task_id, batch_number, status)
+      VALUES(?, ?, ?, 'triaging')
+    `).run(batchId, taskId, batchNumber);
     const insertLink = db.prepare(`
       INSERT INTO feedback_batch_comments(batch_id, comment_id, ordinal)
       VALUES(?, ?, ?)
@@ -244,7 +265,7 @@ export function ensureFeedbackBatchInDb(db: Db, taskId: string) {
       SET feedback_status = 'triaged', feedback_batch_id = ?, updated_at = CURRENT_TIMESTAMP
       WHERE comment_id IN (${placeholders})
     `).run(batchId, ...comments.map((comment) => comment.comment_id));
-    addEvent(db, taskId, 'system', 'FeedbackBatchCreated', `冻结 ${comments.length} 条评论形成反馈批次 ${batchId}`);
+    addEvent(db, taskId, 'system', 'FeedbackBatchCreated', `冻结 ${comments.length} 条评论形成反馈批次 ${batchNumber}`);
   })();
   return db.prepare('SELECT * FROM feedback_batches WHERE batch_id = ?').get(batchId) as FeedbackBatch;
 }
@@ -427,7 +448,7 @@ export async function applyFeedbackTriageGroups(input: {
         WHERE task_id = ?
       `).run(input.taskId);
     }
-    for (const group of input.groups) {
+    for (const [groupIndex, group] of input.groups.entries()) {
       const groupId = randomUUID();
       const immediate = ['reply', 'historical_correction', 'learning_only'].includes(group.workType);
       const status: FeedbackGroup['status'] = immediate ? 'completed'
@@ -436,13 +457,14 @@ export async function applyFeedbackTriageGroups(input: {
             : 'executing';
       db.prepare(`
         INSERT INTO feedback_groups(
-          group_id, batch_id, group_key, work_type, status, title, reason,
+          group_id, batch_id, group_order, group_key, work_type, status, title, reason,
           acceptance_json, affected_story_indexes_json, response_text,
           source_execution_id, completed_at
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'completed' THEN CURRENT_TIMESTAMP END)
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CASE WHEN ? = 'completed' THEN CURRENT_TIMESTAMP END)
       `).run(
         groupId,
         input.batchId,
+        groupIndex + 1,
         group.groupKey,
         group.workType,
         status,
@@ -519,7 +541,7 @@ export async function applyFeedbackTriageGroups(input: {
       WHERE task_id = ?
     `).run(input.taskId);
     updateBatchStatusInDb(db, input.batchId);
-    addEvent(db, input.taskId, 'feedback-agent', 'FeedbackBatchTriaged', `反馈批次 ${input.batchId} 已分成 ${input.groups.length} 个前向工作组`);
+    addEvent(db, input.taskId, 'feedback-agent', 'FeedbackBatchTriaged', `反馈批次 ${batch.batch_number} 已分成 ${input.groups.length} 个前向工作组`);
   })();
   refreshTask(input.taskId);
 }
@@ -558,7 +580,7 @@ export async function applyFeedbackReproResult(input: {
       WHERE task_id = ? AND source_agent = 'repro-agent' AND status = 'answered'
     `).run(input.taskId);
     updateBatchStatusInDb(db, input.batchId);
-    addEvent(db, input.taskId, 'repro-agent', 'FeedbackBugReproduced', `反馈分组 ${group.group_key} 已复现并创建修复交付单元`);
+    addEvent(db, input.taskId, 'repro-agent', 'FeedbackBugReproduced', `反馈「${groupDisplayName(group)}」已复现并创建修复交付单元`);
   })();
   refreshTask(input.taskId);
 }
@@ -594,7 +616,7 @@ export async function applyFeedbackSplitResult(input: {
       WHERE group_id = ?
     `).run(input.executionId || null, input.groupId);
     updateBatchStatusInDb(db, input.batchId);
-    addEvent(db, input.taskId, 'story-splitter-agent', 'FeedbackScopeSplit', `反馈分组 ${group.group_key} 追加 ${input.deliveryUnits.length} 个交付单元`);
+    addEvent(db, input.taskId, 'story-splitter-agent', 'FeedbackScopeSplit', `反馈「${groupDisplayName(group)}」追加 ${input.deliveryUnits.length} 个交付单元`);
   })();
   refreshTask(input.taskId);
 }
@@ -630,7 +652,7 @@ export async function recordFeedbackUnitTestPassed(input: {
         WHERE comment_id IN (${comments.map(() => '?').join(', ')})
       `).run(...comments);
       updateBatchStatusInDb(db, group.batch_id);
-      addEvent(db, input.taskId, 'system', 'FeedbackVerificationQueued', `反馈分组 ${group.group_key} 的追加交付单元已通过测试`);
+      addEvent(db, input.taskId, 'system', 'FeedbackVerificationQueued', `反馈「${groupDisplayName(group)}」的追加交付单元已通过测试`);
     }
   })();
   refreshTask(input.taskId);
@@ -661,7 +683,7 @@ export async function markFeedbackReportGenerated(input: {
       WHERE comment_id IN (${comments.map(() => '?').join(', ')})
     `).run(...comments);
     updateBatchStatusInDb(db, input.batchId);
-    addEvent(db, input.taskId, 'review-agent', 'FeedbackReportRegenerated', `反馈分组 ${group.group_key} 已生成新版结卡报告`);
+    addEvent(db, input.taskId, 'review-agent', 'FeedbackReportRegenerated', `反馈「${groupDisplayName(group)}」已生成新版结卡报告`);
   })();
   refreshTask(input.taskId);
 }
@@ -755,7 +777,13 @@ export async function applyFeedbackVerificationV2(taskId: string, decision: Feed
       WHERE group_id = ?
     `).run(groupStatus, groupStatus, row.group_id);
     updateBatchStatusInDb(db, row.batch_id);
-    addEvent(db, taskId, 'feedback-agent', resolved ? 'FeedbackResolved' : 'FeedbackReopened', `${decision.commentId}：${decision.reason}`);
+    addEvent(
+      db,
+      taskId,
+      'feedback-agent',
+      resolved ? 'FeedbackResolved' : 'FeedbackReopened',
+      `反馈「${groupDisplayName(row)}」${resolved ? '已通过验证' : '验证未通过'}：${decision.reason}`,
+    );
     finalizeTaskAfterFeedbackInDb(db, taskId, row.batch_id);
   })();
   refreshTask(taskId);

@@ -115,6 +115,7 @@ export type DocumentComment = {
 export type FeedbackBatch = {
   batch_id: string;
   task_id: string;
+  batch_number: number;
   status: 'triaging' | 'waiting_for_answers' | 'executing' | 'verifying' | 'reporting' | 'completed' | 'cancelled' | 'system_blocked';
   source_execution_id: string | null;
   summary: string | null;
@@ -126,6 +127,7 @@ export type FeedbackBatch = {
 export type FeedbackGroup = {
   group_id: string;
   batch_id: string;
+  group_order: number;
   group_key: string;
   work_type: 'reply' | 'historical_correction' | 'report_correction' | 'bug' | 'behavior_change' | 'scope_addition' | 'technical_change' | 'learning_only';
   status: 'planned' | 'waiting_for_repro' | 'waiting_for_plan' | 'executing' | 'ready_for_verification' | 'completed' | 'reopened' | 'cancelled' | 'system_blocked';
@@ -346,7 +348,7 @@ export async function listRecentEvents(limit = 20): Promise<(Event & { task_id: 
     SELECT e.event_id, e.task_id, t.title, e.actor, e.event_type, e.summary, e.created_at
     FROM task_events e
     JOIN tasks t ON t.task_id = e.task_id
-    ORDER BY e.created_at DESC
+    ORDER BY e.created_at DESC, e.rowid DESC
     LIMIT ?
   `).all(limit) as (Event & { task_id: string; title: string })[];
 }
@@ -362,14 +364,14 @@ export async function getTask(taskId: string) {
   const documents = db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[];
   const documentComments = db.prepare('SELECT * FROM document_comments WHERE task_id = ? ORDER BY created_at').all(taskId) as DocumentComment[];
   const feedbackBatches = db.prepare(`
-    SELECT * FROM feedback_batches WHERE task_id = ? ORDER BY created_at, batch_id
+    SELECT * FROM feedback_batches WHERE task_id = ? ORDER BY batch_number
   `).all(taskId) as FeedbackBatch[];
   const feedbackGroups = db.prepare(`
     SELECT feedback_group.*
     FROM feedback_groups feedback_group
     JOIN feedback_batches feedback_batch ON feedback_batch.batch_id = feedback_group.batch_id
     WHERE feedback_batch.task_id = ?
-    ORDER BY feedback_group.created_at, feedback_group.group_id
+    ORDER BY feedback_batch.batch_number, feedback_group.group_order
   `).all(taskId) as FeedbackGroup[];
   for (const group of feedbackGroups) {
     group.comment_ids = (db.prepare(`
@@ -399,7 +401,7 @@ export async function getTask(taskId: string) {
     WHERE task_id = ?
     ORDER BY created_at, recovery_id
   `).all(taskId) as RecoveryItem[];
-  const events = db.prepare('SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at DESC').all(taskId) as Event[];
+  const events = db.prepare('SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at DESC, rowid DESC').all(taskId) as Event[];
   return {
     task,
     lanes,
