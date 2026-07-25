@@ -18,6 +18,10 @@ import {
   developmentHelp,
   runDevelopmentCommand,
 } from './development-command-drafts';
+import {
+  runVerificationCommand,
+  verificationHelp,
+} from './verification-command-drafts';
 
 type ExecutionRow = {
   execution_id: string;
@@ -36,7 +40,7 @@ type DraftRow = {
   draft_id: string;
   work_key: string;
   draft_version: number;
-  draft_type: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development';
+  draft_type: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification';
   task_id: string;
   story_index: number | null;
   agent: string;
@@ -305,6 +309,32 @@ function cloneDevelopmentDraft(
   }
 }
 
+function cloneVerificationDraft(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  source: DraftRow,
+  target: DraftRow,
+) {
+  db.prepare(`
+    INSERT INTO verification_drafts(
+      draft_id, summary, failure_kind, expected_behavior, actual_behavior
+    )
+    SELECT ?, summary, failure_kind, expected_behavior, actual_behavior
+    FROM verification_drafts WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
+  for (const table of [
+    ['verification_criteria', 'criterion_key, status, method, evidence, ordinal'],
+    ['verification_checks', 'check_key, kind, instruction, command, passed, exit_code, summary, ordinal'],
+    ['verification_risks', 'risk_key, content, ordinal'],
+    ['verification_runtime_inputs', 'request_key, title, question, why, recommendation, ordinal'],
+    ['verification_recovery_checks', 'recovery_id, status, evidence, ordinal'],
+  ] as const) {
+    db.prepare(`
+      INSERT INTO ${table[0]}(draft_id, ${table[1]})
+      SELECT ?, ${table[1]} FROM ${table[0]} WHERE draft_id = ?
+    `).run(target.draft_id, source.draft_id);
+  }
+}
+
 function createDraft(
   db: Awaited<ReturnType<typeof databaseConnection>>,
   execution: ExecutionRow,
@@ -345,6 +375,9 @@ function createDraft(
   } else if (profile.draftType === 'development') {
     if (source) cloneDevelopmentDraft(db, source, created);
     else db.prepare('INSERT INTO development_drafts(draft_id) VALUES(?)').run(draftId);
+  } else if (profile.draftType === 'verification') {
+    if (source) cloneVerificationDraft(db, source, created);
+    else db.prepare('INSERT INTO verification_drafts(draft_id) VALUES(?)').run(draftId);
   }
   return created;
 }
@@ -854,6 +887,15 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile) {
       '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
     ].join('\n');
   }
+  if (profile.draftType === 'verification') {
+    return [
+      ...common,
+      ...verificationHelp(profile.terminalActions),
+      '',
+      '长文本参数：',
+      '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
+    ].join('\n');
+  }
   return [
     ...common,
     '  requirement-context goal set --text <内容>',
@@ -1066,6 +1108,9 @@ export async function runAgentCommand(input: {
   }
   if (profile.draftType === 'development') {
     return runDevelopmentCommand({ db, execution, draft, command, flags });
+  }
+  if (profile.draftType === 'verification') {
+    return runVerificationCommand({ db, execution, draft, command, flags });
   }
   if (command === 'requirement-context status') {
     db.prepare(`

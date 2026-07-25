@@ -3,7 +3,7 @@ export type AgentCommandProfile = {
   agent: string;
   pipelines: string[];
   namespace: string;
-  draftType: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development';
+  draftType: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification';
   terminalActions: string[];
 };
 
@@ -54,6 +54,19 @@ const PROFILES: AgentCommandProfile[] = [
     ],
   },
   {
+    id: 'verification',
+    agent: 'test-agent',
+    pipelines: ['test', 'resume'],
+    namespace: 'verification',
+    draftType: 'verification',
+    terminalActions: [
+      'verification pass',
+      'verification fail',
+      'verification block',
+      'verification request-input',
+    ],
+  },
+  {
     id: 'delivery-plan',
     agent: 'story-splitter-agent',
     pipelines: ['split', 'feedback-split'],
@@ -94,6 +107,9 @@ export function agentCommandWorkKey(
   }
   if (profile.draftType === 'development') {
     return `development:${taskId}:${storyIndex ?? 'unit'}`;
+  }
+  if (profile.draftType === 'verification') {
+    return `verification:${taskId}:${storyIndex ?? 'unit'}`;
   }
   return `${profile.draftType}:${taskId}:${storyIndex ?? 'task'}`;
 }

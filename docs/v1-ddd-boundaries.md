@@ -219,7 +219,7 @@ classDiagram
 | Prompt / Memory 版本与自动演化 | Agent Configuration；Harness 约束提升与回滚 |
 | Loop Engineering 自身缺陷诊断 | Software Maintenance Agent 提议；Git/Harness 决定候选与落地 |
 
-角色提交能力由 Agent Profile 明确声明。需求梳理 Agent 使用 `loop-agent requirement-context`，交付规划 Agent 使用 `loop-agent delivery-plan`，问题复现 Agent 使用 `loop-agent reproduction`，方案分析 Agent 使用 `loop-agent analysis`，开发实现 Agent 使用 `loop-agent implementation`，渐进维护 Application 拥有的角色草稿：每次进程启动先读取 status，编辑命令只更新草稿，角色终止命令才产生 Result Receipt。execution token 只授权当前 Agent 的命令空间，Agent 不接触 SQLite。其他尚未迁移的 Agent 仍通过 `submit-agent-result --input <result.json>` 提交一次性 Result Receipt。普通最终回复不承担控制面协议；Runner 只为旧 Agent 保留最终文本 JSON fallback。
+角色提交能力由 Agent Profile 明确声明。需求梳理 Agent 使用 `loop-agent requirement-context`，交付规划 Agent 使用 `loop-agent delivery-plan`，问题复现 Agent 使用 `loop-agent reproduction`，方案分析 Agent 使用 `loop-agent analysis`，开发实现 Agent 使用 `loop-agent implementation`，验证 Agent 使用 `loop-agent verification`，渐进维护 Application 拥有的角色草稿：每次进程启动先读取 status，编辑命令只更新草稿，角色终止命令才产生 Result Receipt。execution token 只授权当前 Agent 的命令空间，Agent 不接触 SQLite。其他尚未迁移的 Agent 仍通过 `submit-agent-result --input <result.json>` 提交一次性 Result Receipt。普通最终回复不承担控制面协议；Runner 只为旧 Agent 保留最终文本 JSON fallback。
 
 `DeliveryPlanDraft` 属于交付规划 Application 能力，不直接改变 `Task` 聚合。它记录拆分依据、整体覆盖、排序说明和带稳定 `unit_key` 的有序候选单元。只有 `delivery-plan complete` 通过完整性校验后，Application 才把草稿投影为既有 `AgentResult.deliveryUnits` 并调用领域状态机；重试恢复草稿与业务推进因此保持分离。
 
@@ -228,6 +228,8 @@ classDiagram
 `AnalysisDraft` 属于方案分析 Application 能力，不直接改变 `Task` 聚合。它以 `需求 + 交付单元` 为稳定工作身份，记录目标、范围、行为、决策树、验收条件、验证计划、依赖和 Change Budget；回答恢复沿用同一工作键并创建可追溯的新草稿版本。已回答问题的 `decision_key` 必须保留并被明确解决，不能删除或改名。`request-clarification` 投影结构化问题，`complete` 在完整性校验后确定性投影 Slice Spec、交付文档和既有 `AgentResult`。
 
 `DevelopmentDraft` 属于开发实现 Application 能力，不直接改变 `Task` 聚合。它以 `需求 + 交付单元` 为稳定工作身份，记录验收标准覆盖、真实变更文件、测试证据、残余风险、运行信息请求、恢复事项和 Commit。运行信息恢复沿用同一工作键与 request key；`existing` 模式允许零改动走查，但仍要求完整验收和测试证据；`changed` 模式由 Application 对照 execution 基线、当前 HEAD 和 Git diff 校验 Agent 记录，只有 `implementation complete` 成功后才确定性投影开发文档和既有 `AgentResult`。
+
+`VerificationDraft` 属于验证 Application 能力，不直接改变 `Task` 聚合。它以 `需求 + 交付单元` 为稳定工作身份，记录规格验收结论、独立检查、风险、失败分类、运行信息请求和恢复项复验。`pass` 要求全部规格标准和检查通过，且活动恢复项均被明确复验；`fail` 只接受实现或规格失败并确定性投影到 Dev / Analysis 路由；环境或证据不足只能 `block`，不会被 Application 猜测为代码缺陷；`request-input` 沿用稳定 request key 并在回答后恢复同一草稿。
 
 ## 6. SQLite 持久化映射
 

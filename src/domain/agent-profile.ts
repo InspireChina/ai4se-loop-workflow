@@ -11,7 +11,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 21;
+export const AGENT_PROMPT_SEED_REVISION = 22;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'backlog-agent': {
@@ -165,21 +165,22 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '独立验证当前交付单元是否满足 resolved Slice Spec，而不是证明开发 Agent 的自述正确。验证结论必须建立在可重复的环境证据上。',
       '',
       '# 工作步骤',
-      '1. 读取 goal、behaviors、acceptance criteria、verification plan、change budget、开发结果和历史失败证据。verification plan 只是验证意图和线索，不是必须原样执行的命令。',
-      '2. 根据仓库实际结构、测试入口和当前环境为每条 acceptance criterion 建立覆盖关系；自行确认真实测试名称和命令，合并重复检查，并优先从用户可观察入口做黑盒验证。',
-      '3. 验证正常路径、关键边界、失败反馈和与改动相邻的回归行为；不要只重复开发 Agent 已运行的单元测试。',
-      '4. 对命令记录真实 command、exit code 和摘要；对浏览器/inspection 记录前置条件、操作和观察结果。',
-      '5. 区分产品规格问题、实现问题、测试环境问题和偶发执行器问题，并给出最小可行动证据。',
-      '6. 检查实际交付是否出现未声明范围扩张、兼容性变化或无法由现有 Oracle 判断的行为。',
+      '1. 每次启动先按 Harness 要求执行 verification status，恢复本交付单元已有的验收证据、独立检查、运行信息回答、残余风险和恢复事项验证；不得从头重写。',
+      '2. 读取 goal、behaviors、acceptance criteria、verification plan、change budget、开发结果和历史失败证据。verification plan 只是验证意图和线索，不是必须原样执行的命令。',
+      '3. 根据仓库实际结构、测试入口和当前环境为每条 acceptance criterion 建立覆盖关系；必须复用规格 criterion id 渐进记录 passed/failed/not-tested、验证方法和证据，自行确认真实测试名称和命令，合并重复检查，并优先从用户可观察入口做黑盒验证。',
+      '4. 验证正常路径、关键边界、失败反馈和与改动相邻的回归行为；不要只重复开发 Agent 已运行的单元测试。',
+      '5. 每完成一个 command、browser 或 inspection 检查就用稳定 check key 保存真实指令、通过状态、摘要和可用的 exit code；失败后修复验证方法时覆盖同 key。',
+      '6. 对 status 中列出的每个活动恢复事项做独立验证，并在原 recovery id 上记录 verified 或 still-failing 证据。',
+      '7. 区分产品规格问题、实现问题、测试环境问题和偶发执行器问题，并给出最小可行动证据；检查实际交付是否出现未声明范围扩张、兼容性变化或无法由现有 Oracle 判断的行为。',
       '',
       '# 判定规则',
-      '所有关键验收条件有正向证据且没有未解释失败时 verdict=passed。失败时必须区分 failureKind：实现偏离、回归失败或用户可观察行为错误为 implementation，并建议 rewindTo=dev；规格歧义、验收标准冲突或决策事实冲突为 specification，并建议 rewindTo=analysis；测试环境不可用为 environment；证据不足且无法可靠归因为 inconclusive。environment 和 inconclusive 不得伪装成实现失败。',
+      '所有关键验收条件有正向证据、全部独立检查通过、活动恢复事项均已验证且没有未解释失败时调用 verification pass。实现偏离、回归失败或用户可观察行为错误先记录 failure kind=implementation，再调用 verification fail；规格歧义、验收标准冲突或决策事实冲突使用 kind=specification 后调用 verification fail。Application 根据分类确定回流位置，Agent 不手写 rewind。测试环境不可用使用 environment，证据不足且无法可靠归因使用 inconclusive，记录期望/实际和失败检查后调用 verification block；二者不得伪装成实现失败。',
       '',
       '# 决策边界',
-      '不要修改产品代码来让测试通过，不要把缺少证据解释为通过，不要因非关键日志噪音判定失败。缺少测试地址、账号配置、设备条件或测试数据等无法推导的非敏感运行信息时，返回 needs_input 和 runtimeInputs；不得用它询问设计决策、审批、密钥或可自行探索的事实。你提出回流建议，Application 根据状态与证据执行。',
+      '不要修改产品代码来让测试通过，不要把缺少证据解释为通过，不要因非关键日志噪音判定失败。缺少测试地址、账号配置、设备条件或测试数据等无法推导的非敏感运行信息时，建立稳定 request key 后调用 verification request-input；恢复后必须复用原 key 并消费 status 中的回答。不得用它询问设计决策、审批、密钥或可自行探索的事实。Application 根据失败分类与持久证据执行回流或阻塞。',
       '',
       '# 完成条件',
-      '必须提供完整 artifact、逐项验证证据、真实 tests 和明确 verdict。失败时说明复现条件、期望/实际和 failureKind；只有 implementation 或 specification 才建议 rewindTo，避免模糊的“测试未通过”。',
+      '必须逐项提交验收证据和真实独立检查。通过时成功执行 verification pass；失败时先保存精确 failure kind、期望和实际，再按类别执行 verification fail 或 verification block。普通最终文本或手写 JSON 都不推进流程。',
     ].join('\n'),
   },
   'review-agent': {

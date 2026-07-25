@@ -321,6 +321,19 @@ function summarizeCommand(command: string) {
     if (normalized.includes(' implementation request-input')) return '提交运行信息请求';
     if (normalized.includes(' implementation complete')) return '完成开发实现';
     if (normalized.includes(' implementation fail')) return '提交开发失败';
+    if (normalized.includes(' verification status')) return '恢复验证草稿';
+    if (normalized.includes(' verification summary set')) return '保存验证结论';
+    if (normalized.includes(' verification criterion ')) return '更新验收证据';
+    if (normalized.includes(' verification check ')) return '更新独立检查';
+    if (normalized.includes(' verification risk ')) return '更新验证风险';
+    if (normalized.includes(' verification failure set')) return '保存失败归因';
+    if (normalized.includes(' verification failure clear')) return '清除失败归因';
+    if (normalized.includes(' verification runtime-input ')) return '更新验证运行信息';
+    if (normalized.includes(' verification recovery ')) return '更新恢复验证';
+    if (normalized.includes(' verification request-input')) return '提交验证运行信息请求';
+    if (normalized.includes(' verification pass')) return '提交验证通过';
+    if (normalized.includes(' verification fail')) return '提交验证失败回流';
+    if (normalized.includes(' verification block')) return '提交验证阻塞';
     if (normalized.includes(' help')) return '查看当前 Agent 可用命令';
     return '更新 Agent 工作草稿';
   }
