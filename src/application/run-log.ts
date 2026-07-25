@@ -63,10 +63,12 @@ function summarizeCommand(command: string) {
   const unescaped = command.replace(/\\(["'])/g, '$1');
   if (/(?:^|[/\\])loop-agent\.mjs(?:["']|\s)/.test(unescaped)) {
     if (normalized.includes(' requirement-context status')) return '恢复需求上下文草稿';
-    if (normalized.includes(' requirement-context goal set')) return '保存需求目标';
-    if (normalized.includes(' requirement-context outcome set')) return '保存可观察结果';
+    if (normalized.includes(' requirement-context intent set')) return '保存业务意图';
+    if (normalized.includes(' requirement-context change set')) return '保存业务变化';
+    if (normalized.includes(' requirement-context assertion ')) return '更新业务语义';
+    if (normalized.includes(' requirement-context impact ')) return '更新业务影响';
+    if (normalized.includes(' requirement-context acceptance ')) return '更新验收语义';
     if (normalized.includes(' requirement-context classification set')) return '保存需求分类';
-    if (normalized.includes(' requirement-context fact ')) return '更新已确认事实';
     if (normalized.includes(' requirement-context constraint ')) return '更新需求约束';
     if (normalized.includes(' requirement-context scope ')) return '更新范围边界';
     if (normalized.includes(' requirement-context question ')) return '更新澄清问题';

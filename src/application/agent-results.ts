@@ -53,7 +53,7 @@ function questionKind(agent: string) {
 async function saveArtifact(delegation: DelegationEnvelope, result: AgentResult) {
   let artifact = result.artifact;
   if (!artifact && delegation.agent === 'backlog-agent') artifact = {
-    title: '需求分类与上下文',
+    title: '业务变化上下文',
     content: `${result.summary}\n\n- 分类：${result.classification || '未确定'}\n- 路由：${result.route || '未确定'}`,
   };
   if (!artifact && delegation.agent === 'story-splitter-agent' && result.deliveryUnits?.length) artifact = {

@@ -119,29 +119,70 @@ test('requires status first, accepts progressive edits, and submits a determinis
 
   await assert.rejects(
     command(active.executionId, active.token!, [
-      'requirement-context', 'goal', 'set', '--text', '支持用户导出当前筛选结果',
+      'requirement-context', 'intent', 'set', '--text', '支持用户导出当前筛选结果',
     ]),
     /尚未查看草稿状态/,
   );
 
   const initial = await command(active.executionId, active.token!, ['requirement-context', 'status']);
   assert.match(initial, /草稿 v1/);
-  assert.match(initial, /缺少需求目标/);
+  assert.match(initial, /缺少业务意图/);
 
   await command(active.executionId, active.token!, [
-    'requirement-context', 'goal', 'set', '--text', '支持用户导出当前筛选结果',
+    'requirement-context', 'intent', 'set', '--text', '支持用户导出当前筛选结果',
   ]);
   await command(active.executionId, active.token!, [
-    'requirement-context', 'outcome', 'set', '--text', '下载文件与当前筛选列表一致',
+    'requirement-context', 'assertion', 'upsert',
+    '--key', 'current-export',
+    '--perspective', 'actual',
+    '--statement', '列表已经支持组合筛选，但当前导出不继承筛选结果',
+    '--evidence', 'observed',
+    '--source', '仓库列表导出入口与筛选查询实现',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'assertion', 'upsert',
+    '--key', 'current-business-rule',
+    '--perspective', 'expected',
+    '--statement', '现行业务规则只承诺全量导出，不承诺筛选继承',
+    '--evidence', 'reported',
+    '--source', '当前需求描述与既有产品行为',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'assertion', 'upsert',
+    '--key', 'filtered-export-target',
+    '--perspective', 'target',
+    '--statement', '下载文件与当前筛选列表一致',
+    '--evidence', 'decided',
+    '--source', '当前需求描述',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'change', 'set',
+    '--text', '将列表导出从全量结果改变为继承当前筛选条件',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'impact', 'upsert',
+    '--key', 'filtered-export-data',
+    '--statement', '导出文件的数据范围必须随当前筛选结果改变',
+    '--disposition', 'change',
+    '--rationale', '否则目标业务行为无法成立',
+    '--source', 'filtered-export-target',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'impact', 'upsert',
+    '--key', 'export-permission',
+    '--statement', '现有导出权限保持不变',
+    '--disposition', 'preserve',
+    '--rationale', '本次需求没有改变参与者权限',
+    '--source', '当前需求描述',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'acceptance', 'upsert',
+    '--key', 'filtered-file-matches-list',
+    '--text', '下载文件中的记录与当前筛选列表一致',
+    '--source', 'filtered-export-target',
   ]);
   await command(active.executionId, active.token!, [
     'requirement-context', 'classification', 'set', 'feature',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'fact', 'add',
-    '--key', 'filter-exists',
-    '--statement', '列表已经支持组合筛选',
-    '--source', '用户输入与仓库列表页面',
   ]);
   await command(active.executionId, active.token!, [
     'requirement-context', 'scope', 'include',
@@ -151,7 +192,7 @@ test('requires status first, accepts progressive edits, and submits a determinis
 
   assert.equal(
     await command(active.executionId, active.token!, ['requirement-context', 'validate']),
-    '需求上下文草稿基础结构校验通过；终止命令仍会校验分类和未回答问题。',
+    '业务变化上下文草稿结构校验通过；complete 仍会校验分类和未回答问题。',
   );
   assert.match(
     await command(active.executionId, active.token!, ['requirement-context', 'complete']),
@@ -166,7 +207,11 @@ test('requires status first, accepts progressive edits, and submits a determinis
   assert.equal(result?.classification, 'feature');
   assert.equal(result?.route, 'plan');
   assert.match(result?.artifact?.content || '', /## 需求类型\s+feature/);
-  assert.match(result?.artifact?.content || '', /列表已经支持组合筛选/);
+  assert.match(result?.artifact?.content || '', /## AS-IS Actual/);
+  assert.match(result?.artifact?.content || '', /当前导出不继承筛选结果/);
+  assert.match(result?.artifact?.content || '', /## AS-IS Expected/);
+  assert.match(result?.artifact?.content || '', /## TO-BE/);
+  assert.match(result?.artifact?.content || '', /必须保持不变/);
   assert.match(result?.artifact?.content || '', /导出当前筛选条件命中的数据/);
 
   await applyAgentResult('RUN-command-progressive', active.delegation, result!, {
@@ -177,6 +222,70 @@ test('requires status first, accepts progressive edits, and submits a determinis
   assert.equal(detail?.task.item_type, 'feature');
   assert.equal(detail?.task.agile_status, 'in plan');
   assert.equal(detail?.task.current_subagent, 'story-splitter-agent');
+});
+
+test('routes an evidence-backed Actual versus Expected deviation to reproduction', async () => {
+  const { createTask } = await import('./tasks');
+  const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+  const taskId = await createTask({
+    title: '筛选导出行为偏离现行业务规则',
+    description: '筛选后导出仍然包含全部记录。',
+  });
+  const active = await begin(taskId);
+  await command(active.executionId, active.token!, ['requirement-context', 'status']);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'intent', 'set', '--text', '恢复筛选列表的正确导出行为',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'assertion', 'upsert',
+    '--key', 'actual-export-all',
+    '--perspective', 'actual',
+    '--statement', '筛选列表后导出仍然包含全部记录',
+    '--evidence', 'reported',
+    '--source', '用户问题报告',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'assertion', 'upsert',
+    '--key', 'expected-filtered-export',
+    '--perspective', 'expected',
+    '--statement', '现行业务规则要求导出继承当前筛选条件',
+    '--evidence', 'decided',
+    '--source', '用户明确描述的既有期望',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'assertion', 'upsert',
+    '--key', 'target-restore-rule',
+    '--perspective', 'target',
+    '--statement', '导出结果恢复为当前筛选命中的记录',
+    '--evidence', 'decided',
+    '--source', '用户问题报告',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'change', 'set',
+    '--text', 'Actual 偏离现行 Expected，本次恢复而非改变业务规则',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'impact', 'upsert',
+    '--key', 'restore-export-data',
+    '--statement', '导出数据范围恢复为筛选命中记录',
+    '--disposition', 'change',
+    '--rationale', '修复 Actual 与 Expected 的偏差',
+    '--source', 'actual-export-all 与 expected-filtered-export',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'acceptance', 'upsert',
+    '--key', 'export-matches-filter',
+    '--text', '导出文件只包含当前筛选命中的记录',
+    '--source', 'expected-filtered-export',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'classification', 'set', 'bug',
+  ]);
+  await command(active.executionId, active.token!, ['requirement-context', 'complete']);
+  const result = await readAgentCommandSubmission(active.executionId);
+  assert.equal(result?.classification, 'bug');
+  assert.equal(result?.route, 'repro');
+  assert.match(result?.artifact?.content || '', /Actual 偏离现行 Expected/);
 });
 
 test('inherits a persisted clarification draft after resume and forces status again for the new execution', async () => {
@@ -197,16 +306,33 @@ test('inherits a persisted clarification draft after resume and forces status ag
   const first = await begin(taskId);
   await command(first.executionId, first.token!, ['requirement-context', 'status']);
   await command(first.executionId, first.token!, [
-    'requirement-context', 'goal', 'set', '--text', '为列表提供导出入口',
+    'requirement-context', 'intent', 'set', '--text', '为列表提供导出入口',
   ]);
   await command(first.executionId, first.token!, [
-    'requirement-context', 'outcome', 'set', '--text', '目标用户可以下载列表数据',
-  ]);
-  await command(first.executionId, first.token!, [
-    'requirement-context', 'fact', 'add',
-    '--key', 'audience-missing',
+    'requirement-context', 'assertion', 'upsert',
+    '--key', 'current-export-audience',
+    '--perspective', 'actual',
     '--statement', '当前输入没有说明导出入口面向哪些角色',
+    '--evidence', 'reported',
     '--source', '需求描述',
+  ]);
+  await command(first.executionId, first.token!, [
+    'requirement-context', 'assertion', 'upsert',
+    '--key', 'target-export-audience',
+    '--perspective', 'target',
+    '--statement', '目标用户可以下载列表数据，但目标角色尚未确认',
+    '--evidence', 'conflicted',
+    '--source', '需求描述',
+    '--decision', 'export-audience',
+  ]);
+  await command(first.executionId, first.token!, [
+    'requirement-context', 'impact', 'upsert',
+    '--key', 'export-audience-impact',
+    '--statement', '导出入口的权限范围取决于目标角色',
+    '--disposition', 'needs_decision',
+    '--rationale', '不同角色会改变业务范围和验收结果',
+    '--source', '需求描述',
+    '--decision', 'export-audience',
   ]);
   await command(first.executionId, first.token!, [
     'requirement-context', 'constraint', 'add',
@@ -242,7 +368,7 @@ test('inherits a persisted clarification draft after resume and forces status ag
   ]);
   assert.match(
     await command(first.executionId, first.token!, ['requirement-context', 'validate']),
-    /基础结构校验通过/,
+    /澄清草稿校验通过/,
   );
   await command(first.executionId, first.token!, [
     'requirement-context', 'request-clarification',
@@ -283,8 +409,44 @@ test('inherits a persisted clarification draft after resume and forces status ag
   assert.match(inherited, /草稿 v2/);
   assert.match(inherited, /分类：未填写/);
   assert.match(inherited, /export-audience：确认导出能力的目标用户 · 已回答：本轮只面向管理员/);
-  assert.match(inherited, /audience-missing：当前输入没有说明导出入口面向哪些角色/);
+  assert.match(inherited, /current-export-audience · actual · reported · active/);
   assert.match(inherited, /audience-must-be-confirmed：目标用户必须由用户确认/);
+  await command(resumed.executionId, resumed.token!, [
+    'requirement-context', 'assertion', 'upsert',
+    '--key', 'current-export-rule',
+    '--perspective', 'expected',
+    '--statement', '现有产品没有面向普通成员的导出承诺',
+    '--evidence', 'reported',
+    '--source', '用户回答与当前需求描述',
+  ]);
+  await command(resumed.executionId, resumed.token!, [
+    'requirement-context', 'assertion', 'upsert',
+    '--key', 'target-export-audience',
+    '--perspective', 'target',
+    '--statement', '本轮导出入口只面向管理员',
+    '--evidence', 'decided',
+    '--source', '用户对 export-audience 的回答',
+    '--decision', 'export-audience',
+  ]);
+  await command(resumed.executionId, resumed.token!, [
+    'requirement-context', 'impact', 'upsert',
+    '--key', 'export-audience-impact',
+    '--statement', '新增管理员导出能力，同时保持普通成员无导出入口',
+    '--disposition', 'change',
+    '--rationale', '用户已确认本轮只面向管理员',
+    '--source', '用户对 export-audience 的回答',
+    '--decision', 'export-audience',
+  ]);
+  await command(resumed.executionId, resumed.token!, [
+    'requirement-context', 'change', 'set',
+    '--text', '为管理员新增列表导出入口，普通成员行为保持不变',
+  ]);
+  await command(resumed.executionId, resumed.token!, [
+    'requirement-context', 'acceptance', 'upsert',
+    '--key', 'admin-can-export',
+    '--text', '管理员可以下载列表数据，普通成员看不到导出入口',
+    '--source', '用户对 export-audience 的回答',
+  ]);
   await command(resumed.executionId, resumed.token!, [
     'requirement-context', 'constraint', 'add',
     '--key', 'audience-must-be-confirmed',
@@ -316,6 +478,104 @@ test('inherits a persisted clarification draft after resume and forces status ag
   assert.equal(detail?.questions.find((item) => item.question_id === question?.question_id)?.status, 'resolved');
   assert.ok(detail?.documents.some((document) =>
     document.kind === 'context' && document.content.includes('本轮只面向管理员')));
+});
+
+test('keeps corrected business conclusions traceable instead of deleting or silently reactivating them', async () => {
+  const { createTask } = await import('./tasks');
+  const taskId = await createTask({ title: '显式修订业务影响' });
+  const active = await begin(taskId);
+  await command(active.executionId, active.token!, ['requirement-context', 'status']);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'intent', 'set', '--text', '确认导出能力的真实业务影响',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'assertion', 'upsert',
+    '--key', 'old-current-rule',
+    '--perspective', 'actual',
+    '--statement', '初步认为定时导出复用页面筛选',
+    '--evidence', 'inferred',
+    '--source', '初步仓库检索',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'assertion', 'upsert',
+    '--key', 'verified-current-rule',
+    '--perspective', 'actual',
+    '--statement', '项目不存在定时导出业务入口',
+    '--evidence', 'observed',
+    '--source', '仓库入口和产品路由检索',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'assertion', 'supersede',
+    '--key', 'old-current-rule',
+    '--by', 'verified-current-rule',
+    '--reason', '进一步调查推翻了初步推断',
+  ]);
+  await assert.rejects(
+    command(active.executionId, active.token!, [
+      'requirement-context', 'assertion', 'upsert',
+      '--key', 'old-current-rule',
+      '--perspective', 'actual',
+      '--statement', '尝试无痕恢复旧结论',
+      '--evidence', 'inferred',
+      '--source', '无',
+    ]),
+    /已是 superseded/,
+  );
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'impact', 'upsert',
+    '--key', 'scheduled-export',
+    '--statement', '可能影响定时导出',
+    '--disposition', 'needs_decision',
+    '--rationale', '初步认为存在同类入口',
+    '--source', '初步仓库检索',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'impact', 'dismiss',
+    '--key', 'scheduled-export',
+    '--reason', '确认项目不存在该业务场景',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'acceptance', 'upsert',
+    '--key', 'obsolete-acceptance',
+    '--text', '定时导出继承页面筛选',
+    '--source', '初步推断',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'acceptance', 'dismiss',
+    '--key', 'obsolete-acceptance',
+    '--reason', '对应业务场景不存在',
+  ]);
+  const status = await command(active.executionId, active.token!, ['requirement-context', 'status']);
+  assert.match(status, /old-current-rule · actual · inferred · superseded/);
+  assert.match(status, /进一步调查推翻了初步推断/);
+  assert.match(status, /scheduled-export · needs_decision · dismissed/);
+  assert.match(status, /确认项目不存在该业务场景/);
+  assert.match(status, /obsolete-acceptance · dismissed/);
+  assert.match(status, /语义修订记录：7/);
+});
+
+test('exposes only the new business-context protocol and rejects every legacy context command', async () => {
+  const { createTask } = await import('./tasks');
+  const taskId = await createTask({ title: '只使用新业务上下文协议' });
+  const active = await begin(taskId);
+  const help = await command(active.executionId, active.token!, ['help']);
+  assert.match(help, /requirement-context intent set/);
+  assert.match(help, /requirement-context assertion upsert/);
+  assert.match(help, /requirement-context impact upsert/);
+  assert.doesNotMatch(help, /requirement-context goal set/);
+  assert.doesNotMatch(help, /requirement-context outcome set/);
+  assert.doesNotMatch(help, /requirement-context fact /);
+  await command(active.executionId, active.token!, ['requirement-context', 'status']);
+  for (const args of [
+    ['requirement-context', 'goal', 'set', '--text', 'legacy'],
+    ['requirement-context', 'outcome', 'set', '--text', 'legacy'],
+    ['requirement-context', 'fact', 'add', '--key', 'legacy', '--statement', 'legacy', '--source', 'legacy'],
+  ]) {
+    await assert.rejects(
+      command(active.executionId, active.token!, args),
+      /未知命令/,
+    );
+  }
 });
 
 test('rejects commands with another execution token', async () => {
@@ -352,17 +612,17 @@ test('exposes the same execution-scoped protocol through the cross-platform Node
   );
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /需求上下文草稿 v1/);
-  assert.match(result.stdout, /缺少需求目标/);
+  assert.match(result.stdout, /缺少业务意图/);
 
   const directory = mkdtempSync(join(tmpdir(), 'loop-agent-command-'));
   try {
-    const goalPath = join(directory, 'goal.txt');
-    writeFileSync(goalPath, '从 UTF-8 文件恢复一段较长的需求目标');
+    const goalPath = join(directory, 'intent.txt');
+    writeFileSync(goalPath, '从 UTF-8 文件恢复一段较长的业务意图');
     const fileResult = spawnSync(
       process.execPath,
       [
         join(process.cwd(), 'scripts', 'loop', 'loop-agent.mjs'),
-        'requirement-context', 'goal', 'set', '--text-file', goalPath,
+        'requirement-context', 'intent', 'set', '--text-file', goalPath,
       ],
       {
         cwd: process.env.LOOP_WORKSPACE_ROOT_OVERRIDE,
@@ -371,10 +631,10 @@ test('exposes the same execution-scoped protocol through the cross-platform Node
       },
     );
     assert.equal(fileResult.status, 0, fileResult.stderr);
-    assert.match(fileResult.stdout, /需求目标已保存/);
+    assert.match(fileResult.stdout, /业务意图已保存/);
     assert.match(
       await command(active.executionId, active.token!, ['requirement-context', 'status']),
-      /从 UTF-8 文件恢复一段较长的需求目标/,
+      /从 UTF-8 文件恢复一段较长的业务意图/,
     );
   } finally {
     rmSync(directory, { recursive: true, force: true });

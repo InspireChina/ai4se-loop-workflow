@@ -171,7 +171,7 @@ test('creates title-only and described Tasks without blocking delegation and ser
   assert.ok(describedEnvelope);
   const describedAgentInput = JSON.parse(toJsonlEnvelope(describedEnvelope));
   assert.equal(describedAgentInput.task_description, 'Keep this value for the next story.');
-  assert.equal(describedAgentInput.description, '收集上下文并完成分类');
+  assert.equal(describedAgentInput.description, '澄清业务变化上下文');
 });
 
 test('always creates a new UUID requirement without title, URL, external ID, or terminal-state deduplication', async () => {
@@ -1335,7 +1335,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 25);
+  assert.equal(original.profile.prompt_seed_revision, 26);
   assert.ok(original.currentPrompt.content.length > 800);
   assert.match(original.currentPrompt.content, /# 角色目标/);
   assert.match(original.currentPrompt.content, /# 完成条件/);
@@ -1353,12 +1353,12 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
   await ensureAgentRuntimeWorkspace();
   const upgradedSeed = await getAgentProfile('backlog-agent');
-  assert.equal(upgradedSeed.profile.prompt_seed_revision, 25);
+  assert.equal(upgradedSeed.profile.prompt_seed_revision, 26);
   assert.equal(upgradedSeed.currentPrompt.source, 'seed');
   assert.ok(upgradedSeed.currentPrompt.version > 1);
-  assert.match(upgradedSeed.currentPrompt.content, /# 输入与证据优先级/);
+  assert.match(upgradedSeed.currentPrompt.content, /# 工作原则/);
   const resumedBacklog = await loadAgentRuntime('backlog-agent', 'resume');
-  assert.match(resumedBacklog.prompt, /已回答的需求级产品问题/);
+  assert.match(resumedBacklog.prompt, /用户已经确认的决策/);
   const resumedAnalyst = await loadAgentRuntime('analyst-agent', 'resume');
   assert.match(resumedAnalyst.prompt, /decisionKey 是跨轮次不可变的系统标识/);
   assert.match(resumedAnalyst.prompt, /逐字复用/);
@@ -1381,7 +1381,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const preservedHumanPrompt = await getAgentProfile('dev-agent');
   assert.equal(preservedHumanPrompt.currentPrompt.version, promptVersion);
   assert.equal(preservedHumanPrompt.currentPrompt.source, 'human');
-  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 25);
+  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 26);
 
   const localPrompt = `${promptContent}\n- 本地文件修改也必须形成版本。`;
   writeFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), localPrompt);

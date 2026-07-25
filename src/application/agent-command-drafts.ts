@@ -62,9 +62,42 @@ type DraftRow = {
 
 type ContextDraft = {
   draft_id: string;
-  goal: string | null;
-  observable_outcome: string | null;
+  intent: string | null;
+  change_summary: string | null;
   classification: 'feature' | 'bug' | 'tech' | 'other' | null;
+};
+
+type ContextAssertion = {
+  assertion_key: string;
+  perspective: 'actual' | 'expected' | 'target';
+  statement: string;
+  evidence_status: 'observed' | 'reported' | 'inferred' | 'decided' | 'conflicted';
+  source: string;
+  decision_key: string | null;
+  lifecycle_status: 'active' | 'dismissed' | 'superseded';
+  lifecycle_reason: string | null;
+  superseded_by: string | null;
+};
+
+type ContextImpact = {
+  impact_key: string;
+  statement: string;
+  disposition: 'change' | 'preserve' | 'needs_decision' | 'technical';
+  rationale: string;
+  source: string;
+  decision_key: string | null;
+  lifecycle_status: 'active' | 'dismissed' | 'superseded';
+  lifecycle_reason: string | null;
+  superseded_by: string | null;
+};
+
+type ContextAcceptance = {
+  acceptance_key: string;
+  content: string;
+  source: string;
+  lifecycle_status: 'active' | 'dismissed' | 'superseded';
+  lifecycle_reason: string | null;
+  superseded_by: string | null;
 };
 
 type DeliveryPlanDraft = {
@@ -97,6 +130,11 @@ function bounded(value: string, label: string, max = 4000) {
   if (!normalized) throw new Error(`${label}不能为空`);
   if (normalized.length > max) throw new Error(`${label}不能超过 ${max} 个字符`);
   return normalized;
+}
+
+function optionalBounded(flags: FlagMap, name: string, label: string, max = 4000) {
+  const value = flags.get(name)?.trim();
+  return value ? bounded(value, label, max) : null;
 }
 
 function parseArgs(args: string[]) {
@@ -186,15 +224,32 @@ function cloneRequirementContextDraft(
   target: DraftRow,
 ) {
   db.prepare(`
-    INSERT INTO requirement_context_drafts(draft_id, goal, observable_outcome, classification)
-    SELECT ?, goal, observable_outcome, classification
+    INSERT INTO requirement_context_drafts(
+      draft_id, intent, change_summary, classification
+    )
+    SELECT ?, intent, change_summary, classification
     FROM requirement_context_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   for (const table of [
-    ['requirement_context_facts', 'fact_key, statement, source, ordinal'],
     ['requirement_context_constraints', 'constraint_key, content, ordinal'],
     ['requirement_context_scope_items', 'scope_key, direction, content, ordinal'],
     ['requirement_context_questions', 'decision_key, title, question, impact, recommendation_option_id, recommendation_reason, ordinal'],
+    [
+      'requirement_context_assertions',
+      'assertion_key, perspective, statement, evidence_status, source, decision_key, lifecycle_status, lifecycle_reason, superseded_by, ordinal',
+    ],
+    [
+      'requirement_context_impacts',
+      'impact_key, statement, disposition, rationale, source, decision_key, lifecycle_status, lifecycle_reason, superseded_by, ordinal',
+    ],
+    [
+      'requirement_context_acceptance_items',
+      'acceptance_key, content, source, lifecycle_status, lifecycle_reason, superseded_by, ordinal',
+    ],
+    [
+      'requirement_context_item_revisions',
+      'item_type, item_key, action, snapshot_json, execution_id, created_at',
+    ],
   ] as const) {
     db.prepare(`
       INSERT INTO ${table[0]}(draft_id, ${table[1]})
@@ -538,10 +593,28 @@ function draftState(
   draft: DraftRow,
 ) {
   const context = contextDraft(db, draft.draft_id);
-  const facts = db.prepare(`
-    SELECT fact_key, statement, source FROM requirement_context_facts
-    WHERE draft_id = ? ORDER BY ordinal, fact_key
-  `).all(draft.draft_id) as { fact_key: string; statement: string; source: string }[];
+  const assertions = db.prepare(`
+    SELECT assertion_key, perspective, statement, evidence_status, source, decision_key,
+           lifecycle_status, lifecycle_reason, superseded_by
+    FROM requirement_context_assertions
+    WHERE draft_id = ? ORDER BY ordinal, assertion_key
+  `).all(draft.draft_id) as ContextAssertion[];
+  const impacts = db.prepare(`
+    SELECT impact_key, statement, disposition, rationale, source, decision_key,
+           lifecycle_status, lifecycle_reason, superseded_by
+    FROM requirement_context_impacts
+    WHERE draft_id = ? ORDER BY ordinal, impact_key
+  `).all(draft.draft_id) as ContextImpact[];
+  const acceptance = db.prepare(`
+    SELECT acceptance_key, content, source, lifecycle_status, lifecycle_reason, superseded_by
+    FROM requirement_context_acceptance_items
+    WHERE draft_id = ? ORDER BY ordinal, acceptance_key
+  `).all(draft.draft_id) as ContextAcceptance[];
+  const revisionCount = (db.prepare(`
+    SELECT COUNT(*) AS value
+    FROM requirement_context_item_revisions
+    WHERE draft_id = ?
+  `).get(draft.draft_id) as { value: number }).value;
   const constraints = db.prepare(`
     SELECT constraint_key, content FROM requirement_context_constraints
     WHERE draft_id = ? ORDER BY ordinal, constraint_key
@@ -575,7 +648,10 @@ function draftState(
   const answers = answeredDecisions(db, draft.task_id);
   return {
     context,
-    facts,
+    assertions,
+    impacts,
+    acceptance,
+    revisionCount,
     constraints,
     scope,
     questions: questions.map((question) => ({
@@ -591,12 +667,42 @@ function validationErrors(
   terminal: 'complete' | 'request-clarification' | null = null,
 ) {
   const errors: string[] = [];
-  if (!state.context.goal?.trim()) errors.push('缺少需求目标：使用 requirement-context goal set --text <内容>');
-  if (!state.context.observable_outcome?.trim()) errors.push('缺少可观察结果：使用 requirement-context outcome set --text <内容>');
+  const activeAssertions = state.assertions.filter((item) => item.lifecycle_status === 'active');
+  const reliableAssertions = activeAssertions.filter((item) =>
+    item.evidence_status !== 'inferred' && item.evidence_status !== 'conflicted');
+  const activeImpacts = state.impacts.filter((item) => item.lifecycle_status === 'active');
+  const activeAcceptance = state.acceptance.filter((item) => item.lifecycle_status === 'active');
+  if (!state.context.intent?.trim()) {
+    errors.push('缺少业务意图：使用 requirement-context intent set --text <内容>');
+  }
+  if (terminal === 'request-clarification') {
+    if (!activeAssertions.length) {
+      errors.push('请求澄清前至少需要记录一条带来源的业务语义陈述');
+    }
+  } else {
+    for (const perspective of ['actual', 'expected', 'target'] as const) {
+      if (!reliableAssertions.some((item) => item.perspective === perspective)) {
+        const label = perspective === 'actual'
+          ? 'AS-IS Actual'
+          : perspective === 'expected'
+            ? 'AS-IS Expected'
+            : 'TO-BE';
+        errors.push(`缺少可靠的 ${label} 陈述：使用 requirement-context assertion upsert`);
+      }
+    }
+    if (!state.context.change_summary?.trim()) {
+      errors.push('缺少业务变化摘要：使用 requirement-context change set --text <内容>');
+    }
+    if (!activeImpacts.length) {
+      errors.push('至少需要一条有效业务影响：使用 requirement-context impact upsert');
+    }
+    if (!activeAcceptance.length) {
+      errors.push('至少需要一条需求级验收语义：使用 requirement-context acceptance upsert');
+    }
+  }
   if (terminal === 'complete' && !state.context.classification) {
     errors.push('缺少需求分类：使用 requirement-context classification set <feature|bug|tech|other>');
   }
-  if (!state.facts.length) errors.push('至少需要一条带来源的已确认事实');
   for (const question of state.questions) {
     if (question.answer) continue;
     if (question.options.length < 2) errors.push(`问题 ${question.decision_key} 至少需要两个互斥选项`);
@@ -607,8 +713,28 @@ function validationErrors(
     if (!question.recommendation_reason?.trim()) errors.push(`问题 ${question.decision_key} 缺少推荐理由`);
   }
   const unanswered = state.questions.filter((question) => !question.answer);
+  for (const assertion of activeAssertions.filter((item) => item.evidence_status === 'conflicted')) {
+    if (!assertion.decision_key) {
+      errors.push(`冲突陈述 ${assertion.assertion_key} 缺少关联 decision key`);
+    } else if (!state.questions.some((question) => question.decision_key === assertion.decision_key)) {
+      errors.push(`冲突陈述 ${assertion.assertion_key} 关联的问题 ${assertion.decision_key} 不存在`);
+    }
+  }
+  for (const impact of activeImpacts.filter((item) => item.disposition === 'needs_decision')) {
+    if (!impact.decision_key) {
+      errors.push(`待决影响 ${impact.impact_key} 缺少关联 decision key`);
+    } else if (!state.questions.some((question) => question.decision_key === impact.decision_key)) {
+      errors.push(`待决影响 ${impact.impact_key} 关联的问题 ${impact.decision_key} 不存在`);
+    }
+  }
   if (terminal === 'complete' && unanswered.length) {
     errors.push(`仍有 ${unanswered.length} 个未回答问题，不能完成需求上下文`);
+  }
+  if (terminal === 'complete' && activeAssertions.some((item) => item.evidence_status === 'conflicted')) {
+    errors.push('仍有未解决的证据冲突，不能完成需求上下文');
+  }
+  if (terminal === 'complete' && activeImpacts.some((item) => item.disposition === 'needs_decision')) {
+    errors.push('仍有未收敛的待决业务影响，必须根据用户回答更新其处理结论');
   }
   if (terminal === 'request-clarification' && !unanswered.length) {
     errors.push('没有待用户回答的问题，不能请求澄清');
@@ -618,22 +744,57 @@ function validationErrors(
 
 function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
   const missing = validationErrors(state);
+  const activeAssertions = state.assertions.filter((item) => item.lifecycle_status === 'active');
+  const activeImpacts = state.impacts.filter((item) => item.lifecycle_status === 'active');
+  const activeAcceptance = state.acceptance.filter((item) => item.lifecycle_status === 'active');
   const lines = [
     `需求上下文草稿 v${draft.draft_version} · 变更 ${draft.change_seq}`,
     '',
-    `目标：${state.context.goal || '未填写'}`,
-    `可观察结果：${state.context.observable_outcome || '未填写'}`,
+    `业务意图：${state.context.intent || '未填写'}`,
+    `变化摘要：${state.context.change_summary || '未填写'}`,
     `分类：${state.context.classification || '未填写'}`,
     '',
-    `已确认事实：${state.facts.length}`,
+    `业务语义：Actual ${activeAssertions.filter((item) => item.perspective === 'actual').length}`
+      + ` / Expected ${activeAssertions.filter((item) => item.perspective === 'expected').length}`
+      + ` / TO-BE ${activeAssertions.filter((item) => item.perspective === 'target').length}`,
+    `业务影响：${activeImpacts.length}（历史 ${state.impacts.length - activeImpacts.length}）`,
+    `验收语义：${activeAcceptance.length}`,
+    `语义修订记录：${state.revisionCount}`,
     `约束：${state.constraints.length}`,
     `范围：包含 ${state.scope.filter((item) => item.direction === 'included').length} / 排除 ${state.scope.filter((item) => item.direction === 'excluded').length}`,
     `问题：${state.questions.length}（已回答 ${state.questions.filter((item) => item.answer).length}）`,
   ];
-  if (state.facts.length) {
-    lines.push('', '事实索引（编辑时复用 key）：');
-    for (const fact of state.facts) {
-      lines.push(`- ${fact.fact_key}：${fact.statement}（来源：${fact.source}）`);
+  if (state.assertions.length) {
+    lines.push('', '业务语义索引（跨轮次复用稳定 key）：');
+    for (const assertion of state.assertions) {
+      lines.push(
+        `- ${assertion.assertion_key} · ${assertion.perspective}`
+        + ` · ${assertion.evidence_status} · ${assertion.lifecycle_status}：${assertion.statement}`
+        + `（来源：${assertion.source}）`
+        + (assertion.decision_key ? ` · decision=${assertion.decision_key}` : '')
+        + (assertion.lifecycle_reason ? ` · 原因：${assertion.lifecycle_reason}` : ''),
+      );
+    }
+  }
+  if (state.impacts.length) {
+    lines.push('', '业务影响索引（识别影响不等于自动纳入范围）：');
+    for (const impact of state.impacts) {
+      lines.push(
+        `- ${impact.impact_key} · ${impact.disposition} · ${impact.lifecycle_status}：${impact.statement}`
+        + `（依据：${impact.rationale}；来源：${impact.source}）`
+        + (impact.decision_key ? ` · decision=${impact.decision_key}` : '')
+        + (impact.lifecycle_reason ? ` · 原因：${impact.lifecycle_reason}` : ''),
+      );
+    }
+  }
+  if (state.acceptance.length) {
+    lines.push('', '验收语义索引：');
+    for (const acceptance of state.acceptance) {
+      lines.push(
+        `- ${acceptance.acceptance_key} · ${acceptance.lifecycle_status}：${acceptance.content}`
+        + `（来源：${acceptance.source}）`
+        + (acceptance.lifecycle_reason ? ` · 原因：${acceptance.lifecycle_reason}` : ''),
+      );
     }
   }
   if (state.constraints.length) {
@@ -679,24 +840,81 @@ function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
 function renderArtifact(state: ReturnType<typeof draftState>) {
   const included = state.scope.filter((item) => item.direction === 'included');
   const excluded = state.scope.filter((item) => item.direction === 'excluded');
+  const assertionSection = (
+    perspective: ContextAssertion['perspective'],
+    fallback: string,
+  ) => {
+    const assertions = state.assertions.filter((item) =>
+      item.perspective === perspective && item.lifecycle_status === 'active');
+    return assertions.length
+      ? assertions.map((item) =>
+        `- ${item.statement}（证据状态：${item.evidence_status}；来源：${item.source}`
+        + `${item.decision_key ? `；decision：${item.decision_key}` : ''}）`)
+      : [`- ${fallback}`];
+  };
+  const impactSection = (disposition: ContextImpact['disposition'], fallback: string) => {
+    const impacts = state.impacts.filter((item) =>
+      item.disposition === disposition && item.lifecycle_status === 'active');
+    return impacts.length
+      ? impacts.map((item) =>
+        `- ${item.statement}（依据：${item.rationale}；来源：${item.source}`
+        + `${item.decision_key ? `；decision：${item.decision_key}` : ''}）`)
+      : [`- ${fallback}`];
+  };
   const lines = [
-    '# 需求上下文',
+    '# 业务变化上下文',
     '',
     '## 需求类型',
     '',
     state.context.classification || '待确认',
     '',
-    '## 目标',
+    '## 业务意图',
     '',
-    state.context.goal || '',
+    state.context.intent || '',
     '',
-    '## 可观察结果',
+    '## AS-IS Actual',
     '',
-    state.context.observable_outcome || '',
+    ...assertionSection('actual', '尚未形成可靠结论'),
     '',
-    '## 已确认事实',
+    '## AS-IS Expected',
     '',
-    ...state.facts.map((fact) => `- ${fact.statement}（来源：${fact.source}）`),
+    ...assertionSection('expected', '尚未形成可靠结论'),
+    '',
+    '## TO-BE',
+    '',
+    ...assertionSection('target', '尚未形成可靠结论'),
+    '',
+    '## 业务变化',
+    '',
+    state.context.change_summary || '尚未形成完整变化摘要',
+    '',
+    '## 业务影响',
+    '',
+    '### 必须同步改变',
+    '',
+    ...impactSection('change', '暂无已确认项'),
+    '',
+    '### 必须保持不变',
+    '',
+    ...impactSection('preserve', '暂无已确认项'),
+    '',
+    '### 待业务决策',
+    '',
+    ...impactSection('needs_decision', '暂无待决项'),
+    '',
+    '### 交给后续技术分析',
+    '',
+    ...impactSection('technical', '暂无已识别项'),
+    '',
+    '## 需求级验收语义',
+    '',
+    ...(
+      state.acceptance.filter((item) => item.lifecycle_status === 'active').length
+        ? state.acceptance
+          .filter((item) => item.lifecycle_status === 'active')
+          .map((item) => `- ${item.content}（来源：${item.source}）`)
+        : ['- 尚未明确']
+    ),
     '',
     '## 约束',
     '',
@@ -712,6 +930,21 @@ function renderArtifact(state: ReturnType<typeof draftState>) {
     '',
     ...(excluded.length ? excluded.map((item) => `- ${item.content}`) : ['- 尚未明确']),
   ];
+  const inactiveAssertions = state.assertions.filter((item) => item.lifecycle_status !== 'active');
+  const inactiveImpacts = state.impacts.filter((item) => item.lifecycle_status !== 'active');
+  const inactiveAcceptance = state.acceptance.filter((item) => item.lifecycle_status !== 'active');
+  if (inactiveAssertions.length || inactiveImpacts.length || inactiveAcceptance.length) {
+    lines.push('', '## 已修正的历史结论', '');
+    for (const item of inactiveAssertions) {
+      lines.push(`- 业务语义 \`${item.assertion_key}\`：${item.lifecycle_status}；${item.lifecycle_reason || '未记录原因'}`);
+    }
+    for (const item of inactiveImpacts) {
+      lines.push(`- 业务影响 \`${item.impact_key}\`：${item.lifecycle_status}；${item.lifecycle_reason || '未记录原因'}`);
+    }
+    for (const item of inactiveAcceptance) {
+      lines.push(`- 验收语义 \`${item.acceptance_key}\`：${item.lifecycle_status}；${item.lifecycle_reason || '未记录原因'}`);
+    }
+  }
   const answered = state.questions.filter((question) => question.answer);
   if (answered.length) {
     lines.push('', '## 用户确认决策', '');
@@ -750,10 +983,10 @@ function buildResult(
   return agentResultSchema.parse({
     outcome: complete ? 'completed' : 'needs_input',
     summary: complete
-      ? `需求上下文已完成：${state.context.goal}`
-      : `需求上下文存在 ${questions.length} 个需要用户确认的边界`,
+      ? `业务变化上下文已完成：${state.context.intent}`
+      : `业务变化上下文存在 ${questions.length} 个需要用户确认的边界`,
     artifact: {
-      title: '需求分类与上下文',
+      title: '业务变化上下文',
       content: renderArtifact(state),
     },
     questions,
@@ -792,7 +1025,7 @@ function terminalSubmit(
     `).run(JSON.stringify(result), execution.execution_id);
   })();
   return action === 'complete'
-    ? '需求上下文已提交成功。普通最终回复不再用于推进流程，可以结束本轮。'
+    ? '业务变化上下文已提交成功。普通最终回复不再用于推进流程，可以结束本轮。'
     : '需求澄清请求已提交成功。普通最终回复不再用于推进流程，可以结束本轮。';
 }
 
@@ -1014,11 +1247,18 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile) {
   }
   return [
     ...common,
-    '  requirement-context goal set --text <内容>',
-    '  requirement-context outcome set --text <内容>',
+    '  requirement-context intent set --text <业务意图>',
+    '  requirement-context change set --text <Actual、Expected 与 TO-BE 的变化摘要>',
+    '  requirement-context assertion upsert --key <key> --perspective <actual|expected|target> --statement <陈述> --evidence <observed|reported|inferred|decided|conflicted> --source <来源> [--decision <问题key>]',
+    '  requirement-context assertion dismiss --key <key> --reason <理由>',
+    '  requirement-context assertion supersede --key <旧key> --by <新key> --reason <理由>',
+    '  requirement-context impact upsert --key <key> --statement <影响> --disposition <change|preserve|needs_decision|technical> --rationale <依据> --source <来源> [--decision <问题key>]',
+    '  requirement-context impact dismiss --key <key> --reason <理由>',
+    '  requirement-context impact supersede --key <旧key> --by <新key> --reason <理由>',
+    '  requirement-context acceptance upsert --key <key> --text <验收语义> --source <来源>',
+    '  requirement-context acceptance dismiss --key <key> --reason <理由>',
+    '  requirement-context acceptance supersede --key <旧key> --by <新key> --reason <理由>',
     '  requirement-context classification set <feature|bug|tech|other>',
-    '  requirement-context fact add --key <key> --statement <事实> --source <来源>',
-    '  requirement-context fact remove --key <key>',
     '  requirement-context constraint add --key <key> --text <内容>',
     '  requirement-context constraint remove --key <key>',
     '  requirement-context scope include|exclude --key <key> --text <内容>',
@@ -1164,6 +1404,83 @@ function upsertSimpleItem(
   `).run(draftId, key, content, ordinal);
 }
 
+function recordContextItemRevision(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  input: {
+    draftId: string;
+    executionId: string;
+    itemType: 'assertion' | 'impact' | 'acceptance';
+    itemKey: string;
+    action: 'upsert' | 'dismiss' | 'supersede';
+  },
+) {
+  const metadata = input.itemType === 'assertion'
+    ? { table: 'requirement_context_assertions', keyColumn: 'assertion_key' }
+    : input.itemType === 'impact'
+      ? { table: 'requirement_context_impacts', keyColumn: 'impact_key' }
+      : { table: 'requirement_context_acceptance_items', keyColumn: 'acceptance_key' };
+  const snapshot = db.prepare(`
+    SELECT * FROM ${metadata.table}
+    WHERE draft_id = ? AND ${metadata.keyColumn} = ?
+  `).get(input.draftId, input.itemKey);
+  if (!snapshot) throw new Error(`${input.itemType} ${input.itemKey} 无法生成修订记录`);
+  db.prepare(`
+    INSERT INTO requirement_context_item_revisions(
+      draft_id, item_type, item_key, action, snapshot_json, execution_id
+    ) VALUES(?, ?, ?, ?, ?, ?)
+  `).run(
+    input.draftId,
+    input.itemType,
+    input.itemKey,
+    input.action,
+    JSON.stringify(snapshot),
+    input.executionId,
+  );
+}
+
+function reviseContextItemLifecycle(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  input: {
+    table: 'requirement_context_assertions' | 'requirement_context_impacts' | 'requirement_context_acceptance_items';
+    keyColumn: 'assertion_key' | 'impact_key' | 'acceptance_key';
+    draftId: string;
+    key: string;
+    lifecycle: 'dismissed' | 'superseded';
+    reason: string;
+    supersededBy?: string;
+    label: string;
+  },
+) {
+  const current = db.prepare(`
+    SELECT lifecycle_status FROM ${input.table}
+    WHERE draft_id = ? AND ${input.keyColumn} = ?
+  `).get(input.draftId, input.key) as { lifecycle_status: string } | undefined;
+  if (!current) throw new Error(`${input.label} ${input.key} 不存在`);
+  if (input.lifecycle === 'superseded') {
+    if (!input.supersededBy || input.supersededBy === input.key) {
+      throw new Error(`${input.label}必须由另一个已经存在的稳定 key 取代`);
+    }
+    const replacement = db.prepare(`
+      SELECT lifecycle_status FROM ${input.table}
+      WHERE draft_id = ? AND ${input.keyColumn} = ?
+    `).get(input.draftId, input.supersededBy) as { lifecycle_status: string } | undefined;
+    if (!replacement || replacement.lifecycle_status !== 'active') {
+      throw new Error(`取代项 ${input.supersededBy} 不存在或不是 active`);
+    }
+  }
+  db.prepare(`
+    UPDATE ${input.table}
+    SET lifecycle_status = ?, lifecycle_reason = ?, superseded_by = ?
+    WHERE draft_id = ? AND ${input.keyColumn} = ?
+  `).run(
+    input.lifecycle,
+    input.reason,
+    input.lifecycle === 'superseded' ? input.supersededBy : null,
+    input.draftId,
+    input.key,
+  );
+}
+
 export async function issueAgentCommandToken(executionId: string) {
   const db = await databaseConnection();
   const execution = executionInDb(db, executionId);
@@ -1253,12 +1570,222 @@ export async function runAgentCommand(input: {
   }
   assertViewed(draft, execution.execution_id);
 
-  if (command === 'requirement-context goal set' || command === 'requirement-context outcome set') {
-    const column = command.includes('goal') ? 'goal' : 'observable_outcome';
-    const value = bounded(required(flags, 'text'), column === 'goal' ? '需求目标' : '可观察结果');
+  if (
+    command === 'requirement-context intent set'
+    || command === 'requirement-context change set'
+  ) {
+    const column = command.includes('intent') ? 'intent' : 'change_summary';
+    const label = column === 'intent' ? '业务意图' : '业务变化摘要';
+    const value = bounded(required(flags, 'text'), label);
     db.prepare(`UPDATE requirement_context_drafts SET ${column} = ? WHERE draft_id = ?`).run(value, draft.draft_id);
     touchDraft(db, draft.draft_id);
-    return `${column === 'goal' ? '需求目标' : '可观察结果'}已保存。`;
+    return `${label}已保存。`;
+  }
+  if (command === 'requirement-context assertion upsert') {
+    const key = bounded(required(flags, 'key'), '业务语义 key', 120);
+    const perspective = required(flags, 'perspective');
+    if (!['actual', 'expected', 'target'].includes(perspective)) {
+      throw new Error('--perspective 必须是 actual、expected 或 target');
+    }
+    const evidence = required(flags, 'evidence');
+    if (!['observed', 'reported', 'inferred', 'decided', 'conflicted'].includes(evidence)) {
+      throw new Error('--evidence 必须是 observed、reported、inferred、decided 或 conflicted');
+    }
+    const existing = db.prepare(`
+      SELECT lifecycle_status FROM requirement_context_assertions
+      WHERE draft_id = ? AND assertion_key = ?
+    `).get(draft.draft_id, key) as { lifecycle_status: string } | undefined;
+    if (existing && existing.lifecycle_status !== 'active') {
+      throw new Error(`业务语义 ${key} 已是 ${existing.lifecycle_status}，请使用新的稳定 key 记录新结论`);
+    }
+    const ordinal = nextOrdinal(db, 'requirement_context_assertions', draft.draft_id);
+    db.prepare(`
+      INSERT INTO requirement_context_assertions(
+        draft_id, assertion_key, perspective, statement, evidence_status,
+        source, decision_key, ordinal
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(draft_id, assertion_key) DO UPDATE SET
+        perspective = excluded.perspective,
+        statement = excluded.statement,
+        evidence_status = excluded.evidence_status,
+        source = excluded.source,
+        decision_key = excluded.decision_key
+    `).run(
+      draft.draft_id,
+      key,
+      perspective,
+      bounded(required(flags, 'statement'), '业务语义陈述'),
+      evidence,
+      bounded(required(flags, 'source'), '证据来源', 1000),
+      optionalBounded(flags, 'decision', 'decision key', 120),
+      ordinal,
+    );
+    recordContextItemRevision(db, {
+      draftId: draft.draft_id,
+      executionId: execution.execution_id,
+      itemType: 'assertion',
+      itemKey: key,
+      action: 'upsert',
+    });
+    touchDraft(db, draft.draft_id);
+    return `业务语义 ${key} 已保存。`;
+  }
+  if (
+    command === 'requirement-context assertion dismiss'
+    || command === 'requirement-context assertion supersede'
+  ) {
+    const key = bounded(required(flags, 'key'), '业务语义 key', 120);
+    const superseded = command.endsWith('supersede');
+    reviseContextItemLifecycle(db, {
+      table: 'requirement_context_assertions',
+      keyColumn: 'assertion_key',
+      draftId: draft.draft_id,
+      key,
+      lifecycle: superseded ? 'superseded' : 'dismissed',
+      reason: bounded(required(flags, 'reason'), '修订理由'),
+      supersededBy: superseded ? bounded(required(flags, 'by'), '取代项 key', 120) : undefined,
+      label: '业务语义',
+    });
+    recordContextItemRevision(db, {
+      draftId: draft.draft_id,
+      executionId: execution.execution_id,
+      itemType: 'assertion',
+      itemKey: key,
+      action: superseded ? 'supersede' : 'dismiss',
+    });
+    touchDraft(db, draft.draft_id);
+    return `业务语义 ${key} 已标记为${superseded ? '已取代' : '已排除'}。`;
+  }
+  if (command === 'requirement-context impact upsert') {
+    const key = bounded(required(flags, 'key'), '业务影响 key', 120);
+    const disposition = required(flags, 'disposition');
+    if (!['change', 'preserve', 'needs_decision', 'technical'].includes(disposition)) {
+      throw new Error('--disposition 必须是 change、preserve、needs_decision 或 technical');
+    }
+    const existing = db.prepare(`
+      SELECT lifecycle_status FROM requirement_context_impacts
+      WHERE draft_id = ? AND impact_key = ?
+    `).get(draft.draft_id, key) as { lifecycle_status: string } | undefined;
+    if (existing && existing.lifecycle_status !== 'active') {
+      throw new Error(`业务影响 ${key} 已是 ${existing.lifecycle_status}，请使用新的稳定 key 记录新结论`);
+    }
+    const ordinal = nextOrdinal(db, 'requirement_context_impacts', draft.draft_id);
+    db.prepare(`
+      INSERT INTO requirement_context_impacts(
+        draft_id, impact_key, statement, disposition, rationale,
+        source, decision_key, ordinal
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(draft_id, impact_key) DO UPDATE SET
+        statement = excluded.statement,
+        disposition = excluded.disposition,
+        rationale = excluded.rationale,
+        source = excluded.source,
+        decision_key = excluded.decision_key
+    `).run(
+      draft.draft_id,
+      key,
+      bounded(required(flags, 'statement'), '业务影响'),
+      disposition,
+      bounded(required(flags, 'rationale'), '影响判断依据'),
+      bounded(required(flags, 'source'), '影响来源', 1000),
+      optionalBounded(flags, 'decision', 'decision key', 120),
+      ordinal,
+    );
+    recordContextItemRevision(db, {
+      draftId: draft.draft_id,
+      executionId: execution.execution_id,
+      itemType: 'impact',
+      itemKey: key,
+      action: 'upsert',
+    });
+    touchDraft(db, draft.draft_id);
+    return `业务影响 ${key} 已保存为 ${disposition}。`;
+  }
+  if (
+    command === 'requirement-context impact dismiss'
+    || command === 'requirement-context impact supersede'
+  ) {
+    const key = bounded(required(flags, 'key'), '业务影响 key', 120);
+    const superseded = command.endsWith('supersede');
+    reviseContextItemLifecycle(db, {
+      table: 'requirement_context_impacts',
+      keyColumn: 'impact_key',
+      draftId: draft.draft_id,
+      key,
+      lifecycle: superseded ? 'superseded' : 'dismissed',
+      reason: bounded(required(flags, 'reason'), '修订理由'),
+      supersededBy: superseded ? bounded(required(flags, 'by'), '取代项 key', 120) : undefined,
+      label: '业务影响',
+    });
+    recordContextItemRevision(db, {
+      draftId: draft.draft_id,
+      executionId: execution.execution_id,
+      itemType: 'impact',
+      itemKey: key,
+      action: superseded ? 'supersede' : 'dismiss',
+    });
+    touchDraft(db, draft.draft_id);
+    return `业务影响 ${key} 已标记为${superseded ? '已取代' : '已排除'}。`;
+  }
+  if (command === 'requirement-context acceptance upsert') {
+    const key = bounded(required(flags, 'key'), '验收语义 key', 120);
+    const existing = db.prepare(`
+      SELECT lifecycle_status FROM requirement_context_acceptance_items
+      WHERE draft_id = ? AND acceptance_key = ?
+    `).get(draft.draft_id, key) as { lifecycle_status: string } | undefined;
+    if (existing && existing.lifecycle_status !== 'active') {
+      throw new Error(`验收语义 ${key} 已是 ${existing.lifecycle_status}，请使用新的稳定 key 记录新结论`);
+    }
+    const ordinal = nextOrdinal(db, 'requirement_context_acceptance_items', draft.draft_id);
+    db.prepare(`
+      INSERT INTO requirement_context_acceptance_items(
+        draft_id, acceptance_key, content, source, ordinal
+      ) VALUES(?, ?, ?, ?, ?)
+      ON CONFLICT(draft_id, acceptance_key) DO UPDATE SET
+        content = excluded.content,
+        source = excluded.source
+    `).run(
+      draft.draft_id,
+      key,
+      bounded(required(flags, 'text'), '验收语义'),
+      bounded(required(flags, 'source'), '验收语义来源', 1000),
+      ordinal,
+    );
+    recordContextItemRevision(db, {
+      draftId: draft.draft_id,
+      executionId: execution.execution_id,
+      itemType: 'acceptance',
+      itemKey: key,
+      action: 'upsert',
+    });
+    touchDraft(db, draft.draft_id);
+    return `验收语义 ${key} 已保存。`;
+  }
+  if (
+    command === 'requirement-context acceptance dismiss'
+    || command === 'requirement-context acceptance supersede'
+  ) {
+    const key = bounded(required(flags, 'key'), '验收语义 key', 120);
+    const superseded = command.endsWith('supersede');
+    reviseContextItemLifecycle(db, {
+      table: 'requirement_context_acceptance_items',
+      keyColumn: 'acceptance_key',
+      draftId: draft.draft_id,
+      key,
+      lifecycle: superseded ? 'superseded' : 'dismissed',
+      reason: bounded(required(flags, 'reason'), '修订理由'),
+      supersededBy: superseded ? bounded(required(flags, 'by'), '取代项 key', 120) : undefined,
+      label: '验收语义',
+    });
+    recordContextItemRevision(db, {
+      draftId: draft.draft_id,
+      executionId: execution.execution_id,
+      itemType: 'acceptance',
+      itemKey: key,
+      action: superseded ? 'supersede' : 'dismiss',
+    });
+    touchDraft(db, draft.draft_id);
+    return `验收语义 ${key} 已标记为${superseded ? '已取代' : '已排除'}。`;
   }
   if (command === 'requirement-context classification set') {
     const classification = positionals[3];
@@ -1269,26 +1796,6 @@ export async function runAgentCommand(input: {
       .run(classification, draft.draft_id);
     touchDraft(db, draft.draft_id);
     return `需求分类已设置为 ${classification}；后续 plan/repro 路由由系统确定。`;
-  }
-  if (command === 'requirement-context fact add') {
-    const key = bounded(required(flags, 'key'), '事实 key', 120);
-    const statement = bounded(required(flags, 'statement'), '事实');
-    const source = bounded(required(flags, 'source'), '事实来源', 1000);
-    const ordinal = nextOrdinal(db, 'requirement_context_facts', draft.draft_id);
-    db.prepare(`
-      INSERT INTO requirement_context_facts(draft_id, fact_key, statement, source, ordinal)
-      VALUES(?, ?, ?, ?, ?)
-      ON CONFLICT(draft_id, fact_key) DO UPDATE SET
-        statement = excluded.statement, source = excluded.source
-    `).run(draft.draft_id, key, statement, source, ordinal);
-    touchDraft(db, draft.draft_id);
-    return `已保存事实 ${key}。`;
-  }
-  if (command === 'requirement-context fact remove') {
-    db.prepare('DELETE FROM requirement_context_facts WHERE draft_id = ? AND fact_key = ?')
-      .run(draft.draft_id, required(flags, 'key'));
-    touchDraft(db, draft.draft_id);
-    return '事实已删除。';
   }
   if (command === 'requirement-context constraint add') {
     upsertSimpleItem(
@@ -1395,9 +1902,13 @@ export async function runAgentCommand(input: {
     return '问题已删除。';
   }
   if (command === 'requirement-context validate') {
-    const errors = validationErrors(draftState(db, draft));
+    const current = draftState(db, draft);
+    const clarification = current.questions.some((question) => !question.answer);
+    const errors = validationErrors(current, clarification ? 'request-clarification' : null);
     if (errors.length) throw new Error(`草稿校验失败：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
-    return '需求上下文草稿基础结构校验通过；终止命令仍会校验分类和未回答问题。';
+    return clarification
+      ? '业务变化上下文澄清草稿校验通过，可以提交 request-clarification。'
+      : '业务变化上下文草稿结构校验通过；complete 仍会校验分类和未回答问题。';
   }
   if (command === 'requirement-context complete') {
     return terminalSubmit(db, draft, execution, 'complete');

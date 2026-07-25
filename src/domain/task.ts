@@ -162,7 +162,7 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
   // slot. In that state the Harness-selected control Agent is authoritative;
   // routing from agile_status alone would incorrectly fall through to Plan.
   if (total === 0 && task.current_subagent === 'backlog-agent') {
-    return line('backlog', 'backlog-agent', null, '重新收集上下文并完成分类');
+    return line('backlog', 'backlog-agent', null, '重新澄清业务变化上下文');
   }
   if (total === 0 && task.current_subagent === 'repro-agent') {
     return line('repro', 'repro-agent', null, '重新复现 Bug 并定位根因');
@@ -170,7 +170,7 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
   if (total === 0 && task.current_subagent === 'story-splitter-agent') {
     return line('split', 'story-splitter-agent', null, '重新拆分为可独立验收的交付单元');
   }
-  if (status === 'backlog') return line('backlog', 'backlog-agent', null, '收集上下文并完成分类');
+  if (status === 'backlog') return line('backlog', 'backlog-agent', null, '澄清业务变化上下文');
   if (status === 'in repro') return line('repro', 'repro-agent', null, '复现 Bug 并定位根因');
   if (status === 'in plan') {
     if (total > 0) return null;
