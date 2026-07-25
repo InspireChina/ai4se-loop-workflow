@@ -1,6 +1,5 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
-import { join } from 'node:path';
 import { agentExecutionOptions, getAgentExecutorSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
 import { enqueueSoftwareMaintenance } from '../../src/application/software-maintenance';
 import { buildAgentContextSnapshot } from '../../src/application/agent-context';
@@ -18,6 +17,10 @@ import {
   updatePromptCanary,
   type EvolutionEvidence,
 } from '../../src/application/agent-evolution';
+import {
+  issueInternalAgentCommandToken,
+  readInternalAgentCommandSubmission,
+} from '../../src/application/internal-agent-command-drafts';
 import { applyAgentResult, applyNextQueuedAgentResult, blockDelegation } from '../../src/application/agent-results';
 import {
   beginExecutionAttempt,
@@ -39,7 +42,6 @@ import {
 } from '../../src/application/recovery-items';
 import { AgentResultContractError, parseAgentResult } from '../../src/domain/agent-result';
 import { agentCommandPrompt } from '../../src/domain/agent-command-profile';
-import { parseEvolutionResult } from '../../src/domain/agent-evolution';
 import { agentLabel, deliveryUnitLabel } from '../../src/domain/terminology';
 import { getAgentExecutor, type AgentExecutor } from '../../src/infrastructure/agent-executor';
 import { executeDelegation } from '../../src/infrastructure/delegation-execution';
@@ -124,6 +126,9 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
   });
   const contextCommand = `npm --prefix ${JSON.stringify(paths.appRoot)} run loopctl -- agent-context`;
   const commandPrompt = agentCommandPrompt(paths.appRoot, delegation.agent, delegation.pipeline);
+  if (!commandPrompt) {
+    throw new Error(`${delegation.agent}/${delegation.pipeline} 没有配置渐进式命令协议`);
+  }
   const prompt = [
     `你是 ${agentLabel(delegation.agent)}，只完成当前执行步骤的专业工作。`,
     '',
@@ -193,70 +198,8 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
       '方案分析 Agent 和开发实现 Agent 应处理与当前阶段有关的事项；可以在 recoveryResolutions 中说明处理方式，但 Claim 不是推进的硬条件，也不能自行关闭事项。只有后续 Test Agent 独立验证通过才能关闭失败事项。',
       '具体内容已包含在 Working Context Pack.activeObligations.recovery，并以 RECOVERY ref 持久化在快照中。',
     ] : []),
-    ...(commandPrompt ? ['', commandPrompt] : [
-      '',
-      '# Result Submission Contract',
-      '完成当前步骤后，把结果写入一个临时 JSON 文件，再调用下面的专用命令提交。Runner 只把提交内容作为状态机输入；你的普通最终回复可以简短说明已经提交，不需要重复 JSON。',
-      `提交命令：node ${JSON.stringify(join(paths.appRoot, 'scripts', 'loop', 'submit-agent-result.mjs'))} --input <temporary-result-json-path> --consume`,
-      '提交命令会同步执行完整结构和角色契约校验。若命令返回非零退出码，必须根据错误修正临时 JSON 并重新提交；只有看到 Agent result submitted successfully 才算提交完成。',
-      ...(delegation.agent === 'analyst-agent' ? ['Analyst 必须提交完整 decisionTree。下面示例展示 needs_input：若返回 completed，必须删除 questions 和 ambiguities，并把每个决策改为有明确 source、selectedOption 与 evidence 的 resolved_from_context。'] : []),
-      '只把 --consume 用于你为本次提交创建的临时 JSON；提交成功后命令会删除该文件。不要直接写 LOOP_AGENT_RESULT_PATH，也不要通过数据库或 loopctl 提交结果。若执行环境确实无法调用提交命令，才在最终回复中输出同一 JSON 对象作为兼容 fallback。',
-      '结果 JSON 结构如下；不属于当前角色的字段可以省略：',
-      JSON.stringify({
-      outcome: 'completed | needs_input | failed',
-      summary: '本步骤简要结论',
-      artifact: delegation.agent === 'feedback-agent' ? undefined : { title: '文档标题', content: 'Markdown 正文' },
-      questions: ['backlog-agent', 'analyst-agent', 'repro-agent'].includes(delegation.agent) ? [
-        { decisionKey: 'output-mode', title: '确认输出方式', question: '结果应使用结构化输出还是可读文本？', why: '该选择会改变用户可观察行为和兼容契约', recommendation: '使用结构化输出', recommendationReason: '更容易稳定消费和验证', alternatives: [{ id: 'structured', label: '结构化输出', consequences: ['调用方可以稳定解析'] }, { id: 'text', label: '可读文本', consequences: ['便于直接阅读但解析契约较弱'] }], dependsOn: [] },
-      ] : undefined,
-      runtimeInputs: delegation.agent === 'feedback-agent' ? undefined : [{ title: '缺少的运行信息', question: '需要用户补充的非产品信息', why: '为什么无法从仓库或环境推导', recommendation: '安全的推荐答案或处理方式' }],
-      classification: 'feature | bug | tech | intake | other',
-      route: 'plan | repro',
-      reproVerdict: delegation.agent === 'repro-agent' ? 'reproduced | not_reproduced' : undefined,
-      deliveryUnits: [{ title: '可独立交付和验收的最小业务闭环' }],
-      spec: delegation.agent === 'analyst-agent' ? {
-        goal: '当前交付单元的用户可观察目标',
-        scope: { included: ['本次包含内容'], excluded: ['明确不包含内容'] },
-        behaviors: [{ scenario: '场景', expected: '期望行为' }],
-        decisions: [],
-        decisionTree: [{ key: 'output-mode', question: '结果应使用哪一种输出方式？', impact: '改变用户可观察输出和调用方兼容契约', options: [{ id: 'structured', label: '结构化输出', consequences: ['调用方可以稳定解析'] }, { id: 'text', label: '可读文本', consequences: ['便于直接阅读但解析契约较弱'] }], status: 'needs_user_input' }],
-        ambiguities: [{ key: 'output-mode', description: '上下文没有指定用户可观察的输出契约' }],
-        acceptanceCriteria: [{ id: 'AC-1', description: '可验收条件', oracle: '如何客观判断' }],
-        verificationPlan: [{ criterionId: 'AC-1', kind: 'command | browser | inspection', instruction: '验证步骤', command: 'kind=command 时必填；其他类型省略或填 null' }],
-        dependencies: [],
-        changeBudget: { capabilities: ['允许改变的能力'], paths: ['允许影响的路径'] },
-      } : undefined,
-      verdict: delegation.agent === 'review-agent' ? 'report_ready' : 'passed | failed',
-      failureKind: delegation.agent === 'test-agent' ? 'implementation | specification | environment | inconclusive；仅失败时填写' : undefined,
-      rewindTo: delegation.agent === 'test-agent' ? 'analysis | dev' : undefined,
-      rewindDeliveryUnit: delegation.agent === 'test-agent' ? delegation.storyIndex : undefined,
-      changedFiles: ['文件路径'],
-      feedback: delegation.agent === 'feedback-agent'
-        ? delegation.pipeline === 'feedback-verify'
-          ? { mode: 'verify', commentId: delegation.feedbackId, verdict: 'resolved | reopened', reason: '验证结论', evidence: ['实际证据'] }
-          : {
-              mode: 'triage',
-              groups: [{
-                groupKey: '稳定的批次内分组标识',
-                commentIds: delegation.feedbackIds || [],
-                workType: 'reply | historical_correction | report_correction | bug | behavior_change | scope_addition | technical_change | learning_only',
-                title: '需要工程工作时的新增交付单元标题',
-                affectedDeliveryUnits: [1],
-                reason: '分组及处理类型判断',
-                acceptance: ['需要工程工作时的客观完成标准'],
-                response: '无需工程工作时给用户的明确回复',
-              }],
-            }
-        : undefined,
-      feedbackResolutions: activeFeedback.map((comment) => ({ commentId: comment.comment_id, summary: '如何处理了该反馈', evidence: ['新文档、代码或验证证据'] })),
-      recoveryResolutions: activeRecovery
-        .filter((item) => recoveryStage !== 'test' && item.target_stage === recoveryStage && ['pending', 'reopened'].includes(item.status))
-        .map((item) => ({ recoveryId: item.recovery_id, summary: '如何处理了该恢复事项', evidence: ['代码、规格或测试证据'] })),
-      tests: [{ command: '测试命令', passed: true, summary: '结果' }],
-      }, null, 2),
-      '',
-      'questions 仅供需求梳理 Agent 提出影响目标、范围、路由或交付边界的需求级产品问题，方案分析 Agent 提出交付单元内的产品决策和重大技术决策，问题复现 Agent 在完成合理尝试后仍未复现时请求人工对齐，以及 Feedback Agent 在无法安全分组冻结评论时请求最少必要信息；其他 Agent 不得使用。以上 Agent 提问时必须 outcome=needs_input。问题复现 Agent 未复现时还必须返回 reproVerdict=not_reproduced 且不得返回 route，并且必须使用 questions 而不是 runtimeInputs；只有 reproVerdict=reproduced 才能 route=plan。除这一 Repro 特例外，Agent 若缺少无法从代码、仓库、文档和环境推导的非敏感运行信息，使用 runtimeInputs 并返回 outcome=needs_input。不要通过 runtimeInputs 询问设计决策、审批、密钥或可自行探索的事实。',
-    ]),
+    '',
+    commandPrompt,
   ].join('\n');
   return { prompt, runtime, contextSnapshot };
 }
@@ -274,7 +217,7 @@ async function runDelegation(
   delegation: DelegationEnvelope,
   prompt: string,
   executionId: string,
-  commandToken: string | null,
+  commandToken: string,
   executor: AgentExecutor,
   executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' },
 ) {
@@ -302,12 +245,11 @@ async function runDelegation(
     },
     maxRuntimeMs,
     idleTimeoutMs,
-    resultKind: commandToken ? undefined : 'flow',
     environment: {
       LOOP_EXECUTION_ID: executionId,
       LOOP_APP_ROOT: paths.appRoot,
       LOOP_DATA_ROOT: paths.dataRoot,
-      ...(commandToken ? { LOOP_EXECUTION_TOKEN: commandToken } : {}),
+      LOOP_EXECUTION_TOKEN: commandToken,
     },
     cancellationRequested: () => executionCancellationRequested(executionId),
   });
@@ -359,6 +301,7 @@ async function runEvolutionEvaluator(
   const evolution = await beginEvolutionRun(evidence);
   if (!evolution?.prompt || !evolution.evaluatorDirectory) return;
   try {
+    const command = await issueInternalAgentCommandToken('evolution', evolution.evolutionId);
     await appendLoopRunLog(runId, `[演化] 开始总结 ${agentLabel(evidence.agentId)} execution=${evidence.executionId}`);
     const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
     const execution = await executeDelegation({
@@ -373,11 +316,18 @@ async function runEvolutionEvaluator(
       appendLog: (message) => appendLoopRunLog(runId, message),
       maxRuntimeMs: Number(process.env.EVOLUTION_EVALUATOR_TIMEOUT_MS || 5 * 60 * 1000),
       idleTimeoutMs: Number(process.env.EVOLUTION_EVALUATOR_IDLE_TIMEOUT_MS || 2 * 60 * 1000),
-      resultKind: 'evolution',
+      environment: {
+        LOOP_APP_ROOT: paths.appRoot,
+        LOOP_DATA_ROOT: paths.dataRoot,
+        LOOP_INTERNAL_WORK_TYPE: 'evolution',
+        LOOP_INTERNAL_WORK_ID: evolution.evolutionId,
+        LOOP_INTERNAL_SESSION_ID: command.sessionId,
+        LOOP_INTERNAL_COMMAND_TOKEN: command.token,
+      },
     });
-    if (execution.exitCode !== 0) throw new Error(`Evaluator CLI 退出码 ${execution.exitCode}`);
-    const result = parseEvolutionResult(execution.submittedResult || execution.finalText);
-    if (!execution.submittedResult) await appendLoopRunLog(runId, '[结果通道] Evolution Evaluator 未调用 submit-agent-result，已兼容读取最终文本');
+    const result = await readInternalAgentCommandSubmission('evolution', evolution.evolutionId);
+    if (execution.exitCode !== 0 && !result) throw new Error(`Evaluator CLI 退出码 ${execution.exitCode}`);
+    if (!result) throw new Error('Evolution Evaluator 未通过 evolution complete 提交结果');
     await applyEvolutionResult(evolution.evolutionId, evidence, result);
     await appendLoopRunLog(runId, `[演化] ${agentLabel(evidence.agentId)} 产生 ${result.observations.length} 条结构化观察`);
   } catch (error) {
@@ -464,6 +414,9 @@ async function executeDelegationStep(
     }
 
     const commandToken = await issueAgentCommandToken(durable.attempt.execution_id);
+    if (!commandToken) {
+      throw new Error(`${delegation.agent}/${delegation.pipeline} 无法签发渐进式命令凭证`);
+    }
     const execution = await runDelegation(
       delegation,
       builtPrompt.prompt,
@@ -477,9 +430,7 @@ async function executeDelegationStep(
       await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 已随需求取消，代码槽已释放`);
       return;
     }
-    const commandSubmission = commandToken
-      ? await readAgentCommandSubmission(durable.attempt.execution_id)
-      : null;
+    const commandSubmission = await readAgentCommandSubmission(durable.attempt.execution_id);
     if (execution.exitCode !== 0 && !commandSubmission) {
       await handleExecutionFailure(durable.attempt, delegation, `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`, true);
       return;
@@ -487,20 +438,13 @@ async function executeDelegationStep(
 
     let result;
     try {
-      if (commandToken) {
-        if (!commandSubmission) {
-          throw new Error('Agent 退出前没有成功执行角色终止命令；普通最终文本不会推进流程');
-        }
-        result = commandSubmission;
-        await appendLoopRunLog(runId, `[Agent 命令] requirement=${delegation.taskId} ${delegation.agent} 已通过领域终止命令提交结果`);
-      } else {
-        const resultText = execution.submittedResult || execution.finalText;
-        result = parseAgentResult(resultText);
-        if (!execution.submittedResult) await appendLoopRunLog(runId, `[结果通道] requirement=${delegation.taskId} Agent 未调用 submit-agent-result，已兼容读取最终文本`);
+      if (!commandSubmission) {
+        throw new Error('Agent 退出前没有成功执行角色终止命令；普通最终文本不会推进流程');
       }
+      result = commandSubmission;
+      await appendLoopRunLog(runId, `[Agent 命令] requirement=${delegation.taskId} ${delegation.agent} 已通过领域终止命令提交结果`);
     } catch (error) {
-      const channelReason = execution.resultSubmissionError ? `；结果通道错误：${execution.resultSubmissionError}` : '';
-      const reason = `Agent 未通过结果命令或最终文本返回合法结构化结果：${error instanceof Error ? error.message : String(error)}${channelReason}`;
+      const reason = `Agent 未通过角色终止命令提交结果：${error instanceof Error ? error.message : String(error)}`;
       await handleExecutionFailure(durable.attempt, delegation, reason, true);
       return;
     }

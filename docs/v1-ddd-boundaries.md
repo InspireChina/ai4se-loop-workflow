@@ -219,7 +219,7 @@ classDiagram
 | Prompt / Memory 版本与自动演化 | Agent Configuration；Harness 约束提升与回滚 |
 | Loop Engineering 自身缺陷诊断 | Software Maintenance Agent 提议；Git/Harness 决定候选与落地 |
 
-角色提交能力由 Agent Profile 明确声明。需求梳理 Agent 使用 `loop-agent requirement-context`，交付规划 Agent 使用 `loop-agent delivery-plan`，问题复现 Agent 使用 `loop-agent reproduction`，方案分析 Agent 使用 `loop-agent analysis`，开发实现 Agent 使用 `loop-agent implementation`，验证 Agent 使用 `loop-agent verification`，反馈处理 Agent 使用 `loop-agent feedback`，结卡报告 Agent 使用 `loop-agent review`，渐进维护 Application 拥有的角色草稿：每次进程启动先读取 status，编辑命令只更新草稿，角色终止命令才产生 Result Receipt。execution token 只授权当前 Agent 的命令空间，Agent 不接触 SQLite。Prompt 演化和软件维护 Agent 尚通过 `submit-agent-result --input <result.json>` 提交一次性 Result Receipt。普通最终回复不承担控制面协议；Runner 只为旧 Agent 保留最终文本 JSON fallback。
+角色提交能力由 Agent Profile 或内部工作类型明确声明。需求梳理 Agent 使用 `loop-agent requirement-context`，交付规划 Agent 使用 `loop-agent delivery-plan`，问题复现 Agent 使用 `loop-agent reproduction`，方案分析 Agent 使用 `loop-agent analysis`，开发实现 Agent 使用 `loop-agent implementation`，验证 Agent 使用 `loop-agent verification`，反馈处理 Agent 使用 `loop-agent feedback`，结卡报告 Agent 使用 `loop-agent review`，Prompt 演化评估器使用 `loop-agent evolution`，软件维护 Agent 使用 `loop-agent maintenance`。所有角色渐进维护 Application 拥有的草稿：每次进程启动先读取 status，编辑命令只更新草稿，角色终止命令才产生 Result Receipt。流程 execution token 或内部工作 token 只授权当前 Agent 的命令空间，Agent 不接触 SQLite。普通最终回复和手写 JSON 不承担控制面协议。
 
 `DeliveryPlanDraft` 属于交付规划 Application 能力，不直接改变 `Task` 聚合。它记录拆分依据、整体覆盖、排序说明和带稳定 `unit_key` 的有序候选单元。只有 `delivery-plan complete` 通过完整性校验后，Application 才把草稿投影为既有 `AgentResult.deliveryUnits` 并调用领域状态机；重试恢复草稿与业务推进因此保持分离。
 
@@ -234,6 +234,8 @@ classDiagram
 `FeedbackDraft` 属于反馈处理 Application 能力，不直接改变 `Task` 聚合。Triage 草稿以冻结的反馈批次为稳定工作身份，记录分组、评论归属、受影响历史单元、验收条件、直接回复和最少必要澄清；完整性校验保证每条冻结评论恰好出现一次。Verify 草稿以待验证评论为稳定工作身份，记录验证理由和独立证据。四个终止动作 `triage-complete`、`request-clarification`、`resolve`、`reopen` 只投影既有 Feedback Result；是否追加交付单元、生成新版报告或建立下一反馈批次仍由 Application 状态机确定。
 
 `ReviewDraft` 属于结卡 Application 能力，以需求报告修订版本或反馈报告工作组为稳定身份。它用固定章节 kind 保存结卡正文，用稳定 evidence key 保存 Spec、Document、Commit、Test 与 Feedback 的可追溯事实，并用稳定 request key 恢复必要运行信息。`review complete` 只在八个章节完整且实现、验证均有证据时投影报告结果；`review request-input` 只暂停当前需求级 Review 流程，不占用 Analysis 或 Delivery Lane。
+
+`InternalAgentDraft` 属于内部演化与维护 Application 能力，不进入 Task 聚合，也不占用业务 Lane。Evolution 草稿以 `evolution_id` 为稳定身份，保存摘要和稳定 observation key；Maintenance 草稿以 `job_id` 为稳定身份，保存诊断、真实文件声明和针对性测试。新的进程会获得新的 session 与 token，但继承原工作草稿且必须重新执行 status。终止命令只产生内部结果收据；Memory/Prompt 提升、真实 diff 验证、提交与自动落地仍由既有确定性 Harness 负责。
 
 ## 6. SQLite 持久化映射
 

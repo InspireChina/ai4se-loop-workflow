@@ -209,6 +209,7 @@ test('adds role drafts without losing progress from previously migrated agents',
     VALUES('DRAFT-feedback', 'triage')
   `).run();
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/045_review_drafts.sql'), 'utf8'));
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/046_internal_agent_drafts.sql'), 'utf8'));
 
   const context = db.prepare(`
     SELECT draft_type, goal
@@ -225,7 +226,9 @@ test('adds role drafts without losing progress from previously migrated agents',
       'development_drafts', 'development_criteria',
       'verification_drafts', 'verification_criteria',
       'feedback_drafts', 'feedback_draft_groups',
-      'review_drafts', 'review_sections', 'review_evidence'
+      'review_drafts', 'review_sections', 'review_evidence',
+      'internal_agent_drafts', 'evolution_evaluator_drafts',
+      'software_maintenance_drafts'
     )
     ORDER BY name
   `).all() as { name: string }[];
@@ -260,13 +263,16 @@ test('adds role drafts without losing progress from previously migrated agents',
     'delivery_plan_units',
     'development_criteria',
     'development_drafts',
+    'evolution_evaluator_drafts',
     'feedback_draft_groups',
     'feedback_drafts',
+    'internal_agent_drafts',
     'reproduction_drafts',
     'reproduction_steps',
     'review_drafts',
     'review_evidence',
     'review_sections',
+    'software_maintenance_drafts',
     'verification_criteria',
     'verification_drafts',
   ]);

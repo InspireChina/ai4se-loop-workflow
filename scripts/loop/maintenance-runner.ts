@@ -9,9 +9,12 @@ import {
   updateSoftwareMaintenanceJob,
   type SoftwareMaintenanceJob,
 } from '../../src/application/software-maintenance';
+import {
+  issueInternalAgentCommandToken,
+  readInternalAgentCommandSubmission,
+} from '../../src/application/internal-agent-command-drafts';
 import { recordRuntimeEvent, recordRuntimeException } from '../../src/application/runtime-events';
 import { agentExecutionOptions, getAgentExecutorSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
-import { parseSoftwareMaintenanceResult } from '../../src/domain/software-maintenance';
 import { databaseConnection, paths } from '../../src/infrastructure/database';
 import { getAgentExecutor } from '../../src/infrastructure/agent-executor';
 import { executeDelegation } from '../../src/infrastructure/delegation-execution';
@@ -102,6 +105,7 @@ async function processJob(job: SoftwareMaintenanceJob) {
   const executor = getAgentExecutor(settings.executorId);
   const executionOptions = agentExecutionOptions(settings);
   const prompt = buildSoftwareMaintenancePrompt(job, evidence);
+  const command = await issueInternalAgentCommandToken('maintenance', job.job_id);
   const mainSnapshot = mainRepositorySnapshot();
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
   const execution = await executeDelegation({
@@ -123,9 +127,15 @@ async function processJob(job: SoftwareMaintenanceJob) {
     }),
     maxRuntimeMs: Number(process.env.SOFTWARE_MAINTENANCE_TIMEOUT_MS || 20 * 60_000),
     idleTimeoutMs: Number(process.env.SOFTWARE_MAINTENANCE_IDLE_TIMEOUT_MS || 5 * 60_000),
-    resultKind: 'maintenance',
+    environment: {
+      LOOP_APP_ROOT: paths.appRoot,
+      LOOP_DATA_ROOT: paths.dataRoot,
+      LOOP_INTERNAL_WORK_TYPE: 'maintenance',
+      LOOP_INTERNAL_WORK_ID: job.job_id,
+      LOOP_INTERNAL_SESSION_ID: command.sessionId,
+      LOOP_INTERNAL_COMMAND_TOKEN: command.token,
+    },
   });
-  if (execution.exitCode !== 0) throw new Error(`Maintenance Agent CLI 退出码 ${execution.exitCode}`);
   if (!mainRepositorySnapshotMatches(mainSnapshot)) {
     await updateSoftwareMaintenanceJob(job.job_id, {
       status: 'rejected', error: 'Maintenance Agent 执行期间应用主仓库发生变化；已触发隔离 circuit breaker', finished: true,
@@ -133,8 +143,9 @@ async function processJob(job: SoftwareMaintenanceJob) {
     await maintenanceLog(job, '应用主仓库快照在 Maintenance Agent 执行期间发生变化，候选已拒绝', 'ERROR');
     return;
   }
-  const result = parseSoftwareMaintenanceResult(execution.submittedResult || execution.finalText);
-  if (!execution.submittedResult) await maintenanceLog(job, 'Maintenance Agent 未调用 submit-agent-result，已兼容读取最终文本', 'WARN');
+  const result = await readInternalAgentCommandSubmission('maintenance', job.job_id);
+  if (execution.exitCode !== 0 && !result) throw new Error(`Maintenance Agent CLI 退出码 ${execution.exitCode}`);
+  if (!result) throw new Error('Maintenance Agent 未通过 maintenance complete 提交结果');
   await updateSoftwareMaintenanceJob(job.job_id, {
     incidentFingerprint: result.fingerprint,
     summary: result.summary,

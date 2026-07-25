@@ -140,17 +140,7 @@ Runner 的控制循环：
 - 紧凑的 `Context Index`：文档、规格、决定、运行信息、反馈、恢复项和 execution evidence 的 ref、scope、revision、status、authority 与摘要，不默认放入全部正文。
 - execution-bound 的只读 `agent-context` 命令：Agent 可按 ref 读取、搜索、列出资料及查看证据和历史；命令只读取本次 execution 开始时持久化的 Context Snapshot。
 - 仓库、Git 和测试环境的实时 Ground Truth；它们由 Agent 使用原生命令行和文件工具检查，不由数据库快照替代。
-- 当前角色的命令协议与约束；尚未迁移的角色同时获得兼容用最终 JSON Schema。
-
-尚未迁移的流程 Agent 通过结果命令提交统一结构化 JSON，包含可选的：
-
-- `summary`、`outcome`。
-- `artifacts`：交付文档。
-- `deliveryUnits`：仅交付规划 Agent 创建。
-- `spec`：当前交付单元的目标、范围、行为、完整关键 `decisionTree`、决策、歧义、验收 Oracle、验证计划与 Change Budget。决策树同时覆盖产品决策和重大技术决策，每个决策点必须有上下文证据或标记为待用户回答。
-- `questions`：需求梳理 Agent 可返回影响目标、范围、路由或交付边界的需求级歧义；Analyst 必须返回所有上下文未覆盖的单元级产品决策和重大技术决策，并与 `decisionTree` 和 `ambiguities` 一一对应。
-- `runtimeInputs`：任何 Agent 可返回的非敏感运行信息请求；存在时必须 `outcome=needs_input`，不能与设计问题混用。
-- `rewind` / `rewindDeliveryUnit`：需要回退时的建议。
+- 当前角色的渐进式命令协议与确定性校验约束；Agent 不接收通用结果 JSON Schema。
 
 Review Agent 通过渐进式结卡草稿提交完整 artifact 和 `verdict=report_ready`。Feedback Agent 一次读取冻结的评论批次，将评论按共同验收目标分为直接回复、历史说明、报告修订、Bug、行为修订、范围新增、技术调整或长期建议。Application 不接受 `targetStage`、`targetAgent` 或评论驱动的 rewind；需要工程修改时只在既有交付单元之后追加新的交付单元，并重新经过 Analysis、Dev、Test 和 Feedback 独立验证。既有文档与 Slice Spec 保持为历史证据，只在最终结卡报告中汇总最终事实。反馈批次使用需求内递增的 `batch_number`，工作组使用批次内递增的 `group_order`，保证数据库、Agent 上下文和页面展示的执行顺序一致，不依赖时间戳或随机 UUID 排序。
 
@@ -178,7 +168,9 @@ Application 负责校验最小结果协议、写入数据库和推进状态。�
 
 Runner 按 `Core Contract → Role Prompt → Durable Memory → recent daily memory → Working Context Pack → Context Index / Commands → Role Submission Contract` 组装最终输入，并把 Prompt、Memory 和完整 Context Snapshot 写入 execution attempt。启动 Prompt 只内联当前工作的高信号事实；完整资料保存在快照中，通过 `LOOP_EXECUTION_ID` 绑定的只读命令按需展开。运行期间产生的新评论或状态变化不改变本次快照，由下一次 execution 获取。Core Contract、最小结果协议和提交通道不开放编辑，避免自定义 Prompt 改写权限或状态机。
 
-角色提交协议按 Agent Profile 选择。已迁移的需求梳理、交付规划、问题复现、方案分析、开发实现、验证、反馈处理和结卡报告 Agent 使用数据库草稿和领域命令，每次新进程都必须重新查看 status；失败命令可自行修正重试，成功终止命令与 execution output receipt 在一个事务内保存，因此 Runner 在终止命令后崩溃也不会重跑模型。Prompt 演化和软件维护 Agent 尚通过私有临时结果通道及 `submit-agent-result` 提交。两种协议都不使用 Agent 的普通最终回复推进流程；最终文本 JSON 只保留给旧 Agent 的兼容 fallback。
+所有 Agent 都使用 Application 管理的数据库草稿和领域命令，每次新进程都必须重新查看 status；失败命令可自行修正重试，成功终止命令与结果收据持久化保存，因此 Runner 在终止命令后崩溃也不会重跑模型。流程 Agent 的凭证绑定 execution；Prompt 演化和软件维护 Agent 的凭证绑定内部工作 ID 与本次进程会话，分别使用 `evolution` 和 `maintenance` 命名空间。任何 Agent 的普通最终回复或手写 JSON 都不推进流程。
+
+Prompt 演化草稿逐项保存本轮摘要和最多五条稳定 observation key，Application 在 `evolution complete` 时校验 fingerprint、类别、建议、目标、置信度、复用标记和引用评论 UUID，再生成 Evolution Result。软件维护草稿逐项保存结果、分类、稳定 incident fingerprint、根因、置信度、变更文件和针对性测试；`fixed` 必须声明实际变更文件并至少记录一条通过的测试，之后仍由独立 Maintenance Harness 校验真实 diff、保护路径、完整测试与生产构建。
 
 Evolution Evaluator 是主执行后的 best-effort 旁路：它在同类型 Agent 的一次结果成功应用后运行，而不是在评论保存时运行。开放评论按任务形成 Triage 批次，再由 Application 应用有效分组并创建直接回复、问题复现、追加交付单元、报告修订或长期学习工作；Evaluator 读取评论、批次、处理声明和验证结果作为演化证据。业务评论的 `status=open` 会一直保留到必要流程完成并通过独立验证，和 `evolution_status=analyzed` 相互独立。成功恢复时，已使用的运行信息问答也会作为 evidence 输入，但不得把具体用户数据、具体卡号、地址、账号或凭据写入 Memory；明确的仓库级模板和通用占位符可以提炼。观察首先进入 daily memory 与去重 occurrence 表；只有 `occurrence >= 3`、`distinct requirements >= 2`、`confidence >= 0.75` 且通过安全规则时才提升。Memory 直接形成新 revision；Prompt 形成 candidate，并只由带匹配 `evolution_candidate_id` 的真实 execution attempt 消耗三次 Canary。失败立即回滚，成功三次才激活。Evaluator 失败不改变主执行结果。
 

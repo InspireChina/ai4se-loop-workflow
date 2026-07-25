@@ -1925,7 +1925,7 @@ test('prompt-build: maps RuntimeEventRow fields to stable JSON evidence structur
   const prompt = buildSoftwareMaintenancePrompt(job, [event]);
   assert.ok(prompt.includes('结构化运行证据'), 'prompt should contain evidence section');
 
-  const evidenceMatch = prompt.match(/结构化运行证据：\n(\[[\s\S]*?\])\n\n结果结构：/);
+  const evidenceMatch = prompt.match(/结构化运行证据：\n(\[[\s\S]*\])$/);
   assert.ok(evidenceMatch, 'prompt should contain a JSON evidence array');
   const evidence = JSON.parse(evidenceMatch![1]);
 
@@ -1971,14 +1971,14 @@ test('prompt-build: falls back to empty attributes object on parse failure', asy
   };
 
   const prompt = buildSoftwareMaintenancePrompt(job, [event]);
-  const evidenceMatch = prompt.match(/结构化运行证据：\n(\[[\s\S]*?\])\n\n结果结构：/);
+  const evidenceMatch = prompt.match(/结构化运行证据：\n(\[[\s\S]*\])$/);
   assert.ok(evidenceMatch);
   const evidence = JSON.parse(evidenceMatch![1]);
   assert.deepEqual(evidence[0].attributes, {});
   assert.equal(evidence[0].exception, null);
 });
 
-test('prompt-build: includes security contract and result schema', async () => {
+test('prompt-build: includes security contract and progressive command protocol', async () => {
   const { buildSoftwareMaintenancePrompt } = await import('./software-maintenance');
   const job = {
     job_id: 'test-job-id', trigger_kind: 'runner_error' as const,
@@ -1988,14 +1988,14 @@ test('prompt-build: includes security contract and result schema', async () => {
   const prompt = buildSoftwareMaintenancePrompt(job, []);
   assert.ok(prompt.includes('Software Maintenance Agent'), 'prompt should address maintenance agent');
   assert.ok(prompt.includes('禁止修改'), 'prompt should include safety constraints');
-  assert.ok(prompt.includes('提交命令'), 'prompt should include submission command');
+  assert.ok(prompt.includes('maintenance status'), 'prompt should require status recovery');
+  assert.ok(prompt.includes('maintenance complete'), 'prompt should include terminal command');
   assert.ok(prompt.includes('test-job-id'), 'prompt should include job id');
   assert.ok(prompt.includes('runner_error'), 'prompt should include trigger kind');
   assert.ok(prompt.includes('FATAL'), 'prompt should include severity');
   assert.ok(prompt.includes('abc1234'), 'prompt should include base commit');
-  assert.ok(prompt.includes('outcome') && prompt.includes('no_issue'), 'prompt should include result schema');
-  assert.ok(prompt.includes('fingerprint'), 'prompt should include fingerprint field in schema');
-  assert.ok(prompt.includes('insufficient_evidence'), 'prompt should include insufficient_evidence classification');
+  assert.equal(prompt.includes('submit-agent-result'), false);
+  assert.ok(prompt.includes('普通最终文本和手写 JSON 都不推进流程'));
 });
 
 test('truncates long body', async () => {

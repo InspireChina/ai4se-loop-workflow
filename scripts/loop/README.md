@@ -18,7 +18,7 @@ Loop 生命周期、推进步骤和结束运行只由 Web App 与内部 Runner �
 
 Runner 启动 execution 前会初始化项目隔离的 `data/<repo-hash>/agent-runtime`，从中加载当前 Agent 的 `PROMPT.md`、`MEMORY.md` 和最近 daily memory，并把版本/哈希写入 execution attempt。调用 Codex 或 Claude 时，完整 Prompt 通过 stdin 传输；调用 Cursor 时，完整 Prompt 写入权限受限的临时文档，命令行只传递短文件引用，CLI 退出后统一清理。
 
-需求梳理 Agent 使用 `scripts/loop/loop-agent.mjs requirement-context ...` 渐进提交：每次新进程先执行 `status` 恢复上次草稿，再按稳定 key 写入各字段，最终调用 `complete` 或 `request-clarification`。Runner 通过 `LOOP_EXECUTION_ID` 和一次性 token 限制命令权限；Agent 不生成结果 JSON，也不能直接写数据库。其他尚未迁移的流程 Agent、Evolution Evaluator 和 Software Maintenance Agent 继续使用私有临时结果通道及 `submit-agent-result --input <result.json>`。普通最终回复不推进流程，最终文本 JSON 仅为旧 Agent 的兼容 fallback。执行结束后的 Evolution Evaluator 是非阻塞旁路：它只能记录观察或产生受 Canary 约束的 Prompt candidate，不能调度流程、绕过 Harness 或要求人工 Approval。
+所有流程 Agent 都使用 `scripts/loop/loop-agent.mjs <角色命名空间> ...` 渐进提交：每次新进程先执行 `status` 恢复上次草稿，再按稳定 key 写入各字段，最终调用角色终止命令。Runner 通过 execution 或内部工作 ID、会话 ID 与一次性 token 限制命令权限；Agent 不生成结果 JSON，也不能直接写数据库。Evolution Evaluator 使用 `evolution` 命名空间，Software Maintenance Agent 使用 `maintenance` 命名空间，并遵循同一套先恢复、渐进写入、终止提交协议。普通最终回复不推进流程。执行结束后的 Evolution Evaluator 是非阻塞旁路：它只能记录观察或产生受 Canary 约束的 Prompt candidate，不能调度流程、绕过 Harness 或要求人工 Approval。
 
 流程 Agent 默认最多运行 4 小时，完全无输出 30 分钟后终止；可分别通过 `AGENT_EXECUTOR_TIMEOUT_MS` 和 `AGENT_EXECUTOR_IDLE_TIMEOUT_MS` 覆盖。Execution Lease 始终根据同一个最大运行时间计算，并额外保留 10 分钟恢复窗口。
 

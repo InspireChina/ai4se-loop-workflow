@@ -9,7 +9,15 @@ function fail(message) {
 
 const executionId = process.env.LOOP_EXECUTION_ID;
 const token = process.env.LOOP_EXECUTION_TOKEN;
-if (!executionId || !token) {
+const internalWorkType = process.env.LOOP_INTERNAL_WORK_TYPE;
+const internalWorkId = process.env.LOOP_INTERNAL_WORK_ID;
+const internalSessionId = process.env.LOOP_INTERNAL_SESSION_ID;
+const internalToken = process.env.LOOP_INTERNAL_COMMAND_TOKEN;
+const hasFlowContext = Boolean(executionId && token);
+const hasInternalContext = Boolean(
+  internalWorkType && internalWorkId && internalSessionId && internalToken,
+);
+if (!hasFlowContext && !hasInternalContext) {
   fail('命令只能在活动 Agent execution 内使用');
 }
 
@@ -33,15 +41,30 @@ try {
     args.push(argument.slice(0, -5), content);
     index += 1;
   }
-  const { runAgentCommand } = await tsImport(
-    '../../src/application/agent-command-drafts.ts',
-    import.meta.url,
-  );
-  const output = await runAgentCommand({
-    executionId,
-    token,
-    args,
-  });
+  let output;
+  if (hasInternalContext) {
+    const { runInternalAgentCommand } = await tsImport(
+      '../../src/application/internal-agent-command-drafts.ts',
+      import.meta.url,
+    );
+    output = await runInternalAgentCommand({
+      workType: internalWorkType,
+      workId: internalWorkId,
+      sessionId: internalSessionId,
+      token: internalToken,
+      args,
+    });
+  } else {
+    const { runAgentCommand } = await tsImport(
+      '../../src/application/agent-command-drafts.ts',
+      import.meta.url,
+    );
+    output = await runAgentCommand({
+      executionId,
+      token,
+      args,
+    });
+  }
   process.stdout.write(`${output}\n`);
 } catch (error) {
   fail(error instanceof Error ? error.message : String(error));
