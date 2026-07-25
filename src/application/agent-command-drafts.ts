@@ -22,6 +22,10 @@ import {
   runVerificationCommand,
   verificationHelp,
 } from './verification-command-drafts';
+import {
+  feedbackHelp,
+  runFeedbackCommand,
+} from './feedback-command-drafts';
 
 type ExecutionRow = {
   execution_id: string;
@@ -40,7 +44,7 @@ type DraftRow = {
   draft_id: string;
   work_key: string;
   draft_version: number;
-  draft_type: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification';
+  draft_type: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification' | 'feedback';
   task_id: string;
   story_index: number | null;
   agent: string;
@@ -132,9 +136,17 @@ async function authorize(executionId: string, token: string) {
   let scopeKey: string | undefined;
   try {
     const snapshot = JSON.parse(execution.input_json) as {
-      delegation?: { feedbackGroupId?: string };
+      delegation?: {
+        feedbackGroupId?: string;
+        feedbackBatchId?: string;
+        feedbackId?: string;
+      };
     };
-    scopeKey = snapshot.delegation?.feedbackGroupId;
+    scopeKey = execution.agent === 'feedback-agent'
+      ? execution.pipeline === 'feedback-triage'
+        ? snapshot.delegation?.feedbackBatchId
+        : snapshot.delegation?.feedbackId
+      : snapshot.delegation?.feedbackGroupId;
   } catch {
     // The execution was already validated when persisted; fall back to its delegation key.
   }
@@ -335,6 +347,39 @@ function cloneVerificationDraft(
   }
 }
 
+function cloneFeedbackDraft(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  source: DraftRow,
+  target: DraftRow,
+) {
+  db.prepare(`
+    INSERT INTO feedback_drafts(draft_id, mode, summary, verification_reason)
+    SELECT ?, mode, summary, verification_reason
+    FROM feedback_drafts WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
+  db.prepare(`
+    INSERT INTO feedback_draft_groups(
+      draft_id, group_key, work_type, title, reason, response, ordinal
+    )
+    SELECT ?, group_key, work_type, title, reason, response, ordinal
+    FROM feedback_draft_groups WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
+  for (const table of [
+    ['feedback_draft_group_comments', 'group_key, comment_id, ordinal'],
+    ['feedback_draft_group_units', 'group_key, story_index, ordinal'],
+    ['feedback_draft_acceptance', 'group_key, acceptance_key, content, ordinal'],
+    ['feedback_draft_questions', `decision_key, title, question, impact,
+      recommendation_option_id, recommendation_reason, ordinal`],
+    ['feedback_draft_question_options', 'decision_key, option_id, label, consequence, ordinal'],
+    ['feedback_draft_evidence', 'evidence_key, content, ordinal'],
+  ] as const) {
+    db.prepare(`
+      INSERT INTO ${table[0]}(draft_id, ${table[1]})
+      SELECT ?, ${table[1]} FROM ${table[0]} WHERE draft_id = ?
+    `).run(target.draft_id, source.draft_id);
+  }
+}
+
 function createDraft(
   db: Awaited<ReturnType<typeof databaseConnection>>,
   execution: ExecutionRow,
@@ -378,6 +423,12 @@ function createDraft(
   } else if (profile.draftType === 'verification') {
     if (source) cloneVerificationDraft(db, source, created);
     else db.prepare('INSERT INTO verification_drafts(draft_id) VALUES(?)').run(draftId);
+  } else if (profile.draftType === 'feedback') {
+    if (source) cloneFeedbackDraft(db, source, created);
+    else {
+      db.prepare('INSERT INTO feedback_drafts(draft_id, mode) VALUES(?, ?)')
+        .run(draftId, execution.pipeline === 'feedback-triage' ? 'triage' : 'verify');
+    }
   }
   return created;
 }
@@ -896,6 +947,15 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile) {
       '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
     ].join('\n');
   }
+  if (profile.draftType === 'feedback') {
+    return [
+      ...common,
+      ...feedbackHelp(profile.terminalActions),
+      '',
+      '长文本参数：',
+      '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
+    ].join('\n');
+  }
   return [
     ...common,
     '  requirement-context goal set --text <内容>',
@@ -1111,6 +1171,9 @@ export async function runAgentCommand(input: {
   }
   if (profile.draftType === 'verification') {
     return runVerificationCommand({ db, execution, draft, command, flags });
+  }
+  if (profile.draftType === 'feedback') {
+    return runFeedbackCommand({ db, execution, draft, command, flags });
   }
   if (command === 'requirement-context status') {
     db.prepare(`

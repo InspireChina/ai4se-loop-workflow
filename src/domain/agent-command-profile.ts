@@ -3,7 +3,7 @@ export type AgentCommandProfile = {
   agent: string;
   pipelines: string[];
   namespace: string;
-  draftType: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification';
+  draftType: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification' | 'feedback';
   terminalActions: string[];
 };
 
@@ -67,6 +67,28 @@ const PROFILES: AgentCommandProfile[] = [
     ],
   },
   {
+    id: 'feedback-triage',
+    agent: 'feedback-agent',
+    pipelines: ['feedback-triage'],
+    namespace: 'feedback',
+    draftType: 'feedback',
+    terminalActions: [
+      'feedback triage-complete',
+      'feedback request-clarification',
+    ],
+  },
+  {
+    id: 'feedback-verify',
+    agent: 'feedback-agent',
+    pipelines: ['feedback-verify'],
+    namespace: 'feedback',
+    draftType: 'feedback',
+    terminalActions: [
+      'feedback resolve',
+      'feedback reopen',
+    ],
+  },
+  {
     id: 'delivery-plan',
     agent: 'story-splitter-agent',
     pipelines: ['split', 'feedback-split'],
@@ -110,6 +132,9 @@ export function agentCommandWorkKey(
   }
   if (profile.draftType === 'verification') {
     return `verification:${taskId}:${storyIndex ?? 'unit'}`;
+  }
+  if (profile.draftType === 'feedback') {
+    return `feedback:${taskId}:${pipeline}:${scopeKey || delegationKey || 'work'}`;
   }
   return `${profile.draftType}:${taskId}:${storyIndex ?? 'task'}`;
 }

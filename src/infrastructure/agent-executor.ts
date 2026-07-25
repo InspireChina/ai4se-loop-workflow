@@ -334,6 +334,16 @@ function summarizeCommand(command: string) {
     if (normalized.includes(' verification pass')) return '提交验证通过';
     if (normalized.includes(' verification fail')) return '提交验证失败回流';
     if (normalized.includes(' verification block')) return '提交验证阻塞';
+    if (normalized.includes(' feedback status')) return '恢复反馈草稿';
+    if (normalized.includes(' feedback summary set')) return '保存反馈处理摘要';
+    if (normalized.includes(' feedback group ')) return '更新反馈工作组';
+    if (normalized.includes(' feedback question ')) return '更新反馈澄清问题';
+    if (normalized.includes(' feedback verification reason set')) return '保存反馈验证理由';
+    if (normalized.includes(' feedback evidence ')) return '更新反馈验证证据';
+    if (normalized.includes(' feedback triage-complete')) return '提交反馈批次分流';
+    if (normalized.includes(' feedback request-clarification')) return '提交反馈澄清问题';
+    if (normalized.includes(' feedback resolve')) return '提交反馈已满足';
+    if (normalized.includes(' feedback reopen')) return '提交反馈重新处理';
     if (normalized.includes(' help')) return '查看当前 Agent 可用命令';
     return '更新 Agent 工作草稿';
   }

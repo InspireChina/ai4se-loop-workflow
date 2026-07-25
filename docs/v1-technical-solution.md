@@ -154,7 +154,7 @@ Runner 的控制循环：
 
 Review Agent 只返回完整 artifact 和 `verdict=report_ready`。Feedback Agent 一次读取冻结的评论批次，将评论按共同验收目标分为直接回复、历史说明、报告修订、Bug、行为修订、范围新增、技术调整或长期建议。Application 不接受 `targetStage`、`targetAgent` 或评论驱动的 rewind；需要工程修改时只在既有交付单元之后追加新的交付单元，并重新经过 Analysis、Dev、Test 和 Feedback 独立验证。既有文档与 Slice Spec 保持为历史证据，只在最终结卡报告中汇总最终事实。反馈批次使用需求内递增的 `batch_number`，工作组使用批次内递增的 `group_order`，保证数据库、Agent 上下文和页面展示的执行顺序一致，不依赖时间戳或随机 UUID 排序。
 
-需求梳理 Agent、交付规划 Agent、问题复现 Agent、方案分析 Agent、开发实现 Agent 与验证 Agent 已迁移为 execution 绑定的渐进命令协议。需求梳理 Agent 必须先调用 `loop-agent requirement-context status` 恢复持久草稿，再逐项写入目标、结果、分类、事实、约束、范围和问题；交付规划 Agent 必须先调用 `loop-agent delivery-plan status`，再逐项维护拆分依据、覆盖说明、排序和交付单元；问题复现 Agent 必须先调用 `loop-agent reproduction status`，再逐项维护预期、实际、环境、稳定性、影响范围、复现步骤、证据、根因假设和人工对齐问题；方案分析 Agent 必须先调用 `loop-agent analysis status`，再逐项维护目标、范围、行为、决策树、验收条件、验证计划、依赖和 Change Budget；开发实现 Agent 必须先调用 `loop-agent implementation status`，再逐项维护验收覆盖、变更文件、验证结果、风险、运行信息和恢复事项；验证 Agent 必须先调用 `loop-agent verification status`，再逐项维护规格验收结论、独立检查、风险、失败分类、运行信息和恢复项复验。每个条目使用跨轮次稳定 key；恢复时覆盖原 key，不能靠换名堆叠同义内容。只有角色声明的终止命令会由 Application 生成内部 Agent Result 并推进状态，普通最终回复不参与控制面。长文本可通过 `--<字段>-file` 读取 UTF-8 文件，避免 Windows 命令行长度限制。
+需求梳理 Agent、交付规划 Agent、问题复现 Agent、方案分析 Agent、开发实现 Agent、验证 Agent 与反馈处理 Agent 已迁移为 execution 绑定的渐进命令协议。需求梳理 Agent 必须先调用 `loop-agent requirement-context status` 恢复持久草稿，再逐项写入目标、结果、分类、事实、约束、范围和问题；交付规划 Agent 必须先调用 `loop-agent delivery-plan status`，再逐项维护拆分依据、覆盖说明、排序和交付单元；问题复现 Agent 必须先调用 `loop-agent reproduction status`，再逐项维护预期、实际、环境、稳定性、影响范围、复现步骤、证据、根因假设和人工对齐问题；方案分析 Agent 必须先调用 `loop-agent analysis status`，再逐项维护目标、范围、行为、决策树、验收条件、验证计划、依赖和 Change Budget；开发实现 Agent 必须先调用 `loop-agent implementation status`，再逐项维护验收覆盖、变更文件、验证结果、风险、运行信息和恢复事项；验证 Agent 必须先调用 `loop-agent verification status`，再逐项维护规格验收结论、独立检查、风险、失败分类、运行信息和恢复项复验；反馈处理 Agent 必须先调用 `loop-agent feedback status`，在 Triage 模式逐项维护评论分组、关联评论、影响单元、验收条件和最少必要澄清，在 Verify 模式逐项维护验证理由和独立证据。每个条目使用跨轮次稳定 key；恢复时覆盖原 key，不能靠换名堆叠同义内容。只有角色声明的终止命令会由 Application 生成内部 Agent Result 并推进状态，普通最终回复不参与控制面。长文本可通过 `--<字段>-file` 读取 UTF-8 文件，避免 Windows 命令行长度限制。
 
 交付规划草稿按 `需求 + pipeline + delegation` 隔离。相同委派的失败重试会恢复未完成草稿；普通拆分和评论范围新增触发的追加拆分互不污染。`delivery-plan complete` 成功后，Application 从数据库草稿确定性生成交付计划文档和有序交付单元，再交给既有状态机应用。
 
@@ -166,6 +166,8 @@ Review Agent 只返回完整 artifact 和 `verdict=report_ready`。Feedback Agen
 
 验证草稿按 `需求 + 交付单元` 隔离，普通验证和运行信息补充后的 `resume` 共用稳定工作键。Agent 必须逐条引用 resolved Slice Spec 的验收标准 ID，记录通过、失败或未验证结论及独立证据，并以稳定 check key 保存命令、浏览器或走查结果。`verification pass` 只在全部规格标准与检查通过、活动恢复项均明确复验通过且没有未回答运行信息时成立；`verification fail` 必须说明预期、实际和实现或规格失败分类，Application 据此确定性路由到开发或分析；环境或证据不足使用 `verification block`，不得伪装成代码回退。`verification request-input` 只产生运行信息请求，不推进交付单元。
 
+反馈草稿按冻结批次或单条待验证评论隔离。Triage 使用 `反馈批次 ID` 作为稳定工作身份，每条冻结评论必须且只能关联一个稳定 group key；工程类分组必须逐项记录验收条件，澄清恢复必须沿用原 decision key。`feedback triage-complete` 只在完整覆盖批次且没有未回答问题时提交，`feedback request-clarification` 只保存最少必要问题。Verify 使用 `评论 ID` 作为稳定工作身份，Agent 逐项记录独立证据后调用 `feedback resolve` 或 `feedback reopen`；Application 仍负责创建向前追加工作、新反馈批次或报告修订，不接受 goto、目标 Agent 或历史文档改写。
+
 Application 负责校验最小结果协议、写入数据库和推进状态。方案分析命令既校验决策引用、稳定 key 和回答消费，也校验形成可执行规格所需的结构完整性；专业语义仍由 Analyst、用户对齐和后续 Test 流程保证。Agent 只能调用受 execution 凭证约束的角色命令及只读上下文命令，不能写 `.project` 文档、直接写 SQLite 或主动写运行日志。
 
 ## 7. Agent Runtime 与演化
@@ -174,7 +176,7 @@ Application 负责校验最小结果协议、写入数据库和推进状态。�
 
 Runner 按 `Core Contract → Role Prompt → Durable Memory → recent daily memory → Working Context Pack → Context Index / Commands → Role Submission Contract` 组装最终输入，并把 Prompt、Memory 和完整 Context Snapshot 写入 execution attempt。启动 Prompt 只内联当前工作的高信号事实；完整资料保存在快照中，通过 `LOOP_EXECUTION_ID` 绑定的只读命令按需展开。运行期间产生的新评论或状态变化不改变本次快照，由下一次 execution 获取。Core Contract、最小结果协议和提交通道不开放编辑，避免自定义 Prompt 改写权限或状态机。
 
-角色提交协议按 Agent Profile 选择。已迁移的需求梳理、交付规划、问题复现、方案分析、开发实现和验证 Agent 使用数据库草稿和领域命令，每次新进程都必须重新查看 status；失败命令可自行修正重试，成功终止命令与 execution output receipt 在一个事务内保存，因此 Runner 在终止命令后崩溃也不会重跑模型。其他尚未迁移的 Agent 继续使用私有临时结果通道和 `submit-agent-result`。两种协议都不使用 Agent 的普通最终回复推进流程；最终文本 JSON 只保留给旧 Agent 的兼容 fallback。
+角色提交协议按 Agent Profile 选择。已迁移的需求梳理、交付规划、问题复现、方案分析、开发实现、验证和反馈处理 Agent 使用数据库草稿和领域命令，每次新进程都必须重新查看 status；失败命令可自行修正重试，成功终止命令与 execution output receipt 在一个事务内保存，因此 Runner 在终止命令后崩溃也不会重跑模型。其他尚未迁移的 Agent 继续使用私有临时结果通道和 `submit-agent-result`。两种协议都不使用 Agent 的普通最终回复推进流程；最终文本 JSON 只保留给旧 Agent 的兼容 fallback。
 
 Evolution Evaluator 是主执行后的 best-effort 旁路：它在同类型 Agent 的一次结果成功应用后运行，而不是在评论保存时运行。开放评论按任务形成 Triage 批次，再由 Application 应用有效分组并创建直接回复、问题复现、追加交付单元、报告修订或长期学习工作；Evaluator 读取评论、批次、处理声明和验证结果作为演化证据。业务评论的 `status=open` 会一直保留到必要流程完成并通过独立验证，和 `evolution_status=analyzed` 相互独立。成功恢复时，已使用的运行信息问答也会作为 evidence 输入，但不得把具体用户数据、具体卡号、地址、账号或凭据写入 Memory；明确的仓库级模板和通用占位符可以提炼。观察首先进入 daily memory 与去重 occurrence 表；只有 `occurrence >= 3`、`distinct requirements >= 2`、`confidence >= 0.75` 且通过安全规则时才提升。Memory 直接形成新 revision；Prompt 形成 candidate，并只由带匹配 `evolution_candidate_id` 的真实 execution attempt 消耗三次 Canary。失败立即回滚，成功三次才激活。Evaluator 失败不改变主执行结果。
 
