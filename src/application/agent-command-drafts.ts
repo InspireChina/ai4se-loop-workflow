@@ -6,6 +6,10 @@ import {
   type AgentCommandProfile,
 } from '../domain/agent-command-profile';
 import { databaseConnection, hash } from '../infrastructure/database';
+import {
+  reproductionHelp,
+  runReproductionCommand,
+} from './reproduction-command-drafts';
 
 type ExecutionRow = {
   execution_id: string;
@@ -14,6 +18,7 @@ type ExecutionRow = {
   agent: string;
   pipeline: string;
   delegation_key: string;
+  input_json: string;
   status: string;
   command_token_hash: string | null;
 };
@@ -22,7 +27,7 @@ type DraftRow = {
   draft_id: string;
   work_key: string;
   draft_version: number;
-  draft_type: 'requirement_context' | 'delivery_plan';
+  draft_type: 'requirement_context' | 'delivery_plan' | 'reproduction';
   task_id: string;
   story_index: number | null;
   agent: string;
@@ -93,7 +98,7 @@ function parseArgs(args: string[]) {
 
 function executionInDb(db: Awaited<ReturnType<typeof databaseConnection>>, executionId: string) {
   return db.prepare(`
-    SELECT execution_id, task_id, story_index, agent, pipeline, delegation_key,
+    SELECT execution_id, task_id, story_index, agent, pipeline, delegation_key, input_json,
            status, command_token_hash
     FROM execution_attempts WHERE execution_id = ?
   `).get(executionId) as ExecutionRow | undefined;
@@ -111,12 +116,22 @@ async function authorize(executionId: string, token: string) {
   if (!['running', 'output_received'].includes(execution.status)) {
     throw new Error(`当前 execution 状态为 ${execution.status}，不能使用 Agent 命令`);
   }
+  let scopeKey: string | undefined;
+  try {
+    const snapshot = JSON.parse(execution.input_json) as {
+      delegation?: { feedbackGroupId?: string };
+    };
+    scopeKey = snapshot.delegation?.feedbackGroupId;
+  } catch {
+    // The execution was already validated when persisted; fall back to its delegation key.
+  }
   const workKey = agentCommandWorkKey(
     execution.agent,
     execution.pipeline,
     execution.task_id,
     execution.story_index,
     execution.delegation_key,
+    scopeKey,
   );
   if (!workKey) throw new Error('当前 execution 没有可用的草稿工作键');
   return { db, execution, profile, workKey };
@@ -182,6 +197,38 @@ function cloneDeliveryPlanDraft(
   `).run(target.draft_id, source.draft_id);
 }
 
+function cloneReproductionDraft(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  source: DraftRow,
+  target: DraftRow,
+) {
+  db.prepare(`
+    INSERT INTO reproduction_drafts(
+      draft_id, expected_behavior, actual_behavior, environment, stability, impact_scope
+    )
+    SELECT ?, expected_behavior, actual_behavior, environment, stability, impact_scope
+    FROM reproduction_drafts WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
+  for (const table of [
+    ['reproduction_steps', 'step_key, action, expected, actual, ordinal'],
+    ['reproduction_evidence', 'evidence_key, kind, content, source, ordinal'],
+    ['reproduction_hypotheses', 'hypothesis_key, statement, status, evidence, ordinal'],
+    ['reproduction_questions', 'decision_key, title, question, impact, recommendation_option_id, recommendation_reason, ordinal'],
+  ] as const) {
+    db.prepare(`
+      INSERT INTO ${table[0]}(draft_id, ${table[1]})
+      SELECT ?, ${table[1]} FROM ${table[0]} WHERE draft_id = ?
+    `).run(target.draft_id, source.draft_id);
+  }
+  db.prepare(`
+    INSERT INTO reproduction_question_options(
+      draft_id, decision_key, option_id, label, consequence, ordinal
+    )
+    SELECT ?, decision_key, option_id, label, consequence, ordinal
+    FROM reproduction_question_options WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
+}
+
 function createDraft(
   db: Awaited<ReturnType<typeof databaseConnection>>,
   execution: ExecutionRow,
@@ -213,6 +260,9 @@ function createDraft(
   } else if (profile.draftType === 'delivery_plan') {
     if (source) cloneDeliveryPlanDraft(db, source, created);
     else db.prepare('INSERT INTO delivery_plan_drafts(draft_id) VALUES(?)').run(draftId);
+  } else if (profile.draftType === 'reproduction') {
+    if (source) cloneReproductionDraft(db, source, created);
+    else db.prepare('INSERT INTO reproduction_drafts(draft_id) VALUES(?)').run(draftId);
   }
   return created;
 }
@@ -695,6 +745,15 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile) {
       ...profile.terminalActions.map((action) => `  ${action}`),
     ].join('\n');
   }
+  if (profile.draftType === 'reproduction') {
+    return [
+      ...common,
+      ...reproductionHelp(profile.terminalActions),
+      '',
+      '长文本参数：',
+      '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
+    ].join('\n');
+  }
   return [
     ...common,
     '  requirement-context goal set --text <内容>',
@@ -898,6 +957,9 @@ export async function runAgentCommand(input: {
   let draft = ensureDraft(db, execution, profile, workKey);
   if (profile.draftType === 'delivery_plan') {
     return runDeliveryPlanCommand({ db, execution, draft, command, flags });
+  }
+  if (profile.draftType === 'reproduction') {
+    return runReproductionCommand({ db, execution, draft, command, flags });
   }
   if (command === 'requirement-context status') {
     db.prepare(`

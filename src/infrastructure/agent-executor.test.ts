@@ -85,6 +85,64 @@ test('labels quoted delivery-plan arguments with the specific progressive action
   assert.match(parsed || '', /保存交付单元/);
 });
 
+test('labels progressive reproduction evidence as an Agent domain action', () => {
+  const line = JSON.stringify({
+    type: 'item.started',
+    item: {
+      type: 'command_execution',
+      command: 'node "/app/scripts/loop/loop-agent.mjs" reproduction evidence upsert --key browser',
+    },
+  });
+  const parsed = getAgentExecutor('codex').parseStdout(line, {
+    agent: 'repro-agent',
+    taskId: 'REQ-1',
+    storyIndex: null,
+    pipeline: 'repro',
+  });
+  assert.match(parsed || '', /tool=agent-command/);
+  assert.match(parsed || '', /更新复现证据/);
+});
+
+test('labels escaped and chained progressive commands as Agent domain actions', () => {
+  const line = JSON.stringify({
+    type: 'item.started',
+    item: {
+      type: 'command_execution',
+      command: '/bin/zsh -lc "node \\"/app/scripts/loop/loop-agent.mjs\\" reproduction actual set --text result && node \\"/app/scripts/loop/loop-agent.mjs\\" reproduction validate"',
+    },
+  });
+  const parsed = getAgentExecutor('codex').parseStdout(line, {
+    agent: 'repro-agent',
+    taskId: 'REQ-1',
+    storyIndex: null,
+    pipeline: 'resume',
+  });
+  assert.match(parsed || '', /tool=agent-command/);
+  assert.match(parsed || '', /保存实际行为/);
+});
+
+test('labels Cursor shell wrappers around progressive commands as Agent domain actions', () => {
+  const line = JSON.stringify({
+    type: 'tool_call',
+    subtype: 'started',
+    tool_call: {
+      shellToolCall: {
+        args: {
+          command: '/bin/zsh -lc "node \\"/app/scripts/loop/loop-agent.mjs\\" reproduction status"',
+        },
+      },
+    },
+  });
+  const parsed = getAgentExecutor('cursor').parseStdout(line, {
+    agent: 'repro-agent',
+    taskId: 'REQ-1',
+    storyIndex: null,
+    pipeline: 'resume',
+  });
+  assert.match(parsed || '', /tool=agent-command/);
+  assert.match(parsed || '', /恢复问题复现草稿/);
+});
+
 test('extracts final assistant text from every executor stream', () => {
   const result = '{"outcome":"completed","summary":"ok"}';
   assert.equal(extractAgentFinalText('codex', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: result } })), result);

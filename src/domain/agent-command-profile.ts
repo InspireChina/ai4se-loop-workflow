@@ -3,7 +3,7 @@ export type AgentCommandProfile = {
   agent: string;
   pipelines: string[];
   namespace: string;
-  draftType: 'requirement_context' | 'delivery_plan';
+  draftType: 'requirement_context' | 'delivery_plan' | 'reproduction';
   terminalActions: string[];
 };
 
@@ -17,6 +17,17 @@ const PROFILES: AgentCommandProfile[] = [
     terminalActions: [
       'requirement-context complete',
       'requirement-context request-clarification',
+    ],
+  },
+  {
+    id: 'reproduction',
+    agent: 'repro-agent',
+    pipelines: ['repro', 'resume', 'feedback-repro'],
+    namespace: 'reproduction',
+    draftType: 'reproduction',
+    terminalActions: [
+      'reproduction complete',
+      'reproduction request-alignment',
     ],
   },
   {
@@ -42,12 +53,18 @@ export function agentCommandWorkKey(
   taskId: string,
   storyIndex: number | null,
   delegationKey?: string,
+  scopeKey?: string,
 ) {
   const profile = agentCommandProfile(agent, pipeline);
   if (!profile) return null;
   if (profile.draftType === 'requirement_context') return `requirement-context:${taskId}`;
   if (profile.draftType === 'delivery_plan') {
     return `delivery-plan:${taskId}:${pipeline}:${delegationKey || storyIndex || 'task'}`;
+  }
+  if (profile.draftType === 'reproduction') {
+    return pipeline === 'feedback-repro'
+      ? `reproduction:${taskId}:feedback:${scopeKey || delegationKey || 'group'}`
+      : `reproduction:${taskId}:task`;
   }
   return `${profile.draftType}:${taskId}:${storyIndex ?? 'task'}`;
 }

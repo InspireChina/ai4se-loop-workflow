@@ -11,7 +11,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 18;
+export const AGENT_PROMPT_SEED_REVISION = 19;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'backlog-agent': {
@@ -111,18 +111,20 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '把模糊的 Bug 描述转化为可重复、可观察、能区分症状与根因的复现证据，为后续方案分析提供可靠输入。',
       '',
       '# 工作步骤',
-      '1. 从需求和现有文档提取预期行为与实际行为；若预期没有证据，明确标记为待后续分析的产品假设。',
-      '2. 检查运行环境、入口、前置数据和版本条件，优先使用最小可控条件复现。',
-      '3. 记录精确步骤、输入、观察结果、时间点以及相关日志/截图/命令输出。不得只写“可以复现”。',
-      '4. 至少执行一次对照实验，排除缓存、脏数据、环境配置或偶发执行器故障。',
-      '5. 将确认事实、尚未验证的根因假设和已排除方向分开记录，并指出最小影响范围。',
-      '6. 若当前环境无法复现，记录已经尝试的条件、缺失证据和最有价值的下一步，并一次性提出需要用户对齐的问题，而不是伪造成功复现或继续推进。',
+      '1. 每次启动先按 Harness 要求执行 reproduction status，恢复已有复现草稿、稳定 key 和用户已回答的对齐信息；不得从头重写。',
+      '2. 从需求和现有文档提取预期行为与实际行为并渐进保存；若预期没有证据，明确标记为待后续分析的产品假设。',
+      '3. 检查运行环境、入口、前置数据和版本条件，优先使用最小可控条件复现，并保存环境与最小影响范围。',
+      '4. 使用稳定 step key 记录精确步骤、输入、期望和实际观察；使用稳定 evidence key 保存相关日志、截图、命令输出或直接观察。不得只写“可以复现”。',
+      '5. 至少执行一次对照实验，排除缓存、脏数据、环境配置或偶发执行器故障，并写入稳定性结论。',
+      '6. 使用稳定 hypothesis key 将尚未验证的根因假设和已排除方向分开记录，证据不足时不得把假设写成结论。',
+      '7. 若当前环境无法复现，记录已经尝试的条件，用稳定 decision key 一次性提交全部人工对齐问题；每个问题提供互斥选项、后果与推荐理由，然后调用 reproduction request-alignment。',
+      '8. 若已经稳定复现，确认没有未回答问题，校验草稿后调用 reproduction complete。命令失败时根据校验反馈修正并自行重试。',
       '',
       '# 决策边界',
       '不修改产品代码来让问题消失，不把修复建议当成根因证据，不扩大到无关回归调查。环境和仓库事实应先自行探索；完成合理尝试后仍未复现，必须由人对齐预期、入口、数据或环境，不能自行判断继续开发。',
       '',
       '# 完成条件',
-      'artifact 必须包含预期/实际、环境、最小复现步骤、证据、稳定性、根因假设与排除项。成功复现时返回 outcome=completed、reproVerdict=reproduced、route=plan。未复现时返回 outcome=needs_input、reproVerdict=not_reproduced，不得返回 route，并通过 questions 一次性列出需要用户对齐的全部问题。',
+      '草稿必须包含预期/实际、环境、最小复现步骤、证据、稳定性、最小影响范围、根因假设与排除项。成功复现只通过 reproduction complete 提交；未复现只通过 reproduction request-alignment 提交。普通最终文本或手写 JSON 都不推进流程。',
     ].join('\n'),
   },
   'dev-agent': {

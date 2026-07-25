@@ -246,10 +246,15 @@ function toolNameFromCursor(event: Record<string, unknown>) {
   };
 }
 
+function isAgentDomainCommand(command: string) {
+  const normalized = command.replace(/\\(["'])/g, '$1');
+  return /(?:^|[/\\])loop-agent\.mjs(?:["']|\s)/.test(normalized);
+}
+
 function summarizeCommand(command: string) {
   if (!command) return '';
   const normalized = command.replace(/["']/g, '');
-  if (/(?:^|[/\\])loop-agent\.mjs(?:["']|\s)/.test(command)) {
+  if (isAgentDomainCommand(command)) {
     if (normalized.includes(' requirement-context status')) return '恢复需求上下文草稿';
     if (normalized.includes(' requirement-context goal set')) return '保存需求目标';
     if (normalized.includes(' requirement-context outcome set')) return '保存用户可观察结果';
@@ -270,6 +275,19 @@ function summarizeCommand(command: string) {
     if (normalized.includes(' delivery-plan unit move')) return '调整交付单元顺序';
     if (normalized.includes(' delivery-plan validate')) return '校验交付计划草稿';
     if (normalized.includes(' delivery-plan complete')) return '完成交付计划';
+    if (normalized.includes(' reproduction status')) return '恢复问题复现草稿';
+    if (normalized.includes(' reproduction expected set')) return '保存预期行为';
+    if (normalized.includes(' reproduction actual set')) return '保存实际行为';
+    if (normalized.includes(' reproduction environment set')) return '保存复现环境';
+    if (normalized.includes(' reproduction stability set')) return '保存稳定性与对照结论';
+    if (normalized.includes(' reproduction impact set')) return '保存最小影响范围';
+    if (normalized.includes(' reproduction step ')) return '更新复现步骤';
+    if (normalized.includes(' reproduction evidence ')) return '更新复现证据';
+    if (normalized.includes(' reproduction hypothesis ')) return '更新根因假设';
+    if (normalized.includes(' reproduction question ')) return '更新人工对齐问题';
+    if (normalized.includes(' reproduction validate')) return '校验问题复现草稿';
+    if (normalized.includes(' reproduction request-alignment')) return '提交人工对齐请求';
+    if (normalized.includes(' reproduction complete')) return '完成问题复现';
     if (normalized.includes(' help')) return '查看当前 Agent 可用命令';
     return '更新 Agent 工作草稿';
   }
@@ -317,10 +335,12 @@ function parseCursorStdout(line: string, context: AgentExecutionContext) {
     const { tool, args, result } = toolNameFromCursor(event);
     if (type === 'tool_call' || event.tool_call) {
       const completed = subtype === 'completed';
+      const command = stringifyValue(args?.command);
+      const normalizedTool = isAgentDomainCommand(command) ? 'agent-command' : tool;
       const detail = completed
         ? summarizeResult(result)
-        : stringifyValue(args?.description) || summarizeCommand(stringifyValue(args?.command)) || stringifyValue(args?.path || args?.targetDirectory);
-      return standardToolLog('cursor', context, tool, completed, detail);
+        : stringifyValue(args?.description) || summarizeCommand(command) || stringifyValue(args?.path || args?.targetDirectory);
+      return standardToolLog('cursor', context, normalizedTool, completed, detail);
     }
     if (type === 'user' || type === 'system') return null;
     const content = (event.message as Record<string, unknown> | undefined)?.content;
@@ -343,7 +363,7 @@ function parseCodexStdout(line: string, context: AgentExecutionContext) {
       if (itemType === 'command_execution') {
         const completed = type === 'item.completed';
         const command = stringifyValue(item.command);
-        const tool = /(?:^|[/\\])loop-agent\.mjs(?:["']|\s)/.test(command)
+        const tool = isAgentDomainCommand(command)
           ? 'agent-command'
           : 'shell';
         const detail = completed

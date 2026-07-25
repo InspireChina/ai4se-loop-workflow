@@ -100,7 +100,7 @@ async function taskReadyForSplit(title: string) {
       recoveryResolutions: [],
     },
   );
-  const delegation = (await pipelineForTask(taskId))[0];
+  const delegation = (await pipelineForTask(taskId))[0] as DelegationEnvelope | undefined;
   assert.equal(delegation?.agent, 'story-splitter-agent');
   assert.equal(delegation?.pipeline, 'split');
   return { taskId, delegation: delegation! };

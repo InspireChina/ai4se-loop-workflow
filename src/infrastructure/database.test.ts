@@ -102,7 +102,7 @@ test('removes legacy task-level resume ownership from lane agents', () => {
   db.close();
 });
 
-test('adds delivery-plan drafts without losing existing requirement-context progress', () => {
+test('adds role drafts without losing progress from previously migrated agents', () => {
   const db = new Database(':memory:');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec(`
@@ -130,6 +130,18 @@ test('adds delivery-plan drafts without losing existing requirement-context prog
   `).run();
 
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/039_delivery_plan_drafts.sql'), 'utf8'));
+  db.prepare(`
+    INSERT INTO agent_work_drafts(
+      draft_id, work_key, draft_version, draft_type, task_id,
+      agent, status, last_execution_id
+    ) VALUES('DRAFT-plan', 'delivery-plan:REQ-existing:split:one', 1,
+      'delivery_plan', 'REQ-existing', 'story-splitter-agent', 'editing', 'EXEC-existing')
+  `).run();
+  db.prepare(`
+    INSERT INTO delivery_plan_drafts(draft_id, rationale, coverage)
+    VALUES('DRAFT-plan', '保留拆分依据', '保留覆盖说明')
+  `).run();
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/040_reproduction_drafts.sql'), 'utf8'));
 
   const context = db.prepare(`
     SELECT draft_type, goal
@@ -139,9 +151,15 @@ test('adds delivery-plan drafts without losing existing requirement-context prog
   `).get() as { draft_type: string; goal: string };
   const deliveryTables = db.prepare(`
     SELECT name FROM sqlite_master
-    WHERE type = 'table' AND name IN ('delivery_plan_drafts', 'delivery_plan_units')
+    WHERE type = 'table' AND name IN (
+      'delivery_plan_drafts', 'delivery_plan_units',
+      'reproduction_drafts', 'reproduction_steps'
+    )
     ORDER BY name
   `).all() as { name: string }[];
+  const plan = db.prepare(`
+    SELECT rationale, coverage FROM delivery_plan_drafts WHERE draft_id = 'DRAFT-plan'
+  `).get();
   const foreignKeyViolations = db.prepare('PRAGMA foreign_key_check').all();
   assert.deepEqual(context, {
     draft_type: 'requirement_context',
@@ -150,7 +168,10 @@ test('adds delivery-plan drafts without losing existing requirement-context prog
   assert.deepEqual(deliveryTables.map((row) => row.name), [
     'delivery_plan_drafts',
     'delivery_plan_units',
+    'reproduction_drafts',
+    'reproduction_steps',
   ]);
+  assert.deepEqual(plan, { rationale: '保留拆分依据', coverage: '保留覆盖说明' });
   assert.deepEqual(foreignKeyViolations, []);
   db.close();
 });

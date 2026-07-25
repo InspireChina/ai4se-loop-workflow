@@ -1,0 +1,104 @@
+PRAGMA foreign_keys = OFF;
+
+CREATE TABLE agent_work_drafts_next (
+  draft_id TEXT PRIMARY KEY,
+  work_key TEXT NOT NULL,
+  draft_version INTEGER NOT NULL CHECK(draft_version > 0),
+  draft_type TEXT NOT NULL CHECK(draft_type IN ('requirement_context', 'delivery_plan', 'reproduction')),
+  task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+  story_index INTEGER,
+  agent TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'editing'
+    CHECK(status IN ('editing', 'waiting_for_answers', 'submitted', 'abandoned')),
+  change_seq INTEGER NOT NULL DEFAULT 0 CHECK(change_seq >= 0),
+  last_execution_id TEXT REFERENCES execution_attempts(execution_id) ON DELETE SET NULL,
+  status_viewed_execution_id TEXT REFERENCES execution_attempts(execution_id) ON DELETE SET NULL,
+  terminal_execution_id TEXT REFERENCES execution_attempts(execution_id) ON DELETE SET NULL,
+  terminal_action TEXT,
+  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  submitted_at TEXT,
+  UNIQUE(work_key, draft_version)
+);
+
+INSERT INTO agent_work_drafts_next(
+  draft_id, work_key, draft_version, draft_type, task_id, story_index,
+  agent, status, change_seq, last_execution_id, status_viewed_execution_id,
+  terminal_execution_id, terminal_action, created_at, updated_at, submitted_at
+)
+SELECT
+  draft_id, work_key, draft_version, draft_type, task_id, story_index,
+  agent, status, change_seq, last_execution_id, status_viewed_execution_id,
+  terminal_execution_id, terminal_action, created_at, updated_at, submitted_at
+FROM agent_work_drafts;
+
+DROP TABLE agent_work_drafts;
+ALTER TABLE agent_work_drafts_next RENAME TO agent_work_drafts;
+CREATE INDEX idx_agent_work_drafts_execution
+  ON agent_work_drafts(last_execution_id, status);
+
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE reproduction_drafts (
+  draft_id TEXT PRIMARY KEY REFERENCES agent_work_drafts(draft_id) ON DELETE CASCADE,
+  expected_behavior TEXT,
+  actual_behavior TEXT,
+  environment TEXT,
+  stability TEXT,
+  impact_scope TEXT
+);
+
+CREATE TABLE reproduction_steps (
+  draft_id TEXT NOT NULL REFERENCES reproduction_drafts(draft_id) ON DELETE CASCADE,
+  step_key TEXT NOT NULL,
+  action TEXT NOT NULL,
+  expected TEXT NOT NULL,
+  actual TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  PRIMARY KEY(draft_id, step_key)
+);
+
+CREATE TABLE reproduction_evidence (
+  draft_id TEXT NOT NULL REFERENCES reproduction_drafts(draft_id) ON DELETE CASCADE,
+  evidence_key TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('log', 'screenshot', 'command', 'observation')),
+  content TEXT NOT NULL,
+  source TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  PRIMARY KEY(draft_id, evidence_key)
+);
+
+CREATE TABLE reproduction_hypotheses (
+  draft_id TEXT NOT NULL REFERENCES reproduction_drafts(draft_id) ON DELETE CASCADE,
+  hypothesis_key TEXT NOT NULL,
+  statement TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('suspected', 'excluded')),
+  evidence TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  PRIMARY KEY(draft_id, hypothesis_key)
+);
+
+CREATE TABLE reproduction_questions (
+  draft_id TEXT NOT NULL REFERENCES reproduction_drafts(draft_id) ON DELETE CASCADE,
+  decision_key TEXT NOT NULL,
+  title TEXT NOT NULL,
+  question TEXT NOT NULL,
+  impact TEXT NOT NULL,
+  recommendation_option_id TEXT,
+  recommendation_reason TEXT,
+  ordinal INTEGER NOT NULL,
+  PRIMARY KEY(draft_id, decision_key)
+);
+
+CREATE TABLE reproduction_question_options (
+  draft_id TEXT NOT NULL,
+  decision_key TEXT NOT NULL,
+  option_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  consequence TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  PRIMARY KEY(draft_id, decision_key, option_id),
+  FOREIGN KEY(draft_id, decision_key)
+    REFERENCES reproduction_questions(draft_id, decision_key)
+    ON DELETE CASCADE
+);
