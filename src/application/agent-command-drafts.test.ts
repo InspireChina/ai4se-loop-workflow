@@ -62,6 +62,50 @@ async function begin(taskId: string, pipeline = 'backlog') {
   return { delegation, executionId: started.attempt.execution_id, token };
 }
 
+async function beginDelegation(delegation: DelegationEnvelope, runSuffix = 'delivery-plan') {
+  const { beginExecutionAttempt } = await import('./executions');
+  const { issueAgentCommandToken } = await import('./agent-command-drafts');
+  const started = await beginExecutionAttempt({
+    runId: `RUN-command-${runSuffix}-${delegation.taskId}`,
+    delegation,
+    prompt: 'role-specific progressive command prompt',
+  });
+  const token = await issueAgentCommandToken(started.attempt.execution_id);
+  assert.ok(token);
+  return { delegation, executionId: started.attempt.execution_id, token };
+}
+
+async function taskReadyForSplit(title: string) {
+  const { createTask, pipelineForTask } = await import('./tasks');
+  const { applyAgentResult } = await import('./agent-results');
+  const taskId = await createTask({
+    title,
+    description: '管理员可以将当前筛选结果导出为 CSV，并且导出文件只包含当前筛选命中的字段。',
+  });
+  await applyAgentResult(
+    `RUN-command-backlog-${taskId}`,
+    backlogDelegation(taskId),
+    {
+      outcome: 'completed',
+      summary: '需求上下文完整，可以进入交付拆分。',
+      artifact: {
+        title: '需求分类与上下文',
+        content: '# 需求上下文\n\n管理员导出当前筛选结果。',
+      },
+      questions: [],
+      runtimeInputs: [],
+      classification: 'feature',
+      route: 'plan',
+      feedbackResolutions: [],
+      recoveryResolutions: [],
+    },
+  );
+  const delegation = (await pipelineForTask(taskId))[0];
+  assert.equal(delegation?.agent, 'story-splitter-agent');
+  assert.equal(delegation?.pipeline, 'split');
+  return { taskId, delegation: delegation! };
+}
+
 test('requires status first, accepts progressive edits, and submits a deterministic route without Agent JSON', async () => {
   const { createTask, getTask } = await import('./tasks');
   const { applyAgentResult } = await import('./agent-results');
@@ -321,4 +365,136 @@ test('exposes the same execution-scoped protocol through the cross-platform Node
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('story splitter progressively restores, validates and submits an ordered delivery plan', async () => {
+  const { getTask } = await import('./tasks');
+  const { applyAgentResult } = await import('./agent-results');
+  const {
+    completeExecution,
+    failExecution,
+  } = await import('./executions');
+  const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+  const { taskId, delegation } = await taskReadyForSplit('渐进式交付拆分');
+  const first = await beginDelegation(delegation, 'delivery-plan-first');
+
+  await assert.rejects(
+    command(first.executionId, first.token!, [
+      'delivery-plan', 'rationale', 'set', '--text', '按用户可独立验收的业务闭环拆分',
+    ]),
+    /尚未查看草稿状态/,
+  );
+  const initial = await command(first.executionId, first.token!, ['delivery-plan', 'status']);
+  assert.match(initial, /交付计划草稿 v1/);
+  assert.match(initial, /至少需要一个可独立交付/);
+  await command(first.executionId, first.token!, [
+    'delivery-plan', 'rationale', 'set', '--text', '按用户可独立验收的业务闭环拆分',
+  ]);
+  await command(first.executionId, first.token!, [
+    'delivery-plan', 'coverage', 'set', '--text', '覆盖导出入口、筛选继承与 CSV 下载结果',
+  ]);
+  await command(first.executionId, first.token!, [
+    'delivery-plan', 'unit', 'upsert',
+    '--key', 'download-filtered-csv',
+    '--title', '管理员下载当前筛选结果',
+    '--actor', '管理员',
+    '--trigger', '管理员在已有筛选条件的列表页点击导出',
+    '--outcome', '浏览器下载只包含筛选命中数据的 CSV 文件',
+    '--acceptance', '下载文件的记录与字段均和当前筛选结果一致',
+  ]);
+  await failExecution(first.executionId, '模拟 Agent 进程中断');
+
+  const resumed = await beginDelegation(delegation, 'delivery-plan-retry');
+  await assert.rejects(
+    command(resumed.executionId, resumed.token!, ['delivery-plan', 'validate']),
+    /尚未查看草稿状态/,
+  );
+  const restored = await command(resumed.executionId, resumed.token!, ['delivery-plan', 'status']);
+  assert.match(restored, /交付计划草稿 v1/);
+  assert.match(restored, /download-filtered-csv：管理员下载当前筛选结果/);
+  await command(resumed.executionId, resumed.token!, [
+    'delivery-plan', 'unit', 'upsert',
+    '--key', 'configure-export-fields',
+    '--title', '管理员确认导出字段',
+    '--actor', '管理员',
+    '--trigger', '管理员打开导出操作',
+    '--outcome', '系统显示并采用当前列表可导出的字段',
+    '--acceptance', '不在当前结果中的隐藏字段不会进入 CSV',
+  ]);
+  await command(resumed.executionId, resumed.token!, [
+    'delivery-plan', 'ordering', 'set', '--text', '先确认导出字段，再执行文件下载',
+  ]);
+  await command(resumed.executionId, resumed.token!, [
+    'delivery-plan', 'unit', 'move', '--key', 'configure-export-fields', '--position', '1',
+  ]);
+  assert.equal(
+    await command(resumed.executionId, resumed.token!, ['delivery-plan', 'validate']),
+    '交付计划草稿结构校验通过。',
+  );
+  assert.match(
+    await command(resumed.executionId, resumed.token!, ['delivery-plan', 'complete']),
+    /提交成功/,
+  );
+  assert.match(
+    await command(resumed.executionId, resumed.token!, ['delivery-plan', 'complete']),
+    /已经提交成功/,
+  );
+
+  const result = await readAgentCommandSubmission(resumed.executionId);
+  assert.deepEqual(
+    result?.deliveryUnits?.map((unit) => unit.title),
+    ['管理员确认导出字段', '管理员下载当前筛选结果'],
+  );
+  assert.match(result?.artifact?.content || '', /稳定标识：`configure-export-fields`/);
+  assert.match(result?.artifact?.content || '', /先确认导出字段，再执行文件下载/);
+  await applyAgentResult(`RUN-command-split-${taskId}`, delegation, result!, {
+    executionId: resumed.executionId,
+  });
+  await completeExecution(resumed.executionId);
+
+  const detail = await getTask(taskId);
+  assert.deepEqual(
+    detail?.stories.map((story) => story.title),
+    ['管理员确认导出字段', '管理员下载当前筛选结果'],
+  );
+  assert.equal(detail?.task.current_subagent, 'analyst-agent');
+  assert.equal(detail?.task.agile_status, 'ready for dev');
+});
+
+test('feedback split uses the same progressive protocol with an isolated draft', async () => {
+  const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+  const { taskId, delegation: splitDelegation } = await taskReadyForSplit('评论追加交付拆分');
+  const feedbackDelegation: DelegationEnvelope = {
+    ...splitDelegation,
+    pipeline: 'feedback-split',
+    description: '将范围新增评论拆为追加交付单元',
+    feedbackBatchId: `FB-${taskId}`,
+    feedbackGroupId: `FG-${taskId}`,
+  };
+  const active = await beginDelegation(feedbackDelegation, 'feedback-split');
+  assert.match(
+    await command(active.executionId, active.token!, ['help']),
+    /delivery-plan unit upsert/,
+  );
+  const status = await command(active.executionId, active.token!, ['delivery-plan', 'status']);
+  assert.match(status, /交付计划草稿 v1/);
+  assert.doesNotMatch(status, /download-filtered-csv/);
+  await command(active.executionId, active.token!, [
+    'delivery-plan', 'rationale', 'set', '--text', '评论新增了一个可独立验收的业务范围',
+  ]);
+  await command(active.executionId, active.token!, [
+    'delivery-plan', 'coverage', 'set', '--text', '只覆盖评论要求的批量删除能力',
+  ]);
+  await command(active.executionId, active.token!, [
+    'delivery-plan', 'unit', 'upsert',
+    '--key', 'batch-delete',
+    '--title', '管理员批量删除筛选结果',
+    '--actor', '管理员',
+    '--trigger', '管理员选择多条记录并确认删除',
+    '--outcome', '选中记录被删除且列表刷新',
+    '--acceptance', '仅选中记录被删除，失败项有明确提示',
+  ]);
+  await command(active.executionId, active.token!, ['delivery-plan', 'complete']);
+  const result = await readAgentCommandSubmission(active.executionId);
+  assert.deepEqual(result?.deliveryUnits, [{ title: '管理员批量删除筛选结果' }]);
 });

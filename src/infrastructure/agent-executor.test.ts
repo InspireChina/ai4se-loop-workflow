@@ -67,6 +67,24 @@ test('labels command-driven draft updates as Agent domain commands', () => {
   assert.match(parsed || '', /恢复需求上下文草稿/);
 });
 
+test('labels quoted delivery-plan arguments with the specific progressive action', () => {
+  const line = JSON.stringify({
+    type: 'item.started',
+    item: {
+      type: 'command_execution',
+      command: "/bin/zsh -lc 'node \"/app/scripts/loop/loop-agent.mjs\" '\"'\"'delivery-plan'\"'\"' '\"'\"'unit'\"'\"' '\"'\"'upsert'\"'\"' --key csv-export'",
+    },
+  });
+  const parsed = getAgentExecutor('codex').parseStdout(line, {
+    agent: 'story-splitter-agent',
+    taskId: 'REQ-1',
+    storyIndex: null,
+    pipeline: 'split',
+  });
+  assert.match(parsed || '', /tool=agent-command/);
+  assert.match(parsed || '', /保存交付单元/);
+});
+
 test('extracts final assistant text from every executor stream', () => {
   const result = '{"outcome":"completed","summary":"ok"}';
   assert.equal(extractAgentFinalText('codex', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: result } })), result);

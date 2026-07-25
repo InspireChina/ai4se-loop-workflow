@@ -219,7 +219,9 @@ classDiagram
 | Prompt / Memory 版本与自动演化 | Agent Configuration；Harness 约束提升与回滚 |
 | Loop Engineering 自身缺陷诊断 | Software Maintenance Agent 提议；Git/Harness 决定候选与落地 |
 
-角色提交能力由 Agent Profile 明确声明。需求梳理 Agent 使用 `loop-agent requirement-context` 渐进维护 Application 拥有的草稿：每次进程启动先读取 status，编辑命令只更新草稿，`complete` / `request-clarification` 才产生 Result Receipt。execution token 只授权当前 Agent 的命令空间，Agent 不接触 SQLite。其他尚未迁移的 Agent 仍通过 `submit-agent-result --input <result.json>` 提交一次性 Result Receipt。普通最终回复不承担控制面协议；Runner 只为旧 Agent 保留最终文本 JSON fallback。
+角色提交能力由 Agent Profile 明确声明。需求梳理 Agent 使用 `loop-agent requirement-context`，交付规划 Agent 使用 `loop-agent delivery-plan`，渐进维护 Application 拥有的角色草稿：每次进程启动先读取 status，编辑命令只更新草稿，角色终止命令才产生 Result Receipt。execution token 只授权当前 Agent 的命令空间，Agent 不接触 SQLite。其他尚未迁移的 Agent 仍通过 `submit-agent-result --input <result.json>` 提交一次性 Result Receipt。普通最终回复不承担控制面协议；Runner 只为旧 Agent 保留最终文本 JSON fallback。
+
+`DeliveryPlanDraft` 属于交付规划 Application 能力，不直接改变 `Task` 聚合。它记录拆分依据、整体覆盖、排序说明和带稳定 `unit_key` 的有序候选单元。只有 `delivery-plan complete` 通过完整性校验后，Application 才把草稿投影为既有 `AgentResult.deliveryUnits` 并调用领域状态机；重试恢复草稿与业务推进因此保持分离。
 
 ## 6. SQLite 持久化映射
 

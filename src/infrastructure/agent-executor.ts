@@ -248,19 +248,29 @@ function toolNameFromCursor(event: Record<string, unknown>) {
 
 function summarizeCommand(command: string) {
   if (!command) return '';
+  const normalized = command.replace(/["']/g, '');
   if (/(?:^|[/\\])loop-agent\.mjs(?:["']|\s)/.test(command)) {
-    if (command.includes(' requirement-context status')) return '恢复需求上下文草稿';
-    if (command.includes(' requirement-context goal set')) return '保存需求目标';
-    if (command.includes(' requirement-context outcome set')) return '保存用户可观察结果';
-    if (command.includes(' requirement-context classification set')) return '保存需求分类';
-    if (command.includes(' requirement-context fact ')) return '更新已确认事实';
-    if (command.includes(' requirement-context constraint ')) return '更新需求约束';
-    if (command.includes(' requirement-context scope ')) return '更新范围边界';
-    if (command.includes(' requirement-context question ')) return '更新澄清问题';
-    if (command.includes(' requirement-context validate')) return '校验需求上下文草稿';
-    if (command.includes(' requirement-context request-clarification')) return '提交澄清请求';
-    if (command.includes(' requirement-context complete')) return '完成需求上下文';
-    if (command.includes(' help')) return '查看当前 Agent 可用命令';
+    if (normalized.includes(' requirement-context status')) return '恢复需求上下文草稿';
+    if (normalized.includes(' requirement-context goal set')) return '保存需求目标';
+    if (normalized.includes(' requirement-context outcome set')) return '保存用户可观察结果';
+    if (normalized.includes(' requirement-context classification set')) return '保存需求分类';
+    if (normalized.includes(' requirement-context fact ')) return '更新已确认事实';
+    if (normalized.includes(' requirement-context constraint ')) return '更新需求约束';
+    if (normalized.includes(' requirement-context scope ')) return '更新范围边界';
+    if (normalized.includes(' requirement-context question ')) return '更新澄清问题';
+    if (normalized.includes(' requirement-context validate')) return '校验需求上下文草稿';
+    if (normalized.includes(' requirement-context request-clarification')) return '提交澄清请求';
+    if (normalized.includes(' requirement-context complete')) return '完成需求上下文';
+    if (normalized.includes(' delivery-plan status')) return '恢复交付计划草稿';
+    if (normalized.includes(' delivery-plan rationale set')) return '保存交付拆分依据';
+    if (normalized.includes(' delivery-plan coverage set')) return '保存交付覆盖说明';
+    if (normalized.includes(' delivery-plan ordering set')) return '保存交付排序说明';
+    if (normalized.includes(' delivery-plan unit upsert')) return '保存交付单元';
+    if (normalized.includes(' delivery-plan unit remove')) return '删除交付单元';
+    if (normalized.includes(' delivery-plan unit move')) return '调整交付单元顺序';
+    if (normalized.includes(' delivery-plan validate')) return '校验交付计划草稿';
+    if (normalized.includes(' delivery-plan complete')) return '完成交付计划';
+    if (normalized.includes(' help')) return '查看当前 Agent 可用命令';
     return '更新 Agent 工作草稿';
   }
   if (command.includes(' agent-context ')) return '按需读取 execution Context Snapshot';

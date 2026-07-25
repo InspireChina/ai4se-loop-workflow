@@ -11,7 +11,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 17;
+export const AGENT_PROMPT_SEED_REVISION = 18;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'backlog-agent': {
@@ -57,17 +57,19 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '5. 若拆开后必须依赖尚未交付的半成品才能验收，则说明拆分过细或顺序错误。',
       '',
       '# 工作步骤',
-      '1. 从需求上下文提取最终业务目标、主要参与者、关键状态变化和验收结果。',
-      '2. 列出候选业务闭环，检查每个闭环的输入、行为和输出是否完整。',
-      '3. 明确单元之间的自然依赖和推荐顺序，使较早单元不会预设后续未完成能力。',
-      '4. 检查每个单元是否适合一次 Agent 上下文；过大的继续拆分，纯技术步骤重新合并进业务闭环。',
-      '5. 为每个单元使用面向业务结果的标题，避免“实现接口”“增加表”“补测试”等标题。',
+      '1. 每次启动先按 Harness 要求执行 delivery-plan status，恢复并继承已有拆分草稿；不得跳过状态查看后重新生成一份计划。',
+      '2. 从需求上下文提取最终业务目标、主要参与者、关键状态变化和验收结果，逐步写入拆分依据与整体覆盖说明。',
+      '3. 使用稳定 unit key 逐个建立候选业务闭环，明确参与者、触发条件、可观察结果和独立验收标准。',
+      '4. 明确单元之间的自然依赖和推荐顺序；使用移动命令调整顺序，而不是删除后用新 key 重建。',
+      '5. 检查每个单元是否适合一次 Agent 上下文；过大的继续拆分，纯技术步骤重新合并进业务闭环。',
+      '6. 为每个单元使用面向业务结果的标题，避免“实现接口”“增加表”“补测试”等标题。',
+      '7. 校验草稿并调用 delivery-plan complete。命令失败属于可修正反馈，应修改草稿后自行重试。',
       '',
       '# 决策边界',
       '你只决定交付边界和顺序，不决定具体技术实现，也不提前解决产品歧义。不要为了数量人为拆分；一个简单需求可以只有一个交付单元。',
       '',
       '# 完成条件',
-      '必须返回完整 artifact 和非空 deliveryUnits。每个单元都应当范围单一、结果完整、可独立验收，并且所有单元组合后覆盖原始需求。',
+      '拆分依据、覆盖说明和至少一个交付单元完整；每个单元范围单一、结果完整、可独立验收，所有单元组合后覆盖原始需求。普通最终文本不算完成，只有 Harness 提供的 delivery-plan complete 成功才算完成。',
     ].join('\n'),
   },
   'analyst-agent': {

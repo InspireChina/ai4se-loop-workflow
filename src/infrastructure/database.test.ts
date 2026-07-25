@@ -101,3 +101,56 @@ test('removes legacy task-level resume ownership from lane agents', () => {
   ]);
   db.close();
 });
+
+test('adds delivery-plan drafts without losing existing requirement-context progress', () => {
+  const db = new Database(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec(`
+    CREATE TABLE tasks (task_id TEXT PRIMARY KEY);
+    CREATE TABLE execution_attempts (
+      execution_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(task_id),
+      status TEXT NOT NULL
+    );
+    INSERT INTO tasks(task_id) VALUES('REQ-existing');
+    INSERT INTO execution_attempts(execution_id, task_id, status)
+    VALUES('EXEC-existing', 'REQ-existing', 'running');
+  `);
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/038_agent_command_drafts.sql'), 'utf8'));
+  db.prepare(`
+    INSERT INTO agent_work_drafts(
+      draft_id, work_key, draft_version, draft_type, task_id,
+      agent, status, last_execution_id
+    ) VALUES('DRAFT-existing', 'requirement-context:REQ-existing', 1,
+      'requirement_context', 'REQ-existing', 'backlog-agent', 'editing', 'EXEC-existing')
+  `).run();
+  db.prepare(`
+    INSERT INTO requirement_context_drafts(draft_id, goal)
+    VALUES('DRAFT-existing', '保留已有渐进草稿')
+  `).run();
+
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/039_delivery_plan_drafts.sql'), 'utf8'));
+
+  const context = db.prepare(`
+    SELECT draft_type, goal
+    FROM agent_work_drafts
+    JOIN requirement_context_drafts USING(draft_id)
+    WHERE draft_id = 'DRAFT-existing'
+  `).get() as { draft_type: string; goal: string };
+  const deliveryTables = db.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name IN ('delivery_plan_drafts', 'delivery_plan_units')
+    ORDER BY name
+  `).all() as { name: string }[];
+  const foreignKeyViolations = db.prepare('PRAGMA foreign_key_check').all();
+  assert.deepEqual(context, {
+    draft_type: 'requirement_context',
+    goal: '保留已有渐进草稿',
+  });
+  assert.deepEqual(deliveryTables.map((row) => row.name), [
+    'delivery_plan_drafts',
+    'delivery_plan_units',
+  ]);
+  assert.deepEqual(foreignKeyViolations, []);
+  db.close();
+});

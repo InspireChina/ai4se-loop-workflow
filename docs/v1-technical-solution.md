@@ -154,7 +154,9 @@ Runner 的控制循环：
 
 Review Agent 只返回完整 artifact 和 `verdict=report_ready`。Feedback Agent 一次读取冻结的评论批次，将评论按共同验收目标分为直接回复、历史说明、报告修订、Bug、行为修订、范围新增、技术调整或长期建议。Application 不接受 `targetStage`、`targetAgent` 或评论驱动的 rewind；需要工程修改时只在既有交付单元之后追加新的交付单元，并重新经过 Analysis、Dev、Test 和 Feedback 独立验证。既有文档与 Slice Spec 保持为历史证据，只在最终结卡报告中汇总最终事实。反馈批次使用需求内递增的 `batch_number`，工作组使用批次内递增的 `group_order`，保证数据库、Agent 上下文和页面展示的执行顺序一致，不依赖时间戳或随机 UUID 排序。
 
-需求梳理 Agent 已迁移为 execution 绑定的渐进命令协议：它必须先调用 `loop-agent requirement-context status` 恢复持久草稿，再用角色专属命令逐项写入目标、结果、分类、事实、约束、范围和问题。每个条目使用跨轮次稳定 key；恢复时覆盖原 key，不能靠换名堆叠同义内容。只有 `complete` 或 `request-clarification` 终止命令会由 Application 生成内部 Agent Result 并推进状态，普通最终回复不参与控制面。长文本可通过 `--<字段>-file` 读取 UTF-8 文件，避免 Windows 命令行长度限制。
+需求梳理 Agent 与交付规划 Agent 已迁移为 execution 绑定的渐进命令协议。需求梳理 Agent 必须先调用 `loop-agent requirement-context status` 恢复持久草稿，再逐项写入目标、结果、分类、事实、约束、范围和问题；交付规划 Agent 必须先调用 `loop-agent delivery-plan status`，再逐项维护拆分依据、覆盖说明、排序和交付单元。每个条目使用跨轮次稳定 key；恢复时覆盖原 key，不能靠换名堆叠同义内容。只有角色声明的终止命令会由 Application 生成内部 Agent Result 并推进状态，普通最终回复不参与控制面。长文本可通过 `--<字段>-file` 读取 UTF-8 文件，避免 Windows 命令行长度限制。
+
+交付规划草稿按 `需求 + pipeline + delegation` 隔离。相同委派的失败重试会恢复未完成草稿；普通拆分和评论范围新增触发的追加拆分互不污染。`delivery-plan complete` 成功后，Application 从数据库草稿确定性生成交付计划文档和有序交付单元，再交给既有状态机应用。
 
 Application 负责校验最小结果协议、写入数据库和推进状态。对 Analyst，Application 只检查决策引用有效、待确认规格不能冒充 resolved，以及仍有未决歧义时不能推进；完整性和专业语义由 Analyst Prompt、用户对齐和后续 Test 流程保证。Agent 只能调用受 execution 凭证约束的角色命令及只读上下文命令，不能写 `.project` 文档、直接写 SQLite 或主动写运行日志。
 
