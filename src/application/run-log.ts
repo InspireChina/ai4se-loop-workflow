@@ -151,6 +151,14 @@ function summarizeCommand(command: string) {
     if (normalized.includes(' feedback request-clarification')) return '提交反馈澄清问题';
     if (normalized.includes(' feedback resolve')) return '提交反馈已满足';
     if (normalized.includes(' feedback reopen')) return '提交反馈重新处理';
+    if (normalized.includes(' review status')) return '恢复结卡报告草稿';
+    if (normalized.includes(' review title set')) return '保存结卡报告标题';
+    if (normalized.includes(' review summary set')) return '保存结卡摘要';
+    if (normalized.includes(' review section ')) return '更新结卡报告章节';
+    if (normalized.includes(' review evidence ')) return '更新结卡可追溯证据';
+    if (normalized.includes(' review runtime-input ')) return '更新结卡运行信息';
+    if (normalized.includes(' review complete')) return '提交结卡报告';
+    if (normalized.includes(' review request-input')) return '提交结卡运行信息请求';
     if (normalized.includes(' help')) return '查看当前 Agent 可用命令';
     return '更新 Agent 工作草稿';
   }

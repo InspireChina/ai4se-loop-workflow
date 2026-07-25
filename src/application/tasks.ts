@@ -905,7 +905,44 @@ export async function submitRuntimeInputs(taskId: string, requestedLane?: TaskLa
   const lane = requestedLane
     ? lanes.find((item) => item.lane === requestedLane)
     : lanes.find((item) => item.status === 'waiting_for_runtime_input');
-  if (!lane || lane.status !== 'waiting_for_runtime_input' || !lane.current_agent) throw new Error('指定 Lane 当前不在等待运行信息状态');
+  const controlAgent = !requestedLane
+    && task.run_state === 'waiting_for_runtime_input'
+    && task.current_subagent
+    && laneForAgent(task.current_subagent) === 'control'
+    ? task.current_subagent
+    : null;
+  if ((!lane || lane.status !== 'waiting_for_runtime_input' || !lane.current_agent) && !controlAgent) {
+    throw new Error('当前流程不在等待运行信息状态');
+  }
+  if (controlAgent) {
+    const pending = (db.prepare(`
+      SELECT COUNT(*) AS count FROM runtime_input_requests
+      WHERE task_id = ? AND source_agent = ? AND status = 'pending'
+    `).get(taskId, controlAgent) as { count: number }).count;
+    if (pending) throw new Error('仍有未回答的运行信息，不能继续执行');
+    const answered = (db.prepare(`
+      SELECT COUNT(*) AS count FROM runtime_input_requests
+      WHERE task_id = ? AND source_agent = ? AND status = 'answered'
+    `).get(taskId, controlAgent) as { count: number }).count;
+    if (!answered) throw new Error('没有可提交的运行信息回答');
+    db.exec('BEGIN');
+    try {
+      db.prepare(`
+        UPDATE tasks
+        SET run_state = 'runnable', resume_pending = 1, blocked_reason = NULL,
+            next_step = ?, last_actor = 'human', updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ?
+      `).run(`运行信息已补充，交回 ${controlAgent} 从当前阶段继续`, taskId);
+      addEvent(db, taskId, 'human', 'RuntimeInputsSubmitted', `提交需求级运行信息回答，交回 ${controlAgent}。`);
+      db.exec('COMMIT');
+    } catch (error) {
+      db.exec('ROLLBACK');
+      throw error;
+    }
+    refreshPages('/', `/tasks/${taskId}`);
+    return;
+  }
+  if (!lane || !lane.current_agent) throw new Error('指定 Lane 当前不在等待运行信息状态');
   const agents = lane.lane === 'analysis' ? ['analyst-agent'] : ['dev-agent', 'test-agent'];
   const placeholders = agents.map(() => '?').join(', ');
   const pending = (db.prepare(`

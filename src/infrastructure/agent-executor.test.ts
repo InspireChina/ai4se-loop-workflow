@@ -227,6 +227,28 @@ test('labels progressive feedback grouping as an Agent domain action', () => {
   assert.match(parsed || '', /更新反馈工作组/);
 });
 
+test('labels progressive review evidence as an Agent domain action', () => {
+  const line = JSON.stringify({
+    type: 'tool_call',
+    subtype: 'started',
+    tool_call: {
+      shellToolCall: {
+        args: {
+          command: 'node "/app/scripts/loop/loop-agent.mjs" review evidence upsert --key independent-test --section verification',
+        },
+      },
+    },
+  });
+  const parsed = getAgentExecutor('cursor').parseStdout(line, {
+    agent: 'review-agent',
+    taskId: 'REQ-1',
+    storyIndex: null,
+    pipeline: 'review',
+  });
+  assert.match(parsed || '', /tool=agent-command/);
+  assert.match(parsed || '', /更新结卡可追溯证据/);
+});
+
 test('extracts final assistant text from every executor stream', () => {
   const result = '{"outcome":"completed","summary":"ok"}';
   assert.equal(extractAgentFinalText('codex', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: result } })), result);

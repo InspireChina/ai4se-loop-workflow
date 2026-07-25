@@ -3,7 +3,7 @@ export type AgentCommandProfile = {
   agent: string;
   pipelines: string[];
   namespace: string;
-  draftType: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification' | 'feedback';
+  draftType: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification' | 'feedback' | 'review';
   terminalActions: string[];
 };
 
@@ -89,6 +89,17 @@ const PROFILES: AgentCommandProfile[] = [
     ],
   },
   {
+    id: 'review',
+    agent: 'review-agent',
+    pipelines: ['review', 'feedback-report', 'resume'],
+    namespace: 'review',
+    draftType: 'review',
+    terminalActions: [
+      'review complete',
+      'review request-input',
+    ],
+  },
+  {
     id: 'delivery-plan',
     agent: 'story-splitter-agent',
     pipelines: ['split', 'feedback-split'],
@@ -135,6 +146,9 @@ export function agentCommandWorkKey(
   }
   if (profile.draftType === 'feedback') {
     return `feedback:${taskId}:${pipeline}:${scopeKey || delegationKey || 'work'}`;
+  }
+  if (profile.draftType === 'review') {
+    return `review:${taskId}:${pipeline === 'feedback-report' ? 'feedback' : 'closure'}:${scopeKey || delegationKey || 'report'}`;
   }
   return `${profile.draftType}:${taskId}:${storyIndex ?? 'task'}`;
 }

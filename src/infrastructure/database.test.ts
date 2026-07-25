@@ -197,6 +197,18 @@ test('adds role drafts without losing progress from previously migrated agents',
     VALUES('DRAFT-verification', '保留验证结论')
   `).run();
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/044_feedback_drafts.sql'), 'utf8'));
+  db.prepare(`
+    INSERT INTO agent_work_drafts(
+      draft_id, work_key, draft_version, draft_type, task_id,
+      agent, status, last_execution_id
+    ) VALUES('DRAFT-feedback', 'feedback:REQ-existing:feedback-triage:batch-1', 1,
+      'feedback', 'REQ-existing', 'feedback-agent', 'editing', 'EXEC-existing')
+  `).run();
+  db.prepare(`
+    INSERT INTO feedback_drafts(draft_id, mode)
+    VALUES('DRAFT-feedback', 'triage')
+  `).run();
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/045_review_drafts.sql'), 'utf8'));
 
   const context = db.prepare(`
     SELECT draft_type, goal
@@ -212,7 +224,8 @@ test('adds role drafts without losing progress from previously migrated agents',
       'analysis_drafts', 'analysis_decisions',
       'development_drafts', 'development_criteria',
       'verification_drafts', 'verification_criteria',
-      'feedback_drafts', 'feedback_draft_groups'
+      'feedback_drafts', 'feedback_draft_groups',
+      'review_drafts', 'review_sections', 'review_evidence'
     )
     ORDER BY name
   `).all() as { name: string }[];
@@ -232,6 +245,9 @@ test('adds role drafts without losing progress from previously migrated agents',
   const verification = db.prepare(`
     SELECT summary FROM verification_drafts WHERE draft_id = 'DRAFT-verification'
   `).get();
+  const feedback = db.prepare(`
+    SELECT mode FROM feedback_drafts WHERE draft_id = 'DRAFT-feedback'
+  `).get();
   const foreignKeyViolations = db.prepare('PRAGMA foreign_key_check').all();
   assert.deepEqual(context, {
     draft_type: 'requirement_context',
@@ -248,6 +264,9 @@ test('adds role drafts without losing progress from previously migrated agents',
     'feedback_drafts',
     'reproduction_drafts',
     'reproduction_steps',
+    'review_drafts',
+    'review_evidence',
+    'review_sections',
     'verification_criteria',
     'verification_drafts',
   ]);
@@ -256,6 +275,7 @@ test('adds role drafts without losing progress from previously migrated agents',
   assert.deepEqual(analysis, { goal: '保留分析目标' });
   assert.deepEqual(development, { summary: '保留开发结论' });
   assert.deepEqual(verification, { summary: '保留验证结论' });
+  assert.deepEqual(feedback, { mode: 'triage' });
   assert.deepEqual(foreignKeyViolations, []);
   db.close();
 });
