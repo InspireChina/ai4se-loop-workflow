@@ -95,6 +95,23 @@ function summarizeCommand(command: string) {
     if (normalized.includes(' reproduction validate')) return '校验问题复现草稿';
     if (normalized.includes(' reproduction request-alignment')) return '提交人工对齐请求';
     if (normalized.includes(' reproduction complete')) return '完成问题复现';
+    if (normalized.includes(' analysis status')) return '恢复方案规格草稿';
+    if (normalized.includes(' analysis goal set')) return '保存交付单元目标';
+    if (normalized.includes(' analysis scope ')) return '更新方案范围';
+    if (normalized.includes(' analysis behavior ')) return '更新用户可观察行为';
+    if (normalized.includes(' analysis decision option-')) return '更新决策选项';
+    if (normalized.includes(' analysis decision recommend')) return '更新决策推荐';
+    if (normalized.includes(' analysis decision depends-')) return '更新决策依赖';
+    if (normalized.includes(' analysis decision resolve')) return '解决关键决策';
+    if (normalized.includes(' analysis decision reopen')) return '重新打开关键决策';
+    if (normalized.includes(' analysis decision ')) return '更新关键决策';
+    if (normalized.includes(' analysis criterion ')) return '更新验收标准';
+    if (normalized.includes(' analysis verification ')) return '更新验证计划';
+    if (normalized.includes(' analysis dependency ')) return '更新方案依赖';
+    if (normalized.includes(' analysis budget ')) return '更新 Change Budget';
+    if (normalized.includes(' analysis validate')) return '校验方案规格草稿';
+    if (normalized.includes(' analysis request-clarification')) return '提交方案澄清问题';
+    if (normalized.includes(' analysis complete')) return '完成方案分析';
     if (normalized.includes(' help')) return '查看当前 Agent 可用命令';
     return '更新 Agent 工作草稿';
   }

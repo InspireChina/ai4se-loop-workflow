@@ -143,6 +143,24 @@ test('labels Cursor shell wrappers around progressive commands as Agent domain a
   assert.match(parsed || '', /恢复问题复现草稿/);
 });
 
+test('labels progressive analysis decisions as Agent domain actions', () => {
+  const line = JSON.stringify({
+    type: 'item.started',
+    item: {
+      type: 'command_execution',
+      command: 'node "/app/scripts/loop/loop-agent.mjs" analysis decision resolve --key output-mode',
+    },
+  });
+  const parsed = getAgentExecutor('codex').parseStdout(line, {
+    agent: 'analyst-agent',
+    taskId: 'REQ-1',
+    storyIndex: 1,
+    pipeline: 'resume',
+  });
+  assert.match(parsed || '', /tool=agent-command/);
+  assert.match(parsed || '', /解决关键决策/);
+});
+
 test('extracts final assistant text from every executor stream', () => {
   const result = '{"outcome":"completed","summary":"ok"}';
   assert.equal(extractAgentFinalText('codex', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: result } })), result);

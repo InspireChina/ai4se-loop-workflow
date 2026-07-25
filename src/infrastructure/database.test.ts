@@ -142,6 +142,18 @@ test('adds role drafts without losing progress from previously migrated agents',
     VALUES('DRAFT-plan', '保留拆分依据', '保留覆盖说明')
   `).run();
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/040_reproduction_drafts.sql'), 'utf8'));
+  db.prepare(`
+    INSERT INTO agent_work_drafts(
+      draft_id, work_key, draft_version, draft_type, task_id,
+      agent, status, last_execution_id
+    ) VALUES('DRAFT-repro', 'reproduction:REQ-existing:task', 1,
+      'reproduction', 'REQ-existing', 'repro-agent', 'editing', 'EXEC-existing')
+  `).run();
+  db.prepare(`
+    INSERT INTO reproduction_drafts(draft_id, expected_behavior, actual_behavior)
+    VALUES('DRAFT-repro', '保留预期', '保留实际')
+  `).run();
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/041_analysis_drafts.sql'), 'utf8'));
 
   const context = db.prepare(`
     SELECT draft_type, goal
@@ -153,12 +165,17 @@ test('adds role drafts without losing progress from previously migrated agents',
     SELECT name FROM sqlite_master
     WHERE type = 'table' AND name IN (
       'delivery_plan_drafts', 'delivery_plan_units',
-      'reproduction_drafts', 'reproduction_steps'
+      'reproduction_drafts', 'reproduction_steps',
+      'analysis_drafts', 'analysis_decisions'
     )
     ORDER BY name
   `).all() as { name: string }[];
   const plan = db.prepare(`
     SELECT rationale, coverage FROM delivery_plan_drafts WHERE draft_id = 'DRAFT-plan'
+  `).get();
+  const reproduction = db.prepare(`
+    SELECT expected_behavior, actual_behavior
+    FROM reproduction_drafts WHERE draft_id = 'DRAFT-repro'
   `).get();
   const foreignKeyViolations = db.prepare('PRAGMA foreign_key_check').all();
   assert.deepEqual(context, {
@@ -166,12 +183,15 @@ test('adds role drafts without losing progress from previously migrated agents',
     goal: '保留已有渐进草稿',
   });
   assert.deepEqual(deliveryTables.map((row) => row.name), [
+    'analysis_decisions',
+    'analysis_drafts',
     'delivery_plan_drafts',
     'delivery_plan_units',
     'reproduction_drafts',
     'reproduction_steps',
   ]);
   assert.deepEqual(plan, { rationale: '保留拆分依据', coverage: '保留覆盖说明' });
+  assert.deepEqual(reproduction, { expected_behavior: '保留预期', actual_behavior: '保留实际' });
   assert.deepEqual(foreignKeyViolations, []);
   db.close();
 });

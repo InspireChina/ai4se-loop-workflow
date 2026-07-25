@@ -10,6 +10,10 @@ import {
   reproductionHelp,
   runReproductionCommand,
 } from './reproduction-command-drafts';
+import {
+  analysisHelp,
+  runAnalysisCommand,
+} from './analysis-command-drafts';
 
 type ExecutionRow = {
   execution_id: string;
@@ -27,7 +31,7 @@ type DraftRow = {
   draft_id: string;
   work_key: string;
   draft_version: number;
-  draft_type: 'requirement_context' | 'delivery_plan' | 'reproduction';
+  draft_type: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis';
   task_id: string;
   story_index: number | null;
   agent: string;
@@ -229,6 +233,46 @@ function cloneReproductionDraft(
   `).run(target.draft_id, source.draft_id);
 }
 
+function cloneAnalysisDraft(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  source: DraftRow,
+  target: DraftRow,
+) {
+  db.prepare(`
+    INSERT INTO analysis_drafts(draft_id, goal)
+    SELECT ?, goal FROM analysis_drafts WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
+  for (const table of [
+    ['analysis_scope_items', 'scope_key, direction, content, ordinal'],
+    ['analysis_behaviors', 'behavior_key, scenario, expected, ordinal'],
+    ['analysis_decisions', `decision_key, title, question, impact, status,
+      selected_option_id, source, decision_text, rationale, evidence,
+      recommendation_option_id, recommendation_reason, depends_on_json, ordinal`],
+    ['analysis_acceptance_criteria', 'criterion_key, description, oracle, ordinal'],
+    ['analysis_dependencies', 'dependency_key, content, ordinal'],
+    ['analysis_budget_items', 'budget_key, kind, content, ordinal'],
+  ] as const) {
+    db.prepare(`
+      INSERT INTO ${table[0]}(draft_id, ${table[1]})
+      SELECT ?, ${table[1]} FROM ${table[0]} WHERE draft_id = ?
+    `).run(target.draft_id, source.draft_id);
+  }
+  db.prepare(`
+    INSERT INTO analysis_decision_options(
+      draft_id, decision_key, option_id, label, consequence, ordinal
+    )
+    SELECT ?, decision_key, option_id, label, consequence, ordinal
+    FROM analysis_decision_options WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
+  db.prepare(`
+    INSERT INTO analysis_verification_steps(
+      draft_id, verification_key, criterion_key, kind, instruction, command, ordinal
+    )
+    SELECT ?, verification_key, criterion_key, kind, instruction, command, ordinal
+    FROM analysis_verification_steps WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
+}
+
 function createDraft(
   db: Awaited<ReturnType<typeof databaseConnection>>,
   execution: ExecutionRow,
@@ -263,6 +307,9 @@ function createDraft(
   } else if (profile.draftType === 'reproduction') {
     if (source) cloneReproductionDraft(db, source, created);
     else db.prepare('INSERT INTO reproduction_drafts(draft_id) VALUES(?)').run(draftId);
+  } else if (profile.draftType === 'analysis') {
+    if (source) cloneAnalysisDraft(db, source, created);
+    else db.prepare('INSERT INTO analysis_drafts(draft_id) VALUES(?)').run(draftId);
   }
   return created;
 }
@@ -754,6 +801,15 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile) {
       '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
     ].join('\n');
   }
+  if (profile.draftType === 'analysis') {
+    return [
+      ...common,
+      ...analysisHelp(profile.terminalActions),
+      '',
+      '长文本参数：',
+      '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
+    ].join('\n');
+  }
   return [
     ...common,
     '  requirement-context goal set --text <内容>',
@@ -960,6 +1016,9 @@ export async function runAgentCommand(input: {
   }
   if (profile.draftType === 'reproduction') {
     return runReproductionCommand({ db, execution, draft, command, flags });
+  }
+  if (profile.draftType === 'analysis') {
+    return runAnalysisCommand({ db, execution, draft, command, flags });
   }
   if (command === 'requirement-context status') {
     db.prepare(`

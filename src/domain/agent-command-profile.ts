@@ -3,7 +3,7 @@ export type AgentCommandProfile = {
   agent: string;
   pipelines: string[];
   namespace: string;
-  draftType: 'requirement_context' | 'delivery_plan' | 'reproduction';
+  draftType: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis';
   terminalActions: string[];
 };
 
@@ -28,6 +28,17 @@ const PROFILES: AgentCommandProfile[] = [
     terminalActions: [
       'reproduction complete',
       'reproduction request-alignment',
+    ],
+  },
+  {
+    id: 'analysis',
+    agent: 'analyst-agent',
+    pipelines: ['analysis', 'resume'],
+    namespace: 'analysis',
+    draftType: 'analysis',
+    terminalActions: [
+      'analysis complete',
+      'analysis request-clarification',
     ],
   },
   {
@@ -65,6 +76,9 @@ export function agentCommandWorkKey(
     return pipeline === 'feedback-repro'
       ? `reproduction:${taskId}:feedback:${scopeKey || delegationKey || 'group'}`
       : `reproduction:${taskId}:task`;
+  }
+  if (profile.draftType === 'analysis') {
+    return `analysis:${taskId}:${storyIndex ?? 'unit'}`;
   }
   return `${profile.draftType}:${taskId}:${storyIndex ?? 'task'}`;
 }

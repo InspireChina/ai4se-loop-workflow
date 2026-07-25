@@ -11,7 +11,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 19;
+export const AGENT_PROMPT_SEED_REVISION = 20;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'backlog-agent': {
@@ -87,20 +87,20 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '历史 Agent 的结论只能作为线索，必须与事实交叉验证。',
       '',
       '# 工作步骤',
-      '1. 探索与当前单元直接相关的代码路径、调用边界、测试方式和已有实现模式；先查事实，再做方案。',
-      '2. 建立完整 decisionTree，逐项覆盖两类关键决策：一是影响用户可观察行为、数据语义、范围、权限、兼容性、失败处理或数据生命周期的产品决策；二是影响架构边界、公开接口、持久化模型与迁移、跨模块依赖、安全与隐私、性能目标、部署运维行为，或者代价较高且难以回退的重大技术决策。',
-      '3. 对每个关键决策列出至少两个互斥选项及后果。只有存在明确上下文证据时才能标记 resolved_from_context，并记录 selectedOption、code/user/convention 来源和可定位证据。',
-      '4. 任何无法从上下文证据唯一推导的关键决策都必须标记 needs_user_input 并形成 ambiguity。禁止使用 safe_default、行业惯例、个人技术偏好或推荐方案替用户敲定结论。',
-      '5. 一次性返回当前单元的完整 questions。每个未决决策必须有稳定 decisionKey、影响说明、与 decisionTree 完全一致的互斥选项及后果、依赖关系、推荐答案和推荐理由。decisionKey 是跨轮次不可变的系统标识；恢复执行时必须在 decisionTree 和 decisions 中原样复用已回答问题的 key，禁止因措辞、范围描述或命名优化而改名或创建别名。',
-      '6. 即使需要提问，也要给出当前完整 spec；questions、spec.ambiguities 与 decisionTree 中 needs_user_input 的决策必须一一对应，不能隐藏未决分支。',
-      '7. 把每条 acceptance criterion 写成可判定行为，并为其指定 command、browser 或 inspection 类型的验证 Oracle。',
-      '8. 明确 included/excluded、依赖和 change budget，防止开发阶段顺带扩张范围。',
+      '1. 每次启动先执行 analysis status，恢复已有规格草稿、稳定 key 和用户已回答的决策；不得从头重写。',
+      '2. 探索与当前单元直接相关的代码路径、调用边界、测试方式和已有实现模式；先查事实，再渐进保存目标、范围和行为。',
+      '3. 使用稳定 decision key 建立完整 decisionTree，逐项覆盖产品决策与重大技术决策；每个决策列出至少两个互斥选项及后果。',
+      '4. 只有存在明确上下文证据时才能通过 analysis decision resolve 标记 resolved_from_context，并记录 selected option、code/user/convention 来源、决策正文、理由和可定位证据。',
+      '5. 无法从上下文唯一推导的关键决策保持 needs_user_input，并补齐推荐选项、推荐理由与依赖关系。禁止使用 safe_default、行业惯例、个人技术偏好或推荐方案替用户作答。',
+      '6. 恢复轮必须在原 decision key 上消费用户答案并 resolve；禁止因措辞、范围描述或命名优化而改名或创建别名。',
+      '7. 使用稳定 criterion key 写入可判定验收标准，并用 verification step 为每条标准指定 command、browser 或 inspection 类型的验证方式。',
+      '8. 明确 included/excluded、依赖和 change budget，校验草稿。仍有未决决策时调用 analysis request-clarification；全部有证据解决后调用 analysis complete。命令失败时根据校验反馈修正并自行重试。',
       '',
       '# 决策边界',
       '文件位置、测试命令、命名、局部代码组织、既有组件用法和容易回退的等价实现等细节必须自行查明和决定。不要让用户批准整个方案；但每一个上下文未覆盖的产品决策或重大技术决策都必须单独询问。不要把部分用户答复扩张成其未表达的结论。',
       '',
       '# 完成条件',
-      '只有 decisionTree 已完整遍历、每个决策均有上下文证据、ambiguities 为空、acceptanceCriteria 与 verificationPlan 非空且互相覆盖、依赖和 changeBudget 明确时，才能返回 completed。否则返回 needs_input，并一次性给出全部问题。始终提供完整 artifact。',
+      '只有决策树已完整遍历、每个决策均有上下文证据、没有未决项、验收标准与验证计划非空且互相覆盖、依赖和 change budget 明确时，才能执行 analysis complete。否则必须一次性补齐全部未决决策并执行 analysis request-clarification。普通最终文本或手写 JSON 都不推进流程。',
     ].join('\n'),
   },
   'repro-agent': {
