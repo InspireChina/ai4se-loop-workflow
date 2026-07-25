@@ -78,10 +78,33 @@ async function beginDelegation(delegation: DelegationEnvelope, runSuffix = 'deli
 async function taskReadyForSplit(title: string) {
   const { createTask, pipelineForTask } = await import('./tasks');
   const { applyAgentResult } = await import('./agent-results');
+  const { databaseConnection } = await import('../infrastructure/database');
   const taskId = await createTask({
     title,
     description: '管理员可以将当前筛选结果导出为 CSV，并且导出文件只包含当前筛选命中的字段。',
   });
+  const db = await databaseConnection();
+  const draftId = `DRAFT-context-${taskId}`;
+  db.prepare(`
+    INSERT INTO agent_work_drafts(
+      draft_id, work_key, draft_version, draft_type, task_id, agent,
+      status, terminal_action, submitted_at
+    ) VALUES(?, ?, 1, 'requirement_context', ?, 'backlog-agent', 'submitted', 'complete', CURRENT_TIMESTAMP)
+  `).run(draftId, `requirement-context:${taskId}`, taskId);
+  db.prepare(`
+    INSERT INTO requirement_context_drafts(draft_id, intent, change_summary, classification)
+    VALUES(?, '管理员取得筛选结果文件', '从只能在线查看变为可以下载当前筛选结果', 'feature')
+  `).run(draftId);
+  db.prepare(`
+    INSERT INTO requirement_context_impacts(
+      draft_id, impact_key, statement, disposition, rationale, source, ordinal
+    ) VALUES(?, 'filtered-export', '管理员可以下载当前筛选命中的结果', 'change', '目标业务结果', '用户输入', 1)
+  `).run(draftId);
+  db.prepare(`
+    INSERT INTO requirement_context_acceptance_items(
+      draft_id, acceptance_key, content, source, ordinal
+    ) VALUES(?, 'download-matches-filter', '下载内容与当前筛选结果一致', '用户输入', 1)
+  `).run(draftId);
   await applyAgentResult(
     `RUN-command-backlog-${taskId}`,
     backlogDelegation(taskId),
@@ -685,7 +708,7 @@ test('story splitter progressively restores, validates and submits an ordered de
   );
   const restored = await command(resumed.executionId, resumed.token!, ['delivery-plan', 'status']);
   assert.match(restored, /交付计划草稿 v1/);
-  assert.match(restored, /download-filtered-csv：管理员下载当前筛选结果/);
+  assert.match(restored, /download-filtered-csv · active：管理员下载当前筛选结果/);
   await command(resumed.executionId, resumed.token!, [
     'delivery-plan', 'unit', 'upsert',
     '--key', 'configure-export-fields',
@@ -701,6 +724,55 @@ test('story splitter progressively restores, validates and submits an ordered de
   await command(resumed.executionId, resumed.token!, [
     'delivery-plan', 'unit', 'move', '--key', 'configure-export-fields', '--position', '1',
   ]);
+  await assert.rejects(
+    command(resumed.executionId, resumed.token!, ['delivery-plan', 'validate']),
+    /未关联任何规划输入|尚未由任何有效交付单元承接/,
+  );
+  for (const unitKey of ['configure-export-fields', 'download-filtered-csv']) {
+    await command(resumed.executionId, resumed.token!, [
+      'delivery-plan', 'unit', 'source', 'add',
+      '--key', unitKey, '--source', 'impact:filtered-export',
+    ]);
+    await command(resumed.executionId, resumed.token!, [
+      'delivery-plan', 'unit', 'source', 'add',
+      '--key', unitKey, '--source', 'acceptance:download-matches-filter',
+    ]);
+  }
+  await command(resumed.executionId, resumed.token!, [
+    'delivery-plan', 'unit', 'dependency', 'add',
+    '--key', 'download-filtered-csv', '--on', 'configure-export-fields',
+  ]);
+  await command(resumed.executionId, resumed.token!, [
+    'delivery-plan', 'unit', 'dependency', 'add',
+    '--key', 'configure-export-fields', '--on', 'download-filtered-csv',
+  ]);
+  await assert.rejects(
+    command(resumed.executionId, resumed.token!, ['delivery-plan', 'validate']),
+    /前置.*必须排在它之前|依赖存在循环/,
+  );
+  await command(resumed.executionId, resumed.token!, [
+    'delivery-plan', 'unit', 'dependency', 'remove',
+    '--key', 'configure-export-fields', '--on', 'download-filtered-csv',
+  ]);
+  await command(resumed.executionId, resumed.token!, [
+    'delivery-plan', 'unit', 'upsert',
+    '--key', 'technical-only-candidate',
+    '--title', '准备导出存储结构',
+    '--actor', '系统',
+    '--trigger', '开始实现导出',
+    '--outcome', '内部结构已准备',
+    '--acceptance', '内部结构存在',
+  ]);
+  await command(resumed.executionId, resumed.token!, [
+    'delivery-plan', 'unit', 'dismiss',
+    '--key', 'technical-only-candidate', '--reason', '这是技术步骤，不是独立业务闭环',
+  ]);
+  await assert.rejects(
+    command(resumed.executionId, resumed.token!, [
+      'delivery-plan', 'unit', 'remove', '--key', 'configure-export-fields',
+    ]),
+    /未知命令/,
+  );
   assert.equal(
     await command(resumed.executionId, resumed.token!, ['delivery-plan', 'validate']),
     '交付计划草稿结构校验通过。',
@@ -721,6 +793,8 @@ test('story splitter progressively restores, validates and submits an ordered de
   );
   assert.match(result?.artifact?.content || '', /稳定标识：`configure-export-fields`/);
   assert.match(result?.artifact?.content || '', /先确认导出字段，再执行文件下载/);
+  assert.match(result?.artifact?.content || '', /technical-only-candidate.*dismissed/);
+  assert.deepEqual(result?.deliveryUnits?.[1]?.dependsOn, ['configure-export-fields']);
   await applyAgentResult(`RUN-command-split-${taskId}`, delegation, result!, {
     executionId: resumed.executionId,
   });
@@ -731,12 +805,19 @@ test('story splitter progressively restores, validates and submits an ordered de
     detail?.stories.map((story) => story.title),
     ['管理员确认导出字段', '管理员下载当前筛选结果'],
   );
+  assert.equal(detail?.stories[0]?.unit_key, 'configure-export-fields');
+  assert.equal(detail?.stories[1]?.depends_on_story_indexes[0], 1);
+  assert.deepEqual(
+    detail?.stories[1]?.context_links.map((link) => link.source_key),
+    ['acceptance:download-matches-filter', 'impact:filtered-export'],
+  );
   assert.equal(detail?.task.current_subagent, 'analyst-agent');
   assert.equal(detail?.task.agile_status, 'ready for dev');
 });
 
 test('feedback split uses the same progressive protocol with an isolated draft', async () => {
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+  const { databaseConnection } = await import('../infrastructure/database');
   const { taskId, delegation: splitDelegation } = await taskReadyForSplit('评论追加交付拆分');
   const feedbackDelegation: DelegationEnvelope = {
     ...splitDelegation,
@@ -745,6 +826,22 @@ test('feedback split uses the same progressive protocol with an isolated draft',
     feedbackBatchId: `FB-${taskId}`,
     feedbackGroupId: `FG-${taskId}`,
   };
+  const db = await databaseConnection();
+  db.prepare(`
+    INSERT INTO feedback_batches(batch_id, task_id, status, batch_number)
+    VALUES(?, ?, 'executing', 1)
+  `).run(feedbackDelegation.feedbackBatchId, taskId);
+  db.prepare(`
+    INSERT INTO feedback_groups(
+      group_id, batch_id, group_key, work_type, status, title, reason,
+      acceptance_json, affected_story_indexes_json, group_order
+    ) VALUES(?, ?, 'batch-delete-scope', 'scope_addition', 'waiting_for_plan',
+      '批量删除范围', '新增批量删除能力', ?, '[]', 1)
+  `).run(
+    feedbackDelegation.feedbackGroupId,
+    feedbackDelegation.feedbackBatchId,
+    JSON.stringify(['仅选中记录被删除，失败项有明确提示']),
+  );
   const active = await beginDelegation(feedbackDelegation, 'feedback-split');
   assert.match(
     await command(active.executionId, active.token!, ['help']),
@@ -768,7 +865,16 @@ test('feedback split uses the same progressive protocol with an isolated draft',
     '--outcome', '选中记录被删除且列表刷新',
     '--acceptance', '仅选中记录被删除，失败项有明确提示',
   ]);
+  await command(active.executionId, active.token!, [
+    'delivery-plan', 'unit', 'source', 'add',
+    '--key', 'batch-delete', '--source', 'change:feedback:batch-delete-scope',
+  ]);
+  await command(active.executionId, active.token!, [
+    'delivery-plan', 'unit', 'source', 'add',
+    '--key', 'batch-delete', '--source', 'acceptance:feedback:batch-delete-scope:1',
+  ]);
   await command(active.executionId, active.token!, ['delivery-plan', 'complete']);
   const result = await readAgentCommandSubmission(active.executionId);
-  assert.deepEqual(result?.deliveryUnits, [{ title: '管理员批量删除筛选结果' }]);
+  assert.equal(result?.deliveryUnits?.[0]?.key, 'batch-delete');
+  assert.equal(result?.deliveryUnits?.[0]?.sourceRefs.length, 2);
 });

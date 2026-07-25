@@ -144,9 +144,9 @@ Runner 的控制循环：
 
 Review Agent 通过渐进式结卡草稿提交完整 artifact 和 `verdict=report_ready`。Feedback Agent 一次读取冻结的评论批次，将评论按共同验收目标分为直接回复、历史说明、报告修订、Bug、行为修订、范围新增、技术调整或长期建议。Application 不接受 `targetStage`、`targetAgent` 或评论驱动的 rewind；需要工程修改时只在既有交付单元之后追加新的交付单元，并重新经过 Analysis、Dev、Test 和 Feedback 独立验证。既有文档与 Slice Spec 保持为历史证据，只在最终结卡报告中汇总最终事实。反馈批次使用需求内递增的 `batch_number`，工作组使用批次内递增的 `group_order`，保证数据库、Agent 上下文和页面展示的执行顺序一致，不依赖时间戳或随机 UUID 排序。
 
-需求梳理 Agent、交付规划 Agent、问题复现 Agent、方案分析 Agent、开发实现 Agent、验证 Agent、反馈处理 Agent 与结卡报告 Agent 已迁移为 execution 绑定的渐进命令协议。需求梳理 Agent 必须先调用 `loop-agent requirement-context status` 恢复持久草稿，再逐项维护业务意图、actual/expected/target 语义陈述、变化摘要、业务影响、验收语义、分类、约束、范围和问题。语义陈述保存来源与证据状态；业务影响区分 change、preserve、needs_decision 和 technical。错误结论不能无痕删除，必须使用 dismiss 或 supersede 并保留修订历史。交付规划 Agent 必须先调用 `loop-agent delivery-plan status`，再逐项维护拆分依据、覆盖说明、排序和交付单元；问题复现 Agent 必须先调用 `loop-agent reproduction status`，再逐项维护预期、实际、环境、稳定性、影响范围、复现步骤、证据、根因假设和人工对齐问题；方案分析 Agent 必须先调用 `loop-agent analysis status`，再逐项维护目标、范围、行为、决策树、验收条件、验证计划、依赖和 Change Budget；开发实现 Agent 必须先调用 `loop-agent implementation status`，再逐项维护验收覆盖、变更文件、验证结果、风险、运行信息和恢复事项；验证 Agent 必须先调用 `loop-agent verification status`，再逐项维护规格验收结论、独立检查、风险、失败分类、运行信息和恢复项复验；反馈处理 Agent 必须先调用 `loop-agent feedback status`，在 Triage 模式逐项维护评论分组、关联评论、影响单元、验收条件和最少必要澄清，在 Verify 模式逐项维护验证理由和独立证据；结卡报告 Agent 必须先调用 `loop-agent review status`，再按固定章节逐项维护正文、可追溯证据与运行信息。每个条目使用跨轮次稳定 key；恢复时覆盖原 key，不能靠换名堆叠同义内容。只有角色声明的终止命令会由 Application 生成内部 Agent Result 并推进状态，普通最终回复不参与控制面。长文本可通过 `--<字段>-file` 读取 UTF-8 文件，避免 Windows 命令行长度限制。
+需求梳理 Agent、交付规划 Agent、问题复现 Agent、方案分析 Agent、开发实现 Agent、验证 Agent、反馈处理 Agent 与结卡报告 Agent 已迁移为 execution 绑定的渐进命令协议。需求梳理 Agent 必须先调用 `loop-agent requirement-context status` 恢复持久草稿，再逐项维护业务意图、actual/expected/target 语义陈述、变化摘要、业务影响、验收语义、分类、约束、范围和问题。语义陈述保存来源与证据状态；业务影响区分 change、preserve、needs_decision 和 technical。错误结论不能无痕删除，必须使用 dismiss 或 supersede 并保留修订历史。交付规划 Agent 必须先调用 `loop-agent delivery-plan status`，再逐项维护拆分依据、覆盖说明、排序、有稳定身份的交付单元、规划输入关联和自然依赖；候选单元同样使用 dismiss 或 supersede 保留历史。问题复现 Agent 必须先调用 `loop-agent reproduction status`，再逐项维护预期、实际、环境、稳定性、影响范围、复现步骤、证据、根因假设和人工对齐问题；方案分析 Agent 必须先调用 `loop-agent analysis status`，再逐项维护目标、范围、行为、决策树、验收条件、验证计划、依赖和 Change Budget；开发实现 Agent 必须先调用 `loop-agent implementation status`，再逐项维护验收覆盖、变更文件、验证结果、风险、运行信息和恢复事项；验证 Agent 必须先调用 `loop-agent verification status`，再逐项维护规格验收结论、独立检查、风险、失败分类、运行信息和恢复项复验；反馈处理 Agent 必须先调用 `loop-agent feedback status`，在 Triage 模式逐项维护评论分组、关联评论、影响单元、验收条件和最少必要澄清，在 Verify 模式逐项维护验证理由和独立证据；结卡报告 Agent 必须先调用 `loop-agent review status`，再按固定章节逐项维护正文、可追溯证据与运行信息。每个条目使用跨轮次稳定 key；恢复时覆盖原 key，不能靠换名堆叠同义内容。只有角色声明的终止命令会由 Application 生成内部 Agent Result 并推进状态，普通最终回复不参与控制面。长文本可通过 `--<字段>-file` 读取 UTF-8 文件，避免 Windows 命令行长度限制。
 
-交付规划草稿按 `需求 + pipeline + delegation` 隔离。相同委派的失败重试会恢复未完成草稿；普通拆分和评论范围新增触发的追加拆分互不污染。`delivery-plan complete` 成功后，Application 从数据库草稿确定性生成交付计划文档和有序交付单元，再交给既有状态机应用。
+交付规划草稿按 `需求 + pipeline + delegation` 隔离。相同委派的失败重试会恢复未完成草稿；普通拆分和评论范围新增触发的追加拆分互不污染。草稿建立时冻结本轮规划输入，单元通过 source key 承接变化、保持约束、技术后果和验收语义，并通过 unit key 声明自然依赖。Application 校验所有输入均被有效单元覆盖、依赖无环且与推荐顺序一致，但不替 Agent 判断业务拆分优劣。`delivery-plan complete` 成功后，Application 从数据库草稿确定性生成交付计划文档，并在一个事务中把完整交付单元契约、来源快照和依赖写入需求聚合；后续 Analyst Context 直接读取这些边界。
 
 问题复现草稿按复现工作身份隔离：普通 Bug 使用稳定的需求级工作键；评论触发的复现使用稳定 `feedbackGroupId`，因此请求人工对齐后产生的新 execution 会继续同一份草稿。`reproduction request-alignment` 保存未复现证据和结构化问题但不规划下游路由；人工回答后新版本草稿必须先读取 status，再更新同 key 证据。只有 `reproduction complete` 通过完整性校验后，Application 才生成复现文档并允许进入交付拆分。
 
@@ -252,7 +252,7 @@ Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。A
 
 - 工作区切换后读写独立数据库，目标代码库不产生 Loop 数据目录。
 - 新建需求后能进入持续 Loop；没有工作时不启动 Agent。
-- 交付规划以端到端业务闭环生成交付单元，不按技术层拆分。
+- 交付规划以端到端业务闭环生成交付单元，不按技术层拆分；每个单元完整保留业务边界、上游覆盖和自然依赖，并由后续 Analyst 直接继承。
 - 方案分析、开发实现、验证按交付单元顺序推进，整体验收只执行一次。
 - Analyst 产生的歧义、版本化规格、回答、文档和结果全部写入 SQLite 并可在详情页查看。
 - 回答只形成决策事实；必须由 Analyst 生成无歧义的新规格后才能进入开发。

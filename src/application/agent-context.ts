@@ -22,6 +22,23 @@ export type AgentContextResource = {
 
 export type AgentContextIndexEntry = Omit<AgentContextResource, 'content'>;
 
+type DeliveryUnitContextValue = {
+  index: number;
+  key: string | null;
+  title: string;
+  actor: string | null;
+  trigger: string | null;
+  observableOutcome: string | null;
+  acceptance: string | null;
+  sourceRefs: {
+    key: string;
+    kind: 'change' | 'preserve' | 'technical' | 'acceptance';
+    content: string;
+    sourceRef: string;
+  }[];
+  dependsOn: number[];
+};
+
 export type AgentContextSnapshot = {
   protocol: typeof agentContextProtocol;
   snapshotId: string;
@@ -48,8 +65,8 @@ export type AgentContextSnapshot = {
       lanes: unknown[];
       progress: { analysis: number; development: number; verification: number; total: number };
     };
-    currentDeliveryUnit: { index: number; title: string } | null;
-    deliveryUnits: { index: number; title: string }[];
+    currentDeliveryUnit: DeliveryUnitContextValue | null;
+    deliveryUnits: DeliveryUnitContextValue[];
     currentSliceSpec: unknown | null;
     answeredDecisionKeys: string[];
     userDecisions: unknown[];
@@ -99,6 +116,25 @@ function latestBy<T>(items: T[], revision: (item: T) => number) {
 
 function relevantToExecution(storyIndex: number | null, itemStoryIndex: number | null) {
   return itemStoryIndex == null || itemStoryIndex === storyIndex;
+}
+
+function deliveryUnitContextValue(story: TaskContext['stories'][number]): DeliveryUnitContextValue {
+  return {
+    index: story.story_index,
+    key: story.unit_key,
+    title: story.title,
+    actor: story.actor,
+    trigger: story.trigger_condition,
+    observableOutcome: story.observable_outcome,
+    acceptance: story.acceptance,
+    sourceRefs: story.context_links.map((link) => ({
+      key: link.source_key,
+      kind: link.source_kind,
+      content: link.content,
+      sourceRef: link.source_ref,
+    })),
+    dependsOn: story.depends_on_story_indexes,
+  };
 }
 
 function feedbackPromptValue(comment: DocumentComment, group?: FeedbackGroup) {
@@ -256,7 +292,11 @@ export function buildAgentContextSnapshot(input: {
       deliveryUnit: document.story_index,
       revision: document.revision,
       status: 'active',
-      authority: ['context', 'delivery_split', 'analysis'].includes(document.kind) ? 'supporting' : 'execution_evidence',
+      authority: ['context', 'delivery_split'].includes(document.kind)
+        ? 'authoritative'
+        : document.kind === 'analysis'
+          ? 'supporting'
+          : 'execution_evidence',
       updatedAt: document.updated_at,
       summary: `${documentKindLabel(document.kind)} · ${compact(document.content)}`,
       content: {
@@ -464,8 +504,8 @@ export function buildAgentContextSnapshot(input: {
           total: full.task.total_stories,
         },
       },
-      currentDeliveryUnit: currentStory ? { index: currentStory.story_index, title: currentStory.title } : null,
-      deliveryUnits: full.stories.map((story) => ({ index: story.story_index, title: story.title })),
+      currentDeliveryUnit: currentStory ? deliveryUnitContextValue(currentStory) : null,
+      deliveryUnits: full.stories.map(deliveryUnitContextValue),
       currentSliceSpec: currentSpec ? sliceSpecValue(currentSpec) : null,
       answeredDecisionKeys,
       userDecisions,

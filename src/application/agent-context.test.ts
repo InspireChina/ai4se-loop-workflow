@@ -62,6 +62,23 @@ test('builds a compact execution snapshot while preserving full context for just
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Context engineering', description: 'Implement one delivery unit.' });
   db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Current unit', 'unit-001'), (?, 2, 'Future unit', 'unit-002')").run(taskId, taskId);
+  db.prepare(`
+    UPDATE stories
+    SET unit_key = 'current-unit', actor = '管理员',
+        trigger_condition = '管理员提交当前操作',
+        observable_outcome = '管理员看到当前业务结果',
+        acceptance = '当前业务结果可以独立验收'
+    WHERE task_id = ? AND story_index = 1
+  `).run(taskId);
+  db.prepare(`
+    INSERT INTO delivery_unit_context_links(
+      task_id, story_index, source_key, source_kind, content, source_ref
+    ) VALUES(?, 1, 'impact:current-result', 'change', '产生当前业务结果', 'TEST:current-result')
+  `).run(taskId);
+  db.prepare(`
+    INSERT INTO delivery_unit_dependencies(task_id, story_index, depends_on_story_index)
+    VALUES(?, 2, 1)
+  `).run(taskId);
   db.prepare('UPDATE tasks SET total_stories = 2, analysis_index = 1, spec_resolved_index = 1 WHERE task_id = ?').run(taskId);
   const currentContent = `${'Current analysis details. '.repeat(20)}FULL-CONTEXT-TAIL`;
   const currentDocumentId = await upsertDocument({
@@ -102,6 +119,10 @@ test('builds a compact execution snapshot while preserving full context for just
   assert.equal(startup.includes('FUTURE-UNIT-ONLY'), false);
   assert.match(startup, /Reuse the original configuration/);
   assert.deepEqual(snapshot.authoritativeFacts.answeredDecisionKeys, ['retry-policy']);
+  assert.equal(snapshot.authoritativeFacts.currentDeliveryUnit?.key, 'current-unit');
+  assert.equal(snapshot.authoritativeFacts.currentDeliveryUnit?.actor, '管理员');
+  assert.equal(snapshot.authoritativeFacts.currentDeliveryUnit?.sourceRefs[0]?.key, 'impact:current-result');
+  assert.deepEqual(snapshot.authoritativeFacts.deliveryUnits[1]?.dependsOn, [1]);
   assert.match(startup, /Use fixture B/);
   assert.equal(snapshot.resourceCount > snapshot.startupIndex.length, true);
   assert.equal(snapshot.requiredContextRefs.includes(`DOC:${currentDocumentId}`), true);

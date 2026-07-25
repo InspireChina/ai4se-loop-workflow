@@ -3,6 +3,8 @@ import type Database from 'better-sqlite3';
 import { revalidatePath } from 'next/cache';
 import { databaseConnection } from '../infrastructure/database';
 import type { AgentResult } from '../domain/agent-result';
+import type { DeliveryUnitContract } from '../domain/delivery-unit';
+import { insertDeliveryUnitContractsInDb } from './delivery-units';
 import type { FeedbackBatch, FeedbackGroup, FeedbackVerificationDecision } from './tasks';
 
 export type FeedbackWorkType = FeedbackGroup['work_type'];
@@ -589,8 +591,9 @@ export async function applyFeedbackSplitResult(input: {
   taskId: string;
   batchId: string;
   groupId: string;
-  deliveryUnits: { title: string }[];
+  deliveryUnits: DeliveryUnitContract[];
   executionId?: string;
+  sourceDeliveryPlanDraftId: string;
 }) {
   const db = await databaseConnection();
   const group = db.prepare(`
@@ -599,16 +602,42 @@ export async function applyFeedbackSplitResult(input: {
   if (!group || group.work_type !== 'scope_addition' || group.status !== 'waiting_for_plan') throw new Error('反馈新增范围当前不能追加交付单元');
   if (!input.deliveryUnits.length) throw new Error('反馈新增范围必须产生至少一个交付单元');
   db.transaction(() => {
-    for (const unit of input.deliveryUnits) {
-      appendDeliveryUnitInDb(db, {
-        taskId: input.taskId,
-        batchId: input.batchId,
-        groupId: input.groupId,
-        workType: 'scope_addition',
-        title: unit.title,
-        affectedDeliveryUnits: JSON.parse(group.affected_story_indexes_json) as number[],
-      });
+    const affectedDeliveryUnits = JSON.parse(group.affected_story_indexes_json) as number[];
+    const inserted = insertDeliveryUnitContractsInDb(db, {
+      taskId: input.taskId,
+      units: input.deliveryUnits,
+      originType: 'feedback_scope',
+      originFeedbackBatchId: input.batchId,
+      correctsStoryIndexes: affectedDeliveryUnits,
+      sourceDeliveryPlanDraftId: input.sourceDeliveryPlanDraftId,
+    });
+    for (const unit of inserted) {
+      db.prepare(`
+        INSERT INTO feedback_group_delivery_units(group_id, task_id, story_index)
+        VALUES(?, ?, ?)
+      `).run(input.groupId, input.taskId, unit.storyIndex);
+      addEvent(
+        db,
+        input.taskId,
+        'story-splitter-agent',
+        'FeedbackDeliveryUnitAdded',
+        `反馈新增交付单元 ${unit.storyIndex}：${unit.title}（${unit.key}）`,
+      );
     }
+    const lastIndex = inserted[inserted.length - 1].storyIndex;
+    db.prepare(`
+      UPDATE tasks
+      SET total_stories = ?, agile_status = 'in feedback', current_subagent = 'analyst-agent',
+          run_state = 'runnable', closure_status = 'none', review_document_id = NULL,
+          closure_acknowledged_at = NULL, blocked_reason = NULL, resume_status = NULL,
+          resume_pending = 0, completed_at = NULL,
+          next_step = ?, last_actor = 'story-splitter-agent', updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ?
+    `).run(
+      lastIndex,
+      `反馈新增 ${inserted.length} 个交付单元，等待方案分析`,
+      input.taskId,
+    );
     db.prepare(`
       UPDATE feedback_groups
       SET status = 'executing', source_execution_id = COALESCE(source_execution_id, ?),

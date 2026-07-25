@@ -273,8 +273,13 @@ function summarizeCommand(command: string) {
     if (normalized.includes(' delivery-plan coverage set')) return '保存交付覆盖说明';
     if (normalized.includes(' delivery-plan ordering set')) return '保存交付排序说明';
     if (normalized.includes(' delivery-plan unit upsert')) return '保存交付单元';
-    if (normalized.includes(' delivery-plan unit remove')) return '删除交付单元';
+    if (normalized.includes(' delivery-plan unit dismiss')) return '排除候选交付单元';
+    if (normalized.includes(' delivery-plan unit supersede')) return '取代候选交付单元';
     if (normalized.includes(' delivery-plan unit move')) return '调整交付单元顺序';
+    if (normalized.includes(' delivery-plan unit source add')) return '关联交付规划输入';
+    if (normalized.includes(' delivery-plan unit source remove')) return '移除交付规划输入关联';
+    if (normalized.includes(' delivery-plan unit dependency add')) return '保存交付单元依赖';
+    if (normalized.includes(' delivery-plan unit dependency remove')) return '移除交付单元依赖';
     if (normalized.includes(' delivery-plan validate')) return '校验交付计划草稿';
     if (normalized.includes(' delivery-plan complete')) return '完成交付计划';
     if (normalized.includes(' reproduction status')) return '恢复问题复现草稿';

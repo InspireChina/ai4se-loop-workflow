@@ -13,6 +13,7 @@ import {
   type DelegationEnvelope,
 } from './tasks';
 import { applyAgentResult } from './agent-results';
+import { applyFeedbackSplitResult } from './feedback';
 
 async function completedRequirement(label: string, options: { readyToClose?: boolean } = {}) {
   const taskId = await createTask({ title: `前向反馈验证 · ${label} · ${randomUUID()}` });
@@ -83,6 +84,24 @@ async function comment(taskId: string, documentId: string, content: string) {
 
 function result(value: Record<string, unknown>) {
   return parseAgentResult(JSON.stringify(value));
+}
+
+function plannedUnit(key: string, title: string, sourceKeys: string[] = [`change:${key}`]) {
+  return {
+    key,
+    title,
+    actor: '管理员',
+    trigger: '管理员发起对应操作',
+    observableOutcome: `${title}完成并产生可观察结果`,
+    acceptance: `${title}可以独立验收`,
+    sourceRefs: sourceKeys.map((sourceKey) => ({
+      key: sourceKey,
+      kind: sourceKey.startsWith('acceptance:') ? 'acceptance' as const : 'change' as const,
+      content: title,
+      sourceRef: `TEST:${sourceKey}`,
+    })),
+    dependsOn: [],
+  };
 }
 
 async function delegation(taskId: string, pipeline?: string) {
@@ -286,11 +305,28 @@ test('范围新增通过追加拆分产生多个单元；回复和历史说明�
   }));
   assert.equal((await getTask(taskId))?.stories.length, 1);
   const split = await delegation(taskId, 'feedback-split');
-  await applyAgentResult(`run-${randomUUID()}`, split, result({
-    outcome: 'completed',
-    summary: '拆成两个追加单元。',
-    deliveryUnits: [{ title: '增加导出能力' }, { title: '增加批量删除能力' }],
-  }));
+  assert.ok(split.feedbackBatchId);
+  assert.ok(split.feedbackGroupId);
+  const db = await databaseConnection();
+  const draftId = `DRAFT-feedback-split-${randomUUID()}`;
+  db.prepare(`
+    INSERT INTO agent_work_drafts(
+      draft_id, work_key, draft_version, draft_type, task_id, agent,
+      status, terminal_action, submitted_at
+    ) VALUES(?, ?, 1, 'delivery_plan', ?, 'story-splitter-agent',
+      'submitted', 'complete', CURRENT_TIMESTAMP)
+  `).run(draftId, `delivery-plan:${taskId}:feedback-split:${split.feedbackGroupId}`, taskId);
+  db.prepare('INSERT INTO delivery_plan_drafts(draft_id) VALUES(?)').run(draftId);
+  await applyFeedbackSplitResult({
+    taskId,
+    batchId: split.feedbackBatchId,
+    groupId: split.feedbackGroupId,
+    deliveryUnits: [
+      plannedUnit('feedback-export', '增加导出能力'),
+      plannedUnit('feedback-batch-delete', '增加批量删除能力'),
+    ],
+    sourceDeliveryPlanDraftId: draftId,
+  });
   const detail = await getTask(taskId);
   assert.equal(detail?.stories.length, 3);
   assert.deepEqual(detail?.stories.slice(1).map((story) => story.origin_type), ['feedback_scope', 'feedback_scope']);

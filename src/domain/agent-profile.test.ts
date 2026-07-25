@@ -3,7 +3,7 @@ import test from 'node:test';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
 test('ships rigorous versioned seed prompts for every flow Agent', () => {
-  assert.equal(AGENT_PROMPT_SEED_REVISION, 26);
+  assert.equal(AGENT_PROMPT_SEED_REVISION, 27);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
     assert.ok(prompt.length >= 450, `${agentId} seed prompt is too small to define a reliable role contract`);
@@ -30,6 +30,9 @@ test('ships rigorous versioned seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不得修改工作区中的任何文件，不得提交代码/);
   assert.match(AGENT_PROFILE_DEFINITIONS['story-splitter-agent'].prompt, /每次启动先.*delivery-plan status/);
   assert.match(AGENT_PROFILE_DEFINITIONS['story-splitter-agent'].prompt, /稳定 unit key/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['story-splitter-agent'].prompt, /change.*preserve.*technical.*acceptance/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['story-splitter-agent'].prompt, /无法证明可以独立时采用保守的较大闭环/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['story-splitter-agent'].prompt, /不通过提问或阶段回退/);
   assert.match(AGENT_PROFILE_DEFINITIONS['story-splitter-agent'].prompt, /delivery-plan complete/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /完整 decisionTree/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /重大技术决策/);

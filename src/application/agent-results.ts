@@ -10,8 +10,8 @@ import {
 } from './recovery-items';
 import {
   addQuestion,
+  addPlannedDeliveryUnits,
   addRuntimeInputRequest,
-  addStory,
   CodeSlotBusyError,
   getTask,
   rewindTask,
@@ -84,6 +84,21 @@ async function saveArtifact(delegation: DelegationEnvelope, result: AgentResult)
     content: artifact.content,
     format: 'markdown',
   });
+}
+
+async function deliveryPlanDraftId(sourceExecutionId?: string) {
+  if (!sourceExecutionId) throw new Error('交付规划结果缺少来源 execution');
+  const db = await databaseConnection();
+  const row = db.prepare(`
+    SELECT draft_id
+    FROM agent_work_drafts
+    WHERE terminal_execution_id = ?
+      AND draft_type = 'delivery_plan'
+      AND status = 'submitted'
+      AND terminal_action = 'complete'
+  `).get(sourceExecutionId) as { draft_id: string } | undefined;
+  if (!row) throw new Error('交付规划结果没有对应的已提交草稿');
+  return row.draft_id;
 }
 
 async function saveQuestions(delegation: DelegationEnvelope, result: AgentResult, specRevision = 1) {
@@ -367,6 +382,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     }
     case 'story-splitter-agent': {
       if (!result.deliveryUnits?.length) throw new Error('交付规划 Agent 结果缺少 deliveryUnits');
+      const sourceDeliveryPlanDraftId = await deliveryPlanDraftId(sourceExecutionId);
       if (delegation.pipeline === 'feedback-split') {
         if (!delegation.feedbackBatchId || !delegation.feedbackGroupId) throw new Error('反馈追加拆分缺少批次或分组');
         await applyFeedbackSplitResult({
@@ -375,13 +391,18 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
           groupId: delegation.feedbackGroupId,
           deliveryUnits: result.deliveryUnits,
           executionId: sourceExecutionId,
+          sourceDeliveryPlanDraftId,
         });
         return 'advanced';
       }
       const detail = await getTask(delegation.taskId);
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
-      if (detail.stories.length) throw new Error('当前需求已存在交付单元，拒绝重复拆分');
-      for (const unit of result.deliveryUnits) await addStory({ taskId: delegation.taskId, actor, title: unit.title });
+      await addPlannedDeliveryUnits({
+        taskId: delegation.taskId,
+        actor,
+        units: result.deliveryUnits,
+        sourceDeliveryPlanDraftId,
+      });
       await updateTask(delegation.taskId, actor, {
         agile_status: detail.task.agile_status === 'in dev' ? 'in dev' : 'ready for dev',
         current_subagent: 'analyst-agent',

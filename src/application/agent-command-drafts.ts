@@ -114,7 +114,28 @@ type DeliveryPlanUnit = {
   trigger_condition: string;
   observable_outcome: string;
   acceptance: string;
+  lifecycle_status: 'active' | 'dismissed' | 'superseded';
+  lifecycle_reason: string | null;
+  superseded_by: string | null;
   ordinal: number;
+};
+
+type DeliveryPlanSourceItem = {
+  source_key: string;
+  source_kind: 'change' | 'preserve' | 'technical' | 'acceptance';
+  content: string;
+  source_ref: string;
+  ordinal: number;
+};
+
+type DeliveryPlanSourceLink = {
+  unit_key: string;
+  source_key: string;
+};
+
+type DeliveryPlanDependency = {
+  unit_key: string;
+  depends_on_unit_key: string;
 };
 
 type FlagMap = Map<string, string>;
@@ -278,12 +299,150 @@ function cloneDeliveryPlanDraft(
   db.prepare(`
     INSERT INTO delivery_plan_units(
       draft_id, unit_key, title, actor, trigger_condition,
-      observable_outcome, acceptance, ordinal
+      observable_outcome, acceptance, lifecycle_status, lifecycle_reason,
+      superseded_by, ordinal
     )
     SELECT ?, unit_key, title, actor, trigger_condition,
-           observable_outcome, acceptance, ordinal
+           observable_outcome, acceptance, lifecycle_status, lifecycle_reason,
+           superseded_by, ordinal
     FROM delivery_plan_units WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
+  for (const table of [
+    ['delivery_plan_source_items', 'source_key, source_kind, content, source_ref, ordinal'],
+    ['delivery_plan_unit_source_links', 'unit_key, source_key'],
+    ['delivery_plan_unit_dependencies', 'unit_key, depends_on_unit_key'],
+    ['delivery_plan_unit_revisions', 'unit_key, action, snapshot_json, execution_id, created_at'],
+  ] as const) {
+    db.prepare(`
+      INSERT INTO ${table[0]}(draft_id, ${table[1]})
+      SELECT ?, ${table[1]} FROM ${table[0]} WHERE draft_id = ?
+    `).run(target.draft_id, source.draft_id);
+  }
+}
+
+function executionDelegation(execution: ExecutionRow) {
+  try {
+    return (JSON.parse(execution.input_json) as {
+      delegation?: {
+        feedbackGroupId?: string;
+      };
+    }).delegation || {};
+  } catch {
+    throw new Error('当前 execution 的输入快照无法读取');
+  }
+}
+
+function initializeDeliveryPlanSources(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  execution: ExecutionRow,
+  draft: DraftRow,
+) {
+  if (execution.pipeline === 'feedback-split') {
+    const groupId = executionDelegation(execution).feedbackGroupId;
+    if (!groupId) throw new Error('反馈交付规划缺少反馈工作组');
+    const group = db.prepare(`
+      SELECT group_id, group_key, title, reason, acceptance_json
+      FROM feedback_groups
+      WHERE group_id = ?
+    `).get(groupId) as {
+      group_id: string;
+      group_key: string;
+      title: string | null;
+      reason: string;
+      acceptance_json: string;
+    } | undefined;
+    if (!group) throw new Error('反馈交付规划关联的工作组不存在');
+    db.prepare(`
+      INSERT INTO delivery_plan_source_items(
+        draft_id, source_key, source_kind, content, source_ref, ordinal
+      ) VALUES(?, ?, 'change', ?, ?, 1)
+    `).run(
+      draft.draft_id,
+      `change:feedback:${group.group_key}`,
+      group.title?.trim() ? `${group.title}：${group.reason}` : group.reason,
+      `FEEDBACK_GROUP:${group.group_id}`,
+    );
+    const acceptance = JSON.parse(group.acceptance_json) as unknown;
+    if (!Array.isArray(acceptance)) throw new Error('反馈工作组验收要求格式无效');
+    for (const [index, item] of acceptance.entries()) {
+      if (typeof item !== 'string' || !item.trim()) throw new Error('反馈工作组包含无效验收要求');
+      db.prepare(`
+        INSERT INTO delivery_plan_source_items(
+          draft_id, source_key, source_kind, content, source_ref, ordinal
+        ) VALUES(?, ?, 'acceptance', ?, ?, ?)
+      `).run(
+        draft.draft_id,
+        `acceptance:feedback:${group.group_key}:${index + 1}`,
+        item.trim(),
+        `FEEDBACK_GROUP:${group.group_id}`,
+        index + 2,
+      );
+    }
+    return;
+  }
+
+  const contextDraft = db.prepare(`
+    SELECT work.draft_id
+    FROM agent_work_drafts work
+    WHERE work.task_id = ?
+      AND work.draft_type = 'requirement_context'
+      AND work.status = 'submitted'
+      AND work.terminal_action = 'complete'
+    ORDER BY work.draft_version DESC
+    LIMIT 1
+  `).get(execution.task_id) as { draft_id: string } | undefined;
+  if (!contextDraft) throw new Error('交付规划缺少已完成的业务变化上下文');
+  const impacts = db.prepare(`
+    SELECT impact_key, statement, disposition
+    FROM requirement_context_impacts
+    WHERE draft_id = ? AND lifecycle_status = 'active'
+    ORDER BY ordinal, impact_key
+  `).all(contextDraft.draft_id) as {
+    impact_key: string;
+    statement: string;
+    disposition: 'change' | 'preserve' | 'needs_decision' | 'technical';
+  }[];
+  const unresolved = impacts.filter((item) => item.disposition === 'needs_decision');
+  if (unresolved.length) {
+    throw new Error(`业务变化上下文仍有待决影响：${unresolved.map((item) => item.impact_key).join(', ')}`);
+  }
+  let ordinal = 0;
+  for (const impact of impacts) {
+    ordinal += 1;
+    db.prepare(`
+      INSERT INTO delivery_plan_source_items(
+        draft_id, source_key, source_kind, content, source_ref, ordinal
+      ) VALUES(?, ?, ?, ?, ?, ?)
+    `).run(
+      draft.draft_id,
+      `impact:${impact.impact_key}`,
+      impact.disposition,
+      impact.statement,
+      `REQUIREMENT_CONTEXT:${contextDraft.draft_id}:impact:${impact.impact_key}`,
+      ordinal,
+    );
+  }
+  const acceptance = db.prepare(`
+    SELECT acceptance_key, content
+    FROM requirement_context_acceptance_items
+    WHERE draft_id = ? AND lifecycle_status = 'active'
+    ORDER BY ordinal, acceptance_key
+  `).all(contextDraft.draft_id) as { acceptance_key: string; content: string }[];
+  for (const item of acceptance) {
+    ordinal += 1;
+    db.prepare(`
+      INSERT INTO delivery_plan_source_items(
+        draft_id, source_key, source_kind, content, source_ref, ordinal
+      ) VALUES(?, ?, 'acceptance', ?, ?, ?)
+    `).run(
+      draft.draft_id,
+      `acceptance:${item.acceptance_key}`,
+      item.content,
+      `REQUIREMENT_CONTEXT:${contextDraft.draft_id}:acceptance:${item.acceptance_key}`,
+      ordinal,
+    );
+  }
+  if (!ordinal) throw new Error('业务变化上下文没有可供交付规划消费的影响或验收语义');
 }
 
 function cloneReproductionDraft(
@@ -472,53 +631,58 @@ function createDraft(
   workKey: string,
   source?: DraftRow,
 ) {
-  const draftId = randomUUID();
-  const version = (source?.draft_version || 0) + 1;
-  db.prepare(`
-    INSERT INTO agent_work_drafts(
-      draft_id, work_key, draft_version, draft_type, task_id, story_index,
-      agent, status, last_execution_id
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, 'editing', ?)
-  `).run(
-    draftId,
-    workKey,
-    version,
-    profile.draftType,
-    execution.task_id,
-    execution.story_index,
-    execution.agent,
-    execution.execution_id,
-  );
-  const created = db.prepare('SELECT * FROM agent_work_drafts WHERE draft_id = ?').get(draftId) as DraftRow;
-  if (profile.draftType === 'requirement_context') {
-    if (source) cloneRequirementContextDraft(db, source, created);
-    else db.prepare('INSERT INTO requirement_context_drafts(draft_id) VALUES(?)').run(draftId);
-  } else if (profile.draftType === 'delivery_plan') {
-    if (source) cloneDeliveryPlanDraft(db, source, created);
-    else db.prepare('INSERT INTO delivery_plan_drafts(draft_id) VALUES(?)').run(draftId);
-  } else if (profile.draftType === 'reproduction') {
-    if (source) cloneReproductionDraft(db, source, created);
-    else db.prepare('INSERT INTO reproduction_drafts(draft_id) VALUES(?)').run(draftId);
-  } else if (profile.draftType === 'analysis') {
-    if (source) cloneAnalysisDraft(db, source, created);
-    else db.prepare('INSERT INTO analysis_drafts(draft_id) VALUES(?)').run(draftId);
-  } else if (profile.draftType === 'development') {
-    if (source) cloneDevelopmentDraft(db, source, created);
-    else db.prepare('INSERT INTO development_drafts(draft_id) VALUES(?)').run(draftId);
-  } else if (profile.draftType === 'verification') {
-    if (source) cloneVerificationDraft(db, source, created);
-    else db.prepare('INSERT INTO verification_drafts(draft_id) VALUES(?)').run(draftId);
-  } else if (profile.draftType === 'feedback') {
-    if (source) cloneFeedbackDraft(db, source, created);
-    else {
-      db.prepare('INSERT INTO feedback_drafts(draft_id, mode) VALUES(?, ?)')
-        .run(draftId, execution.pipeline === 'feedback-triage' ? 'triage' : 'verify');
+  return db.transaction(() => {
+    const draftId = randomUUID();
+    const version = (source?.draft_version || 0) + 1;
+    db.prepare(`
+      INSERT INTO agent_work_drafts(
+        draft_id, work_key, draft_version, draft_type, task_id, story_index,
+        agent, status, last_execution_id
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, 'editing', ?)
+    `).run(
+      draftId,
+      workKey,
+      version,
+      profile.draftType,
+      execution.task_id,
+      execution.story_index,
+      execution.agent,
+      execution.execution_id,
+    );
+    const created = db.prepare('SELECT * FROM agent_work_drafts WHERE draft_id = ?').get(draftId) as DraftRow;
+    if (profile.draftType === 'requirement_context') {
+      if (source) cloneRequirementContextDraft(db, source, created);
+      else db.prepare('INSERT INTO requirement_context_drafts(draft_id) VALUES(?)').run(draftId);
+    } else if (profile.draftType === 'delivery_plan') {
+      if (source) cloneDeliveryPlanDraft(db, source, created);
+      else {
+        db.prepare('INSERT INTO delivery_plan_drafts(draft_id) VALUES(?)').run(draftId);
+        initializeDeliveryPlanSources(db, execution, created);
+      }
+    } else if (profile.draftType === 'reproduction') {
+      if (source) cloneReproductionDraft(db, source, created);
+      else db.prepare('INSERT INTO reproduction_drafts(draft_id) VALUES(?)').run(draftId);
+    } else if (profile.draftType === 'analysis') {
+      if (source) cloneAnalysisDraft(db, source, created);
+      else db.prepare('INSERT INTO analysis_drafts(draft_id) VALUES(?)').run(draftId);
+    } else if (profile.draftType === 'development') {
+      if (source) cloneDevelopmentDraft(db, source, created);
+      else db.prepare('INSERT INTO development_drafts(draft_id) VALUES(?)').run(draftId);
+    } else if (profile.draftType === 'verification') {
+      if (source) cloneVerificationDraft(db, source, created);
+      else db.prepare('INSERT INTO verification_drafts(draft_id) VALUES(?)').run(draftId);
+    } else if (profile.draftType === 'feedback') {
+      if (source) cloneFeedbackDraft(db, source, created);
+      else {
+        db.prepare('INSERT INTO feedback_drafts(draft_id, mode) VALUES(?, ?)')
+          .run(draftId, execution.pipeline === 'feedback-triage' ? 'triage' : 'verify');
+      }
+    } else if (profile.draftType === 'review') {
+      if (source) cloneReviewDraft(db, source, created);
+      else db.prepare('INSERT INTO review_drafts(draft_id) VALUES(?)').run(draftId);
     }
-  } else if (profile.draftType === 'review') {
-    if (source) cloneReviewDraft(db, source, created);
-    else db.prepare('INSERT INTO review_drafts(draft_id) VALUES(?)').run(draftId);
-  }
-  return created;
+    return created;
+  })();
 }
 
 function ensureDraft(
@@ -1038,24 +1202,150 @@ function deliveryPlanState(
     FROM delivery_plan_drafts WHERE draft_id = ?
   `).get(draft.draft_id) as DeliveryPlanDraft;
   const units = db.prepare(`
-    SELECT unit_key, title, actor, trigger_condition, observable_outcome, acceptance, ordinal
+    SELECT unit_key, title, actor, trigger_condition, observable_outcome, acceptance,
+           lifecycle_status, lifecycle_reason, superseded_by, ordinal
     FROM delivery_plan_units
     WHERE draft_id = ?
     ORDER BY ordinal, unit_key
   `).all(draft.draft_id) as DeliveryPlanUnit[];
-  return { plan, units };
+  const sources = db.prepare(`
+    SELECT source_key, source_kind, content, source_ref, ordinal
+    FROM delivery_plan_source_items
+    WHERE draft_id = ?
+    ORDER BY ordinal, source_key
+  `).all(draft.draft_id) as DeliveryPlanSourceItem[];
+  const sourceLinks = db.prepare(`
+    SELECT unit_key, source_key
+    FROM delivery_plan_unit_source_links
+    WHERE draft_id = ?
+    ORDER BY unit_key, source_key
+  `).all(draft.draft_id) as DeliveryPlanSourceLink[];
+  const dependencies = db.prepare(`
+    SELECT unit_key, depends_on_unit_key
+    FROM delivery_plan_unit_dependencies
+    WHERE draft_id = ?
+    ORDER BY unit_key, depends_on_unit_key
+  `).all(draft.draft_id) as DeliveryPlanDependency[];
+  const revisionCount = (db.prepare(`
+    SELECT COUNT(*) AS value
+    FROM delivery_plan_unit_revisions
+    WHERE draft_id = ?
+  `).get(draft.draft_id) as { value: number }).value;
+  const existingUnits = db.prepare(`
+    SELECT story_index, unit_key, title
+    FROM stories
+    WHERE task_id = ?
+    ORDER BY story_index
+  `).all(draft.task_id) as { story_index: number; unit_key: string | null; title: string }[];
+  return { plan, units, sources, sourceLinks, dependencies, revisionCount, existingUnits };
 }
 
 function deliveryPlanValidationErrors(state: ReturnType<typeof deliveryPlanState>) {
   const errors: string[] = [];
+  const activeUnits = state.units.filter((unit) => unit.lifecycle_status === 'active');
+  const activeKeys = new Set(activeUnits.map((unit) => unit.unit_key));
+  const existingKeys = new Set(state.existingUnits
+    .map((unit) => unit.unit_key)
+    .filter((key): key is string => Boolean(key)));
   if (!state.plan.rationale?.trim()) {
     errors.push('缺少拆分依据：使用 delivery-plan rationale set --text <内容>');
   }
   if (!state.plan.coverage?.trim()) {
     errors.push('缺少整体覆盖说明：使用 delivery-plan coverage set --text <内容>');
   }
-  if (!state.units.length) {
+  if (!state.sources.length) {
+    errors.push('交付计划缺少冻结的上游规划输入，不能完成');
+  }
+  if (!activeUnits.length) {
     errors.push('至少需要一个可独立交付的交付单元');
+  }
+  if (activeUnits.length > 50) {
+    errors.push('单次交付计划最多包含 50 个有效交付单元');
+  }
+  if (activeUnits.length > 1 && !state.plan.ordering_notes?.trim()) {
+    errors.push('存在多个交付单元时必须说明推荐顺序与依赖依据');
+  }
+
+  const duplicateTitles = activeUnits
+    .filter((unit, index) =>
+      activeUnits.findIndex((candidate) => candidate.title.trim() === unit.title.trim()) !== index)
+    .map((unit) => unit.title.trim());
+  if (duplicateTitles.length) {
+    errors.push(`有效交付单元不能使用重复标题：${[...new Set(duplicateTitles)].join('、')}`);
+  }
+  const conflictingKeys = activeUnits
+    .map((unit) => unit.unit_key)
+    .filter((key) => existingKeys.has(key));
+  if (conflictingKeys.length) {
+    errors.push(`交付单元 key 已被当前需求中的既有单元使用：${conflictingKeys.join(', ')}`);
+  }
+
+  for (const unit of activeUnits) {
+    const linkedSourceKeys = state.sourceLinks
+      .filter((link) => link.unit_key === unit.unit_key)
+      .map((link) => link.source_key);
+    const linkedSources = state.sources.filter((source) => linkedSourceKeys.includes(source.source_key));
+    if (!linkedSources.length) {
+      errors.push(`交付单元 ${unit.unit_key} 未关联任何规划输入`);
+    } else if (linkedSources.length > 200) {
+      errors.push(`交付单元 ${unit.unit_key} 最多关联 200 个规划输入`);
+    } else if (!linkedSources.some((source) =>
+      source.source_kind === 'change' || source.source_kind === 'acceptance')) {
+      errors.push(`交付单元 ${unit.unit_key} 只关联了保持项或技术后果，尚未形成业务变化或验收闭环`);
+    }
+    const dependencies = state.dependencies.filter((item) => item.unit_key === unit.unit_key);
+    if (dependencies.length > 50) {
+      errors.push(`交付单元 ${unit.unit_key} 最多声明 50 个前置单元`);
+    }
+    for (const dependency of dependencies) {
+      if (!activeKeys.has(dependency.depends_on_unit_key)) {
+        errors.push(`交付单元 ${unit.unit_key} 依赖的 ${dependency.depends_on_unit_key} 不是有效交付单元`);
+        continue;
+      }
+      const requiredUnit = activeUnits.find((item) => item.unit_key === dependency.depends_on_unit_key)!;
+      if (requiredUnit.ordinal >= unit.ordinal) {
+        errors.push(`交付单元 ${unit.unit_key} 的前置 ${requiredUnit.unit_key} 必须排在它之前`);
+      }
+    }
+  }
+
+  for (const source of state.sources) {
+    const coveredBy = state.sourceLinks
+      .filter((link) => link.source_key === source.source_key && activeKeys.has(link.unit_key))
+      .map((link) => link.unit_key);
+    if (!coveredBy.length) {
+      const label = source.source_kind === 'change'
+        ? '必须同步改变'
+        : source.source_kind === 'preserve'
+          ? '必须保持'
+          : source.source_kind === 'technical'
+            ? '技术后果'
+            : '验收语义';
+      errors.push(`${label} ${source.source_key} 尚未由任何有效交付单元承接`);
+    }
+  }
+
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const dependenciesByUnit = new Map(activeUnits.map((unit) => [
+    unit.unit_key,
+    state.dependencies
+      .filter((item) => item.unit_key === unit.unit_key && activeKeys.has(item.depends_on_unit_key))
+      .map((item) => item.depends_on_unit_key),
+  ]));
+  const visit = (unitKey: string): boolean => {
+    if (visiting.has(unitKey)) return true;
+    if (visited.has(unitKey)) return false;
+    visiting.add(unitKey);
+    for (const dependency of dependenciesByUnit.get(unitKey) || []) {
+      if (visit(dependency)) return true;
+    }
+    visiting.delete(unitKey);
+    visited.add(unitKey);
+    return false;
+  };
+  if (activeUnits.some((unit) => visit(unit.unit_key))) {
+    errors.push('交付单元依赖存在循环，无法形成可执行顺序');
   }
   return errors;
 }
@@ -1071,17 +1361,41 @@ function renderDeliveryPlanStatus(
     `拆分依据：${state.plan.rationale || '未填写'}`,
     `整体覆盖：${state.plan.coverage || '未填写'}`,
     `排序说明：${state.plan.ordering_notes || '未填写'}`,
-    `交付单元：${state.units.length}`,
+    `规划输入：${state.sources.length}`,
+    `交付单元：${state.units.filter((unit) => unit.lifecycle_status === 'active').length}`
+      + `（历史 ${state.units.filter((unit) => unit.lifecycle_status !== 'active').length}）`,
+    `单元修订记录：${state.revisionCount}`,
   ];
+  if (state.sources.length) {
+    lines.push('', '规划输入索引（交付单元必须引用稳定 source key）：');
+    for (const source of state.sources) {
+      lines.push(`- ${source.source_key} · ${source.source_kind}：${source.content}（来源：${source.source_ref}）`);
+    }
+  }
+  if (state.existingUnits.length) {
+    lines.push('', '当前需求已有交付单元（新增计划的 unit key 不得重复）：');
+    for (const unit of state.existingUnits) {
+      lines.push(`- ${unit.story_index}. ${unit.unit_key || '无稳定 key'}：${unit.title}`);
+    }
+  }
   if (state.units.length) {
     lines.push('', '交付单元索引（跨轮次编辑必须复用 unit key）：');
     for (const [index, unit] of state.units.entries()) {
+      const sourceKeys = state.sourceLinks
+        .filter((link) => link.unit_key === unit.unit_key)
+        .map((link) => link.source_key);
+      const dependencies = state.dependencies
+        .filter((item) => item.unit_key === unit.unit_key)
+        .map((item) => item.depends_on_unit_key);
       lines.push(
-        `${index + 1}. ${unit.unit_key}：${unit.title}`,
+        `${index + 1}. ${unit.unit_key} · ${unit.lifecycle_status}：${unit.title}`,
         `   参与者：${unit.actor}`,
         `   触发条件：${unit.trigger_condition}`,
         `   可观察结果：${unit.observable_outcome}`,
         `   验收标准：${unit.acceptance}`,
+        `   覆盖来源：${sourceKeys.length ? sourceKeys.join(', ') : '未关联'}`,
+        `   前置单元：${dependencies.length ? dependencies.join(', ') : '无'}`,
+        ...(unit.lifecycle_reason ? [`   修订原因：${unit.lifecycle_reason}`] : []),
       );
     }
   }
@@ -1094,6 +1408,7 @@ function renderDeliveryPlanStatus(
 }
 
 function renderDeliveryPlanArtifact(state: ReturnType<typeof deliveryPlanState>) {
+  const activeUnits = state.units.filter((unit) => unit.lifecycle_status === 'active');
   const lines = [
     '# 交付计划',
     '',
@@ -1109,7 +1424,14 @@ function renderDeliveryPlanArtifact(state: ReturnType<typeof deliveryPlanState>)
     lines.push('', '## 排序与依赖', '', state.plan.ordering_notes);
   }
   lines.push('', '## 交付单元', '');
-  for (const [index, unit] of state.units.entries()) {
+  for (const [index, unit] of activeUnits.entries()) {
+    const linkedSources = state.sourceLinks
+      .filter((link) => link.unit_key === unit.unit_key)
+      .map((link) => state.sources.find((source) => source.source_key === link.source_key))
+      .filter((source): source is DeliveryPlanSourceItem => Boolean(source));
+    const dependencies = state.dependencies
+      .filter((item) => item.unit_key === unit.unit_key)
+      .map((item) => item.depends_on_unit_key);
     lines.push(
       `### ${index + 1}. ${unit.title}`,
       '',
@@ -1118,21 +1440,59 @@ function renderDeliveryPlanArtifact(state: ReturnType<typeof deliveryPlanState>)
       `- 触发条件：${unit.trigger_condition}`,
       `- 用户可观察结果：${unit.observable_outcome}`,
       `- 验收标准：${unit.acceptance}`,
+      `- 前置单元：${dependencies.length ? dependencies.map((key) => `\`${key}\``).join('、') : '无'}`,
+      '- 承接的规划输入：',
+      ...linkedSources.map((source) =>
+        `  - \`${source.source_key}\` · ${source.source_kind}：${source.content}`),
       '',
     );
+  }
+  const historicalUnits = state.units.filter((unit) => unit.lifecycle_status !== 'active');
+  if (historicalUnits.length) {
+    lines.push('', '## 已修正的候选单元', '');
+    for (const unit of historicalUnits) {
+      lines.push(
+        `- \`${unit.unit_key}\`：${unit.lifecycle_status}；${unit.lifecycle_reason || '未记录原因'}`
+        + `${unit.superseded_by ? `；由 \`${unit.superseded_by}\` 取代` : ''}`,
+      );
+    }
   }
   return lines.join('\n').trim();
 }
 
 function buildDeliveryPlanResult(state: ReturnType<typeof deliveryPlanState>) {
+  const activeUnits = state.units.filter((unit) => unit.lifecycle_status === 'active');
   return agentResultSchema.parse({
     outcome: 'completed',
-    summary: `已规划 ${state.units.length} 个可独立交付的交付单元`,
+    summary: `已规划 ${activeUnits.length} 个可独立交付的交付单元`,
     artifact: {
       title: '交付计划',
       content: renderDeliveryPlanArtifact(state),
     },
-    deliveryUnits: state.units.map((unit) => ({ title: unit.title })),
+    deliveryUnits: activeUnits.map((unit) => {
+      const sourceKeys = state.sourceLinks
+        .filter((link) => link.unit_key === unit.unit_key)
+        .map((link) => link.source_key);
+      return {
+        key: unit.unit_key,
+        title: unit.title,
+        actor: unit.actor,
+        trigger: unit.trigger_condition,
+        observableOutcome: unit.observable_outcome,
+        acceptance: unit.acceptance,
+        sourceRefs: state.sources
+          .filter((source) => sourceKeys.includes(source.source_key))
+          .map((source) => ({
+            key: source.source_key,
+            kind: source.source_kind,
+            content: source.content,
+            sourceRef: source.source_ref,
+          })),
+        dependsOn: state.dependencies
+          .filter((item) => item.unit_key === unit.unit_key)
+          .map((item) => item.depends_on_unit_key),
+      };
+    }),
   });
 }
 
@@ -1180,8 +1540,13 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile) {
       '  delivery-plan coverage set --text <整体覆盖说明>',
       '  delivery-plan ordering set --text <排序与依赖说明>',
       '  delivery-plan unit upsert --key <稳定key> --title <标题> --actor <参与者> --trigger <触发条件> --outcome <可观察结果> --acceptance <验收标准>',
-      '  delivery-plan unit remove --key <稳定key>',
+      '  delivery-plan unit dismiss --key <稳定key> --reason <理由>',
+      '  delivery-plan unit supersede --key <旧key> --by <新key> --reason <理由>',
       '  delivery-plan unit move --key <稳定key> --position <从1开始的位置>',
+      '  delivery-plan unit source add --key <单元key> --source <规划输入key>',
+      '  delivery-plan unit source remove --key <单元key> --source <规划输入key>',
+      '  delivery-plan unit dependency add --key <单元key> --on <前置单元key>',
+      '  delivery-plan unit dependency remove --key <单元key> --on <前置单元key>',
       '  delivery-plan validate',
       '',
       '长文本参数：',
@@ -1323,6 +1688,13 @@ function runDeliveryPlanCommand(input: {
   }
   if (command === 'delivery-plan unit upsert') {
     const key = bounded(required(flags, 'key'), '交付单元 key', 120);
+    const existing = db.prepare(`
+      SELECT lifecycle_status FROM delivery_plan_units
+      WHERE draft_id = ? AND unit_key = ?
+    `).get(draft.draft_id, key) as { lifecycle_status: string } | undefined;
+    if (existing && existing.lifecycle_status !== 'active') {
+      throw new Error(`交付单元 ${key} 已是 ${existing.lifecycle_status}，请使用新的稳定 key 记录新单元`);
+    }
     const ordinal = nextOrdinal(db, 'delivery_plan_units', draft.draft_id);
     db.prepare(`
       INSERT INTO delivery_plan_units(
@@ -1345,26 +1717,99 @@ function runDeliveryPlanCommand(input: {
       bounded(required(flags, 'acceptance'), '验收标准'),
       ordinal,
     );
+    recordDeliveryPlanUnitRevision(db, {
+      draftId: draft.draft_id,
+      executionId: execution.execution_id,
+      unitKey: key,
+      action: 'upsert',
+    });
     touchDraft(db, draft.draft_id);
     return `交付单元 ${key} 已保存。`;
   }
-  if (command === 'delivery-plan unit remove') {
+  if (
+    command === 'delivery-plan unit dismiss'
+    || command === 'delivery-plan unit supersede'
+  ) {
     const key = bounded(required(flags, 'key'), '交付单元 key', 120);
-    const removed = db.prepare(`
-      DELETE FROM delivery_plan_units WHERE draft_id = ? AND unit_key = ?
-    `).run(draft.draft_id, key);
-    if (!removed.changes) throw new Error(`交付单元 ${key} 不存在`);
+    const superseded = command.endsWith('supersede');
+    reviseDeliveryPlanUnitLifecycle(db, {
+      draftId: draft.draft_id,
+      unitKey: key,
+      lifecycle: superseded ? 'superseded' : 'dismissed',
+      reason: bounded(required(flags, 'reason'), '修订理由'),
+      supersededBy: superseded ? bounded(required(flags, 'by'), '取代单元 key', 120) : undefined,
+    });
+    recordDeliveryPlanUnitRevision(db, {
+      draftId: draft.draft_id,
+      executionId: execution.execution_id,
+      unitKey: key,
+      action: superseded ? 'supersede' : 'dismiss',
+    });
     touchDraft(db, draft.draft_id);
-    return `交付单元 ${key} 已删除。`;
+    return `交付单元 ${key} 已标记为${superseded ? '已取代' : '已排除'}。`;
+  }
+  if (
+    command === 'delivery-plan unit source add'
+    || command === 'delivery-plan unit source remove'
+  ) {
+    const key = bounded(required(flags, 'key'), '交付单元 key', 120);
+    const sourceKey = bounded(required(flags, 'source'), '规划输入 key', 240);
+    requireActiveDeliveryPlanUnit(db, draft.draft_id, key);
+    const source = db.prepare(`
+      SELECT 1 FROM delivery_plan_source_items
+      WHERE draft_id = ? AND source_key = ?
+    `).get(draft.draft_id, sourceKey);
+    if (!source) throw new Error(`规划输入 ${sourceKey} 不存在`);
+    if (command.endsWith('add')) {
+      db.prepare(`
+        INSERT INTO delivery_plan_unit_source_links(draft_id, unit_key, source_key)
+        VALUES(?, ?, ?)
+        ON CONFLICT(draft_id, unit_key, source_key) DO NOTHING
+      `).run(draft.draft_id, key, sourceKey);
+    } else {
+      const removed = db.prepare(`
+        DELETE FROM delivery_plan_unit_source_links
+        WHERE draft_id = ? AND unit_key = ? AND source_key = ?
+      `).run(draft.draft_id, key, sourceKey);
+      if (!removed.changes) throw new Error(`交付单元 ${key} 未关联规划输入 ${sourceKey}`);
+    }
+    touchDraft(db, draft.draft_id);
+    return `交付单元 ${key} 与规划输入 ${sourceKey} 的关联已${command.endsWith('add') ? '保存' : '移除'}。`;
+  }
+  if (
+    command === 'delivery-plan unit dependency add'
+    || command === 'delivery-plan unit dependency remove'
+  ) {
+    const key = bounded(required(flags, 'key'), '交付单元 key', 120);
+    const dependsOn = bounded(required(flags, 'on'), '前置单元 key', 120);
+    if (key === dependsOn) throw new Error('交付单元不能依赖自身');
+    requireActiveDeliveryPlanUnit(db, draft.draft_id, key);
+    requireActiveDeliveryPlanUnit(db, draft.draft_id, dependsOn);
+    if (command.endsWith('add')) {
+      db.prepare(`
+        INSERT INTO delivery_plan_unit_dependencies(draft_id, unit_key, depends_on_unit_key)
+        VALUES(?, ?, ?)
+        ON CONFLICT(draft_id, unit_key, depends_on_unit_key) DO NOTHING
+      `).run(draft.draft_id, key, dependsOn);
+    } else {
+      const removed = db.prepare(`
+        DELETE FROM delivery_plan_unit_dependencies
+        WHERE draft_id = ? AND unit_key = ? AND depends_on_unit_key = ?
+      `).run(draft.draft_id, key, dependsOn);
+      if (!removed.changes) throw new Error(`交付单元 ${key} 不依赖 ${dependsOn}`);
+    }
+    touchDraft(db, draft.draft_id);
+    return `交付单元 ${key} 对 ${dependsOn} 的前置依赖已${command.endsWith('add') ? '保存' : '移除'}。`;
   }
   if (command === 'delivery-plan unit move') {
     const key = bounded(required(flags, 'key'), '交付单元 key', 120);
     const requested = Number(required(flags, 'position'));
     if (!Number.isInteger(requested) || requested < 1) throw new Error('--position 必须是从 1 开始的整数');
     const state = deliveryPlanState(db, draft);
-    const current = state.units.find((unit) => unit.unit_key === key);
+    const activeUnits = state.units.filter((unit) => unit.lifecycle_status === 'active');
+    const current = activeUnits.find((unit) => unit.unit_key === key);
     if (!current) throw new Error(`交付单元 ${key} 不存在`);
-    const reordered = state.units.filter((unit) => unit.unit_key !== key);
+    const reordered = activeUnits.filter((unit) => unit.unit_key !== key);
     reordered.splice(Math.min(requested - 1, reordered.length), 0, current);
     db.transaction(() => {
       for (const [index, unit] of reordered.entries()) {
@@ -1435,6 +1880,79 @@ function recordContextItemRevision(
     input.action,
     JSON.stringify(snapshot),
     input.executionId,
+  );
+}
+
+function requireActiveDeliveryPlanUnit(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  draftId: string,
+  unitKey: string,
+) {
+  const unit = db.prepare(`
+    SELECT lifecycle_status
+    FROM delivery_plan_units
+    WHERE draft_id = ? AND unit_key = ?
+  `).get(draftId, unitKey) as { lifecycle_status: string } | undefined;
+  if (!unit) throw new Error(`交付单元 ${unitKey} 不存在`);
+  if (unit.lifecycle_status !== 'active') {
+    throw new Error(`交付单元 ${unitKey} 已是 ${unit.lifecycle_status}，不能继续编辑关联`);
+  }
+}
+
+function recordDeliveryPlanUnitRevision(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  input: {
+    draftId: string;
+    executionId: string;
+    unitKey: string;
+    action: 'upsert' | 'dismiss' | 'supersede';
+  },
+) {
+  const snapshot = db.prepare(`
+    SELECT * FROM delivery_plan_units
+    WHERE draft_id = ? AND unit_key = ?
+  `).get(input.draftId, input.unitKey);
+  if (!snapshot) throw new Error(`交付单元 ${input.unitKey} 无法生成修订记录`);
+  db.prepare(`
+    INSERT INTO delivery_plan_unit_revisions(
+      draft_id, unit_key, action, snapshot_json, execution_id
+    ) VALUES(?, ?, ?, ?, ?)
+  `).run(
+    input.draftId,
+    input.unitKey,
+    input.action,
+    JSON.stringify(snapshot),
+    input.executionId,
+  );
+}
+
+function reviseDeliveryPlanUnitLifecycle(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  input: {
+    draftId: string;
+    unitKey: string;
+    lifecycle: 'dismissed' | 'superseded';
+    reason: string;
+    supersededBy?: string;
+  },
+) {
+  requireActiveDeliveryPlanUnit(db, input.draftId, input.unitKey);
+  if (input.lifecycle === 'superseded') {
+    if (!input.supersededBy || input.supersededBy === input.unitKey) {
+      throw new Error('交付单元必须由另一个已经存在的稳定 key 取代');
+    }
+    requireActiveDeliveryPlanUnit(db, input.draftId, input.supersededBy);
+  }
+  db.prepare(`
+    UPDATE delivery_plan_units
+    SET lifecycle_status = ?, lifecycle_reason = ?, superseded_by = ?
+    WHERE draft_id = ? AND unit_key = ?
+  `).run(
+    input.lifecycle,
+    input.reason,
+    input.lifecycle === 'superseded' ? input.supersededBy : null,
+    input.draftId,
+    input.unitKey,
   );
 }
 

@@ -162,7 +162,7 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
     `当前角色使用 execution 绑定的 \`${profile.namespace}\` 命令空间渐进提交工作，不再生成或提交通用结果 JSON。`,
     `每次 Agent 进程启动后的第一条领域命令必须是：${command} ${profile.namespace} status`,
     '这一步会恢复上一次 attempt 或澄清轮次留下的草稿。未查看状态前，所有编辑、校验和终止命令都会被拒绝。',
-    'status 会列出当前角色草稿中的稳定 key。修改既有语义时必须复用原 key 进行覆盖或删除；只有新增语义才创建新 key，禁止通过换名制造重复条目。问题的 decision key 和交付单元的 unit key 都跨轮次不可改名。',
+    'status 会列出当前角色草稿中的稳定 key。修改既有语义时必须复用原 key，并使用当前角色提供的编辑或显式修订命令；只有新增语义才创建新 key，禁止通过换名制造重复条目。问题的 decision key 和交付单元的 unit key 都跨轮次不可改名。',
     `使用 ${command} help 查看当前 execution 实际允许的命令；命令失败时根据错误修正后自行重试，不要因为一次校验失败就结束工作。`,
     '长文本不要塞进命令行：任意 `--text <内容>` 一类参数都可改成 `--text-file <UTF-8 文件路径>`（例如 `--statement-file`、`--question-file`），尤其在 Windows 上应优先使用文件参数。',
     '草稿命令可以反复增加、修改或删除内容，不会推进业务状态。只有一个成功的终止命令才会结束当前工作。',

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
+import { deliveryUnitContractSchema } from '../domain/delivery-unit';
 import { AgentResultContractError, assertSliceSpecDecisionCoverage, sliceSpecSchema } from '../domain/agent-result';
 import { databaseConnection, paths } from '../infrastructure/database';
 import { isProcessAlive, readRunPid } from '../infrastructure/run-process';
@@ -19,6 +20,7 @@ import {
   type TaskLane,
   type TaskLaneKind,
 } from './task-lanes';
+import { insertDeliveryUnitContractsInDb } from './delivery-units';
 import {
   assertActorCanCreate,
   assertState,
@@ -65,6 +67,19 @@ export type Story = {
   origin_type: 'original' | 'feedback_behavior' | 'feedback_bug' | 'feedback_scope' | 'feedback_technical';
   origin_feedback_batch_id: string | null;
   corrects_story_indexes_json: string | null;
+  unit_key: string | null;
+  actor: string | null;
+  trigger_condition: string | null;
+  observable_outcome: string | null;
+  acceptance: string | null;
+  source_delivery_plan_draft_id: string | null;
+  context_links: {
+    source_key: string;
+    source_kind: 'change' | 'preserve' | 'technical' | 'acceptance';
+    content: string;
+    source_ref: string;
+  }[];
+  depends_on_story_indexes: number[];
 };
 export type StorySpec = { spec_id: string; task_id: string; story_index: number; revision: number; status: 'draft' | 'waiting_for_answers' | 'resolved' | 'superseded'; spec_json: string; source_result_id: string | null; created_at: string; resolved_at: string | null };
 export type Document = {
@@ -358,7 +373,29 @@ export async function getTask(taskId: string) {
   const db = await databaseConnection();
   const task = fetchTask(db, taskId);
   if (!task) return null;
-  const stories = db.prepare('SELECT * FROM stories WHERE task_id = ? ORDER BY story_index').all(taskId) as Story[];
+  const storyRows = db.prepare('SELECT * FROM stories WHERE task_id = ? ORDER BY story_index')
+    .all(taskId) as Omit<Story, 'context_links' | 'depends_on_story_indexes'>[];
+  const contextLinks = db.prepare(`
+    SELECT story_index, source_key, source_kind, content, source_ref
+    FROM delivery_unit_context_links
+    WHERE task_id = ?
+    ORDER BY story_index, source_key
+  `).all(taskId) as (Story['context_links'][number] & { story_index: number })[];
+  const dependencies = db.prepare(`
+    SELECT story_index, depends_on_story_index
+    FROM delivery_unit_dependencies
+    WHERE task_id = ?
+    ORDER BY story_index, depends_on_story_index
+  `).all(taskId) as { story_index: number; depends_on_story_index: number }[];
+  const stories: Story[] = storyRows.map((story) => ({
+    ...story,
+    context_links: contextLinks
+      .filter((link) => link.story_index === story.story_index)
+      .map(({ story_index: _storyIndex, ...link }) => link),
+    depends_on_story_indexes: dependencies
+      .filter((dependency) => dependency.story_index === story.story_index)
+      .map((dependency) => dependency.depends_on_story_index),
+  }));
   const storySpecs = db.prepare('SELECT * FROM story_specs WHERE task_id = ? ORDER BY story_index, revision').all(taskId) as StorySpec[];
   const questions = db.prepare('SELECT * FROM questions WHERE task_id = ? ORDER BY created_at').all(taskId) as Question[];
   const runtimeInputs = db.prepare('SELECT * FROM runtime_input_requests WHERE task_id = ? ORDER BY created_at').all(taskId) as RuntimeInputRequest[];
@@ -709,6 +746,60 @@ export async function addStory(input: unknown) {
     const after = fetchTask(db, value.taskId);
     if (after) refreshTaskLaneStatesInDb(db, after);
     addEvent(db, value.taskId, value.actor, 'StoryAdded', `新增交付单元 ${nextIndex}：${value.title}`);
+    db.exec('COMMIT');
+    await syncTaskFiles(db, value.taskId);
+    refreshPages(`/tasks/${value.taskId}`);
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+}
+
+export async function addPlannedDeliveryUnits(input: unknown) {
+  const value = z.object({
+    taskId: z.string().min(1),
+    actor: z.literal('story-splitter-agent'),
+    units: z.array(deliveryUnitContractSchema).min(1).max(50),
+    sourceDeliveryPlanDraftId: z.string().min(1),
+  }).parse(input);
+  const db = await databaseConnection();
+  const task = fetchTask(db, value.taskId);
+  if (!task) throw new Error('需求不存在');
+  const existingCount = (db.prepare(`
+    SELECT COUNT(*) AS value FROM stories WHERE task_id = ?
+  `).get(value.taskId) as { value: number }).value;
+  if (existingCount) throw new Error('当前需求已存在交付单元，拒绝重复拆分');
+  const prospective = { ...task, total_stories: value.units.length };
+  assertState(prospective);
+  db.exec('BEGIN');
+  try {
+    const inserted = insertDeliveryUnitContractsInDb(db, {
+      taskId: value.taskId,
+      units: value.units,
+      originType: 'original',
+      sourceDeliveryPlanDraftId: value.sourceDeliveryPlanDraftId,
+    });
+    db.prepare(`
+      UPDATE tasks
+      SET total_stories = ?, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ?
+    `).run(
+      prospective.total_stories,
+      `已规划 ${inserted.length} 个交付单元，等待方案分析`,
+      value.actor,
+      value.taskId,
+    );
+    const after = fetchTask(db, value.taskId);
+    if (after) refreshTaskLaneStatesInDb(db, after);
+    for (const unit of inserted) {
+      addEvent(
+        db,
+        value.taskId,
+        value.actor,
+        'DeliveryUnitAdded',
+        `新增交付单元 ${unit.storyIndex}：${unit.title}（${unit.key}）`,
+      );
+    }
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId);
     refreshPages(`/tasks/${value.taskId}`);

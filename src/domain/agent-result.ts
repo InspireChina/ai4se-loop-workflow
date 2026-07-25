@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { omitNullObjectProperties } from './schema-normalization';
+import { deliveryUnitContractSchema } from './delivery-unit';
 
 const artifactSchema = z.object({
   title: z.string().min(1).max(240),
@@ -28,8 +29,6 @@ const runtimeInputSchema = z.object({
   why: z.string().max(1000).optional().default(''),
   recommendation: z.string().max(2000).optional().default(''),
 });
-
-const deliveryUnitSchema = z.object({ title: z.string().min(1).max(200) });
 
 const feedbackTriageGroupSchema = z.object({
   groupKey: z.string().min(1).max(200),
@@ -156,10 +155,10 @@ export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object
   classification: z.enum(['feature', 'bug', 'tech', 'intake', 'other']).optional(),
   route: z.enum(['plan', 'repro']).optional(),
   reproVerdict: z.enum(['reproduced', 'not_reproduced']).optional(),
-  deliveryUnits: z.array(deliveryUnitSchema).max(50).optional(),
+  deliveryUnits: z.array(deliveryUnitContractSchema).max(50).optional(),
   spec: sliceSpecSchema.optional(),
   // Read-only compatibility for results queued before the terminology change.
-  stories: z.array(deliveryUnitSchema).max(50).optional(),
+  stories: z.array(deliveryUnitContractSchema).max(50).optional(),
   verdict: z.enum(['passed', 'failed', 'report_ready', 'ready_for_approval', 'changes_requested']).optional(),
   failureKind: z.enum(['implementation', 'specification', 'environment', 'inconclusive']).optional(),
   rewindTo: z.enum(['plan', 'analysis', 'dev', 'test']).optional(),

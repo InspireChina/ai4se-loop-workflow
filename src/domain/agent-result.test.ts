@@ -2,11 +2,32 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { assertAgentResultRoleContract, parseAgentResult } from './agent-result';
 
+function deliveryUnit(key: string, title: string) {
+  return {
+    key,
+    title,
+    actor: '用户',
+    trigger: '用户发起对应业务操作',
+    observableOutcome: `${title}产生可观察结果`,
+    acceptance: `${title}可以独立验收`,
+    sourceRefs: [{
+      key: `change:${key}`,
+      kind: 'change',
+      content: title,
+      sourceRef: `TEST:${key}`,
+    }],
+    dependsOn: [],
+  };
+}
+
 test('parses a structured agent result with role-specific fields', () => {
   const result = parseAgentResult(JSON.stringify({
     outcome: 'completed',
     summary: '拆分完成',
-    deliveryUnits: [{ title: '用户可以提交描述' }, { title: '用户可以查看已保存描述' }],
+    deliveryUnits: [
+      deliveryUnit('submit-description', '用户可以提交描述'),
+      deliveryUnit('view-description', '用户可以查看已保存描述'),
+    ],
   }));
   assert.equal(result.outcome, 'completed');
   assert.equal(result.deliveryUnits?.length, 2);
@@ -33,7 +54,7 @@ test('accepts legacy story fields while exposing delivery-unit terminology', () 
   const result = parseAgentResult(JSON.stringify({
     outcome: 'completed',
     summary: 'legacy queued result',
-    stories: [{ title: 'Legacy unit' }],
+    stories: [deliveryUnit('legacy-unit', 'Legacy unit')],
     rewindStory: 1,
   }));
   assert.equal(result.deliveryUnits?.[0]?.title, 'Legacy unit');

@@ -5,7 +5,7 @@
 | 产品术语 | 含义 |
 |---|---|
 | 需求（Requirement） | 用户输入的完整目标，可能包含多个可独立交付的业务流程，是系统的流程聚合根。 |
-| 交付单元（Delivery Unit） | 从需求中拆出的最小可独立交付、验证的业务闭环，粒度应适合一个开发实现 Agent 在一次上下文中完成。 |
+| 交付单元（Delivery Unit） | 带稳定身份、参与者、触发条件、可观察结果、验收语义、来源覆盖和自然依赖的业务闭环；在保持闭环完整的前提下，粒度应适合当前项目可信的 Agent 交付能力。 |
 | Agent 执行尝试 | 应用为一个明确推进步骤持久化输入、输出和副作用收据后启动一次 Agent CLI。 |
 | 推进流程 | 应用根据需求状态和进度计算出的下一组 Agent 执行步骤。 |
 | 需求级产品歧义 | 需求梳理 Agent 无法从项目证据推导，且会改变业务目标、规则、参与者、范围、分类或验收结果的信息。 |
@@ -224,7 +224,7 @@ classDiagram
 
 角色提交能力由 Agent Profile 或内部工作类型明确声明。需求梳理 Agent 使用 `loop-agent requirement-context`，交付规划 Agent 使用 `loop-agent delivery-plan`，问题复现 Agent 使用 `loop-agent reproduction`，方案分析 Agent 使用 `loop-agent analysis`，开发实现 Agent 使用 `loop-agent implementation`，验证 Agent 使用 `loop-agent verification`，反馈处理 Agent 使用 `loop-agent feedback`，结卡报告 Agent 使用 `loop-agent review`，Prompt 演化评估器使用 `loop-agent evolution`，软件维护 Agent 使用 `loop-agent maintenance`。所有角色渐进维护 Application 拥有的草稿：每次进程启动先读取 status，编辑命令只更新草稿，角色终止命令才产生 Result Receipt。流程 execution token 或内部工作 token 只授权当前 Agent 的命令空间，Agent 不接触 SQLite。普通最终回复和手写 JSON 不承担控制面协议。
 
-`DeliveryPlanDraft` 属于交付规划 Application 能力，不直接改变 `Task` 聚合。它记录拆分依据、整体覆盖、排序说明和带稳定 `unit_key` 的有序候选单元。只有 `delivery-plan complete` 通过完整性校验后，Application 才把草稿投影为既有 `AgentResult.deliveryUnits` 并调用领域状态机；重试恢复草稿与业务推进因此保持分离。
+`DeliveryPlanDraft` 属于交付规划 Application 能力，不直接改变 `Task` 聚合。创建草稿时，Application 为普通拆分冻结已完成业务变化上下文中的 change、preserve、technical 和 acceptance 输入；反馈范围新增则只冻结当前反馈工作组的变化与验收输入。草稿记录拆分依据、整体覆盖、排序说明、带稳定 `unit_key` 的有序候选单元、输入承接关系和自然依赖；错误候选通过 dismiss 或 supersede 保留修订历史。`delivery-plan complete` 只校验输入覆盖、稳定引用、单元完整性和无环顺序等结构事实，成功后一次事务把完整单元契约投影进 `Requirement` 聚合。Analyst 直接继承参与者、触发条件、可观察结果、单元验收、来源快照和前置单元，不再从标题重新猜测边界。
 
 `ReproductionDraft` 属于问题复现 Application 能力，不直接改变 `Task` 聚合。它记录复现条件、步骤、证据、根因假设和人工对齐问题；普通 Bug 以需求级工作键隔离，评论复现以 `feedbackGroupId` 隔离。`request-alignment` 只形成待回答问题和未复现文档，`complete` 才能在完整证据校验后投影为可推进的 `AgentResult`。回答恢复必须沿用原 `decision_key`，不能通过改名绕过已回答问题的身份约束。
 
