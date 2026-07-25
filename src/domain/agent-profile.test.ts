@@ -3,7 +3,7 @@ import test from 'node:test';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
 test('ships rigorous versioned seed prompts for every flow Agent', () => {
-  assert.equal(AGENT_PROMPT_SEED_REVISION, 24);
+  assert.equal(AGENT_PROMPT_SEED_REVISION, 25);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
     assert.ok(prompt.length >= 450, `${agentId} seed prompt is too small to define a reliable role contract`);
@@ -12,9 +12,21 @@ test('ships rigorous versioned seed prompts for every flow Agent', () => {
     assert.match(prompt, /# (?:决策边界|禁止事项)/, agentId);
   }
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /现有实现已经满足规格/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /目标、整体范围、Bug\/非 Bug 分类或交付单元边界/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /目标、整体范围、主要参与者、Bug\/非 Bug 分类或最终验收结果/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /如何拆分交付单元完全由后续交付规划 Agent 决定/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /request-clarification/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /每次启动先.*requirement-context status/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不得为了通过校验猜测临时分类/);
+  assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /\bintake\b/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /用户最新的明确指令和已经回答的需求级问题具有最高优先级/);
+  assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /数据库文档/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /feature 是新增或改变.*bug 是现有可观察行为偏离.*tech 的主要目标是.*other 只用于/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /用户、运营者、开发者或外部系统最终能够验证到什么变化/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /事实来源必须可定位到用户输入或答复、Context ref、仓库相对路径与符号/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /探索到足以确认现有可观察行为.*后立即停止/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /实质改变需求语义的最少问题/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不询问偏好性问题、实现细节或可自行验证的事实/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不得修改工作区中的任何文件，不得提交代码/);
   assert.match(AGENT_PROFILE_DEFINITIONS['story-splitter-agent'].prompt, /每次启动先.*delivery-plan status/);
   assert.match(AGENT_PROFILE_DEFINITIONS['story-splitter-agent'].prompt, /稳定 unit key/);
   assert.match(AGENT_PROFILE_DEFINITIONS['story-splitter-agent'].prompt, /delivery-plan complete/);

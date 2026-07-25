@@ -151,7 +151,7 @@ test('requires status first, accepts progressive edits, and submits a determinis
 
   assert.equal(
     await command(active.executionId, active.token!, ['requirement-context', 'validate']),
-    '需求上下文草稿结构校验通过。',
+    '需求上下文草稿基础结构校验通过；终止命令仍会校验分类和未回答问题。',
   );
   assert.match(
     await command(active.executionId, active.token!, ['requirement-context', 'complete']),
@@ -165,6 +165,7 @@ test('requires status first, accepts progressive edits, and submits a determinis
   const result = await readAgentCommandSubmission(active.executionId);
   assert.equal(result?.classification, 'feature');
   assert.equal(result?.route, 'plan');
+  assert.match(result?.artifact?.content || '', /## 需求类型\s+feature/);
   assert.match(result?.artifact?.content || '', /列表已经支持组合筛选/);
   assert.match(result?.artifact?.content || '', /导出当前筛选条件命中的数据/);
 
@@ -200,9 +201,6 @@ test('inherits a persisted clarification draft after resume and forces status ag
   ]);
   await command(first.executionId, first.token!, [
     'requirement-context', 'outcome', 'set', '--text', '目标用户可以下载列表数据',
-  ]);
-  await command(first.executionId, first.token!, [
-    'requirement-context', 'classification', 'set', 'feature',
   ]);
   await command(first.executionId, first.token!, [
     'requirement-context', 'fact', 'add',
@@ -242,13 +240,20 @@ test('inherits a persisted clarification draft after resume and forces status ag
     '--option', 'admin',
     '--reason', '这是满足当前目标的最小范围',
   ]);
+  assert.match(
+    await command(first.executionId, first.token!, ['requirement-context', 'validate']),
+    /基础结构校验通过/,
+  );
   await command(first.executionId, first.token!, [
     'requirement-context', 'request-clarification',
   ]);
 
   const questionResult = await readAgentCommandSubmission(first.executionId);
   assert.equal(questionResult?.outcome, 'needs_input');
+  assert.equal(questionResult?.classification, undefined);
+  assert.equal(questionResult?.route, undefined);
   assert.equal(questionResult?.questions[0]?.decisionKey, 'export-audience');
+  assert.match(questionResult?.artifact?.content || '', /## 需求类型\s+待确认/);
   await applyAgentResult('RUN-command-question', first.delegation, questionResult!, {
     executionId: first.executionId,
   });
@@ -276,6 +281,7 @@ test('inherits a persisted clarification draft after resume and forces status ag
     'requirement-context', 'status',
   ]);
   assert.match(inherited, /草稿 v2/);
+  assert.match(inherited, /分类：未填写/);
   assert.match(inherited, /export-audience：确认导出能力的目标用户 · 已回答：本轮只面向管理员/);
   assert.match(inherited, /audience-missing：当前输入没有说明导出入口面向哪些角色/);
   assert.match(inherited, /audience-must-be-confirmed：目标用户必须由用户确认/);
@@ -287,10 +293,18 @@ test('inherits a persisted clarification draft after resume and forces status ag
   const revised = await command(resumed.executionId, resumed.token!, ['requirement-context', 'status']);
   assert.match(revised, /约束：1/);
   assert.match(revised, /audience-must-be-confirmed：本轮导出能力只面向管理员/);
+  await assert.rejects(
+    command(resumed.executionId, resumed.token!, ['requirement-context', 'complete']),
+    /缺少需求分类/,
+  );
+  await command(resumed.executionId, resumed.token!, [
+    'requirement-context', 'classification', 'set', 'feature',
+  ]);
   await command(resumed.executionId, resumed.token!, ['requirement-context', 'complete']);
 
   const completedResult = await readAgentCommandSubmission(resumed.executionId);
   assert.equal(completedResult?.outcome, 'completed');
+  assert.match(completedResult?.artifact?.content || '', /## 需求类型\s+feature/);
   assert.match(completedResult?.artifact?.content || '', /本轮只面向管理员/);
   await applyAgentResult('RUN-command-resume', resumed.delegation, completedResult!, {
     executionId: resumed.executionId,

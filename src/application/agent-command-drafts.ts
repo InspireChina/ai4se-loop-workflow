@@ -592,8 +592,10 @@ function validationErrors(
 ) {
   const errors: string[] = [];
   if (!state.context.goal?.trim()) errors.push('缺少需求目标：使用 requirement-context goal set --text <内容>');
-  if (!state.context.observable_outcome?.trim()) errors.push('缺少用户可观察结果：使用 requirement-context outcome set --text <内容>');
-  if (!state.context.classification) errors.push('缺少需求分类：使用 requirement-context classification set <feature|bug|tech|other>');
+  if (!state.context.observable_outcome?.trim()) errors.push('缺少可观察结果：使用 requirement-context outcome set --text <内容>');
+  if (terminal === 'complete' && !state.context.classification) {
+    errors.push('缺少需求分类：使用 requirement-context classification set <feature|bug|tech|other>');
+  }
   if (!state.facts.length) errors.push('至少需要一条带来源的已确认事实');
   for (const question of state.questions) {
     if (question.answer) continue;
@@ -660,6 +662,14 @@ function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
   }
   if (missing.length) {
     lines.push('', '当前校验提示：', ...missing.map((item, index) => `${index + 1}. ${item}`));
+  } else if (!state.context.classification) {
+    lines.push(
+      '',
+      '草稿基础结构完整，但 complete 前仍需确定需求分类。',
+      state.questions.some((question) => !question.answer)
+        ? '若分类取决于待回答问题，可以先提交 request-clarification；不要猜测临时分类。'
+        : '当前没有待回答问题，请设置 classification 后再 complete。',
+    );
   } else {
     lines.push('', '草稿结构完整。请根据是否仍有未回答问题选择终止命令。');
   }
@@ -672,11 +682,15 @@ function renderArtifact(state: ReturnType<typeof draftState>) {
   const lines = [
     '# 需求上下文',
     '',
+    '## 需求类型',
+    '',
+    state.context.classification || '待确认',
+    '',
     '## 目标',
     '',
     state.context.goal || '',
     '',
-    '## 用户可观察结果',
+    '## 可观察结果',
     '',
     state.context.observable_outcome || '',
     '',
@@ -1383,7 +1397,7 @@ export async function runAgentCommand(input: {
   if (command === 'requirement-context validate') {
     const errors = validationErrors(draftState(db, draft));
     if (errors.length) throw new Error(`草稿校验失败：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
-    return '需求上下文草稿结构校验通过。';
+    return '需求上下文草稿基础结构校验通过；终止命令仍会校验分类和未回答问题。';
   }
   if (command === 'requirement-context complete') {
     return terminalSubmit(db, draft, execution, 'complete');
