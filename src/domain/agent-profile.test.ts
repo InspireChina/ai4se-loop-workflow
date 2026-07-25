@@ -3,7 +3,7 @@ import test from 'node:test';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
 test('ships rigorous versioned seed prompts for every flow Agent', () => {
-  assert.equal(AGENT_PROMPT_SEED_REVISION, 20);
+  assert.equal(AGENT_PROMPT_SEED_REVISION, 21);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
     assert.ok(prompt.length >= 450, `${agentId} seed prompt is too small to define a reliable role contract`);
@@ -29,9 +29,11 @@ test('ships rigorous versioned seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['repro-agent'].prompt, /必须由人对齐/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /不要为了制造 diff/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /工作区已有其他未提交内容不是跳过 commit 的理由/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /成功提交本轮相关改动后才能返回 completed/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /提交成功后记录当前 HEAD.*implementation complete/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /只能暂存本轮相关改动/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /runtimeInputs/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /implementation status/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /implementation complete/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /原 request key/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /runtimeInputs/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /逐条说明如何处理/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /Application 只向前追加交付单元/);

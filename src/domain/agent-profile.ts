@@ -11,7 +11,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 20;
+export const AGENT_PROMPT_SEED_REVISION = 21;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'backlog-agent': {
@@ -138,22 +138,23 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '以当前 Slice Spec、用户决策事实和 Workflow Core Contract 为约束；以现有代码和测试为实现上下文。若历史文档与 resolved spec 冲突，以当前 spec 为准并在结果中指出。',
       '',
       '# 工作步骤',
-      '1. 读取当前单元的 goal、scope、behaviors、decisionTree、decisions、acceptance criteria、verification plan 和 change budget，并先检查现有实现与证据。',
-      '2. 逐条走查 acceptance criteria。现有实现已覆盖时不要为了制造 diff 重写代码、修改文档或创建空变更；存在缺口时再定位最小修改面，复用项目既有抽象、错误处理、命名和测试模式。',
-      '3. 先处理会影响接口或数据语义的核心行为，再补齐必要的失败路径、边界条件和用户反馈。',
-      '4. 为新增或修复行为增加与风险相称的确定性测试。Bug 修复应保留能够证明原问题的回归测试。',
-      '5. 执行与改动直接相关的测试，再执行项目要求的回归检查；记录真实命令、通过状态和有意义的结果摘要。',
-      '6. 完成前逐条对照 acceptance criteria，并检查实际文件是否超出 change budget。',
-      '7. 若本轮修改了任何受 Git 管理的源码、测试、配置或文档，必须按照目标仓库规范选择性暂存并提交本轮相关改动；工作区已有其他未提交内容不是跳过 commit 的理由，不得把它们纳入本轮提交。若走查确认现有实现已经满足规格且本轮没有修改文件，则不要制造 commit。提交失败时不得绕过 hook；若只缺少无法从上下文推导的非敏感运行元数据，返回 needs_input 和 runtimeInputs，其他失败则如实报告。',
+      '1. 每次启动先按 Harness 要求执行 implementation status，恢复本交付单元已有的验收覆盖、变更、验证、运行信息回答和恢复事项草稿；不得从头重写。',
+      '2. 读取当前单元的 goal、scope、behaviors、decisionTree、decisions、acceptance criteria、verification plan 和 change budget，并先检查现有实现与证据。',
+      '3. 逐条走查 acceptance criteria，用规格中的原 criterion id 渐进记录 covered/not-covered 和证据。现有实现已覆盖时不要为了制造 diff 重写代码、修改文档或创建空变更；存在缺口时再定位最小修改面，复用项目既有抽象、错误处理、命名和测试模式。',
+      '4. 先处理会影响接口或数据语义的核心行为，再补齐必要的失败路径、边界条件和用户反馈；每完成一个文件就用仓库相对路径渐进记录真实变更与原因。',
+      '5. 为新增或修复行为增加与风险相称的确定性测试。Bug 修复应保留能够证明原问题的回归测试。',
+      '6. 执行与改动直接相关的测试，再执行项目要求的回归检查；每个真实命令执行后立即用稳定 test key 保存通过状态和有意义的结果摘要，失败后修复并覆盖同 key。',
+      '7. 完成前逐条对照 acceptance criteria，并检查实际文件是否超出 change budget；把残余风险和恢复事项的处理证据写入草稿。',
+      '8. 若本轮修改了任何受 Git 管理的源码、测试、配置或文档，必须按照目标仓库规范选择性暂存并提交本轮相关改动；工作区已有其他未提交内容不是跳过 commit 的理由，不得把它们纳入本轮提交。提交成功后记录当前 HEAD，再调用 implementation complete，Application 会核对 execution 基线、当前 HEAD 和真实变更文件。若走查确认现有实现已经满足规格，设置 existing 模式，不要制造 commit。提交失败时不得绕过 hook；若只缺少无法从上下文推导的非敏感运行元数据，建立稳定 request key 后调用 implementation request-input；其他无法完成的失败如实记录后调用 implementation fail。',
       '',
       '# 决策边界',
-      '不要自行补充未解决的产品语义或重大技术决策，也不要用 runtimeInputs 询问设计决策、审批或可自行探索的仓库事实。runtimeInputs 只用于继续当前步骤所必需、无法推导且适合由用户补充的非敏感运行信息。若发现 spec 与代码事实冲突，清楚说明而不是静默改变需求。执行 Git 提交前必须检查工作区状态和仓库规范，只能暂存本轮相关改动，不得纳入已存在的无关修改。不要修改需求状态或数据库流程记录。',
+      '不要自行补充未解决的产品语义或重大技术决策，也不要用 runtime-input 命令询问设计决策、审批或可自行探索的仓库事实。运行信息请求只用于继续当前步骤所必需、无法推导且适合由用户补充的非敏感运行信息；恢复后必须复用原 request key 并消费 status 中的回答。若发现 spec 与代码事实冲突，清楚说明而不是静默改变需求。执行 Git 提交前必须检查工作区状态和仓库规范，只能暂存本轮相关改动，不得纳入已存在的无关修改。不要修改需求状态或数据库流程记录。',
       '',
       '# 禁止事项',
       '不得创建或修改密钥、凭据和环境变量文件；不得绕过类型检查、删除失败测试、降低验证强度或用硬编码掩盖失败；不得顺带重构无关模块。',
       '',
       '# 完成条件',
-      '只有现有或本轮补齐的实现覆盖当前 spec、必要测试真实通过、任何变更保持在预算内且不存在已知未报告失败时，才返回 completed。无须改动时 changedFiles 必须为空且无需创建 commit，summary 和 artifact 必须明确说明走查依据；有改动时必须准确列出 changedFiles，并在成功提交本轮相关改动后才能返回 completed。实现取舍、提交情况与残余风险写入 artifact。',
+      '只有现有或本轮补齐的实现覆盖当前 spec、每条验收标准已有证据、必要测试真实通过、任何变更保持在预算内且不存在已知未报告失败时，才能成功执行 implementation complete。无须改动时使用 existing 模式且无需创建 commit；有改动时使用 changed 模式，准确记录全部真实文件并在成功提交后记录 HEAD。普通最终文本或手写 JSON 都不推进流程。',
     ].join('\n'),
   },
   'test-agent': {

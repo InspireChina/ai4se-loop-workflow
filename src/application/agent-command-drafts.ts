@@ -14,6 +14,10 @@ import {
   analysisHelp,
   runAnalysisCommand,
 } from './analysis-command-drafts';
+import {
+  developmentHelp,
+  runDevelopmentCommand,
+} from './development-command-drafts';
 
 type ExecutionRow = {
   execution_id: string;
@@ -25,13 +29,14 @@ type ExecutionRow = {
   input_json: string;
   status: string;
   command_token_hash: string | null;
+  base_commit: string | null;
 };
 
 type DraftRow = {
   draft_id: string;
   work_key: string;
   draft_version: number;
-  draft_type: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis';
+  draft_type: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development';
   task_id: string;
   story_index: number | null;
   agent: string;
@@ -103,7 +108,7 @@ function parseArgs(args: string[]) {
 function executionInDb(db: Awaited<ReturnType<typeof databaseConnection>>, executionId: string) {
   return db.prepare(`
     SELECT execution_id, task_id, story_index, agent, pipeline, delegation_key, input_json,
-           status, command_token_hash
+           status, command_token_hash, base_commit
     FROM execution_attempts WHERE execution_id = ?
   `).get(executionId) as ExecutionRow | undefined;
 }
@@ -273,6 +278,33 @@ function cloneAnalysisDraft(
   `).run(target.draft_id, source.draft_id);
 }
 
+function cloneDevelopmentDraft(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  source: DraftRow,
+  target: DraftRow,
+) {
+  db.prepare(`
+    INSERT INTO development_drafts(
+      draft_id, summary, assessment_mode, implementation_notes, commit_sha, failure_summary
+    )
+    SELECT ?, summary, assessment_mode, implementation_notes, commit_sha, failure_summary
+    FROM development_drafts WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
+  for (const table of [
+    ['development_criteria', 'criterion_key, status, evidence, ordinal'],
+    ['development_changes', 'path, summary, ordinal'],
+    ['development_tests', 'test_key, command, passed, summary, ordinal'],
+    ['development_risks', 'risk_key, content, ordinal'],
+    ['development_runtime_inputs', 'request_key, title, question, why, recommendation, ordinal'],
+    ['development_recovery_resolutions', 'recovery_id, summary, evidence, ordinal'],
+  ] as const) {
+    db.prepare(`
+      INSERT INTO ${table[0]}(draft_id, ${table[1]})
+      SELECT ?, ${table[1]} FROM ${table[0]} WHERE draft_id = ?
+    `).run(target.draft_id, source.draft_id);
+  }
+}
+
 function createDraft(
   db: Awaited<ReturnType<typeof databaseConnection>>,
   execution: ExecutionRow,
@@ -310,6 +342,9 @@ function createDraft(
   } else if (profile.draftType === 'analysis') {
     if (source) cloneAnalysisDraft(db, source, created);
     else db.prepare('INSERT INTO analysis_drafts(draft_id) VALUES(?)').run(draftId);
+  } else if (profile.draftType === 'development') {
+    if (source) cloneDevelopmentDraft(db, source, created);
+    else db.prepare('INSERT INTO development_drafts(draft_id) VALUES(?)').run(draftId);
   }
   return created;
 }
@@ -810,6 +845,15 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile) {
       '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
     ].join('\n');
   }
+  if (profile.draftType === 'development') {
+    return [
+      ...common,
+      ...developmentHelp(profile.terminalActions),
+      '',
+      '长文本参数：',
+      '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
+    ].join('\n');
+  }
   return [
     ...common,
     '  requirement-context goal set --text <内容>',
@@ -1019,6 +1063,9 @@ export async function runAgentCommand(input: {
   }
   if (profile.draftType === 'analysis') {
     return runAnalysisCommand({ db, execution, draft, command, flags });
+  }
+  if (profile.draftType === 'development') {
+    return runDevelopmentCommand({ db, execution, draft, command, flags });
   }
   if (command === 'requirement-context status') {
     db.prepare(`

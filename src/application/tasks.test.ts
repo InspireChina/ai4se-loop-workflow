@@ -1335,7 +1335,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 20);
+  assert.equal(original.profile.prompt_seed_revision, 21);
   assert.ok(original.currentPrompt.content.length > 800);
   assert.match(original.currentPrompt.content, /# 角色目标/);
   assert.match(original.currentPrompt.content, /# 完成条件/);
@@ -1353,7 +1353,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
   await ensureAgentRuntimeWorkspace();
   const upgradedSeed = await getAgentProfile('backlog-agent');
-  assert.equal(upgradedSeed.profile.prompt_seed_revision, 20);
+  assert.equal(upgradedSeed.profile.prompt_seed_revision, 21);
   assert.equal(upgradedSeed.currentPrompt.source, 'seed');
   assert.ok(upgradedSeed.currentPrompt.version > 1);
   assert.match(upgradedSeed.currentPrompt.content, /# 输入与证据优先级/);
@@ -1381,7 +1381,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const preservedHumanPrompt = await getAgentProfile('dev-agent');
   assert.equal(preservedHumanPrompt.currentPrompt.version, promptVersion);
   assert.equal(preservedHumanPrompt.currentPrompt.source, 'human');
-  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 20);
+  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 21);
 
   const localPrompt = `${promptContent}\n- 本地文件修改也必须形成版本。`;
   writeFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), localPrompt);

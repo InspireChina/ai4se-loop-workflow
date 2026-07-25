@@ -3,7 +3,13 @@ import Database from 'better-sqlite3';
 import { readFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import test from 'node:test';
-import { databaseConnection, paths } from './database';
+import { databaseConnection, isDatabaseTestProcess, paths } from './database';
+
+test('does not treat a domain command argument ending in .test.js as a test process', () => {
+  assert.equal(isDatabaseTestProcess({}), false);
+  assert.equal(isDatabaseTestProcess({ LOOP_TEST: '1' }), true);
+  assert.equal(isDatabaseTestProcess({ NODE_TEST_CONTEXT: 'child-v8' }), true);
+});
 
 test('database tests use a process-local root outside the repository', () => {
   const repository = resolve(process.cwd());
@@ -154,6 +160,19 @@ test('adds role drafts without losing progress from previously migrated agents',
     VALUES('DRAFT-repro', '保留预期', '保留实际')
   `).run();
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/041_analysis_drafts.sql'), 'utf8'));
+  db.prepare(`
+    INSERT INTO agent_work_drafts(
+      draft_id, work_key, draft_version, draft_type, task_id,
+      agent, status, last_execution_id
+    ) VALUES('DRAFT-analysis', 'analysis:REQ-existing:1', 1,
+      'analysis', 'REQ-existing', 'analyst-agent', 'editing', 'EXEC-existing')
+  `).run();
+  db.prepare(`
+    INSERT INTO analysis_drafts(draft_id, goal)
+    VALUES('DRAFT-analysis', '保留分析目标')
+  `).run();
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/025_runtime_input_requests.sql'), 'utf8'));
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/042_development_drafts.sql'), 'utf8'));
 
   const context = db.prepare(`
     SELECT draft_type, goal
@@ -166,7 +185,8 @@ test('adds role drafts without losing progress from previously migrated agents',
     WHERE type = 'table' AND name IN (
       'delivery_plan_drafts', 'delivery_plan_units',
       'reproduction_drafts', 'reproduction_steps',
-      'analysis_drafts', 'analysis_decisions'
+      'analysis_drafts', 'analysis_decisions',
+      'development_drafts', 'development_criteria'
     )
     ORDER BY name
   `).all() as { name: string }[];
@@ -176,6 +196,9 @@ test('adds role drafts without losing progress from previously migrated agents',
   const reproduction = db.prepare(`
     SELECT expected_behavior, actual_behavior
     FROM reproduction_drafts WHERE draft_id = 'DRAFT-repro'
+  `).get();
+  const analysis = db.prepare(`
+    SELECT goal FROM analysis_drafts WHERE draft_id = 'DRAFT-analysis'
   `).get();
   const foreignKeyViolations = db.prepare('PRAGMA foreign_key_check').all();
   assert.deepEqual(context, {
@@ -187,11 +210,14 @@ test('adds role drafts without losing progress from previously migrated agents',
     'analysis_drafts',
     'delivery_plan_drafts',
     'delivery_plan_units',
+    'development_criteria',
+    'development_drafts',
     'reproduction_drafts',
     'reproduction_steps',
   ]);
   assert.deepEqual(plan, { rationale: '保留拆分依据', coverage: '保留覆盖说明' });
   assert.deepEqual(reproduction, { expected_behavior: '保留预期', actual_behavior: '保留实际' });
+  assert.deepEqual(analysis, { goal: '保留分析目标' });
   assert.deepEqual(foreignKeyViolations, []);
   db.close();
 });

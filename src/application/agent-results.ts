@@ -113,6 +113,7 @@ async function saveRuntimeInputs(delegation: DelegationEnvelope, result: AgentRe
       taskId: delegation.taskId,
       storyIndex: delegation.storyIndex,
       sourceAgent: delegation.agent,
+      sourceKey: input.key || null,
       ...input,
       sourceExecutionId: sourceExecutionId || null,
     });

@@ -98,7 +98,7 @@ Application 从 Agent 的结构化结果写入文档，UI 直接读取数据库�
 - 模型：`CodeSlot`、`BrowserReservation`
 - 关键规则：同一时间一个代码槽、一个浏览器独占步骤和最多四个 Analysis Agent
 
-代码槽繁忙不是设计澄清。需要写代码的步骤进入内部等待队列，释放后自动继续。开发实现 Agent 直接使用当前主干工作区，可以只提交本轮相关代码，也可以不提交；V1 接受已有改动与 Agent 修改同文件时难以完全区分归属的风险，不由 Runner 创建 checkpoint 或代理提交。
+代码槽繁忙不是设计澄清。需要写代码的步骤进入内部等待队列，释放后自动继续。开发实现 Agent 直接使用当前主干工作区：本轮有代码改动时由 Agent 选择性提交相关文件，走查确认现有实现已满足规格时不制造 Commit。Application 以 execution 起始 HEAD 为基线，在完成时核对当前 HEAD、Agent 记录的 Commit 和真实变更文件；Runner 不创建 checkpoint，也不代理提交。
 
 ### 2.7 Agent 配置与演化（Agent Configuration and Evolution）
 
@@ -215,17 +215,19 @@ classDiagram
 | 工具调用、subagent 使用 | 当前 Agent |
 | 文档、确认事项和结果入库 | Application |
 | 运行信息请求、回答与原阶段恢复 | 当前 Agent 提出；Application 持久化和恢复；用户仅补充事实 |
-| Git 提交（可选） | 开发实现 Agent；Runner 只记录执行前后 HEAD，不代理提交或要求必须存在 Commit |
+| Git 提交 | 开发实现 Agent；有代码改动时提交本轮相关文件，无改动走查不制造 Commit；Runner 只记录执行前后 HEAD |
 | Prompt / Memory 版本与自动演化 | Agent Configuration；Harness 约束提升与回滚 |
 | Loop Engineering 自身缺陷诊断 | Software Maintenance Agent 提议；Git/Harness 决定候选与落地 |
 
-角色提交能力由 Agent Profile 明确声明。需求梳理 Agent 使用 `loop-agent requirement-context`，交付规划 Agent 使用 `loop-agent delivery-plan`，问题复现 Agent 使用 `loop-agent reproduction`，方案分析 Agent 使用 `loop-agent analysis`，渐进维护 Application 拥有的角色草稿：每次进程启动先读取 status，编辑命令只更新草稿，角色终止命令才产生 Result Receipt。execution token 只授权当前 Agent 的命令空间，Agent 不接触 SQLite。其他尚未迁移的 Agent 仍通过 `submit-agent-result --input <result.json>` 提交一次性 Result Receipt。普通最终回复不承担控制面协议；Runner 只为旧 Agent 保留最终文本 JSON fallback。
+角色提交能力由 Agent Profile 明确声明。需求梳理 Agent 使用 `loop-agent requirement-context`，交付规划 Agent 使用 `loop-agent delivery-plan`，问题复现 Agent 使用 `loop-agent reproduction`，方案分析 Agent 使用 `loop-agent analysis`，开发实现 Agent 使用 `loop-agent implementation`，渐进维护 Application 拥有的角色草稿：每次进程启动先读取 status，编辑命令只更新草稿，角色终止命令才产生 Result Receipt。execution token 只授权当前 Agent 的命令空间，Agent 不接触 SQLite。其他尚未迁移的 Agent 仍通过 `submit-agent-result --input <result.json>` 提交一次性 Result Receipt。普通最终回复不承担控制面协议；Runner 只为旧 Agent 保留最终文本 JSON fallback。
 
 `DeliveryPlanDraft` 属于交付规划 Application 能力，不直接改变 `Task` 聚合。它记录拆分依据、整体覆盖、排序说明和带稳定 `unit_key` 的有序候选单元。只有 `delivery-plan complete` 通过完整性校验后，Application 才把草稿投影为既有 `AgentResult.deliveryUnits` 并调用领域状态机；重试恢复草稿与业务推进因此保持分离。
 
 `ReproductionDraft` 属于问题复现 Application 能力，不直接改变 `Task` 聚合。它记录复现条件、步骤、证据、根因假设和人工对齐问题；普通 Bug 以需求级工作键隔离，评论复现以 `feedbackGroupId` 隔离。`request-alignment` 只形成待回答问题和未复现文档，`complete` 才能在完整证据校验后投影为可推进的 `AgentResult`。回答恢复必须沿用原 `decision_key`，不能通过改名绕过已回答问题的身份约束。
 
 `AnalysisDraft` 属于方案分析 Application 能力，不直接改变 `Task` 聚合。它以 `需求 + 交付单元` 为稳定工作身份，记录目标、范围、行为、决策树、验收条件、验证计划、依赖和 Change Budget；回答恢复沿用同一工作键并创建可追溯的新草稿版本。已回答问题的 `decision_key` 必须保留并被明确解决，不能删除或改名。`request-clarification` 投影结构化问题，`complete` 在完整性校验后确定性投影 Slice Spec、交付文档和既有 `AgentResult`。
+
+`DevelopmentDraft` 属于开发实现 Application 能力，不直接改变 `Task` 聚合。它以 `需求 + 交付单元` 为稳定工作身份，记录验收标准覆盖、真实变更文件、测试证据、残余风险、运行信息请求、恢复事项和 Commit。运行信息恢复沿用同一工作键与 request key；`existing` 模式允许零改动走查，但仍要求完整验收和测试证据；`changed` 模式由 Application 对照 execution 基线、当前 HEAD 和 Git diff 校验 Agent 记录，只有 `implementation complete` 成功后才确定性投影开发文档和既有 `AgentResult`。
 
 ## 6. SQLite 持久化映射
 

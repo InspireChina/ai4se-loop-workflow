@@ -5,9 +5,10 @@ import { isAbsolute, dirname, join, relative, resolve } from 'node:path';
 import { Umzug } from 'umzug';
 
 const repositoryRoot = process.cwd();
-const isTestProcess = process.env.LOOP_TEST === '1'
-  || Boolean(process.env.NODE_TEST_CONTEXT)
-  || process.argv.some((argument) => /(?:^|[/\\])[^/\\]+\.test\.[cm]?[jt]sx?$/.test(argument));
+export function isDatabaseTestProcess(env: Readonly<Record<string, string | undefined>>) {
+  return env.LOOP_TEST === '1' || Boolean(env.NODE_TEST_CONTEXT);
+}
+const isTestProcess = isDatabaseTestProcess(process.env);
 const appRoot = process.env.LOOP_APP_ROOT ? resolve(process.env.LOOP_APP_ROOT) : repositoryRoot;
 const dataRoot = process.env.LOOP_DATA_ROOT ? resolve(process.env.LOOP_DATA_ROOT) : join(appRoot, 'data');
 if (isTestProcess) {

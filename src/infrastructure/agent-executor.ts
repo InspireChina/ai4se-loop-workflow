@@ -305,6 +305,22 @@ function summarizeCommand(command: string) {
     if (normalized.includes(' analysis validate')) return '校验方案规格草稿';
     if (normalized.includes(' analysis request-clarification')) return '提交方案澄清问题';
     if (normalized.includes(' analysis complete')) return '完成方案分析';
+    if (normalized.includes(' implementation status')) return '恢复开发实现草稿';
+    if (normalized.includes(' implementation summary set')) return '保存开发结论';
+    if (normalized.includes(' implementation assessment set')) return '保存走查模式';
+    if (normalized.includes(' implementation notes set')) return '保存实现说明';
+    if (normalized.includes(' implementation criterion ')) return '更新验收覆盖';
+    if (normalized.includes(' implementation change ')) return '更新代码变更';
+    if (normalized.includes(' implementation test ')) return '更新验证记录';
+    if (normalized.includes(' implementation risk ')) return '更新残余风险';
+    if (normalized.includes(' implementation runtime-input ')) return '更新运行信息请求';
+    if (normalized.includes(' implementation recovery ')) return '更新恢复事项';
+    if (normalized.includes(' implementation commit set')) return '记录开发提交';
+    if (normalized.includes(' implementation failure set')) return '记录开发失败';
+    if (normalized.includes(' implementation validate')) return '校验开发实现草稿';
+    if (normalized.includes(' implementation request-input')) return '提交运行信息请求';
+    if (normalized.includes(' implementation complete')) return '完成开发实现';
+    if (normalized.includes(' implementation fail')) return '提交开发失败';
     if (normalized.includes(' help')) return '查看当前 Agent 可用命令';
     return '更新 Agent 工作草稿';
   }

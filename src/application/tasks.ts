@@ -170,6 +170,7 @@ export type RuntimeInputRequest = {
   task_id: string;
   story_index: number | null;
   source_agent: string;
+  request_key: string | null;
   title: string;
   question: string;
   why: string | null;
@@ -801,6 +802,7 @@ const runtimeInputSchema = z.object({
   taskId: z.string().min(1),
   storyIndex: z.coerce.number().int().positive().optional().nullable(),
   sourceAgent: z.enum(['backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent']),
+  sourceKey: z.string().min(1).max(120).optional().nullable(),
   title: z.string().min(1).max(200),
   question: z.string().min(1).max(4000),
   why: z.string().max(1000).optional().nullable(),
@@ -823,12 +825,12 @@ export async function addRuntimeInputRequest(input: unknown) {
     db.prepare(`
       INSERT INTO runtime_input_requests(
         request_id, task_id, story_index, source_agent, title, question, why,
-        recommendation, source_execution_id
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+        recommendation, source_execution_id, request_key
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       requestId, value.taskId, value.storyIndex || null, value.sourceAgent,
       value.title, value.question, value.why || null, value.recommendation || null,
-      value.sourceExecutionId || null,
+      value.sourceExecutionId || null, value.sourceKey || null,
     );
     db.prepare(`
       UPDATE tasks

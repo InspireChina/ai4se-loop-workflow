@@ -22,6 +22,7 @@ const questionSchema = z.object({
 });
 
 const runtimeInputSchema = z.object({
+  key: z.string().min(1).max(120).optional(),
   title: z.string().min(1).max(200),
   question: z.string().min(1).max(4000),
   why: z.string().max(1000).optional().default(''),

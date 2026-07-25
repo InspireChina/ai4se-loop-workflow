@@ -161,6 +161,28 @@ test('labels progressive analysis decisions as Agent domain actions', () => {
   assert.match(parsed || '', /解决关键决策/);
 });
 
+test('labels progressive development verification as an Agent domain action', () => {
+  const line = JSON.stringify({
+    type: 'tool_call',
+    subtype: 'started',
+    tool_call: {
+      shellToolCall: {
+        args: {
+          command: 'node "/app/scripts/loop/loop-agent.mjs" implementation test upsert --key unit --passed true',
+        },
+      },
+    },
+  });
+  const parsed = getAgentExecutor('cursor').parseStdout(line, {
+    agent: 'dev-agent',
+    taskId: 'REQ-1',
+    storyIndex: 1,
+    pipeline: 'dev',
+  });
+  assert.match(parsed || '', /tool=agent-command/);
+  assert.match(parsed || '', /更新验证记录/);
+});
+
 test('extracts final assistant text from every executor stream', () => {
   const result = '{"outcome":"completed","summary":"ok"}';
   assert.equal(extractAgentFinalText('codex', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: result } })), result);
