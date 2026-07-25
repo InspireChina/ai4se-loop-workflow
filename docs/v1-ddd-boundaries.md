@@ -219,7 +219,7 @@ classDiagram
 | Prompt / Memory 版本与自动演化 | Agent Configuration；Harness 约束提升与回滚 |
 | Loop Engineering 自身缺陷诊断 | Software Maintenance Agent 提议；Git/Harness 决定候选与落地 |
 
-Agent 通过 Runner 为当前 execution 注入的 `submit-agent-result --input <result.json>` 命令提交结构化 Result Receipt，不调用流程命令、不写运行日志、不直接操作 SQLite，也不自行推进状态。普通最终回复不再承担控制面协议；未调用结果命令时，Runner 仅为旧执行器兼容而尝试解析最终文本 JSON。
+角色提交能力由 Agent Profile 明确声明。需求梳理 Agent 使用 `loop-agent requirement-context` 渐进维护 Application 拥有的草稿：每次进程启动先读取 status，编辑命令只更新草稿，`complete` / `request-clarification` 才产生 Result Receipt。execution token 只授权当前 Agent 的命令空间，Agent 不接触 SQLite。其他尚未迁移的 Agent 仍通过 `submit-agent-result --input <result.json>` 提交一次性 Result Receipt。普通最终回复不承担控制面协议；Runner 只为旧 Agent 保留最终文本 JSON fallback。
 
 ## 6. SQLite 持久化映射
 
@@ -230,6 +230,7 @@ Agent 通过 Runner 为当前 execution 注入的 `submit-agent-result --input <
 | Requirement | `tasks`，主键当前仍为 `task_id`；新 ID 使用 `REQ-<UUID>`，创建时不按标题、URL 或外部 ID 去重。 |
 | Delivery Unit | `stories`，序号列当前仍为 `story_index`。 |
 | Clarification Question / Decision Fact | `questions`。 |
+| Agent Work Draft | `agent_work_drafts` 与角色专属草稿明细表；以稳定业务 work key 跨 execution 继承，不以进程或 attempt 为生命周期。 |
 | Slice Spec | `story_specs`。 |
 | Test Result / Recovery Evidence | `documents` / `recovery_items`；`verification_runs` / `verification_evidence` 仅保留旧数据库兼容。 |
 | Closure Acknowledgement | `closure_acknowledgements`。 |

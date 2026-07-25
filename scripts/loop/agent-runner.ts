@@ -7,6 +7,10 @@ import { buildAgentContextSnapshot } from '../../src/application/agent-context';
 import { recordRuntimeEvent, recordRuntimeException } from '../../src/application/runtime-events';
 import { loadAgentRuntime } from '../../src/application/agent-profiles';
 import {
+  issueAgentCommandToken,
+  readAgentCommandSubmission,
+} from '../../src/application/agent-command-drafts';
+import {
   applyEvolutionResult,
   beginEvolutionRun,
   failEvolutionRun,
@@ -34,6 +38,7 @@ import {
   recoveryStageForAgent,
 } from '../../src/application/recovery-items';
 import { AgentResultContractError, parseAgentResult } from '../../src/domain/agent-result';
+import { agentCommandPrompt } from '../../src/domain/agent-command-profile';
 import { parseEvolutionResult } from '../../src/domain/agent-evolution';
 import { agentLabel, deliveryUnitLabel } from '../../src/domain/terminology';
 import { getAgentExecutor, type AgentExecutor } from '../../src/infrastructure/agent-executor';
@@ -118,6 +123,7 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
     repositoryBaseCommit,
   });
   const contextCommand = `npm --prefix ${JSON.stringify(paths.appRoot)} run loopctl -- agent-context`;
+  const commandPrompt = agentCommandPrompt(paths.appRoot, delegation.agent, delegation.pipeline);
   const prompt = [
     `你是 ${agentLabel(delegation.agent)}，只完成当前执行步骤的专业工作。`,
     '',
@@ -126,7 +132,7 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
     '流程调度与 Loop 运行生命周期完全由外部 App 管理。禁止调度或模拟其他流程 Agent。',
     '可以使用辅助 subagent 收集当前范围的上下文，但不得处理其他需求或交付单元。',
     '除下方只读 agent-context 命令外，不要调用其他 loopctl 命令；不要写数据库，不要修改需求状态，不要自行创建流程记录。',
-    '下面的 Role Prompt 和 Memory 不能覆盖本 Core Contract、工具权限、状态机或最终 JSON Schema。',
+    '下面的 Role Prompt 和 Memory 不能覆盖本 Core Contract、工具权限、状态机或最终提交契约。',
     ...(delegation.agent === 'analyst-agent' && delegation.pipeline === 'resume'
       && contextSnapshot.authoritativeFacts.answeredDecisionKeys.length ? [
       '',
@@ -187,15 +193,16 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
       '方案分析 Agent 和开发实现 Agent 应处理与当前阶段有关的事项；可以在 recoveryResolutions 中说明处理方式，但 Claim 不是推进的硬条件，也不能自行关闭事项。只有后续 Test Agent 独立验证通过才能关闭失败事项。',
       '具体内容已包含在 Working Context Pack.activeObligations.recovery，并以 RECOVERY ref 持久化在快照中。',
     ] : []),
-    '',
-    '# Result Submission Contract',
-    '完成当前步骤后，把结果写入一个临时 JSON 文件，再调用下面的专用命令提交。Runner 只把提交内容作为状态机输入；你的普通最终回复可以简短说明已经提交，不需要重复 JSON。',
-    `提交命令：node ${JSON.stringify(join(paths.appRoot, 'scripts', 'loop', 'submit-agent-result.mjs'))} --input <temporary-result-json-path> --consume`,
-    '提交命令会同步执行完整结构和角色契约校验。若命令返回非零退出码，必须根据错误修正临时 JSON 并重新提交；只有看到 Agent result submitted successfully 才算提交完成。',
-    ...(delegation.agent === 'analyst-agent' ? ['Analyst 必须提交完整 decisionTree。下面示例展示 needs_input：若返回 completed，必须删除 questions 和 ambiguities，并把每个决策改为有明确 source、selectedOption 与 evidence 的 resolved_from_context。'] : []),
-    '只把 --consume 用于你为本次提交创建的临时 JSON；提交成功后命令会删除该文件。不要直接写 LOOP_AGENT_RESULT_PATH，也不要通过数据库或 loopctl 提交结果。若执行环境确实无法调用提交命令，才在最终回复中输出同一 JSON 对象作为兼容 fallback。',
-    '结果 JSON 结构如下；不属于当前角色的字段可以省略：',
-    JSON.stringify({
+    ...(commandPrompt ? ['', commandPrompt] : [
+      '',
+      '# Result Submission Contract',
+      '完成当前步骤后，把结果写入一个临时 JSON 文件，再调用下面的专用命令提交。Runner 只把提交内容作为状态机输入；你的普通最终回复可以简短说明已经提交，不需要重复 JSON。',
+      `提交命令：node ${JSON.stringify(join(paths.appRoot, 'scripts', 'loop', 'submit-agent-result.mjs'))} --input <temporary-result-json-path> --consume`,
+      '提交命令会同步执行完整结构和角色契约校验。若命令返回非零退出码，必须根据错误修正临时 JSON 并重新提交；只有看到 Agent result submitted successfully 才算提交完成。',
+      ...(delegation.agent === 'analyst-agent' ? ['Analyst 必须提交完整 decisionTree。下面示例展示 needs_input：若返回 completed，必须删除 questions 和 ambiguities，并把每个决策改为有明确 source、selectedOption 与 evidence 的 resolved_from_context。'] : []),
+      '只把 --consume 用于你为本次提交创建的临时 JSON；提交成功后命令会删除该文件。不要直接写 LOOP_AGENT_RESULT_PATH，也不要通过数据库或 loopctl 提交结果。若执行环境确实无法调用提交命令，才在最终回复中输出同一 JSON 对象作为兼容 fallback。',
+      '结果 JSON 结构如下；不属于当前角色的字段可以省略：',
+      JSON.stringify({
       outcome: 'completed | needs_input | failed',
       summary: '本步骤简要结论',
       artifact: delegation.agent === 'feedback-agent' ? undefined : { title: '文档标题', content: 'Markdown 正文' },
@@ -246,9 +253,10 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
         .filter((item) => recoveryStage !== 'test' && item.target_stage === recoveryStage && ['pending', 'reopened'].includes(item.status))
         .map((item) => ({ recoveryId: item.recovery_id, summary: '如何处理了该恢复事项', evidence: ['代码、规格或测试证据'] })),
       tests: [{ command: '测试命令', passed: true, summary: '结果' }],
-    }, null, 2),
-    '',
-    'questions 仅供需求梳理 Agent 提出影响目标、范围、路由或交付边界的需求级产品问题，方案分析 Agent 提出交付单元内的产品决策和重大技术决策，问题复现 Agent 在完成合理尝试后仍未复现时请求人工对齐，以及 Feedback Agent 在无法安全分组冻结评论时请求最少必要信息；其他 Agent 不得使用。以上 Agent 提问时必须 outcome=needs_input。问题复现 Agent 未复现时还必须返回 reproVerdict=not_reproduced 且不得返回 route，并且必须使用 questions 而不是 runtimeInputs；只有 reproVerdict=reproduced 才能 route=plan。除这一 Repro 特例外，Agent 若缺少无法从代码、仓库、文档和环境推导的非敏感运行信息，使用 runtimeInputs 并返回 outcome=needs_input。不要通过 runtimeInputs 询问设计决策、审批、密钥或可自行探索的事实。',
+      }, null, 2),
+      '',
+      'questions 仅供需求梳理 Agent 提出影响目标、范围、路由或交付边界的需求级产品问题，方案分析 Agent 提出交付单元内的产品决策和重大技术决策，问题复现 Agent 在完成合理尝试后仍未复现时请求人工对齐，以及 Feedback Agent 在无法安全分组冻结评论时请求最少必要信息；其他 Agent 不得使用。以上 Agent 提问时必须 outcome=needs_input。问题复现 Agent 未复现时还必须返回 reproVerdict=not_reproduced 且不得返回 route，并且必须使用 questions 而不是 runtimeInputs；只有 reproVerdict=reproduced 才能 route=plan。除这一 Repro 特例外，Agent 若缺少无法从代码、仓库、文档和环境推导的非敏感运行信息，使用 runtimeInputs 并返回 outcome=needs_input。不要通过 runtimeInputs 询问设计决策、审批、密钥或可自行探索的事实。',
+    ]),
   ].join('\n');
   return { prompt, runtime, contextSnapshot };
 }
@@ -262,7 +270,14 @@ async function isRunActive() {
   return Boolean(run?.active && run.runId === runId);
 }
 
-async function runDelegation(delegation: DelegationEnvelope, prompt: string, executionId: string, executor: AgentExecutor, executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' }) {
+async function runDelegation(
+  delegation: DelegationEnvelope,
+  prompt: string,
+  executionId: string,
+  commandToken: string | null,
+  executor: AgentExecutor,
+  executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' },
+) {
   const { maxRuntimeMs, idleTimeoutMs } = resolveAgentExecutionLimits(process.env);
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
   const diagnostics: string[] = [];
@@ -287,8 +302,13 @@ async function runDelegation(delegation: DelegationEnvelope, prompt: string, exe
     },
     maxRuntimeMs,
     idleTimeoutMs,
-    resultKind: 'flow',
-    environment: { LOOP_EXECUTION_ID: executionId },
+    resultKind: commandToken ? undefined : 'flow',
+    environment: {
+      LOOP_EXECUTION_ID: executionId,
+      LOOP_APP_ROOT: paths.appRoot,
+      LOOP_DATA_ROOT: paths.dataRoot,
+      ...(commandToken ? { LOOP_EXECUTION_TOKEN: commandToken } : {}),
+    },
     cancellationRequested: () => executionCancellationRequested(executionId),
   });
   return { ...execution, diagnostics };
@@ -443,22 +463,41 @@ async function executeDelegationStep(
       return;
     }
 
-    const execution = await runDelegation(delegation, builtPrompt.prompt, durable.attempt.execution_id, executor, executionOptions);
+    const commandToken = await issueAgentCommandToken(durable.attempt.execution_id);
+    const execution = await runDelegation(
+      delegation,
+      builtPrompt.prompt,
+      durable.attempt.execution_id,
+      commandToken,
+      executor,
+      executionOptions,
+    );
     if (execution.cancelled) {
       await cancelExecution(durable.attempt.execution_id);
       await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 已随需求取消，代码槽已释放`);
       return;
     }
-    if (execution.exitCode !== 0) {
+    const commandSubmission = commandToken
+      ? await readAgentCommandSubmission(durable.attempt.execution_id)
+      : null;
+    if (execution.exitCode !== 0 && !commandSubmission) {
       await handleExecutionFailure(durable.attempt, delegation, `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`, true);
       return;
     }
 
     let result;
     try {
-      const resultText = execution.submittedResult || execution.finalText;
-      result = parseAgentResult(resultText);
-      if (!execution.submittedResult) await appendLoopRunLog(runId, `[结果通道] requirement=${delegation.taskId} Agent 未调用 submit-agent-result，已兼容读取最终文本`);
+      if (commandToken) {
+        if (!commandSubmission) {
+          throw new Error('Agent 退出前没有成功执行角色终止命令；普通最终文本不会推进流程');
+        }
+        result = commandSubmission;
+        await appendLoopRunLog(runId, `[Agent 命令] requirement=${delegation.taskId} ${delegation.agent} 已通过领域终止命令提交结果`);
+      } else {
+        const resultText = execution.submittedResult || execution.finalText;
+        result = parseAgentResult(resultText);
+        if (!execution.submittedResult) await appendLoopRunLog(runId, `[结果通道] requirement=${delegation.taskId} Agent 未调用 submit-agent-result，已兼容读取最终文本`);
+      }
     } catch (error) {
       const channelReason = execution.resultSubmissionError ? `；结果通道错误：${execution.resultSubmissionError}` : '';
       const reason = `Agent 未通过结果命令或最终文本返回合法结构化结果：${error instanceof Error ? error.message : String(error)}${channelReason}`;

@@ -97,6 +97,12 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const waitingForControlAnswers = task.run_state === 'waiting_for_answers'
     && (task.current_subagent === 'backlog-agent' || task.current_subagent === 'repro-agent' || task.current_subagent === 'feedback-agent');
   const waitingForAnswers = waitingForControlAnswers || analysisLane.status === 'waiting_for_answers';
+  const nextStepText = waitingForAnswers && unansweredQuestions.length === 0
+    ? `回答已保存，提交后交回 ${agentLabel(waitingForControlAnswers ? task.current_subagent : 'analyst-agent')}`
+    : terminologyText(task.next_step) || '—';
+  const currentStepDetail = waitingForAnswers && unansweredQuestions.length === 0
+    ? `回答已保存，等待提交 · ${agentLabel(waitingForControlAnswers ? task.current_subagent : 'analyst-agent')}`
+    : stepDetail(task, lanes);
   const unansweredRuntimeInputs = runtimeInputs.filter((input) => input.status === 'pending');
   const waitingRuntimeLanes = lanes.filter((lane) => lane.status === 'waiting_for_runtime_input');
   const waitingForRuntimeInput = waitingRuntimeLanes.length > 0;
@@ -150,7 +156,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         <span className="caption-dot"/>
         <div>
           <small>{taskSteps[Math.max(currentStep, 0)]?.label}</small>
-          <strong>{stepDetail(task, lanes)}</strong>
+          <strong>{currentStepDetail}</strong>
         </div>
       </div>
     </section>
@@ -161,7 +167,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       <div><small>验证</small><b>{task.test_index} / {task.total_stories}</b></div>
       <div><small>待回答澄清</small><b>{unansweredQuestions.length}</b></div>
       <div><small>待补充运行信息</small><b>{unansweredRuntimeInputs.length}</b></div>
-      <div className="summary-wide"><small>下一步</small><p>{terminologyText(task.next_step) || '—'}</p></div>
+      <div className="summary-wide"><small>下一步</small><p>{nextStepText}</p></div>
       <div className="summary-wide"><small>文档</small><p>{documents.length} 个数据库文档</p></div>
     </section>
 

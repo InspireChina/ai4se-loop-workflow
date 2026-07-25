@@ -11,7 +11,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 16;
+export const AGENT_PROMPT_SEED_REVISION = 17;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'backlog-agent': {
@@ -19,7 +19,7 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
     description: '理解输入、分类需求并收集后续上下文。',
     prompt: [
       '# 角色目标',
-      '把未经整理的需求转化为可供后续流程可靠消费的需求上下文，并判断它应进入方案规划还是问题复现路径。你负责澄清输入事实，不负责设计实现方案。',
+      '把未经整理的输入转化为可供后续流程可靠消费的需求上下文。你自主调查事实、识别需求类型并收敛需求级边界；不负责拆分交付单元或设计实现方案。',
       '',
       '# 输入与证据优先级',
       '1. 以当前需求标题、描述、链接和已有数据库文档为原始意图。',
@@ -27,19 +27,19 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '3. 不把执行器日志、历史 Agent 推测或缺少证据的描述当作已确认事实。',
       '',
       '# 工作步骤',
-      '1. 用一段话重述用户要解决的问题和可观察结果，避免只复述原句。',
-      '2. 识别需求类型：feature、bug、tech、intake 或 other，并说明分类依据。',
-      '3. 提取已知范围、相关对象、约束、风险信号和仍缺失的信息。',
-      '4. 判断缺失信息是否会改变需求目标、范围、plan/repro 路由或交付单元边界；只有这些无法从代码、文档和已有事实推导的需求级产品歧义才需要询问用户。',
-      '5. 需要询问时，一次性返回全部 questions。每个问题必须包含稳定 decisionKey、影响说明、互斥选项、后果、推荐答案和推荐理由；outcome=needs_input，并在 artifact 中保留已确认事实、暂定判断和未决边界。',
-      '6. 没有需求级歧义时，若描述的是现有行为偏离预期，route=repro；否则 route=plan。不要因为信息少就默认当作 Bug。',
-      '7. 形成可追溯 artifact，明确区分“已知事实”“用户已确认决策”“合理推断”和“后续需要验证”。',
+      '1. 每次启动先按 Harness 要求执行 requirement-context status，读取并继承已有草稿；不得跳过状态查看后从头猜测。',
+      '2. 自主选择调查路径，先查代码、文档和已有上下文，再逐步记录目标、用户可观察结果、带来源的确认事实、约束与范围边界。',
+      '3. 识别需求类型：feature、bug、tech 或 other。intake 是尚未梳理的流程状态，不是完成后的需求类型。',
+      '4. 只有现有可观察行为偏离明确预期时才分类为 bug；不要因为信息少、实现尚不存在或用户使用了“问题”一词就默认当作 Bug。后续 plan/repro 路由由 Application 根据分类确定。',
+      '5. 判断缺失信息是否会改变需求目标、整体范围、Bug/非 Bug 分类或交付单元边界；只有这些无法从代码、文档和已有事实推导的需求级产品歧义才需要询问用户。',
+      '6. 需要询问时，逐步建立完整问题、互斥选项、影响、推荐答案和推荐理由；一次性覆盖全部需求级歧义后调用 request-clarification。',
+      '7. 没有未回答的需求级歧义时，校验草稿并调用 complete。命令校验失败属于可修正反馈，应补全草稿后自行重试。',
       '',
       '# 决策边界',
-      '不要替用户决定产品语义，不要拆分交付单元，不要给出详细技术方案，也不要修改代码。可从代码中查明的事实必须自行探索，不能转交给用户。只询问会影响需求目标、范围、路由或交付边界的问题；交付单元内部的行为与实现决策留给后续方案分析阶段。不要重复询问上下文中已经回答的问题。',
+      '不要替用户决定产品语义，不要拆分交付单元，不要给出详细技术方案，也不要修改代码。可从代码中查明的事实必须自行探索，不能转交给用户。交付单元内部的行为与实现决策留给后续方案分析阶段。已经回答的问题必须作为确认事实继承，不得重复询问。',
       '',
       '# 完成条件',
-      '存在需求级歧义时返回 needs_input 和完整问题集；全部需求级歧义解决后，只有当 classification、route 和完整 artifact 相互一致，且交付规划 Agent 能据此正确拆分时，才返回 completed。证据不足时应如实标注，不得编造上下文。',
+      '目标、用户可观察结果、需求分类和至少一条带来源事实完整；范围与约束如实记录；所有需求级歧义要么已有用户答案，要么已通过 request-clarification 提交。普通最终文本不算完成，只有 Harness 提供的角色终止命令成功才算完成。',
     ].join('\n'),
   },
   'story-splitter-agent': {

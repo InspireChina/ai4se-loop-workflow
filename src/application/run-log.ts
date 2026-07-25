@@ -47,6 +47,7 @@ function friendlyCursorDiagnostic(text: string) {
 
 function toolNameLabel(tool: string) {
   const lower = tool.toLowerCase();
+  if (lower === 'agent-command') return 'Agent 领域命令';
   if (lower.includes('shell')) return 'Shell 命令';
   if (lower.includes('grep')) return '搜索';
   if (lower.includes('glob')) return '文件匹配';
@@ -58,6 +59,21 @@ function toolNameLabel(tool: string) {
 
 function summarizeCommand(command: string) {
   if (!command) return '';
+  if (/(?:^|[/\\])loop-agent\.mjs(?:["']|\s)/.test(command)) {
+    if (command.includes(' requirement-context status')) return '恢复需求上下文草稿';
+    if (command.includes(' requirement-context goal set')) return '保存需求目标';
+    if (command.includes(' requirement-context outcome set')) return '保存用户可观察结果';
+    if (command.includes(' requirement-context classification set')) return '保存需求分类';
+    if (command.includes(' requirement-context fact ')) return '更新已确认事实';
+    if (command.includes(' requirement-context constraint ')) return '更新需求约束';
+    if (command.includes(' requirement-context scope ')) return '更新范围边界';
+    if (command.includes(' requirement-context question ')) return '更新澄清问题';
+    if (command.includes(' requirement-context validate')) return '校验需求上下文草稿';
+    if (command.includes(' requirement-context request-clarification')) return '提交澄清请求';
+    if (command.includes(' requirement-context complete')) return '完成需求上下文';
+    if (command.includes(' help')) return '查看当前 Agent 可用命令';
+    return '更新 Agent 工作草稿';
+  }
   if (command.includes(' agent-context ')) return '按需读取执行上下文';
   if (command.includes(' task-get ') || command.includes(' task-show ')) return '查询需求详情';
   if (command.includes(' task-context-init ')) return '初始化需求上下文';
@@ -170,7 +186,7 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
     }
     const isDone = parsed.body.includes('完成');
     const tool = meta.tool || '工具';
-    return { ...base, kind: 'tool', status: isDone ? 'success' : 'running', title: `${isDone ? '完成' : '调用'} ${tool}`, detail: detailBody };
+    return { ...base, kind: 'tool', status: isDone ? 'success' : 'running', title: `${isDone ? '完成' : '调用'} ${toolNameLabel(tool)}`, detail: detailBody };
   }
   if (parsed.label === '执行器输出' || parsed.label === 'Cursor输出') {
     if (parsed.body.includes('type=user')) return null;
@@ -189,6 +205,8 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
   if (parsed.label === '执行器事件' || parsed.label === 'Cursor事件') {
     if (parsed.body.includes('"type":"system"') || parsed.body.includes('"subtype":"completed"')) return null;
   }
+  if (parsed.label === '执行器警告'
+    && /codex_core_plugins::manifest: ignoring interface\.defaultPrompt: maximum of \d+ prompts is supported/.test(parsed.body)) return null;
   if (parsed.label === '执行器警告') {
     return { ...base, kind: 'executor', status: 'info', title: `${meta.executor || 'Agent'} 警告`, detail: parsed.body };
   }
@@ -198,7 +216,11 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
   if (parsed.label === 'Cursor错误' && isCursorDiagnostic(parsed.body)) {
     return { ...base, kind: 'executor', status: 'info', title: 'Cursor 诊断', detail: friendlyCursorDiagnostic(parsed.body) };
   }
-  if (parsed.label === '执行器错误' && (/Reading additional input from stdin/.test(parsed.body) || /codex_core_skills::loader: ignoring interface\.icon_(?:small|large)/.test(parsed.body))) return null;
+  if (parsed.label === '执行器错误' && (
+    /Reading additional input from stdin/.test(parsed.body)
+    || /codex_core_skills::loader: ignoring interface\.icon_(?:small|large)/.test(parsed.body)
+    || /codex_core_plugins::manifest: ignoring interface\.defaultPrompt: maximum of \d+ prompts is supported/.test(parsed.body)
+  )) return null;
   if (parsed.label === '执行器错误' && /(?:^|\s)WARN(?:ING)?(?:\s|:)/i.test(parsed.body)) {
     return { ...base, kind: 'executor', status: 'info', title: `${meta.executor || 'Agent'} 警告`, detail: parsed.body };
   }

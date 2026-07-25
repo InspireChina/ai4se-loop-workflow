@@ -248,6 +248,21 @@ function toolNameFromCursor(event: Record<string, unknown>) {
 
 function summarizeCommand(command: string) {
   if (!command) return '';
+  if (/(?:^|[/\\])loop-agent\.mjs(?:["']|\s)/.test(command)) {
+    if (command.includes(' requirement-context status')) return '恢复需求上下文草稿';
+    if (command.includes(' requirement-context goal set')) return '保存需求目标';
+    if (command.includes(' requirement-context outcome set')) return '保存用户可观察结果';
+    if (command.includes(' requirement-context classification set')) return '保存需求分类';
+    if (command.includes(' requirement-context fact ')) return '更新已确认事实';
+    if (command.includes(' requirement-context constraint ')) return '更新需求约束';
+    if (command.includes(' requirement-context scope ')) return '更新范围边界';
+    if (command.includes(' requirement-context question ')) return '更新澄清问题';
+    if (command.includes(' requirement-context validate')) return '校验需求上下文草稿';
+    if (command.includes(' requirement-context request-clarification')) return '提交澄清请求';
+    if (command.includes(' requirement-context complete')) return '完成需求上下文';
+    if (command.includes(' help')) return '查看当前 Agent 可用命令';
+    return '更新 Agent 工作草稿';
+  }
   if (command.includes(' agent-context ')) return '按需读取 execution Context Snapshot';
   if (command.includes(' task-context ')) return '读取数据库需求上下文';
   if (command.includes(' document-list ')) return '列出数据库文档';
@@ -318,10 +333,13 @@ function parseCodexStdout(line: string, context: AgentExecutionContext) {
       if (itemType === 'command_execution') {
         const completed = type === 'item.completed';
         const command = stringifyValue(item.command);
+        const tool = /(?:^|[/\\])loop-agent\.mjs(?:["']|\s)/.test(command)
+          ? 'agent-command'
+          : 'shell';
         const detail = completed
           ? [`exit=${stringifyValue(item.exit_code)}`, compact(stringifyValue(item.aggregated_output), 500)].filter(Boolean).join('，')
           : summarizeCommand(command);
-        return standardToolLog('codex', context, 'shell', completed, detail);
+        return standardToolLog('codex', context, tool, completed, detail);
       }
       if (itemType === 'mcp_tool_call' || itemType === 'file_change' || itemType === 'web_search') {
         const completed = type === 'item.completed';
@@ -489,7 +507,11 @@ export function parseAgentTelemetryStdoutEvents(executor: AgentExecutorId, line:
 export function parseAgentTelemetryStderr(executor: AgentExecutorId, line: string): AgentTelemetryEvent | null {
   const text = compact(line, 500);
   if (!text) return null;
-  if (executor === 'codex' && (/^Reading additional input from stdin\.\.\.$/.test(text) || /codex_core_skills::loader: ignoring interface\.icon_(?:small|large)/.test(text))) return null;
+  if (executor === 'codex' && (
+    /^Reading additional input from stdin\.\.\.$/.test(text)
+    || /codex_core_skills::loader: ignoring interface\.icon_(?:small|large)/.test(text)
+    || /codex_core_plugins::manifest: ignoring interface\.defaultPrompt: maximum of \d+ prompts is supported/.test(text)
+  )) return null;
   const error = /(?:^|\s)(?:ERROR|FATAL|PANIC)(?:\s|:)/i.test(text) || /^Error:/i.test(text);
   const warning = /(?:^|\s)WARN(?:ING)?(?:\s|:)/i.test(text);
   return telemetryDiagnostic(executor, text, error ? 'ERROR' : warning ? 'WARNING' : 'DEFAULT');
@@ -498,7 +520,11 @@ export function parseAgentTelemetryStderr(executor: AgentExecutorId, line: strin
 function stderrLog(executor: AgentExecutorId, context: AgentExecutionContext, line: string) {
   const text = compact(line);
   if (!text) return null;
-  if (executor === 'codex' && (/^Reading additional input from stdin\.\.\.$/.test(text) || /codex_core_skills::loader: ignoring interface\.icon_(?:small|large)/.test(text))) return null;
+  if (executor === 'codex' && (
+    /^Reading additional input from stdin\.\.\.$/.test(text)
+    || /codex_core_skills::loader: ignoring interface\.icon_(?:small|large)/.test(text)
+    || /codex_core_plugins::manifest: ignoring interface\.defaultPrompt: maximum of \d+ prompts is supported/.test(text)
+  )) return null;
   const isError = /(?:^|\s)(?:ERROR|FATAL|PANIC)(?:\s|:)/i.test(text) || /^Error:/i.test(text);
   const isWarning = /(?:^|\s)WARN(?:ING)?(?:\s|:)/i.test(text);
   const label = isError ? '执行器错误' : isWarning ? '执行器警告' : '执行器诊断';

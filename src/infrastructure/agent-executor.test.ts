@@ -40,6 +40,31 @@ test('coalesces output separately while mapping errors and stderr at the correct
   assert.equal(stderr?.level, 'WARNING');
   assert.equal(info?.level, 'DEFAULT');
   assert.equal(parseAgentTelemetryStderr('codex', 'Reading additional input from stdin...'), null);
+  assert.equal(
+    parseAgentTelemetryStderr(
+      'codex',
+      '2026-07-25T03:58:12Z WARN codex_core_plugins::manifest: ignoring interface.defaultPrompt: maximum of 3 prompts is supported path=file:///plugin.json',
+    ),
+    null,
+  );
+});
+
+test('labels command-driven draft updates as Agent domain commands', () => {
+  const line = JSON.stringify({
+    type: 'item.started',
+    item: {
+      type: 'command_execution',
+      command: 'node "/app/scripts/loop/loop-agent.mjs" requirement-context status',
+    },
+  });
+  const parsed = getAgentExecutor('codex').parseStdout(line, {
+    agent: 'backlog-agent',
+    taskId: 'REQ-1',
+    storyIndex: null,
+    pipeline: 'resume',
+  });
+  assert.match(parsed || '', /tool=agent-command/);
+  assert.match(parsed || '', /恢复需求上下文草稿/);
 });
 
 test('extracts final assistant text from every executor stream', () => {
