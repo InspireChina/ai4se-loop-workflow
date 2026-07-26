@@ -265,14 +265,14 @@ test('labels progressive development evidence selection as an Agent domain actio
   assert.match(parsed || '', /选择关键检查/);
 });
 
-test('labels progressive independent verification evidence as an Agent domain action', () => {
+test('labels progressive independent verification results as an Agent domain action', () => {
   const line = JSON.stringify({
     type: 'tool_call',
     subtype: 'started',
     tool_call: {
       shellToolCall: {
         args: {
-          command: 'node "/app/scripts/loop/loop-agent.mjs" verification criterion upsert --key AC-1 --status passed',
+          command: 'node "/app/scripts/loop/loop-agent.mjs" verification result record --key checkout-happy-path --status passed',
         },
       },
     },
@@ -284,7 +284,7 @@ test('labels progressive independent verification evidence as an Agent domain ac
     pipeline: 'test',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /更新验收证据/);
+  assert.match(parsed || '', /记录场景验证结果/);
 });
 
 test('labels progressive feedback grouping as an Agent domain action', () => {
@@ -309,14 +309,14 @@ test('labels progressive feedback grouping as an Agent domain action', () => {
   assert.match(parsed || '', /更新反馈工作组/);
 });
 
-test('labels progressive review evidence as an Agent domain action', () => {
+test('labels progressive Review reconciliation as an Agent domain action', () => {
   const line = JSON.stringify({
     type: 'tool_call',
     subtype: 'started',
     tool_call: {
       shellToolCall: {
         args: {
-          command: 'node "/app/scripts/loop/loop-agent.mjs" review evidence upsert --key independent-test --section verification',
+          command: 'node "/app/scripts/loop/loop-agent.mjs" review reconciliation upsert --key final-outcome --subject DELIVERY_UNIT:REQ-1:1',
         },
       },
     },
@@ -328,7 +328,7 @@ test('labels progressive review evidence as an Agent domain action', () => {
     pipeline: 'review',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /更新结卡可追溯证据/);
+  assert.match(parsed || '', /保存最终事实对账/);
 });
 
 test('labels progressive internal Agent commands as domain actions', () => {

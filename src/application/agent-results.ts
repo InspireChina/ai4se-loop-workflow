@@ -28,9 +28,10 @@ import {
   applyFeedbackTriageGroups,
   applyFeedbackVerificationV2,
   markFeedbackBatchWaitingForAnswers,
-  markFeedbackReportGenerated,
   recordFeedbackUnitTestPassed,
 } from './feedback';
+import { forwardReviewClosureGaps } from './review-closure-gaps';
+import { publishReviewReport } from './review-report-publication';
 
 const artifactKinds: Record<string, string> = {
   'backlog-agent': 'context',
@@ -45,7 +46,6 @@ const artifactKinds: Record<string, string> = {
 function questionKind(agent: string) {
   if (agent === 'analyst-agent') return 'analysis' as const;
   if (agent === 'test-agent') return 'test' as const;
-  if (agent === 'review-agent') return 'review' as const;
   if (agent === 'feedback-agent') return 'feedback' as const;
   return 'local' as const;
 }
@@ -214,44 +214,55 @@ function envelopeFromTask(row: QueuedAgentResult, detail: NonNullable<Awaited<Re
   };
 }
 
-function restoreFeedbackSnapshot(
+function restoreExecutionSnapshot(
   db: Awaited<ReturnType<typeof databaseConnection>>,
   row: QueuedAgentResult,
   result: AgentResult,
   delegation: DelegationEnvelope,
 ) {
-  if (row.agent !== 'feedback-agent') return delegation;
-  let stored: Pick<DelegationEnvelope, 'feedbackId' | 'feedbackIds' | 'feedbackBatchId' | 'feedbackGroupId'> | null = null;
+  let stored: DelegationEnvelope | null = null;
   if (row.execution_id) {
     const attempt = db.prepare('SELECT input_json FROM execution_attempts WHERE execution_id = ?').get(row.execution_id) as { input_json: string } | undefined;
     if (attempt?.input_json) {
       try {
-        const parsed = JSON.parse(attempt.input_json) as { delegation?: Pick<DelegationEnvelope, 'feedbackId' | 'feedbackIds' | 'feedbackBatchId' | 'feedbackGroupId'> };
+        const parsed = JSON.parse(attempt.input_json) as { delegation?: DelegationEnvelope };
         stored = parsed.delegation || null;
       } catch {
-        // Legacy attempts may not contain a readable delegation snapshot.
+        throw new Error('排队结果关联的 execution delegation 快照无法读取');
       }
     }
   }
+  if (stored) {
+    if (
+      stored.taskId !== row.task_id
+      || stored.agent !== row.agent
+      || stored.pipeline !== row.pipeline
+      || stored.storyIndex !== row.story_index
+    ) {
+      throw new Error('排队结果与 execution delegation 快照不一致');
+    }
+    delegation = stored;
+  }
+  if (row.agent !== 'feedback-agent') return delegation;
   if (result.feedback?.mode === 'triage') {
-    const feedbackIds = stored?.feedbackIds?.length
-      ? stored.feedbackIds
+    const feedbackIds = delegation.feedbackIds?.length
+      ? delegation.feedbackIds
       : result.feedback.groups.flatMap((group) => group.commentIds);
     return {
       ...delegation,
-      feedbackId: stored?.feedbackId || feedbackIds[0] || null,
+      feedbackId: delegation.feedbackId || feedbackIds[0] || null,
       feedbackIds,
-      feedbackBatchId: stored?.feedbackBatchId || delegation.feedbackBatchId || null,
-      feedbackGroupId: stored?.feedbackGroupId || delegation.feedbackGroupId || null,
+      feedbackBatchId: delegation.feedbackBatchId || null,
+      feedbackGroupId: delegation.feedbackGroupId || null,
     };
   }
   if (result.feedback?.mode === 'verify') {
     return {
       ...delegation,
-      feedbackId: stored?.feedbackId || result.feedback.commentId,
-      feedbackIds: stored?.feedbackIds || null,
-      feedbackBatchId: stored?.feedbackBatchId || delegation.feedbackBatchId || null,
-      feedbackGroupId: stored?.feedbackGroupId || delegation.feedbackGroupId || null,
+      feedbackId: delegation.feedbackId || result.feedback.commentId,
+      feedbackIds: delegation.feedbackIds || null,
+      feedbackBatchId: delegation.feedbackBatchId || null,
+      feedbackGroupId: delegation.feedbackGroupId || null,
     };
   }
   return delegation;
@@ -304,6 +315,25 @@ type ApplyOutcome = 'advanced' | 'blocked' | 'rewound' | 'discarded';
 
 async function applyResultEffects(delegation: DelegationEnvelope, result: AgentResult, sourceResultId?: string, sourceExecutionId?: string): Promise<ApplyOutcome> {
   await ensureCodeSlotForDelegation(delegation, result);
+
+  if (delegation.agent === 'review-agent') {
+    if (result.outcome !== 'completed') throw new Error('Review Agent 必须以 completed 结束事实对账');
+    if (result.questions.length || result.runtimeInputs.length) {
+      throw new Error('Review Agent 不得创建问题或运行信息请求；事实缺口必须转为前向交付单元');
+    }
+    if (result.rewindTo || result.rewindDeliveryUnit) throw new Error('Review Agent 不得返回回退决策');
+    if (result.verdict === 'closure_gap') {
+      if (delegation.pipeline === 'feedback-report') throw new Error('反馈报告修订只能返回 verdict=report_ready');
+      if (delegation.pipeline !== 'review') throw new Error(`Review closure gap 不支持 pipeline=${delegation.pipeline}`);
+      if (!result.closureGaps?.length) throw new Error('closure_gap 必须包含至少一个事实缺口');
+      if (result.artifact) throw new Error('closure_gap 不得生成结卡报告 artifact');
+    } else if (result.verdict === 'report_ready') {
+      if (!result.artifact) throw new Error('review-agent 结果缺少 artifact');
+      if (result.closureGaps?.length) throw new Error('report_ready 不能同时包含 closure gaps');
+    } else {
+      throw new Error('Review Agent 只能返回 verdict=report_ready 或 closure_gap');
+    }
+  }
 
   const canAskAlignmentQuestions = delegation.agent === 'backlog-agent'
     || delegation.agent === 'analyst-agent'
@@ -359,7 +389,48 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     return 'advanced';
   }
 
-  const artifactDocumentId = await saveArtifact(delegation, result);
+  if (delegation.agent === 'review-agent') {
+    const detail = await getTask(delegation.taskId);
+    if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
+    if (delegation.pipeline === 'review') {
+      if (result.verdict !== 'closure_gap'
+        && (detail.task.agile_status !== 'in review'
+        || detail.task.current_subagent !== 'review-agent'
+        || detail.task.closure_status !== 'none')) {
+        return 'discarded';
+      }
+    } else if (delegation.pipeline === 'feedback-report') {
+      if (!delegation.feedbackBatchId || !delegation.feedbackGroupId) {
+        throw new Error('反馈报告更正缺少批次或分组');
+      }
+      const db = await databaseConnection();
+      const current = db.prepare(`
+        SELECT 1
+        FROM feedback_batches batch
+        JOIN feedback_groups group_item
+          ON group_item.batch_id = batch.batch_id
+        WHERE batch.task_id = ?
+          AND batch.batch_id = ?
+          AND group_item.group_id = ?
+          AND batch.status = 'reporting'
+          AND group_item.status = 'executing'
+          AND group_item.work_type = 'report_correction'
+        LIMIT 1
+      `).get(delegation.taskId, delegation.feedbackBatchId, delegation.feedbackGroupId);
+      if (
+        detail.task.agile_status !== 'in feedback'
+        || detail.task.review_document_id !== delegation.reviewDocumentId
+        || detail.task.review_revision !== delegation.reviewRevision
+        || !current
+      ) return 'discarded';
+    } else {
+      throw new Error(`Review Agent 不支持 pipeline=${delegation.pipeline}`);
+    }
+  }
+
+  const artifactDocumentId = delegation.agent === 'review-agent'
+    ? null
+    : await saveArtifact(delegation, result);
   const actor = delegation.agent as Actor;
   switch (delegation.agent) {
     case 'backlog-agent': {
@@ -567,39 +638,27 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       return 'rewound' as const;
     }
     case 'review-agent': {
-      requireArtifact(result, delegation.agent);
-      if (!artifactDocumentId) throw new Error('Review Agent 结卡报告未保存');
-      const detail = await getTask(delegation.taskId);
-      if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
-      if (result.verdict !== 'report_ready') throw new Error('Review Agent 只能返回 verdict=report_ready');
-      const reviewRevision = detail.task.review_revision + 1;
-      if (delegation.pipeline === 'feedback-report') {
-        if (!delegation.feedbackBatchId || !delegation.feedbackGroupId) throw new Error('反馈报告更正缺少批次或分组');
-        await updateTask(delegation.taskId, actor, {
-          current_subagent: 'review-agent',
-          closure_status: 'none',
-          review_revision: reviewRevision,
-          review_document_id: artifactDocumentId,
-          next_step: `结卡报告 v${reviewRevision} 已按反馈修订，等待独立验证`,
-        });
-        await markFeedbackReportGenerated({
+      if (result.verdict === 'closure_gap') {
+        if (!sourceResultId) throw new Error('Review closure gap 缺少来源 result');
+        const forwarding = await forwardReviewClosureGaps({
           taskId: delegation.taskId,
-          batchId: delegation.feedbackBatchId,
-          groupId: delegation.feedbackGroupId,
-          executionId: sourceExecutionId,
+          sourceResultId,
+          gaps: result.closureGaps || [],
+          expected: {
+            totalStories: delegation.totalStories,
+            reviewRevision: delegation.reviewRevision,
+            reviewDocumentId: delegation.reviewDocumentId,
+          },
         });
-        return 'advanced';
+        return forwarding === 'stale' ? 'discarded' : 'advanced';
       }
-      await updateTask(delegation.taskId, actor, {
-        agile_status: 'ready_to_close',
-        current_subagent: null,
-        run_state: 'idle',
-        closure_status: 'awaiting_read',
-        review_revision: reviewRevision,
-        review_document_id: artifactDocumentId,
-        next_step: `结卡报告 v${reviewRevision} 已生成，等待用户阅读并关闭需求`,
+      if (!sourceResultId) throw new Error('Review report_ready 缺少来源 result');
+      return publishReviewReport({
+        delegation,
+        result,
+        resultId: sourceResultId,
+        executionId: sourceExecutionId,
       });
-      return 'advanced' as const;
     }
     default:
       throw new Error(`不支持的 agent：${delegation.agent}`);
@@ -672,7 +731,12 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
       return { status: 'applied', resultId: row.result_id, taskId: row.task_id, storyIndex: row.story_index, agent: row.agent, outcome: 'discarded' };
     }
     const result = parseAgentResult(row.result_json);
-    const delegation = restoreFeedbackSnapshot(db, row, result, envelopeFromTask(row, detail));
+    const delegation = restoreExecutionSnapshot(
+      db,
+      row,
+      result,
+      envelopeFromTask(row, detail),
+    );
     const outcome = await applyResultEffects(delegation, result, row.result_id, row.execution_id || undefined);
     if (result.outcome === 'completed') {
       await resolveRuntimeInputs({
@@ -682,7 +746,7 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
         resolvedExecutionId: row.execution_id || undefined,
       });
     }
-    await markApplication(row.result_id, 'applied');
+    await markApplication(row.result_id, 'applied', null, outcome);
     const execution = db.prepare('SELECT execution_id FROM agent_results WHERE result_id = ?').get(row.result_id) as { execution_id: string | null } | undefined;
     if (execution?.execution_id) {
       db.prepare(`

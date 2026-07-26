@@ -672,23 +672,58 @@ function cloneVerificationDraft(
   source: DraftRow,
   target: DraftRow,
 ) {
-  db.prepare(`
-    INSERT INTO verification_drafts(
-      draft_id, summary, failure_kind, expected_behavior, actual_behavior
-    )
-    SELECT ?, summary, failure_kind, expected_behavior, actual_behavior
+  const sourceHeader = db.prepare(`
+    SELECT phase, spec_revision
     FROM verification_drafts WHERE draft_id = ?
-  `).run(target.draft_id, source.draft_id);
+  `).get(source.draft_id) as {
+    phase: 'planning' | 'executing';
+    spec_revision: number | null;
+  };
+  const currentSpec = db.prepare(`
+    SELECT revision
+    FROM story_specs
+    WHERE task_id = ? AND story_index = ? AND status = 'resolved'
+    ORDER BY revision DESC LIMIT 1
+  `).get(target.task_id, target.story_index) as { revision: number } | undefined;
+  const continuesAfterInput = source.status === 'waiting_for_answers';
+  const frozenPlanMatchesCurrentSpec = sourceHeader.phase === 'executing'
+    && sourceHeader.spec_revision !== null
+    && sourceHeader.spec_revision === currentSpec?.revision;
+  const canReuseFrozenPlan = sourceHeader.phase === 'executing'
+    && frozenPlanMatchesCurrentSpec;
+  const targetPhase = sourceHeader.phase === 'planning'
+    ? 'planning'
+    : (continuesAfterInput && frozenPlanMatchesCurrentSpec) || canReuseFrozenPlan
+      ? 'executing'
+      : 'planning';
+  const targetSpecRevision = targetPhase === 'executing'
+    ? sourceHeader.spec_revision
+    : null;
+  db.prepare(`
+    INSERT INTO verification_drafts(draft_id, phase, spec_revision)
+    VALUES(?, ?, ?)
+  `).run(target.draft_id, targetPhase, targetSpecRevision);
   for (const table of [
-    ['verification_criteria', 'criterion_key, status, method, evidence, ordinal'],
-    ['verification_checks', 'check_key, kind, instruction, command, passed, exit_code, summary, ordinal'],
-    ['verification_risks', 'risk_key, content, ordinal'],
-    ['verification_runtime_inputs', 'request_key, title, question, why, recommendation, ordinal'],
-    ['verification_recovery_checks', 'recovery_id, status, evidence, ordinal'],
+    ['verification_plan_scenarios', `scenario_key, channel, title, setup, steps,
+      expected, coverage_refs_json, ordinal`],
   ] as const) {
     db.prepare(`
       INSERT INTO ${table[0]}(draft_id, ${table[1]})
       SELECT ?, ${table[1]} FROM ${table[0]} WHERE draft_id = ?
+    `).run(target.draft_id, source.draft_id);
+  }
+  // Waiting for user-provided runtime information is a continuation of the
+  // same Test attempt. The shared runtime_input_requests table owns the
+  // request and answer; this draft only restores already executed scenarios.
+  if (continuesAfterInput && targetPhase === 'executing') {
+    db.prepare(`
+      INSERT INTO verification_results(
+        draft_id, scenario_key, status, failure_kind, evidence,
+        actual_behavior, ordinal
+      )
+      SELECT ?, scenario_key, status, failure_kind, evidence,
+             actual_behavior, ordinal
+      FROM verification_results WHERE draft_id = ?
     `).run(target.draft_id, source.draft_id);
   }
 }
@@ -732,13 +767,21 @@ function cloneReviewDraft(
   target: DraftRow,
 ) {
   db.prepare(`
-    INSERT INTO review_drafts(draft_id, title, summary)
-    SELECT ?, title, summary FROM review_drafts WHERE draft_id = ?
+    INSERT INTO review_drafts(
+      draft_id, mode, baseline_review_document_id, baseline_review_revision
+    )
+    SELECT ?, mode, baseline_review_document_id, baseline_review_revision
+    FROM review_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   for (const table of [
-    ['review_sections', 'section_kind, heading, content'],
-    ['review_evidence', 'evidence_key, section_kind, reference, claim, ordinal'],
-    ['review_runtime_inputs', 'request_key, title, question, why, recommendation, ordinal'],
+    ['review_required_subjects', `subject_ref, subject_kind, content, source_ref,
+      contract_ref, story_index, subject_hash, ordinal`],
+    ['review_reconciliations', 'reconciliation_key, subject_ref, result, ordinal'],
+    ['review_reconciliation_evidence', `reconciliation_key, evidence_ref,
+      evidence_revision, evidence_hash, ordinal`],
+    ['review_gaps', `gap_key, subject_ref, gap_kind, reason, boundary, status,
+      resolution, forwarded_story_index, ordinal`],
+    ['review_sections', 'section_kind, content'],
   ] as const) {
     db.prepare(`
       INSERT INTO ${table[0]}(draft_id, ${table[1]})
@@ -815,7 +858,15 @@ function createDraft(
       }
     } else if (profile.draftType === 'review') {
       if (source) cloneReviewDraft(db, source, created);
-      else db.prepare('INSERT INTO review_drafts(draft_id) VALUES(?)').run(draftId);
+      else {
+        db.prepare('INSERT INTO review_drafts(draft_id, mode) VALUES(?, ?)')
+          .run(
+            draftId,
+            execution.pipeline === 'feedback-report'
+              ? 'report_correction'
+              : 'closure',
+          );
+      }
     }
     return created;
   })();
@@ -1974,8 +2025,12 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
       '  2. Prompt 已给出 required refs 时优先使用 get。',
       '  3. 不知道 ref 或怀疑资料未展示时使用 search/list。',
       '  4. 核对前序执行时使用 evidence；仅在版本或替代冲突时使用 history。',
-      '  5. 再使用仓库文件、Git 和测试工具确认实时 Ground Truth。',
-      '  6. 完成上述调查后仍无法唯一确定，才声明缺少信息或提交问题。',
+      execution.agent === 'review-agent'
+        ? '  5. Review 只消费已有最终仓库执行记录和独立 Test 证据，不重新运行测试或修改仓库。'
+        : '  5. 再使用仓库文件、Git 和测试工具确认实时 Ground Truth。',
+      execution.agent === 'review-agent'
+        ? '  6. 已有证据无法闭合时声明结卡缺口，不创建问题或运行信息请求。'
+        : '  6. 完成上述调查后仍无法唯一确定，才声明缺少信息或提交问题。',
     ].join('\n');
   }
   if (topic) {
@@ -2021,6 +2076,30 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         `帮助主题：${topic}`,
         '',
         ...developmentHelp(profile.terminalActions, topic),
+        '',
+        '长文本参数：',
+        '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
+        `  返回完整索引：${command} help`,
+      ].join('\n');
+    }
+    if (profile.draftType === 'verification') {
+      return [
+        `当前身份：${execution.agent} · ${execution.pipeline}`,
+        `帮助主题：${topic}`,
+        '',
+        ...verificationHelp(profile.terminalActions, topic),
+        '',
+        '长文本参数：',
+        '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
+        `  返回完整索引：${command} help`,
+      ].join('\n');
+    }
+    if (profile.draftType === 'review') {
+      return [
+        `当前身份：${execution.agent} · ${execution.pipeline}`,
+        `帮助主题：${topic}`,
+        '',
+        ...reviewHelp(profile.terminalActions, topic),
         '',
         '长文本参数：',
         '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
@@ -2084,7 +2163,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
   if (profile.draftType === 'verification') {
     return [
       ...common,
-      ...verificationHelp(profile.terminalActions),
+      ...verificationHelp(profile.terminalActions, null),
       '',
       '长文本参数：',
       '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
@@ -2102,7 +2181,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
   if (profile.draftType === 'review') {
     return [
       ...common,
-      ...reviewHelp(profile.terminalActions),
+      ...reviewHelp(profile.terminalActions, null),
       '',
       '长文本参数：',
       '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',

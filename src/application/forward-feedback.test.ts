@@ -98,7 +98,36 @@ async function delegation(taskId: string, pipeline?: string) {
   const lines = await pipelineForTask(taskId);
   const line = lines.find((item) => !pipeline || item.pipeline === pipeline);
   assert.ok(line, `缺少预期派发：${pipeline || '任意'}`);
-  return line as DelegationEnvelope;
+  const detail = await getTask(taskId);
+  assert.ok(detail);
+  return {
+    ...line,
+    title: detail.task.title,
+    taskDescription: detail.task.description,
+    itemType: detail.task.item_type,
+    priority: detail.task.priority || '',
+    link: detail.task.link || '',
+    externalId: detail.task.external_id || '',
+    externalStatus: detail.task.external_status || '',
+    agileStatus: detail.task.agile_status,
+    currentSubagent: detail.task.current_subagent || '',
+    resumePending: detail.task.resume_pending,
+    specResolvedIndex: detail.task.spec_resolved_index,
+    runState: detail.task.run_state,
+    closureStatus: detail.task.closure_status,
+    reviewRevision: detail.task.review_revision,
+    reviewDocumentId: detail.task.review_document_id || '',
+    lastActor: detail.task.last_actor || '',
+    analysisIndex: detail.task.analysis_index,
+    devIndex: detail.task.dev_index,
+    testIndex: detail.task.test_index,
+    totalStories: detail.task.total_stories,
+    nextStep: detail.task.next_step || '',
+    blockedReason: detail.task.blocked_reason || '',
+    owner: detail.task.owner || '',
+    evidence: detail.task.evidence || '',
+    risk: detail.task.risk || '',
+  } as DelegationEnvelope;
 }
 
 const resolvedSpec = deliverySpecFixture({
@@ -339,12 +368,17 @@ test('结卡报告修订生成新版本，验证通过后直接回到等待阅�
     },
   }));
   const report = await delegation(taskId, 'feedback-report');
-  await applyAgentResult(`run-${randomUUID()}`, report, result({
+  const reportOutcome = await applyAgentResult(`run-${randomUUID()}`, report, result({
     outcome: 'completed',
     summary: '结卡报告已补充离线边界。',
     artifact: { title: '结卡报告 v2', content: '# 已知限制\n\n当前不支持离线模式。' },
     verdict: 'report_ready',
   }));
+  assert.equal(reportOutcome, 'advanced');
+  const afterReport = await getTask(taskId);
+  assert.equal(afterReport?.task.review_revision, 2);
+  assert.equal(afterReport?.feedbackGroups[0]?.status, 'ready_for_verification');
+  assert.equal(afterReport?.documentComments[0]?.feedback_status, 'verifying');
   const verify = await delegation(taskId, 'feedback-verify');
   await applyAgentResult(`run-${randomUUID()}`, verify, result({
     outcome: 'completed',

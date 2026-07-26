@@ -20,6 +20,8 @@ Runner 启动 execution 前会初始化项目隔离的 `data/<repo-hash>/agent-r
 
 所有流程 Agent 都使用 `scripts/loop/loop-agent.mjs <角色命名空间> ...` 渐进提交：每次新进程先执行 `status` 恢复上次草稿，再按稳定 key 写入各字段，最终调用角色终止命令。Runner 通过 execution 或内部工作 ID、会话 ID 与一次性 token 限制命令权限；Agent 不生成结果 JSON，也不能直接写数据库。Evolution Evaluator 使用 `evolution` 命名空间，Software Maintenance Agent 使用 `maintenance` 命名空间，并遵循同一套先恢复、渐进写入、终止提交协议。普通最终回复不推进流程。执行结束后的 Evolution Evaluator 是非阻塞旁路：它只能记录观察或产生受 Canary 约束的 Prompt candidate，不能调度流程、绕过 Harness 或要求人工 Approval。
 
+验证 Agent 使用精简的两阶段协议：先通过 `verification plan upsert` 维护 `frontend` 或 `api` 黑盒场景，必要时在规划阶段 `verification plan dismiss`，覆盖完整后调用 `verification plan freeze`；再逐项使用 `verification result record` 记录通过、失败或阻塞，最终调用 `verification complete`。每项交付单元验收语义必须有真实前端业务闭环场景；API 场景可以补充业务边界、错误反馈和数据语义，也可以直接形成失败证据，但不能替代前端闭环的通过证据。测试资源不足时使用运行信息请求，仍无法获得则记录环境阻塞。角色帮助按 `context|plan|execute|input|finish` 组织，不要求 Agent 提交执行回执。
+
 流程 Agent 默认最多运行 4 小时，完全无输出 30 分钟后终止；可分别通过 `AGENT_EXECUTOR_TIMEOUT_MS` 和 `AGENT_EXECUTOR_IDLE_TIMEOUT_MS` 覆盖。Runner 持续写入 heartbeat 与持久化 execution checkpoint；进程异常退出后由恢复逻辑判断未完成 execution 并继续处理，不依赖长期租约。
 
 `agent-runner.ts` 的顶层 `finally` 会把本 execution 的结构化日志游标写入 `software_maintenance_jobs`，然后 best-effort 唤醒独立 `maintenance-runner.ts`。finally 不直接调用模型或修改代码。Maintenance Runner 在应用仓库的隔离 Git worktree 内分析 Loop Engineering 自身问题，通过变更预算、保护路径、`npm test`、`npm run build` 和 clean-baseline 检查后才能自动 cherry-pick；失败不会阻塞主 Loop。

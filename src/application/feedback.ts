@@ -687,6 +687,59 @@ export async function recordFeedbackUnitTestPassed(input: {
   refreshTask(input.taskId);
 }
 
+export function markFeedbackReportGeneratedInDb(db: Db, input: {
+  taskId: string;
+  batchId: string;
+  groupId: string;
+  executionId?: string;
+}) {
+  const group = db.prepare(`
+    SELECT feedback_group.*
+    FROM feedback_groups feedback_group
+    JOIN feedback_batches batch
+      ON batch.batch_id = feedback_group.batch_id
+    WHERE feedback_group.group_id = ?
+      AND feedback_group.batch_id = ?
+      AND batch.task_id = ?
+      AND batch.status = 'reporting'
+  `).get(
+    input.groupId,
+    input.batchId,
+    input.taskId,
+  ) as FeedbackGroup | undefined;
+  if (
+    !group
+    || group.work_type !== 'report_correction'
+    || group.status !== 'executing'
+  ) {
+    throw new Error('反馈报告更正分组不存在或已离开执行状态');
+  }
+  const updated = db.prepare(`
+    UPDATE feedback_groups
+    SET status = 'ready_for_verification',
+        source_execution_id = COALESCE(source_execution_id, ?),
+        updated_at = CURRENT_TIMESTAMP
+    WHERE group_id = ? AND status = 'executing'
+  `).run(input.executionId || null, input.groupId);
+  if (updated.changes !== 1) throw new Error('反馈报告更正分组状态已变化');
+  const comments = groupCommentIds(db, input.groupId);
+  if (comments.length) {
+    db.prepare(`
+      UPDATE document_comments
+      SET feedback_status = 'verifying', updated_at = CURRENT_TIMESTAMP
+      WHERE comment_id IN (${comments.map(() => '?').join(', ')})
+    `).run(...comments);
+  }
+  updateBatchStatusInDb(db, input.batchId);
+  addEvent(
+    db,
+    input.taskId,
+    'review-agent',
+    'FeedbackReportRegenerated',
+    `反馈「${groupDisplayName(group)}」已生成新版结卡报告`,
+  );
+}
+
 export async function markFeedbackReportGenerated(input: {
   taskId: string;
   batchId: string;
@@ -694,25 +747,8 @@ export async function markFeedbackReportGenerated(input: {
   executionId?: string;
 }) {
   const db = await databaseConnection();
-  const group = db.prepare(`
-    SELECT * FROM feedback_groups WHERE group_id = ? AND batch_id = ?
-  `).get(input.groupId, input.batchId) as FeedbackGroup | undefined;
-  if (!group || group.work_type !== 'report_correction') throw new Error('反馈报告更正分组不存在');
   db.transaction(() => {
-    db.prepare(`
-      UPDATE feedback_groups
-      SET status = 'ready_for_verification', source_execution_id = COALESCE(source_execution_id, ?),
-          updated_at = CURRENT_TIMESTAMP
-      WHERE group_id = ?
-    `).run(input.executionId || null, input.groupId);
-    const comments = groupCommentIds(db, input.groupId);
-    db.prepare(`
-      UPDATE document_comments
-      SET feedback_status = 'verifying', updated_at = CURRENT_TIMESTAMP
-      WHERE comment_id IN (${comments.map(() => '?').join(', ')})
-    `).run(...comments);
-    updateBatchStatusInDb(db, input.batchId);
-    addEvent(db, input.taskId, 'review-agent', 'FeedbackReportRegenerated', `反馈「${groupDisplayName(group)}」已生成新版结卡报告`);
+    markFeedbackReportGeneratedInDb(db, input);
   })();
   refreshTask(input.taskId);
 }

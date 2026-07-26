@@ -108,11 +108,12 @@ test('removes legacy task-level resume ownership from lane agents', () => {
   db.close();
 });
 
-test('adds role drafts without losing progress from previously migrated agents', () => {
+test('migrates role drafts and replaces the obsolete verification data model', () => {
   const db = new Database(':memory:');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec(`
     CREATE TABLE tasks (task_id TEXT PRIMARY KEY);
+    CREATE TABLE documents (document_id TEXT PRIMARY KEY);
     CREATE TABLE execution_attempts (
       execution_id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL REFERENCES tasks(task_id),
@@ -229,6 +230,18 @@ test('adds role drafts without losing progress from previously migrated agents',
     INSERT INTO verification_drafts(draft_id, summary)
     VALUES('DRAFT-verification', '保留验证结论')
   `).run();
+  db.prepare(`
+    INSERT INTO verification_risks(draft_id, risk_key, content, ordinal)
+    VALUES('DRAFT-verification', 'legacy-risk', '旧风险草稿', 1)
+  `).run();
+  db.prepare(`
+    INSERT INTO verification_runtime_inputs(
+      draft_id, request_key, title, question, why, recommendation, ordinal
+    ) VALUES(
+      'DRAFT-verification', 'legacy-input', '旧运行信息',
+      '旧问题', '旧原因', '旧建议', 1
+    )
+  `).run();
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/044_feedback_drafts.sql'), 'utf8'));
   db.prepare(`
     INSERT INTO agent_work_drafts(
@@ -242,8 +255,29 @@ test('adds role drafts without losing progress from previously migrated agents',
     VALUES('DRAFT-feedback', 'triage')
   `).run();
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/045_review_drafts.sql'), 'utf8'));
+  db.prepare(`
+    INSERT INTO agent_work_drafts(
+      draft_id, work_key, draft_version, draft_type, task_id,
+      agent, status, last_execution_id
+    ) VALUES('DRAFT-review', 'review:REQ-existing:closure:report', 1,
+      'review', 'REQ-existing', 'review-agent', 'editing', 'EXEC-existing')
+  `).run();
+  db.prepare(`
+    INSERT INTO review_drafts(draft_id, title, summary)
+    VALUES('DRAFT-review', '旧结卡标题', '旧结卡草稿')
+  `).run();
+  db.prepare(`
+    INSERT INTO review_evidence(
+      draft_id, evidence_key, section_kind, reference, claim, ordinal
+    ) VALUES(
+      'DRAFT-review', 'legacy-evidence', 'verification',
+      'DOC-test', '旧证据', 1
+    )
+  `).run();
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/046_internal_agent_drafts.sql'), 'utf8'));
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/051_simplify_development_drafts.sql'), 'utf8'));
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/052_two_phase_verification.sql'), 'utf8'));
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/053_review_reconciliation.sql'), 'utf8'));
 
   const context = db.prepare(`
     SELECT draft_type, goal
@@ -258,9 +292,10 @@ test('adds role drafts without losing progress from previously migrated agents',
       'reproduction_drafts', 'reproduction_steps',
       'analysis_drafts', 'analysis_decisions',
       'development_drafts', 'development_criteria', 'development_checks',
-      'verification_drafts', 'verification_criteria',
+      'verification_drafts', 'verification_plan_scenarios', 'verification_results',
       'feedback_drafts', 'feedback_draft_groups',
-      'review_drafts', 'review_sections', 'review_evidence',
+      'review_drafts', 'review_required_subjects', 'review_reconciliations',
+      'review_reconciliation_evidence', 'review_gaps', 'review_sections',
       'internal_agent_drafts', 'evolution_evaluator_drafts',
       'software_maintenance_drafts'
     )
@@ -315,12 +350,54 @@ test('adds role drafts without losing progress from previously migrated agents',
       WHERE draft_id = 'DRAFT-development'
     `).all(),
   };
-  const verification = db.prepare(`
-    SELECT summary FROM verification_drafts WHERE draft_id = 'DRAFT-verification'
+  const removedVerificationDraft = db.prepare(`
+    SELECT phase, spec_revision
+    FROM verification_drafts
+    WHERE draft_id = 'DRAFT-verification'
   `).get();
+  const removedVerificationWorkDraft = db.prepare(`
+    SELECT draft_id
+    FROM agent_work_drafts
+    WHERE draft_id = 'DRAFT-verification'
+  `).get();
+  const verificationPlanScenarios = db.prepare(`
+    SELECT scenario_key, channel
+    FROM verification_plan_scenarios
+    WHERE draft_id = 'DRAFT-verification'
+  `).all();
+  const verificationPlanColumns = db.prepare('PRAGMA table_info(verification_plan_scenarios)')
+    .all() as { name: string }[];
+  const verificationResults = db.prepare(`
+    SELECT scenario_key, status
+    FROM verification_results
+    WHERE draft_id = 'DRAFT-verification'
+  `).all();
+  const removedVerificationTables = db.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name IN (
+      'verification_criteria',
+      'verification_checks',
+      'verification_risks',
+      'verification_runtime_inputs',
+      'verification_recovery_checks',
+      'verification_runs',
+      'verification_evidence'
+    )
+    ORDER BY name
+  `).all();
   const feedback = db.prepare(`
     SELECT mode FROM feedback_drafts WHERE draft_id = 'DRAFT-feedback'
   `).get();
+  const removedReviewDraft = db.prepare(`
+    SELECT draft_id
+    FROM agent_work_drafts
+    WHERE draft_id = 'DRAFT-review'
+  `).get();
+  const removedReviewTables = db.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name IN ('review_evidence', 'review_runtime_inputs')
+    ORDER BY name
+  `).all();
   const foreignKeyViolations = db.prepare('PRAGMA foreign_key_check').all();
   assert.deepEqual(context, {
     draft_type: 'requirement_context',
@@ -341,11 +418,15 @@ test('adds role drafts without losing progress from previously migrated agents',
     'reproduction_drafts',
     'reproduction_steps',
     'review_drafts',
-    'review_evidence',
+    'review_gaps',
+    'review_reconciliation_evidence',
+    'review_reconciliations',
+    'review_required_subjects',
     'review_sections',
     'software_maintenance_drafts',
-    'verification_criteria',
     'verification_drafts',
+    'verification_plan_scenarios',
+    'verification_results',
   ]);
   assert.deepEqual(plan, { rationale: '保留拆分依据', coverage: '保留覆盖说明' });
   assert.deepEqual(reproduction, { expected_behavior: '保留预期', actual_behavior: '保留实际' });
@@ -388,8 +469,28 @@ test('adds role drafts without losing progress from previously migrated agents',
     runtimeInputs: [{ request_key: 'preview-url', title: '预览地址' }],
     recovery: [{ recovery_id: 'REC-1', summary: '已处理恢复事项' }],
   });
-  assert.deepEqual(verification, { summary: '保留验证结论' });
+  assert.equal(removedVerificationDraft, undefined);
+  assert.equal(removedVerificationWorkDraft, undefined);
+  assert.deepEqual(verificationPlanScenarios, []);
+  assert.deepEqual(
+    verificationPlanColumns.map((column) => column.name),
+    [
+      'draft_id',
+      'scenario_key',
+      'channel',
+      'title',
+      'setup',
+      'steps',
+      'expected',
+      'coverage_refs_json',
+      'ordinal',
+    ],
+  );
+  assert.deepEqual(verificationResults, []);
+  assert.deepEqual(removedVerificationTables, []);
   assert.deepEqual(feedback, { mode: 'triage' });
+  assert.equal(removedReviewDraft, undefined);
+  assert.deepEqual(removedReviewTables, []);
   assert.deepEqual(foreignKeyViolations, []);
   db.close();
 });

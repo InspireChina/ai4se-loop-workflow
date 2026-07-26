@@ -20,6 +20,41 @@ export type VerificationExecutionRow = {
   execution_id: string;
 };
 
+type RequiredRef = {
+  key: string;
+  kind: 'acceptance' | 'focus' | 'guardrail' | 'recovery';
+  description: string;
+  oracle: string;
+};
+
+type Scenario = {
+  scenario_key: string;
+  channel: 'frontend' | 'api';
+  title: string;
+  setup: string;
+  steps: string;
+  expected: string;
+  coverageRefs: string[];
+  ordinal: number;
+};
+
+type ScenarioResult = {
+  scenario_key: string;
+  status: 'passed' | 'failed' | 'blocked';
+  failure_kind: 'implementation' | 'specification' | 'environment' | 'inconclusive' | null;
+  evidence: string;
+  actual_behavior: string | null;
+  ordinal: number;
+};
+
+type RuntimeInputSubmission = {
+  key: string;
+  title: string;
+  question: string;
+  why: string;
+  recommendation: string;
+};
+
 function required(flags: FlagMap, name: string) {
   const value = flags.get(name)?.trim();
   if (!value) throw new Error(`缺少 --${name}`);
@@ -33,18 +68,9 @@ function bounded(value: string, label: string, max = 4000) {
   return normalized;
 }
 
-function booleanFlag(flags: FlagMap, name: string) {
-  const value = required(flags, name).toLowerCase();
-  if (value === 'true') return true;
-  if (value === 'false') return false;
-  throw new Error(`--${name} 必须是 true 或 false`);
-}
-
-function optionalInteger(flags: FlagMap, name: string) {
+function optionalBounded(flags: FlagMap, name: string, label: string, max = 4000) {
   const value = flags.get(name)?.trim();
-  if (!value) return null;
-  if (!/^-?\d+$/.test(value)) throw new Error(`--${name} 必须是整数`);
-  return Number(value);
+  return value ? bounded(value, label, max) : null;
 }
 
 function nextOrdinal(db: Db, table: string, draftId: string) {
@@ -71,75 +97,77 @@ function assertViewed(draft: VerificationDraftRow, executionId: string) {
   }
 }
 
+function parseCoverageRefs(raw: string) {
+  const refs = [...new Set(raw
+    .split(',')
+    .map((item) => item.trim())
+    .filter(Boolean))];
+  if (!refs.length) throw new Error('--covers 至少需要一个覆盖引用');
+  if (refs.length > 100) throw new Error('--covers 最多包含 100 个覆盖引用');
+  for (const ref of refs) bounded(ref, '覆盖引用', 240);
+  return refs;
+}
+
+function parseStoredCoverage(raw: string) {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) return [];
+    return parsed;
+  } catch {
+    return [];
+  }
+}
+
 function state(db: Db, draft: VerificationDraftRow) {
   const header = db.prepare(`
-    SELECT summary, failure_kind, expected_behavior, actual_behavior
+    SELECT phase, spec_revision
     FROM verification_drafts WHERE draft_id = ?
   `).get(draft.draft_id) as {
-    summary: string | null;
-    failure_kind: 'implementation' | 'specification' | 'environment' | 'inconclusive' | null;
-    expected_behavior: string | null;
-    actual_behavior: string | null;
+    phase: 'planning' | 'executing';
+    spec_revision: number | null;
   };
-  const criteria = db.prepare(`
-    SELECT criterion_key, status, method, evidence, ordinal
-    FROM verification_criteria WHERE draft_id = ? ORDER BY ordinal, criterion_key
+  const scenarios = (db.prepare(`
+    SELECT scenario_key, channel, title, setup, steps, expected,
+           coverage_refs_json, ordinal
+    FROM verification_plan_scenarios
+    WHERE draft_id = ?
+    ORDER BY ordinal, scenario_key
   `).all(draft.draft_id) as {
-    criterion_key: string;
-    status: 'passed' | 'failed' | 'not_tested';
-    method: 'command' | 'browser' | 'inspection';
-    evidence: string;
+    scenario_key: string;
+    channel: 'frontend' | 'api';
+    title: string;
+    setup: string;
+    steps: string;
+    expected: string;
+    coverage_refs_json: string;
     ordinal: number;
-  }[];
-  const checks = db.prepare(`
-    SELECT check_key, kind, instruction, command, passed, exit_code, summary, ordinal
-    FROM verification_checks WHERE draft_id = ? ORDER BY ordinal, check_key
-  `).all(draft.draft_id) as {
-    check_key: string;
-    kind: 'command' | 'browser' | 'inspection';
-    instruction: string;
-    command: string | null;
-    passed: number;
-    exit_code: number | null;
-    summary: string;
-    ordinal: number;
-  }[];
-  const risks = db.prepare(`
-    SELECT risk_key, content, ordinal
-    FROM verification_risks WHERE draft_id = ? ORDER BY ordinal, risk_key
-  `).all(draft.draft_id) as { risk_key: string; content: string; ordinal: number }[];
+  }[]).map((item): Scenario => ({
+    ...item,
+    coverageRefs: parseStoredCoverage(item.coverage_refs_json),
+  }));
+  const results = db.prepare(`
+    SELECT scenario_key, status, failure_kind, evidence, actual_behavior, ordinal
+    FROM verification_results
+    WHERE draft_id = ?
+    ORDER BY ordinal, scenario_key
+  `).all(draft.draft_id) as ScenarioResult[];
   const runtimeInputs = db.prepare(`
-    SELECT request_key, title, question, why, recommendation, ordinal
-    FROM verification_runtime_inputs WHERE draft_id = ? ORDER BY ordinal, request_key
-  `).all(draft.draft_id) as {
+    SELECT request_key, title, question,
+           COALESCE(why, '') AS why,
+           COALESCE(recommendation, '') AS recommendation,
+           answer, status
+    FROM runtime_input_requests
+    WHERE task_id = ? AND story_index IS ? AND source_agent = 'test-agent'
+      AND request_key IS NOT NULL AND status != 'superseded'
+    ORDER BY created_at, request_id
+  `).all(draft.task_id, draft.story_index) as {
     request_key: string;
     title: string;
     question: string;
     why: string;
     recommendation: string;
-    ordinal: number;
-  }[];
-  const inputAnswers = db.prepare(`
-    SELECT request_key, answer, status
-    FROM runtime_input_requests
-    WHERE task_id = ? AND story_index IS ? AND source_agent = 'test-agent'
-      AND request_key IS NOT NULL
-    ORDER BY created_at, request_id
-  `).all(draft.task_id, draft.story_index) as {
-    request_key: string;
     answer: string | null;
     status: string;
-  }[];
-  const answerMap = new Map(inputAnswers.map((row) => [row.request_key, row]));
-  const recoveryChecks = db.prepare(`
-    SELECT recovery_id, status, evidence, ordinal
-    FROM verification_recovery_checks
-    WHERE draft_id = ? ORDER BY ordinal, recovery_id
-  `).all(draft.draft_id) as {
-    recovery_id: string;
-    status: 'verified' | 'still_failing';
-    evidence: string;
-    ordinal: number;
   }[];
   const activeRecoveries = db.prepare(`
     SELECT recovery_id, summary, target_stage, status
@@ -154,150 +182,155 @@ function state(db: Db, draft: VerificationDraftRow) {
     status: string;
   }[];
   const specRow = db.prepare(`
-    SELECT spec_json
+    SELECT revision, spec_json
     FROM story_specs
     WHERE task_id = ? AND story_index = ? AND status = 'resolved'
     ORDER BY revision DESC LIMIT 1
-  `).get(draft.task_id, draft.story_index) as { spec_json: string } | undefined;
-  let expectedCriteria: { id: string; description: string; oracle: string }[] = [];
-  let verificationFocus: { key: string; expected: string; oracle: string }[] = [];
+  `).get(draft.task_id, draft.story_index) as {
+    revision: number;
+    spec_json: string;
+  } | undefined;
+  const requiredRefs: RequiredRef[] = [];
+  let currentSpecRevision: number | null = null;
   try {
-    const parsed = specRow ? deliverySpecSchema.parse(JSON.parse(specRow.spec_json)) : null;
-    verificationFocus = parsed?.handoff.verificationFocus || [];
-    expectedCriteria = parsed
-      ? [{
-            id: 'unit-acceptance',
-            description: parsed.unit.acceptance,
-            oracle: parsed.unit.observableOutcome,
-          }, ...verificationFocus.map((focus) => ({
-            id: focus.key,
-            description: focus.expected,
-            oracle: focus.oracle,
-          }))]
-      : [];
+    const spec = specRow ? deliverySpecSchema.parse(JSON.parse(specRow.spec_json)) : null;
+    if (spec && specRow) {
+      currentSpecRevision = specRow.revision;
+      requiredRefs.push({
+        key: 'unit-acceptance',
+        kind: 'acceptance',
+        description: spec.unit.acceptance,
+        oracle: spec.unit.observableOutcome,
+      });
+      for (const focus of spec.handoff.verificationFocus) {
+        requiredRefs.push({
+          key: `focus:${focus.key}`,
+          kind: 'focus',
+          description: focus.expected,
+          oracle: focus.oracle,
+        });
+      }
+      for (const guardrail of spec.handoff.guardrails) {
+        requiredRefs.push({
+          key: `guardrail:${guardrail.key}`,
+          kind: 'guardrail',
+          description: guardrail.content,
+          oracle: guardrail.rationale,
+        });
+      }
+    }
   } catch {
-    // saveDeliverySpec validates JSON before persistence; retain a useful validation error below.
+    // saveDeliverySpec validates before persistence. Status will expose the
+    // missing resolved contract instead of silently freezing an empty plan.
+  }
+  for (const recovery of activeRecoveries) {
+    requiredRefs.push({
+      key: `recovery:${recovery.recovery_id}`,
+      kind: 'recovery',
+      description: recovery.summary,
+      oracle: '原始失败应不再复现，且不能使用开发自述作为验证依据',
+    });
   }
   return {
     header,
-    criteria,
-    checks,
-    risks,
-    runtimeInputs: runtimeInputs.map((item) => ({
-      ...item,
-      answer: answerMap.get(item.request_key)?.answer || null,
-      answerStatus: answerMap.get(item.request_key)?.status || null,
-    })),
-    recoveryChecks,
+    scenarios,
+    results,
+    runtimeInputs,
     activeRecoveries,
-    expectedCriteria,
-    verificationFocus,
+    requiredRefs,
+    currentSpecRevision,
   };
 }
 
 type VerificationState = ReturnType<typeof state>;
-type TerminalAction = 'pass' | 'fail' | 'block' | 'request-input';
+type DerivedConclusion = {
+  action: 'pass' | 'fail' | 'block';
+  failureKind?: 'implementation' | 'specification' | 'environment' | 'inconclusive';
+};
 
-function validationErrors(current: VerificationState, terminal: TerminalAction | null = null) {
+function coveredRefs(current: VerificationState) {
+  return new Set(current.scenarios.flatMap((scenario) => scenario.coverageRefs));
+}
+
+function planErrors(current: VerificationState) {
   const errors: string[] = [];
-  if (!current.header.summary?.trim()) errors.push('缺少验证结论摘要');
-  if (!current.expectedCriteria.length) errors.push('当前交付单元没有可读取的已收敛交付规格验收标准');
-  const expectedKeys = new Set(current.expectedCriteria.map((item) => item.id));
-  const unknownCriteria = current.criteria
-    .map((item) => item.criterion_key)
-    .filter((key) => !expectedKeys.has(key));
-  if (unknownCriteria.length) errors.push(`验证记录引用了不存在的验收标准：${unknownCriteria.join(', ')}`);
-  const unknownRecoveries = current.recoveryChecks
-    .map((item) => item.recovery_id)
-    .filter((id) => !current.activeRecoveries.some((recovery) => recovery.recovery_id === id));
-  if (unknownRecoveries.length) errors.push(`验证记录引用了非活动恢复事项：${unknownRecoveries.join(', ')}`);
+  if (!current.currentSpecRevision || !current.requiredRefs.some((item) => item.key === 'unit-acceptance')) {
+    errors.push('当前交付单元没有可读取的已收敛交付契约');
+  }
+  if (!current.scenarios.length) errors.push('测试计划至少需要一个场景');
+  const covered = coveredRefs(current);
+  const missing = current.requiredRefs.filter((item) => !covered.has(item.key));
+  if (missing.length) {
+    errors.push(`以下必测引用尚未被场景覆盖：${missing.map((item) => item.key).join(', ')}`);
+  }
+  if (!current.scenarios.some((scenario) =>
+    scenario.channel === 'frontend' && scenario.coverageRefs.includes('unit-acceptance'))) {
+    errors.push('unit-acceptance 必须由至少一个 frontend 场景覆盖');
+  }
+  return errors;
+}
 
-  if (terminal === 'pass' || terminal === 'fail' || terminal === 'block') {
-    const missingCriteria = current.expectedCriteria
-      .map((item) => item.id)
-      .filter((key) => !current.criteria.some((item) => item.criterion_key === key));
-    if (missingCriteria.length) errors.push(`以下验收标准尚未逐条记录：${missingCriteria.join(', ')}`);
-    if (!current.checks.length) errors.push('至少需要一条独立验证检查');
-    if (current.runtimeInputs.some((item) => !item.answer)) {
-      errors.push('仍有未回答的运行信息请求，不能提交验证结论');
-    }
+function completionErrors(current: VerificationState) {
+  const errors = planErrors(current);
+  if (current.header.phase !== 'executing') errors.push('测试计划尚未 freeze，不能提交验证结论');
+  if (current.header.spec_revision !== current.currentSpecRevision) {
+    errors.push('冻结计划绑定的交付契约版本已经变化，需要在新一轮草稿中重新审视计划');
   }
-  if (terminal === 'pass') {
-    const notPassed = current.criteria.filter((item) => item.status !== 'passed');
-    if (notPassed.length) errors.push(`以下验收标准没有通过：${notPassed.map((item) => item.criterion_key).join(', ')}`);
-    const failedChecks = current.checks.filter((item) => !item.passed);
-    if (failedChecks.length) errors.push(`仍有失败检查：${failedChecks.map((item) => item.check_key).join(', ')}`);
-    const missingRecoveries = current.activeRecoveries.filter((recovery) =>
-      !current.recoveryChecks.some((item) =>
-        item.recovery_id === recovery.recovery_id && item.status === 'verified'));
-    if (missingRecoveries.length) {
-      errors.push(`以下活动恢复事项尚未独立验证通过：${missingRecoveries.map((item) => item.recovery_id).join(', ')}`);
-    }
-    if (current.header.failure_kind || current.header.expected_behavior || current.header.actual_behavior) {
-      errors.push('通过结论不应保留失败分类、期望或实际行为');
-    }
+  const missingResults = current.scenarios.filter((scenario) =>
+    !current.results.some((result) => result.scenario_key === scenario.scenario_key));
+  if (missingResults.length) {
+    errors.push(`以下计划场景尚无执行结果：${missingResults.map((item) => item.scenario_key).join(', ')}`);
   }
-  if (terminal === 'fail') {
-    if (!['implementation', 'specification'].includes(current.header.failure_kind || '')) {
-      errors.push('回流失败必须分类为 implementation 或 specification');
-    }
-    if (!current.header.expected_behavior?.trim()) errors.push('缺少失败场景的期望行为');
-    if (!current.header.actual_behavior?.trim()) errors.push('缺少失败场景的实际行为');
-    if (!current.criteria.some((item) => item.status === 'failed') && !current.checks.some((item) => !item.passed)) {
-      errors.push('回流失败至少需要一个失败验收标准或失败检查');
-    }
-  }
-  if (terminal === 'block') {
-    if (!['environment', 'inconclusive'].includes(current.header.failure_kind || '')) {
-      errors.push('阻塞结论必须分类为 environment 或 inconclusive');
-    }
-    if (!current.header.expected_behavior?.trim()) errors.push('缺少无法验证时的期望条件');
-    if (!current.header.actual_behavior?.trim()) errors.push('缺少当前实际环境或证据状态');
-    if (!current.checks.some((item) => !item.passed)) {
-      errors.push('阻塞结论至少需要一个失败检查作为证据');
-    }
-  }
-  if (terminal === 'request-input') {
-    const unanswered = current.runtimeInputs.filter((item) => !item.answer);
-    if (!unanswered.length) errors.push('没有待用户补充的运行信息，不能 request-input');
+  if (current.runtimeInputs.some((item) => item.status === 'pending')) {
+    errors.push('仍有未回答的运行信息请求，不能提交验证结论');
   }
   return [...new Set(errors)];
 }
 
+function deriveConclusion(current: VerificationState): DerivedConclusion {
+  const failed = current.results.filter((item) => item.status === 'failed');
+  if (failed.length) {
+    return {
+      action: 'fail',
+      failureKind: failed.some((item) => item.failure_kind === 'specification')
+        ? 'specification'
+        : 'implementation',
+    };
+  }
+  const blocked = current.results.filter((item) => item.status === 'blocked');
+  if (blocked.length) {
+    return {
+      action: 'block',
+      failureKind: blocked.some((item) => item.failure_kind === 'inconclusive')
+        ? 'inconclusive'
+        : 'environment',
+    };
+  }
+  return { action: 'pass' };
+}
+
 function renderStatus(draft: VerificationDraftRow, current: VerificationState) {
+  const covered = coveredRefs(current);
   const lines = [
     `验证草稿 v${draft.draft_version} · 变更 ${draft.change_seq}`,
+    `阶段：${current.header.phase === 'planning' ? '规划测试计划' : '逐项执行测试'}`,
+    `交付契约：当前 revision ${current.currentSpecRevision ?? '不可用'} · 计划绑定 ${current.header.spec_revision ?? '未冻结'}`,
     '',
-    `结论摘要：${current.header.summary || '未填写'}`,
-    `失败分类：${current.header.failure_kind || '未设置'}`,
-    `验收覆盖：${current.criteria.length}/${current.expectedCriteria.length}`,
-    `独立检查：${current.checks.length}（通过 ${current.checks.filter((item) => item.passed).length} / 失败 ${current.checks.filter((item) => !item.passed).length}）`,
-    `风险：${current.risks.length}`,
+    `计划场景：${current.scenarios.length}（前端 ${current.scenarios.filter((item) => item.channel === 'frontend').length} / API ${current.scenarios.filter((item) => item.channel === 'api').length}）`,
+    `执行结果：${current.results.length}/${current.scenarios.length}（通过 ${current.results.filter((item) => item.status === 'passed').length} / 失败 ${current.results.filter((item) => item.status === 'failed').length} / 阻塞 ${current.results.filter((item) => item.status === 'blocked').length}）`,
     `运行信息：${current.runtimeInputs.length}（已回答 ${current.runtimeInputs.filter((item) => item.answer).length}）`,
-    `活动恢复事项：${current.activeRecoveries.length}（已记录 ${current.recoveryChecks.length}）`,
   ];
-  if (current.expectedCriteria.length) {
-    lines.push('', '验收标准（criterion key 必须复用规格 ID）：');
-    for (const criterion of current.expectedCriteria) {
-      const evidence = current.criteria.find((item) => item.criterion_key === criterion.id);
-      lines.push(`- ${criterion.id}：${criterion.description} · ${evidence ? `${evidence.status} · ${evidence.method} · ${evidence.evidence}` : '尚未记录'}`);
+  if (current.requiredRefs.length) {
+    lines.push('', '必测引用（plan --covers 使用下列稳定 ref）：');
+    for (const ref of current.requiredRefs) {
+      lines.push(`- ${ref.key} · ${ref.kind} · ${covered.has(ref.key) ? '已覆盖' : '未覆盖'}：${ref.description} · Oracle：${ref.oracle}`);
     }
   }
-  if (current.verificationFocus.length) {
-    lines.push('', '额外验证关注点：');
-    for (const focus of current.verificationFocus) {
-      lines.push(`- ${focus.key}：${focus.expected} · Oracle：${focus.oracle}`);
-    }
-  }
-  if (current.checks.length) {
-    lines.push('', '独立检查：', ...current.checks.map((item) =>
-      `- ${item.check_key} · ${item.kind} · ${item.passed ? '通过' : '失败'}：${item.summary}`));
-  }
-  if (current.activeRecoveries.length) {
-    lines.push('', '必须核验的活动恢复事项：');
-    for (const recovery of current.activeRecoveries) {
-      const evidence = current.recoveryChecks.find((item) => item.recovery_id === recovery.recovery_id);
-      lines.push(`- ${recovery.recovery_id} · ${recovery.target_stage}：${recovery.summary} · ${evidence ? `${evidence.status} · ${evidence.evidence}` : '尚未记录'}`);
+  if (current.scenarios.length) {
+    lines.push('', '测试计划：');
+    for (const scenario of current.scenarios) {
+      const result = current.results.find((item) => item.scenario_key === scenario.scenario_key);
+      lines.push(`- ${scenario.scenario_key} · ${scenario.channel} · ${result?.status || '待执行'} · 覆盖 ${scenario.coverageRefs.join(', ')}：${scenario.title}`);
     }
   }
   if (current.runtimeInputs.length) {
@@ -306,117 +339,144 @@ function renderStatus(draft: VerificationDraftRow, current: VerificationState) {
       lines.push(`- ${input.request_key}：${input.title} · ${input.answer ? `已回答=${input.answer}` : '待回答'}`);
     }
   }
-  const commonErrors = validationErrors(current);
-  if (commonErrors.length) {
-    lines.push('', '当前基础校验提示：', ...commonErrors.map((item, index) => `${index + 1}. ${item}`));
+  const errors = current.header.phase === 'planning'
+    ? planErrors(current)
+    : completionErrors(current);
+  if (errors.length) {
+    lines.push('', current.header.phase === 'planning' ? '计划尚未就绪：' : '执行尚未完成：');
+    lines.push(...errors.map((item, index) => `${index + 1}. ${item}`));
+  } else if (current.header.phase === 'planning') {
+    lines.push('', '测试计划覆盖完整，可以执行 verification plan freeze。');
   } else {
-    lines.push('', '基础结构已建立；请按实际证据选择 pass、fail、block 或 request-input。');
+    lines.push('', '所有计划场景均已记录结果，可以执行 verification complete。');
   }
   return lines.join('\n');
 }
 
-function renderArtifact(current: VerificationState, action: TerminalAction) {
-  const verdict = action === 'pass' ? '通过' : action === 'fail' ? '失败并回流' : action === 'block' ? '无法完成验证' : '等待运行信息';
+function renderArtifact(
+  current: VerificationState,
+  conclusion?: DerivedConclusion,
+  residualRisk?: string | null,
+) {
+  const conclusionLabel = conclusion?.action === 'pass'
+    ? '通过'
+    : conclusion?.action === 'fail'
+      ? '失败并回流'
+      : conclusion?.action === 'block'
+        ? '验证阻塞'
+        : '等待运行信息';
   const lines = [
-    '# 验证报告',
+    '# 独立验证报告',
     '',
-    `## 结论：${verdict}`,
+    `## 结论：${conclusionLabel}`,
     '',
-    current.header.summary || '',
+    `交付契约 revision：${current.header.spec_revision ?? '未冻结'}`,
     '',
-    '## 验收标准证据',
+    '## 测试计划与执行结果',
     '',
-    ...current.expectedCriteria.map((criterion) => {
-      const evidence = current.criteria.find((item) => item.criterion_key === criterion.id);
-      return `- **${criterion.id}** ${criterion.description}：${evidence?.status || 'not_tested'}${evidence ? ` · ${evidence.method} — ${evidence.evidence}` : ''}`;
-    }),
-    '',
-    '## 独立检查',
-    '',
-    ...(current.checks.length
-      ? current.checks.map((item) =>
-        `- ${item.passed ? '通过' : '失败'} **${item.check_key}**（${item.kind}）：${item.summary}${item.command ? `；命令 \`${item.command}\`` : ''}${item.exit_code !== null ? `；exit=${item.exit_code}` : ''}`)
-      : ['- 尚无检查记录']),
   ];
-  if (current.header.failure_kind) {
+  for (const scenario of current.scenarios) {
+    const result = current.results.find((item) => item.scenario_key === scenario.scenario_key);
     lines.push(
+      `### ${scenario.scenario_key} · ${scenario.channel} · ${result?.status || '未执行'}`,
       '',
-      '## 失败归因',
-      '',
-      `- 分类：${current.header.failure_kind}`,
-      `- 期望：${current.header.expected_behavior || ''}`,
-      `- 实际：${current.header.actual_behavior || ''}`,
+      `- 场景：${scenario.title}`,
+      `- 准备：${scenario.setup}`,
+      `- 测试步骤：${scenario.steps}`,
+      `- 期望：${scenario.expected}`,
+      `- 覆盖：${scenario.coverageRefs.join(', ')}`,
+      `- 证据：${result?.evidence || '尚无'}`,
     );
+    if (result?.actual_behavior) lines.push(`- 实际：${result.actual_behavior}`);
+    if (result?.failure_kind) lines.push(`- 责任边界：${result.failure_kind}`);
+    lines.push('');
   }
-  if (current.recoveryChecks.length) {
-    lines.push('', '## 恢复事项验证', '');
-    for (const item of current.recoveryChecks) {
-      lines.push(`- **${item.recovery_id}**：${item.status} — ${item.evidence}`);
-    }
-  }
-  lines.push('', '## 残余风险', '');
-  lines.push(...(current.risks.length ? current.risks.map((item) => `- ${item.content}`) : ['- 未发现已知残余风险']));
+  lines.push('## 残余风险', '');
+  lines.push(residualRisk ? `- ${residualRisk}` : '- 未发现已知残余风险');
   return lines.join('\n');
 }
 
-function buildResult(current: VerificationState, draft: VerificationDraftRow, action: TerminalAction) {
-  const failureKind = current.header.failure_kind || undefined;
-  const result = {
-    outcome: action === 'request-input'
-      ? 'needs_input' as const
-      : action === 'block'
-        ? 'failed' as const
-        : 'completed' as const,
-    summary: current.header.summary!,
+function buildCompleteResult(
+  current: VerificationState,
+  draft: VerificationDraftRow,
+  residualRisk?: string | null,
+) {
+  const conclusion = deriveConclusion(current);
+  const passed = current.results.filter((item) => item.status === 'passed').length;
+  const failed = current.results.filter((item) => item.status === 'failed').length;
+  const blocked = current.results.filter((item) => item.status === 'blocked').length;
+  const summary = conclusion.action === 'pass'
+    ? `独立验证通过：${current.results.length} 个计划场景全部符合冻结交付契约`
+    : conclusion.action === 'fail'
+      ? `独立验证失败：${failed} 个场景发现产品行为偏差（通过 ${passed}，阻塞 ${blocked}）`
+      : `独立验证受阻：${blocked} 个场景缺少可用资源或无法形成可靠判定（通过 ${passed}）`;
+  return agentResultSchema.parse({
+    outcome: conclusion.action === 'block' ? 'failed' : 'completed',
+    summary,
     artifact: {
-      title: '验证报告',
-      content: renderArtifact(current, action),
+      title: '独立验证报告',
+      content: renderArtifact(current, conclusion, residualRisk),
     },
-    ...(action === 'pass' ? { verdict: 'passed' as const } : {}),
-    ...(action === 'fail' || action === 'block'
+    verdict: conclusion.action === 'pass' ? 'passed' : 'failed',
+    ...(conclusion.failureKind
       ? {
-        verdict: 'failed' as const,
-        failureKind,
-        ...(action === 'fail'
+        failureKind: conclusion.failureKind,
+        ...(conclusion.action === 'fail'
           ? {
-            rewindTo: failureKind === 'specification' ? 'analysis' as const : 'dev' as const,
+            rewindTo: conclusion.failureKind === 'specification' ? 'analysis' : 'dev',
             rewindDeliveryUnit: draft.story_index || undefined,
           }
           : {}),
       }
       : {}),
-    runtimeInputs: action === 'request-input'
-      ? current.runtimeInputs.filter((item) => !item.answer).map((item) => ({
-        key: item.request_key,
-        title: item.title,
-        question: item.question,
-        why: item.why,
-        recommendation: item.recommendation,
-      }))
-      : [],
-    tests: current.checks.map((item) => ({
-      command: item.command || `[${item.kind}] ${item.instruction}`,
-      passed: Boolean(item.passed),
-      summary: `${item.summary}${item.exit_code !== null ? `（exit=${item.exit_code}）` : ''}`,
-    })),
-  };
-  return agentResultSchema.parse(result);
+    tests: current.scenarios.map((scenario) => {
+      const result = current.results.find((item) => item.scenario_key === scenario.scenario_key)!;
+      return {
+        command: `[${scenario.channel}] ${scenario.title}`,
+        passed: result.status === 'passed',
+        summary: `${result.evidence}${result.actual_behavior ? `；实际：${result.actual_behavior}` : ''}`,
+      };
+    }),
+  });
+}
+
+function buildInputResult(current: VerificationState, input: RuntimeInputSubmission) {
+  return agentResultSchema.parse({
+    outcome: 'needs_input',
+    summary: `独立验证缺少运行资源或信息：${input.title}`,
+    artifact: {
+      title: '独立验证进行中',
+      content: renderArtifact(current),
+    },
+    runtimeInputs: [input],
+  });
 }
 
 function terminalSubmit(
   db: Db,
   draft: VerificationDraftRow,
   execution: VerificationExecutionRow,
-  action: TerminalAction,
+  action: 'complete' | 'request-input',
+  options?: {
+    completionRisk?: string | null;
+    runtimeInput?: RuntimeInputSubmission;
+  },
 ) {
   assertViewed(draft, execution.execution_id);
   const current = state(db, draft);
-  const errors = validationErrors(current, action);
-  if (errors.length) {
-    throw new Error(`验证草稿不能执行 ${action}：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+  const runtimeInput = options?.runtimeInput;
+  if (action === 'complete') {
+    const errors = completionErrors(current);
+    if (errors.length) {
+      throw new Error(`验证草稿不能执行 complete：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+    }
+  } else if (!runtimeInput) {
+    throw new Error('缺少要提交的运行信息请求');
   }
-  const result = buildResult(current, draft, action);
-  const status = action === 'request-input' ? 'waiting_for_answers' : 'submitted';
+  const result = action === 'complete'
+    ? buildCompleteResult(current, draft, options?.completionRisk)
+    : buildInputResult(current, runtimeInput!);
+  const status = action === 'complete' ? 'submitted' : 'waiting_for_answers';
   db.transaction(() => {
     db.prepare(`
       UPDATE agent_work_drafts
@@ -430,32 +490,72 @@ function terminalSubmit(
       WHERE execution_id = ?
     `).run(JSON.stringify(result), execution.execution_id);
   })();
-  return action === 'pass'
-    ? '验证通过结果已提交。'
-    : action === 'fail'
-      ? '验证失败与回流证据已提交。'
-      : action === 'block'
-        ? '验证阻塞证据已提交。'
-        : '运行信息请求已提交，等待用户补充。';
+  if (action === 'request-input') return '运行信息请求已提交，等待用户补充。';
+  const conclusion = deriveConclusion(current).action;
+  return conclusion === 'pass'
+    ? '独立验证通过结果已提交。'
+    : conclusion === 'fail'
+      ? '独立验证失败与责任边界已提交。'
+      : '独立验证阻塞证据已提交。';
 }
 
-export function verificationHelp(terminalActions: string[]) {
+export function verificationHelp(
+  _terminalActions: string[],
+  topic?: string | null,
+) {
+  if (topic === 'plan') {
+    return [
+      '测试计划阶段：',
+      '  verification plan upsert --key <稳定 key> --channel <frontend|api> --title <场景> --setup <前置条件与测试数据> --steps <入口与测试动作> --expected <可观察期望> --covers <status 中的 ref，多个用逗号分隔>',
+      '    逐项建立面向业务预期的黑盒场景；修改同一场景时复用 key。',
+      '    setup 说明执行前需要成立的条件与数据；steps 从真实入口开始描述用户或 API 动作。',
+      '    每项交付单元验收必须至少由一个 frontend 场景覆盖真实业务闭环；API 场景可以补充业务证据或形成反例。',
+      '  verification plan dismiss --key <场景 key>',
+      '    只在计划冻结前移除错误或重复场景。',
+      '  verification plan freeze',
+      '    最低覆盖完整后冻结计划并进入执行阶段；之后只能追加新发现的场景。',
+    ];
+  }
+  if (topic === 'execute') {
+    return [
+      '测试执行阶段：',
+      '  verification result record --key <场景 key> --status <passed|failed|blocked> --evidence <独立证据> [--kind <implementation|specification|environment|inconclusive>] [--actual <实际行为或阻塞状态>]',
+      '    按计划记录实际观察。failed 使用 implementation/specification；blocked 使用 environment/inconclusive。',
+    ];
+  }
+  if (topic === 'input') {
+    return [
+      '运行信息：',
+      '  verification request-input --key <稳定 key> --title <标题> --question <问题> --why <原因> [--recommendation <建议>]',
+      '    仅在测试地址、账号、设备条件或测试数据等必要资源无法自行取得时使用；命令成功后结束本轮。',
+    ];
+  }
+  if (topic === 'finish') {
+    return [
+      '完成验证：',
+      '  verification complete [--risk <不影响本次交付成立的残余风险>]',
+      '    所有活动场景有结果后，由 Application 根据结果状态和失败分类确定通过、回流或阻塞。',
+      '    Harness 只校验阶段、前端最低覆盖和结果完整性，不替 Test Agent 判断证据质量。',
+    ];
+  }
+  if (topic) {
+    throw new Error(`验证 help 不支持主题：${topic}。可用主题：context、plan、execute、input、finish`);
+  }
   return [
     '  verification status',
-    '  verification summary set --text <结论摘要>',
-    '  verification criterion upsert --key <规格 criterion id> --status <passed|failed|not-tested> --method <command|browser|inspection> --evidence <证据>',
-    '  verification criterion remove --key <规格 criterion id>',
-    '  verification check upsert --key <稳定 key> --kind <command|browser|inspection> --instruction <检查说明> [--command <真实命令>] --passed <true|false> [--exit-code <整数>] --summary <结果>',
-    '  verification check remove --key <稳定 key>',
-    '  verification risk upsert --key <稳定 key> --content <残余风险>',
-    '  verification risk remove --key <稳定 key>',
-    '  verification failure set --kind <implementation|specification|environment|inconclusive> --expected <期望> --actual <实际>',
-    '  verification failure clear',
-    '  verification runtime-input upsert --key <稳定 key> --title <标题> --question <问题> --why <原因> --recommendation <建议>',
-    '  verification runtime-input remove --key <稳定 key>',
-    '  verification recovery upsert --id <RECOVERY id> --status <verified|still-failing> --evidence <独立证据>',
-    '  verification recovery remove --id <RECOVERY id>',
-    ...terminalActions.map((action) => `  ${action}`),
+    '  verification plan upsert --key <稳定 key> --channel <frontend|api> --title <场景> --setup <前置条件与测试数据> --steps <入口与测试动作> --expected <可观察期望> --covers <status 中的 ref，多个用逗号分隔>',
+    '  verification plan dismiss --key <场景 key>',
+    '  verification plan freeze',
+    '  verification result record --key <场景 key> --status <passed|failed|blocked> --evidence <独立证据> [--kind <implementation|specification|environment|inconclusive>] [--actual <实际行为或阻塞状态>]',
+    '  verification complete [--risk <残余风险>]',
+    '  verification request-input --key <稳定 key> --title <标题> --question <问题> --why <原因> [--recommendation <建议>]',
+    '',
+    '主题帮助：',
+    '  help context  只读上下文工具与使用时机',
+    '  help plan     建立并冻结测试计划',
+    '  help execute  逐项记录黑盒测试结果',
+    '  help input    缺少执行资源时请求运行信息',
+    '  help finish   完成条件与确定性结论',
   ];
 }
 
@@ -476,7 +576,7 @@ export function runVerificationCommand(input: {
     return renderStatus({ ...draft, status_viewed_execution_id: execution.execution_id }, state(db, draft));
   }
   if (
-    ['verification pass', 'verification fail', 'verification block', 'verification request-input'].includes(command)
+    ['verification complete', 'verification request-input'].includes(command)
     && draft.terminal_execution_id === execution.execution_id
     && draft.terminal_action === command.replace('verification ', '')
   ) {
@@ -484,192 +584,153 @@ export function runVerificationCommand(input: {
   }
   assertViewed(draft, execution.execution_id);
 
-  if (command === 'verification summary set') {
-    db.prepare('UPDATE verification_drafts SET summary = ? WHERE draft_id = ?')
-      .run(bounded(required(flags, 'text'), '结论摘要', 10000), draft.draft_id);
-    touchDraft(db, draft.draft_id);
-    return '验证结论摘要已保存。';
-  }
-  if (command === 'verification criterion upsert') {
-    const key = bounded(required(flags, 'key'), '验收标准 key', 120);
-    const status = required(flags, 'status').replace('-', '_');
-    if (!['passed', 'failed', 'not_tested'].includes(status)) {
-      throw new Error('--status 必须是 passed、failed 或 not-tested');
+  if (command === 'verification plan upsert') {
+    const current = state(db, draft);
+    const key = bounded(required(flags, 'key'), '场景 key', 120);
+    const existing = current.scenarios.find((item) => item.scenario_key === key);
+    if (current.header.phase === 'executing' && existing) {
+      throw new Error(`测试计划已经 freeze，不能修改既有场景 ${key}；发现新风险时请使用新的稳定 key 追加场景`);
     }
-    const method = required(flags, 'method');
-    if (!['command', 'browser', 'inspection'].includes(method)) {
-      throw new Error('--method 必须是 command、browser 或 inspection');
+    const channel = required(flags, 'channel');
+    if (!['frontend', 'api'].includes(channel)) {
+      throw new Error('--channel 必须是 frontend 或 api');
     }
-    const ordinal = nextOrdinal(db, 'verification_criteria', draft.draft_id);
+    const ordinal = nextOrdinal(db, 'verification_plan_scenarios', draft.draft_id);
     db.prepare(`
-      INSERT INTO verification_criteria(draft_id, criterion_key, status, method, evidence, ordinal)
-      VALUES(?, ?, ?, ?, ?, ?)
-      ON CONFLICT(draft_id, criterion_key) DO UPDATE SET
-        status = excluded.status, method = excluded.method, evidence = excluded.evidence
-    `).run(
-      draft.draft_id,
-      key,
-      status,
-      method,
-      bounded(required(flags, 'evidence'), '验收证据'),
-      ordinal,
-    );
-    touchDraft(db, draft.draft_id);
-    return `验收证据 ${key} 已保存。`;
-  }
-  if (command === 'verification criterion remove') {
-    db.prepare('DELETE FROM verification_criteria WHERE draft_id = ? AND criterion_key = ?')
-      .run(draft.draft_id, required(flags, 'key'));
-    touchDraft(db, draft.draft_id);
-    return '验收证据已删除。';
-  }
-  if (command === 'verification check upsert') {
-    const key = bounded(required(flags, 'key'), '检查 key', 120);
-    const kind = required(flags, 'kind');
-    if (!['command', 'browser', 'inspection'].includes(kind)) {
-      throw new Error('--kind 必须是 command、browser 或 inspection');
-    }
-    const commandText = flags.get('command')?.trim() || null;
-    if (kind === 'command' && !commandText) throw new Error('command 类型检查必须提供 --command');
-    const ordinal = nextOrdinal(db, 'verification_checks', draft.draft_id);
-    db.prepare(`
-      INSERT INTO verification_checks(
-        draft_id, check_key, kind, instruction, command, passed, exit_code, summary, ordinal
+      INSERT INTO verification_plan_scenarios(
+        draft_id, scenario_key, channel, title, setup, steps,
+        expected, coverage_refs_json, ordinal
       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(draft_id, check_key) DO UPDATE SET
-        kind = excluded.kind, instruction = excluded.instruction, command = excluded.command,
-        passed = excluded.passed, exit_code = excluded.exit_code, summary = excluded.summary
+      ON CONFLICT(draft_id, scenario_key) DO UPDATE SET
+        channel = excluded.channel,
+        title = excluded.title,
+        setup = excluded.setup,
+        steps = excluded.steps,
+        expected = excluded.expected,
+        coverage_refs_json = excluded.coverage_refs_json
     `).run(
       draft.draft_id,
       key,
-      kind,
-      bounded(required(flags, 'instruction'), '检查说明'),
-      commandText,
-      booleanFlag(flags, 'passed') ? 1 : 0,
-      optionalInteger(flags, 'exit-code'),
-      bounded(required(flags, 'summary'), '检查摘要'),
+      channel,
+      bounded(required(flags, 'title'), '场景标题', 240),
+      bounded(required(flags, 'setup'), '测试准备', 10000),
+      bounded(required(flags, 'steps'), '测试步骤', 10000),
+      bounded(required(flags, 'expected'), '可观察期望'),
+      JSON.stringify(parseCoverageRefs(required(flags, 'covers'))),
       ordinal,
     );
     touchDraft(db, draft.draft_id);
-    return `独立检查 ${key} 已保存。`;
+    return current.header.phase === 'planning'
+      ? `测试计划场景 ${key} 已保存。`
+      : `执行阶段发现的新场景 ${key} 已追加；该场景不可再修改。`;
   }
-  if (command === 'verification check remove') {
-    db.prepare('DELETE FROM verification_checks WHERE draft_id = ? AND check_key = ?')
-      .run(draft.draft_id, required(flags, 'key'));
-    touchDraft(db, draft.draft_id);
-    return '独立检查已删除。';
-  }
-  if (command === 'verification risk upsert') {
-    const key = bounded(required(flags, 'key'), '风险 key', 120);
-    const ordinal = nextOrdinal(db, 'verification_risks', draft.draft_id);
-    db.prepare(`
-      INSERT INTO verification_risks(draft_id, risk_key, content, ordinal)
-      VALUES(?, ?, ?, ?)
-      ON CONFLICT(draft_id, risk_key) DO UPDATE SET content = excluded.content
-    `).run(
-      draft.draft_id,
-      key,
-      bounded(required(flags, 'content'), '风险内容'),
-      ordinal,
-    );
-    touchDraft(db, draft.draft_id);
-    return `残余风险 ${key} 已保存。`;
-  }
-  if (command === 'verification risk remove') {
-    db.prepare('DELETE FROM verification_risks WHERE draft_id = ? AND risk_key = ?')
-      .run(draft.draft_id, required(flags, 'key'));
-    touchDraft(db, draft.draft_id);
-    return '残余风险已删除。';
-  }
-  if (command === 'verification failure set') {
-    const kind = required(flags, 'kind');
-    if (!['implementation', 'specification', 'environment', 'inconclusive'].includes(kind)) {
-      throw new Error('--kind 必须是 implementation、specification、environment 或 inconclusive');
+  if (command === 'verification plan dismiss') {
+    const current = state(db, draft);
+    if (current.header.phase !== 'planning') {
+      throw new Error('测试计划已经 freeze，执行阶段不能删除场景');
     }
-    db.prepare(`
-      UPDATE verification_drafts
-      SET failure_kind = ?, expected_behavior = ?, actual_behavior = ?
-      WHERE draft_id = ?
-    `).run(
-      kind,
-      bounded(required(flags, 'expected'), '期望行为'),
-      bounded(required(flags, 'actual'), '实际行为'),
-      draft.draft_id,
-    );
-    touchDraft(db, draft.draft_id);
-    return `失败分类 ${kind} 已保存。`;
-  }
-  if (command === 'verification failure clear') {
-    db.prepare(`
-      UPDATE verification_drafts
-      SET failure_kind = NULL, expected_behavior = NULL, actual_behavior = NULL
-      WHERE draft_id = ?
-    `).run(draft.draft_id);
-    touchDraft(db, draft.draft_id);
-    return '失败分类已清除。';
-  }
-  if (command === 'verification runtime-input upsert') {
-    const key = bounded(required(flags, 'key'), '运行信息 key', 120);
-    const ordinal = nextOrdinal(db, 'verification_runtime_inputs', draft.draft_id);
-    db.prepare(`
-      INSERT INTO verification_runtime_inputs(
-        draft_id, request_key, title, question, why, recommendation, ordinal
-      ) VALUES(?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(draft_id, request_key) DO UPDATE SET
-        title = excluded.title, question = excluded.question, why = excluded.why,
-        recommendation = excluded.recommendation
-    `).run(
-      draft.draft_id,
-      key,
-      bounded(required(flags, 'title'), '运行信息标题', 200),
-      bounded(required(flags, 'question'), '运行信息问题'),
-      bounded(required(flags, 'why'), '请求原因', 1000),
-      bounded(required(flags, 'recommendation'), '建议', 2000),
-      ordinal,
-    );
-    touchDraft(db, draft.draft_id);
-    return `运行信息请求 ${key} 已保存。`;
-  }
-  if (command === 'verification runtime-input remove') {
     const key = required(flags, 'key');
-    const answered = state(db, draft).runtimeInputs.find((item) => item.request_key === key)?.answer;
-    if (answered) throw new Error(`运行信息 ${key} 已回答，必须保留原 request key 并消费回答`);
-    db.prepare('DELETE FROM verification_runtime_inputs WHERE draft_id = ? AND request_key = ?')
-      .run(draft.draft_id, key);
+    const removed = db.prepare(`
+      DELETE FROM verification_plan_scenarios
+      WHERE draft_id = ? AND scenario_key = ?
+    `).run(draft.draft_id, key);
+    if (!removed.changes) throw new Error(`测试计划场景不存在：${key}`);
     touchDraft(db, draft.draft_id);
-    return '运行信息请求已删除。';
+    return `测试计划场景 ${key} 已删除。`;
   }
-  if (command === 'verification recovery upsert') {
-    const id = bounded(required(flags, 'id'), '恢复事项 id', 200);
-    const status = required(flags, 'status').replace('-', '_');
-    if (!['verified', 'still_failing'].includes(status)) {
-      throw new Error('--status 必须是 verified 或 still-failing');
+  if (command === 'verification plan freeze') {
+    const current = state(db, draft);
+    if (current.header.phase === 'executing') return '测试计划已经 freeze，可以继续逐项执行。';
+    const errors = planErrors(current);
+    if (errors.length) {
+      throw new Error(`测试计划不能 freeze：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
     }
-    const ordinal = nextOrdinal(db, 'verification_recovery_checks', draft.draft_id);
     db.prepare(`
-      INSERT INTO verification_recovery_checks(draft_id, recovery_id, status, evidence, ordinal)
-      VALUES(?, ?, ?, ?, ?)
-      ON CONFLICT(draft_id, recovery_id) DO UPDATE SET
-        status = excluded.status, evidence = excluded.evidence
+      UPDATE verification_drafts
+      SET phase = 'executing', spec_revision = ?
+      WHERE draft_id = ?
+    `).run(current.currentSpecRevision, draft.draft_id);
+    touchDraft(db, draft.draft_id);
+    return `测试计划已冻结并绑定交付契约 revision ${current.currentSpecRevision}，请按计划逐项执行。`;
+  }
+  if (command === 'verification result record') {
+    const current = state(db, draft);
+    if (current.header.phase !== 'executing') {
+      throw new Error('必须先完成并 freeze 测试计划，才能记录执行结果');
+    }
+    const key = bounded(required(flags, 'key'), '场景 key', 120);
+    if (!current.scenarios.some((item) => item.scenario_key === key)) {
+      throw new Error(`测试计划中不存在场景：${key}`);
+    }
+    const status = required(flags, 'status');
+    if (!['passed', 'failed', 'blocked'].includes(status)) {
+      throw new Error('--status 必须是 passed、failed 或 blocked');
+    }
+    const kind = flags.get('kind')?.trim() || null;
+    const actual = optionalBounded(flags, 'actual', '实际行为或阻塞状态');
+    if (status === 'passed') {
+      if (kind) throw new Error('passed 结果不能设置 --kind');
+    } else if (status === 'failed') {
+      if (!['implementation', 'specification'].includes(kind || '')) {
+        throw new Error('failed 结果的 --kind 必须是 implementation 或 specification');
+      }
+      if (!actual) throw new Error('failed 结果必须提供 --actual');
+    } else {
+      if (!['environment', 'inconclusive'].includes(kind || '')) {
+        throw new Error('blocked 结果的 --kind 必须是 environment 或 inconclusive');
+      }
+      if (!actual) throw new Error('blocked 结果必须提供 --actual');
+    }
+    const ordinal = nextOrdinal(db, 'verification_results', draft.draft_id);
+    db.prepare(`
+      INSERT INTO verification_results(
+        draft_id, scenario_key, status, failure_kind, evidence, actual_behavior, ordinal
+      ) VALUES(?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(draft_id, scenario_key) DO UPDATE SET
+        status = excluded.status,
+        failure_kind = excluded.failure_kind,
+        evidence = excluded.evidence,
+        actual_behavior = excluded.actual_behavior
     `).run(
       draft.draft_id,
-      id,
+      key,
       status,
-      bounded(required(flags, 'evidence'), '恢复验证证据'),
+      kind,
+      bounded(required(flags, 'evidence'), '独立验证证据', 10000),
+      actual,
       ordinal,
     );
     touchDraft(db, draft.draft_id);
-    return `恢复事项 ${id} 的验证已保存。`;
+    return `测试场景 ${key} 的 ${status} 结果已保存。`;
   }
-  if (command === 'verification recovery remove') {
-    db.prepare('DELETE FROM verification_recovery_checks WHERE draft_id = ? AND recovery_id = ?')
-      .run(draft.draft_id, required(flags, 'id'));
-    touchDraft(db, draft.draft_id);
-    return '恢复事项验证已删除。';
+  if (command === 'verification request-input') {
+    const key = bounded(required(flags, 'key'), '运行信息 key', 120);
+    const existing = state(db, draft).runtimeInputs.find((item) => item.request_key === key);
+    if (existing) {
+      throw new Error(existing.answer
+        ? `运行信息 ${key} 已回答；请消费已有回答，新的资源问题必须使用新的稳定 key`
+        : `运行信息 ${key} 已在等待回答，不能重复提交`);
+    }
+    return terminalSubmit(db, draft, execution, 'request-input', {
+      runtimeInput: {
+        key,
+        title: bounded(required(flags, 'title'), '运行信息标题', 200),
+        question: bounded(required(flags, 'question'), '运行信息问题'),
+        why: bounded(required(flags, 'why'), '请求原因', 1000),
+        recommendation: optionalBounded(flags, 'recommendation', '建议', 2000) || '',
+      },
+    });
   }
-  if (command === 'verification pass') return terminalSubmit(db, draft, execution, 'pass');
-  if (command === 'verification fail') return terminalSubmit(db, draft, execution, 'fail');
-  if (command === 'verification block') return terminalSubmit(db, draft, execution, 'block');
-  if (command === 'verification request-input') return terminalSubmit(db, draft, execution, 'request-input');
+  if (command === 'verification complete') {
+    return terminalSubmit(
+      db,
+      draft,
+      execution,
+      'complete',
+      {
+        completionRisk: optionalBounded(flags, 'risk', '残余风险', 10000),
+      },
+    );
+  }
   throw new Error(`未知命令：${command}。请使用 loop-agent help`);
 }

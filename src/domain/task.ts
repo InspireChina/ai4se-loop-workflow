@@ -89,6 +89,30 @@ export function assertState(state: TaskState) {
   }
 }
 
+export function assertReviewClosureGapForward(
+  before: TaskState,
+  after: TaskState,
+) {
+  if (
+    before.agile_status !== 'in review'
+    || before.current_subagent !== 'review-agent'
+    || before.closure_status !== 'none'
+  ) {
+    throw new Error('只有当前普通结卡中的需求才能前向追加结卡缺口');
+  }
+  if (
+    after.agile_status !== 'ready for dev'
+    || after.current_subagent !== 'analyst-agent'
+    || after.total_stories <= before.total_stories
+    || after.analysis_index !== before.analysis_index
+    || after.dev_index !== before.dev_index
+    || after.test_index !== before.test_index
+  ) {
+    throw new Error('结卡缺口必须在保留既有游标的前提下追加新的交付单元');
+  }
+  assertState(after);
+}
+
 export function assertUpdate(before: TaskState, actor: Actor, next: Partial<TaskState>, changedFields: string[]) {
   if (actor !== 'human' && actor !== 'system') {
     const allowed = fieldPermissions[actor];

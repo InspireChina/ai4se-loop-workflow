@@ -33,15 +33,25 @@ test('shares one context command guide with prompt and help surfaces', () => {
   assert.match(content, /仅在资料存在版本、替代或冲突疑问时检查历史/);
 });
 
-test('advertises role-specific help topics for the first three flow Agents', () => {
+test('advertises a role-specific command guide for every progressive flow Agent', () => {
   const backlog = agentCommandPrompt('/app', 'backlog-agent', 'backlog');
   const splitter = agentCommandPrompt('/app', 'story-splitter-agent', 'split');
   const analyst = agentCommandPrompt('/app', 'analyst-agent', 'analysis');
   const development = agentCommandPrompt('/app', 'dev-agent', 'dev');
+  const verification = agentCommandPrompt('/app', 'test-agent', 'test');
+  const review = agentCommandPrompt('/app', 'review-agent', 'review');
   assert.match(backlog || '', /help <context\|assertion\|impact\|question\|scope\|finish>/);
   assert.match(splitter || '', /help <context\|unit\|source\|dependency\|revision\|finish>/);
   assert.match(analyst || '', /help <context\|impact\|decision\|contract\|finish>/);
   assert.match(development || '', /help <context\|evidence\|input\|finish>/);
+  assert.match(verification || '', /help <context\|plan\|execute\|input\|finish>/);
+  assert.match(review || '', /help <context\|reconciliation\|gap\|report\|finish>/);
+  assert.match(review || '', /Review 不创建问题或运行信息请求/);
+  assert.match(review || '', /review complete/);
+  assert.doesNotMatch(review || '', /review request-input/);
+  assert.match(verification || '', /verification complete/);
+  assert.match(verification || '', /verification request-input/);
+  assert.doesNotMatch(verification || '', /verification (?:pass|fail|block)/);
   assert.doesNotMatch(development || '', /help <[^>]*handoff/);
   assert.match(development || '', /implementation fail --reason <原因与证据>/);
   assert.doesNotMatch(analyst || '', /--reason <原因与证据>/);

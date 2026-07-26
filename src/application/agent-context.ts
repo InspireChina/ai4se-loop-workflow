@@ -185,6 +185,7 @@ function executionValue(attempt: ExecutionAttemptView) {
     attempt: attempt.attempt,
     status: attempt.status,
     outcome: attempt.result_outcome,
+    verdict: attempt.result_verdict,
     summary: attempt.result_summary,
     baseCommit: attempt.base_commit,
     codeCommit: attempt.code_commit,

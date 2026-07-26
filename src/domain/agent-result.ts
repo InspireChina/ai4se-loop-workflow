@@ -30,6 +30,14 @@ const runtimeInputSchema = z.object({
   recommendation: z.string().max(2000).optional().default(''),
 });
 
+const closureGapSchema = z.object({
+  key: z.string().min(1).max(240),
+  subject: z.string().min(1).max(2000),
+  kind: z.enum(['missing_evidence', 'fact_conflict', 'unresolved_obligation']),
+  reason: z.string().min(1).max(4000),
+  boundary: z.string().min(1).max(4000),
+});
+
 const feedbackTriageGroupSchema = z.object({
   groupKey: z.string().min(1).max(200),
   commentIds: z.array(z.string().min(1).max(200)).min(1).max(100),
@@ -139,7 +147,8 @@ export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object
   spec: deliverySpecSchema.optional(),
   // Read-only compatibility for results queued before the terminology change.
   stories: z.array(deliveryUnitContractSchema).max(50).optional(),
-  verdict: z.enum(['passed', 'failed', 'report_ready', 'ready_for_approval', 'changes_requested']).optional(),
+  verdict: z.enum(['passed', 'failed', 'report_ready', 'closure_gap', 'ready_for_approval', 'changes_requested']).optional(),
+  closureGaps: z.array(closureGapSchema).max(100).optional(),
   failureKind: z.enum(['implementation', 'specification', 'environment', 'inconclusive']).optional(),
   rewindTo: z.enum(['plan', 'analysis', 'dev', 'test']).optional(),
   rewindDeliveryUnit: z.number().int().positive().optional(),
@@ -261,6 +270,30 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
     || agent === 'analyst-agent'
     || agent === 'repro-agent'
     || agent === 'feedback-agent';
+  if (agent === 'review-agent') {
+    if (result.questions.length || result.runtimeInputs.length) {
+      throw new Error('Review Agent 不得创建问题或运行信息请求；事实缺口必须使用 verdict=closure_gap');
+    }
+    if (result.outcome !== 'completed') throw new Error('Review Agent 必须以 completed 结束事实对账');
+    if (result.rewindTo || result.rewindDeliveryUnit) {
+      throw new Error('Review Agent 不得返回回退决策；反馈判断由 Feedback Agent 负责，Application 只执行前向路由');
+    }
+    const closureGaps = result.closureGaps || [];
+    const duplicateGapKeys = duplicateKeys(closureGaps.map((gap) => gap.key));
+    if (duplicateGapKeys.length) throw new Error(`Review Agent 的 closure gap key 不能重复：${duplicateGapKeys.join(', ')}`);
+    if (result.verdict === 'report_ready') {
+      if (!result.artifact) throw new Error('review-agent 结果缺少 artifact');
+      if (closureGaps.length) throw new Error('report_ready 不能同时包含 closure gaps');
+      return;
+    }
+    if (result.verdict === 'closure_gap') {
+      if (!closureGaps.length) throw new Error('closure_gap 必须包含至少一个事实缺口');
+      if (result.artifact) throw new Error('closure_gap 不得生成结卡报告 artifact');
+      return;
+    }
+    throw new Error('Review Agent 只能返回 verdict=report_ready 或 closure_gap；反馈判断由 Feedback Agent 负责，Application 执行路由');
+  }
+  if (result.closureGaps?.length) throw new Error('只有 Review Agent 可以返回 closure gaps');
   if (agent === 'feedback-agent' && result.runtimeInputs.length) {
     throw new Error('feedback-agent 不能创建运行信息请求；无法安全分组时使用 questions');
   }
@@ -316,11 +349,6 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
       break;
     case 'test-agent':
       if (!result.verdict) throw new Error('验证 Agent 结果缺少 verdict');
-      break;
-    case 'review-agent':
-      if (!result.artifact) throw new Error('review-agent 结果缺少 artifact');
-      if (result.verdict !== 'report_ready') throw new Error('Review Agent 只能返回 verdict=report_ready；反馈判断由 Feedback Agent 负责，Application 执行路由');
-      if (result.rewindTo || result.rewindDeliveryUnit) throw new Error('Review Agent 不得返回回退决策');
       break;
     case 'feedback-agent':
       if (!result.questions.length && !result.feedback) throw new Error('feedback-agent 结果缺少 feedback');

@@ -385,6 +385,87 @@ test('keeps feedback rewind decisions out of the Review Agent contract', () => {
   );
 });
 
+test('accepts Review closure gaps as a forward result without a report artifact', () => {
+  const result = parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'Two final facts still need forward delivery work.',
+    verdict: 'closure_gap',
+    closureGaps: [{
+      key: 'missing-visible-proof',
+      subject: 'UNIT:1:acceptance',
+      kind: 'missing_evidence',
+      reason: 'The final user-visible path has no independent Test evidence.',
+      boundary: 'A black-box Test result demonstrates the complete visible path.',
+    }, {
+      key: 'conflicting-status-fact',
+      subject: 'REQUIREMENT:status-transition',
+      kind: 'fact_conflict',
+      reason: 'The implementation and Test report describe different terminal states.',
+      boundary: 'One observable terminal-state contract is implemented and independently verified.',
+    }],
+  }));
+
+  assert.equal(result.closureGaps?.length, 2);
+  assert.doesNotThrow(() => assertAgentResultRoleContract(result, 'review-agent'));
+  assert.throws(
+    () => assertAgentResultRoleContract({ ...result, closureGaps: [] }, 'review-agent'),
+    /至少一个事实缺口/,
+  );
+  assert.throws(
+    () => assertAgentResultRoleContract({
+      ...result,
+      artifact: { title: 'Premature report', content: 'This report must not be published.' },
+    }, 'review-agent'),
+    /不得生成结卡报告/,
+  );
+});
+
+test('requires a clean Review report result and keeps closure gaps role-scoped', () => {
+  const report = parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'All final facts reconcile.',
+    verdict: 'report_ready',
+    artifact: { title: 'Closure report', content: 'All obligations and evidence reconcile.' },
+  }));
+  assert.doesNotThrow(() => assertAgentResultRoleContract(report, 'review-agent'));
+  assert.throws(
+    () => assertAgentResultRoleContract({
+      ...report,
+      closureGaps: [{
+        key: 'late-gap',
+        subject: 'UNIT:1',
+        kind: 'unresolved_obligation',
+        reason: 'One obligation remains.',
+        boundary: 'The obligation is delivered.',
+      }],
+    }, 'review-agent'),
+    /不能同时包含 closure gaps/,
+  );
+
+  const gap = parseAgentResult(JSON.stringify({
+    outcome: 'completed',
+    summary: 'A gap was found.',
+    verdict: 'closure_gap',
+    closureGaps: [{
+      key: 'review-only',
+      subject: 'UNIT:1',
+      kind: 'unresolved_obligation',
+      reason: 'One obligation remains.',
+      boundary: 'The obligation is delivered.',
+    }],
+  }));
+  assert.throws(() => assertAgentResultRoleContract(gap, 'dev-agent'), /只有 Review Agent/);
+  assert.throws(
+    () => assertAgentResultRoleContract({ ...gap, runtimeInputs: [{
+      title: 'Ask for evidence',
+      question: 'Can someone provide evidence?',
+      why: '',
+      recommendation: '',
+    }] }, 'review-agent'),
+    /不得创建问题或运行信息请求/,
+  );
+});
+
 test('lets Feedback Agent ask for minimum grouping context but rejects runtime input flows', () => {
   const question = parseAgentResult(JSON.stringify({
     outcome: 'needs_input',

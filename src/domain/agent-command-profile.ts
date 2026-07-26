@@ -60,9 +60,7 @@ const PROFILES: AgentCommandProfile[] = [
     namespace: 'verification',
     draftType: 'verification',
     terminalActions: [
-      'verification pass',
-      'verification fail',
-      'verification block',
+      'verification complete',
       'verification request-input',
     ],
   },
@@ -91,12 +89,11 @@ const PROFILES: AgentCommandProfile[] = [
   {
     id: 'review',
     agent: 'review-agent',
-    pipelines: ['review', 'feedback-report', 'resume'],
+    pipelines: ['review', 'feedback-report'],
     namespace: 'review',
     draftType: 'review',
     terminalActions: [
       'review complete',
-      'review request-input',
     ],
   },
   {
@@ -197,7 +194,11 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
         ? 'context|impact|decision|contract|finish'
         : profile.draftType === 'development'
           ? 'context|evidence|input|finish'
-          : 'context';
+          : profile.draftType === 'verification'
+            ? 'context|plan|execute|input|finish'
+            : profile.draftType === 'review'
+              ? 'context|reconciliation|gap|report|finish'
+            : 'context';
   return [
     '# Agent Tool Contract',
     '当前 execution 有三类工具面。先判断需要恢复状态、读取冻结上下文，还是检查实时仓库事实；不要把所有资料一次性展开。',
@@ -214,14 +215,20 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
     ...agentContextHelpLines(appRoot),
     '',
     '## 3. 实时项目事实（只读调查）',
-    '使用执行器提供的文件搜索、代码阅读、Git、配置检查和测试工具确认当前 AS IS 与真实影响。仓库事实可以证明当前实现，但不能自行覆盖上游业务承诺或用户决定。',
+    profile.draftType === 'review'
+      ? 'Review 只对账冻结的需求、交付规格、最终仓库执行记录和独立 Test 证据；不要重新运行测试、修改仓库或开启新的实现调查。证据不足时声明 closure gap。'
+      : '使用执行器提供的文件搜索、代码阅读、Git、配置检查和测试工具确认当前 AS IS 与真实影响。仓库事实可以证明当前实现，但不能自行覆盖上游业务承诺或用户决定。',
     '',
     '## 工具选择顺序',
     `1. 始终先执行 ${profile.namespace} status，恢复已有草稿和稳定 key。`,
     '2. 阅读 Prompt 已内联的 Working Context Pack 与 required context refs；需要完整内容时使用 agent-context get。',
     '3. 不知道 ref 或怀疑资料未展示时使用 agent-context search/list；检查前序执行事实时使用 evidence；只有版本或替代冲突时使用 history。',
-    '4. 使用仓库工具确认代码、配置、数据模型、Git 和测试中的实时 Ground Truth。',
-    '5. 只有完成上述调查后仍无法从现有证据唯一确定，才声明缺少信息、提交问题或运行信息请求。',
+    profile.draftType === 'review'
+      ? '4. 逐项把必需 subject 与已有最终事实、独立 Test 证据对账；不要生成新的交付事实。'
+      : '4. 使用仓库工具确认代码、配置、数据模型、Git 和测试中的实时 Ground Truth。',
+    profile.draftType === 'review'
+      ? '5. 无法从已有事实闭合的对象必须声明结卡缺口；Review 不创建问题或运行信息请求。'
+      : '5. 只有完成上述调查后仍无法从现有证据唯一确定，才声明缺少信息、提交问题或运行信息请求。',
     '',
     '## 命令行为',
     '命令失败时根据 Application 返回的错误修正后自行重试，不要因为一次校验失败就结束工作。',
