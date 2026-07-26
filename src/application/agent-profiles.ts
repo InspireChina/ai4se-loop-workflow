@@ -348,7 +348,7 @@ export async function loadAgentRuntime(agentIdInput: string, pipeline?: string):
     ? agentIdInput === 'backlog-agent'
       ? '根据上下文中已回答的需求级产品问题更新需求目标、范围、路由和交付边界；不要重复询问已经回答的问题。'
       : agentIdInput === 'analyst-agent'
-        ? '根据上下文中的用户答复更新当前交付单元的方案分析；只解决用户已经明确回答的决策，继续列出并询问所有仍无上下文证据的产品决策和重大技术决策。已回答问题的 decisionKey 是跨轮次不可变的系统标识，必须在新 Spec 的 decisionTree 和 decisions 中逐字复用，禁止改名或创建别名。'
+        ? '根据上下文中的用户答复继续当前交付分析；在原 decision key 上消费答案并以 user 权限关闭决策，把关联影响更新为最终处理方式，再收敛冻结交付契约。只保留仍然超出角色权限、会造成实质不同交付后果的最少问题。已回答问题的 decision key 是跨轮次不可变的系统标识，必须逐字复用，禁止改名或创建别名。'
         : '读取上下文中已回答的运行信息，从暂停点继续当前阶段；重新核验条件，不重复已经完成且仍然有效的工作。'
     : '只处理当前委派阶段和交付单元，不扩张到无关工作。';
   const prompt = selected.content.includes('{{mode_instruction}}')

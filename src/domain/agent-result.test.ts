@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 import { assertAgentResultRoleContract, parseAgentResult } from './agent-result';
 
 function deliveryUnit(key: string, title: string) {
@@ -117,7 +118,7 @@ test('allows requirement intake, analysis, and unsuccessful repro agents to ask 
   }));
 
   assert.doesNotThrow(() => assertAgentResultRoleContract(requirementQuestion, 'backlog-agent'));
-  assert.throws(() => assertAgentResultRoleContract(requirementQuestion, 'story-splitter-agent'), /不允许创建设计澄清问题/);
+  assert.throws(() => assertAgentResultRoleContract(requirementQuestion, 'story-splitter-agent'), /不允许创建业务或交付决策问题/);
   assert.throws(
     () => assertAgentResultRoleContract({ ...requirementQuestion, outcome: 'completed' }, 'backlog-agent'),
     /outcome 必须为 needs_input/,
@@ -156,44 +157,66 @@ test('allows Repro to advance only after the issue is reproduced', () => {
   );
 });
 
-test('parses a versionable Slice Spec and normalizes the legacy review verdict', () => {
+test('parses a versionable Delivery Spec and normalizes the legacy review verdict', () => {
   const result = parseAgentResult(JSON.stringify({
     outcome: 'completed',
     summary: 'Decision tree is resolved.',
     artifact: { title: 'Resolved analysis', content: 'All product decisions are evidenced.' },
     verdict: 'ready_for_approval',
-    spec: {
-      goal: 'A user can close one delivery unit without ambiguity.',
-      scope: { included: ['Closure behavior'], excluded: ['Unrelated redesign'] },
-      behaviors: [{ scenario: 'All decisions are resolved', expected: 'Development can start' }],
-      decisions: [{ key: 'closure-mode', decision: 'Acknowledge reading', rationale: 'No approval gate', source: 'user' }],
-      decisionTree: [{
+    spec: deliverySpecFixture({
+      unit: {
+        key: 'closure',
+        title: 'A user closes one delivery unit',
+        actor: 'User',
+        trigger: 'The delivery report is ready',
+        observableOutcome: 'The unit is visibly closed',
+        acceptance: 'The user can acknowledge the report without an approval gate',
+        sourceRefs: [{ key: 'acceptance:closure', kind: 'acceptance', content: 'Closure is acknowledged', sourceRef: 'TEST:closure' }],
+        dependsOn: [],
+      },
+      summary: 'Closure affects acknowledgement without adding an approval gate.',
+      impacts: [{
+        key: 'closure-flow',
+        area: 'Task closure',
+        finding: 'Reading acknowledgement closes the unit.',
+        disposition: 'change',
+        evidence: 'Task tests and the user decision.',
+      }],
+      decisions: [{
         key: 'closure-mode',
+        type: 'business',
+        title: 'Closure mode',
         question: 'How is a delivery unit closed?',
         impact: 'Changes the user-visible closure flow.',
         options: [
           { id: 'acknowledge', label: 'Acknowledge reading', consequences: ['No approval gate'] },
           { id: 'approve', label: 'Explicit approval', consequences: ['Adds an approval gate'] },
         ],
-        status: 'resolved_from_context',
+        status: 'resolved',
         selectedOption: 'acknowledge',
-        source: 'user',
-        evidence: ['The user explicitly requested acknowledgement without approval.'],
+        authority: 'user',
+        decision: 'Acknowledge reading',
+        rationale: 'No approval gate',
+        evidence: 'The user explicitly requested acknowledgement without approval.',
       }],
-      ambiguities: [],
-      acceptanceCriteria: [{ id: 'AC-1', description: 'The unit has a deterministic contract', oracle: 'The stored spec is resolved' }],
-      verificationPlan: [{ criterionId: 'AC-1', kind: 'command', instruction: 'Run tests', command: 'npm test' }],
-      dependencies: [],
-      changeBudget: { capabilities: ['Task closure'], paths: ['src/application/tasks.ts'] },
-    },
+      handoff: {
+        implementationGuidance: 'Record acknowledgement without adding approval state.',
+        guardrails: [],
+        verificationFocus: [{
+          key: 'AC-1',
+          expected: 'The unit has a deterministic contract',
+          oracle: 'The stored analysis is resolved',
+        }],
+      },
+    }),
   }));
   assert.equal(result.verdict, 'report_ready');
-  assert.equal(result.spec?.acceptanceCriteria[0]?.id, 'AC-1');
+  assert.equal(result.spec?.handoff.verificationFocus[0]?.key, 'AC-1');
   assert.doesNotThrow(() => assertAgentResultRoleContract(result, 'analyst-agent'));
-  assert.throws(
-    () => assertAgentResultRoleContract({ ...result, spec: { ...result.spec!, decisionTree: [] } }, 'analyst-agent'),
-    /必须包含完整 decisionTree/,
-  );
+  assert.doesNotThrow(() => assertAgentResultRoleContract({
+    ...result,
+    spec: { ...result.spec!, decisions: [] },
+  }, 'analyst-agent'));
 });
 
 test('keeps unresolved analysis decisions in the question flow without requiring duplicated wording', () => {
@@ -210,13 +233,30 @@ test('keeps unresolved analysis decisions in the question flow without requiring
         { id: 'text', label: 'Text', consequences: ['Optimized for reading'] },
       ],
     }],
-    spec: {
-      goal: 'Produce one visible output.',
-      scope: { included: ['Output contract'], excluded: ['Unrelated features'] },
-      behaviors: [{ scenario: 'The operation completes', expected: 'The chosen output is visible' }],
-      decisions: [],
-      decisionTree: [{
+    spec: deliverySpecFixture({
+      unit: {
+        key: 'visible-output',
+        title: 'Produce one visible output',
+        actor: 'User',
+        trigger: 'The operation completes',
+        observableOutcome: 'The chosen output is visible',
+        acceptance: 'Output follows the chosen contract',
+        sourceRefs: [{ key: 'acceptance:output', kind: 'acceptance', content: 'Output is visible', sourceRef: 'TEST:output' }],
+        dependsOn: [],
+      },
+      summary: 'The output contract is the only unresolved delivery impact.',
+      impacts: [{
+        key: 'output-contract',
+        area: 'Visible output',
+        finding: 'Structured and text output create different user-visible contracts.',
+        disposition: 'needs_decision',
+        evidence: 'Both output modes are present in the requested behavior.',
+        decisionKey: 'output-mode',
+      }],
+      decisions: [{
         key: 'output-mode',
+        type: 'business',
+        title: 'Output mode',
         question: 'Which output mode should users receive?',
         impact: 'Changes the user-visible output contract.',
         options: [
@@ -224,13 +264,16 @@ test('keeps unresolved analysis decisions in the question flow without requiring
           { id: 'text', label: 'Text', consequences: ['Optimized for reading'] },
         ],
         status: 'needs_user_input',
+        authority: 'needs_user_input',
+        recommendationOption: 'structured',
+        recommendationReason: 'The existing consumers use a structured contract.',
       }],
-      ambiguities: [{ key: 'output-mode', description: 'No context chooses the visible output.' }],
-      acceptanceCriteria: [{ id: 'AC-1', description: 'Output follows the chosen contract', oracle: 'Inspect output' }],
-      verificationPlan: [{ criterionId: 'AC-1', kind: 'inspection', instruction: 'Inspect output' }],
-      dependencies: [],
-      changeBudget: { capabilities: ['Output contract'], paths: [] },
-    },
+      handoff: {
+        implementationGuidance: 'Implement the selected visible output contract.',
+        guardrails: [],
+        verificationFocus: [],
+      },
+    }),
   }));
   assert.doesNotThrow(() => assertAgentResultRoleContract(unresolved, 'analyst-agent'));
   assert.throws(
@@ -244,15 +287,21 @@ test('keeps unresolved analysis decisions in the question flow without requiring
     questions: [],
     spec: {
       ...unresolved.spec,
-      decisions: [{ key: 'output-mode', decision: 'Structured', rationale: 'A common default', source: 'safe_default' }],
-      decisionTree: [{
-        ...unresolved.spec!.decisionTree[0],
-        status: 'resolved_from_context',
+      impacts: unresolved.spec!.impacts.map((impact) => ({
+        ...impact,
+        disposition: 'change' as const,
+      })),
+      decisions: [{
+        ...unresolved.spec!.decisions[0],
+        status: 'resolved',
         selectedOption: 'structured',
-        source: 'code',
-        evidence: ['No explicit product evidence; selected as a default.'],
+        authority: 'agent_authority',
+        decision: 'Structured',
+        rationale: 'The Agent used its delegated engineering authority.',
+        evidence: 'No product behavior changes; both options satisfy the upstream contract.',
+        recommendationOption: undefined,
+        recommendationReason: undefined,
       }],
-      ambiguities: [],
     },
   }));
   assert.doesNotThrow(() => assertAgentResultRoleContract(unsafe, 'analyst-agent'));

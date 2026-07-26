@@ -1,4 +1,4 @@
-import { agentResultSchema } from '../domain/agent-result';
+import { agentResultSchema, deliverySpecSchema } from '../domain/agent-result';
 import { databaseConnection } from '../infrastructure/database';
 
 type Db = Awaited<ReturnType<typeof databaseConnection>>;
@@ -160,26 +160,23 @@ function state(db: Db, draft: VerificationDraftRow) {
     ORDER BY revision DESC LIMIT 1
   `).get(draft.task_id, draft.story_index) as { spec_json: string } | undefined;
   let expectedCriteria: { id: string; description: string; oracle: string }[] = [];
-  let verificationPlan: {
-    criterionId: string;
-    kind: 'command' | 'browser' | 'inspection';
-    instruction: string;
-    command?: string;
-  }[] = [];
+  let verificationFocus: { key: string; expected: string; oracle: string }[] = [];
   try {
-    const parsed = specRow ? JSON.parse(specRow.spec_json) as {
-      acceptanceCriteria?: { id: string; description: string; oracle: string }[];
-      verificationPlan?: {
-        criterionId: string;
-        kind: 'command' | 'browser' | 'inspection';
-        instruction: string;
-        command?: string;
-      }[];
-    } : null;
-    expectedCriteria = parsed?.acceptanceCriteria || [];
-    verificationPlan = parsed?.verificationPlan || [];
+    const parsed = specRow ? deliverySpecSchema.parse(JSON.parse(specRow.spec_json)) : null;
+    verificationFocus = parsed?.handoff.verificationFocus || [];
+    expectedCriteria = parsed
+      ? [{
+            id: 'unit-acceptance',
+            description: parsed.unit.acceptance,
+            oracle: parsed.unit.observableOutcome,
+          }, ...verificationFocus.map((focus) => ({
+            id: focus.key,
+            description: focus.expected,
+            oracle: focus.oracle,
+          }))]
+      : [];
   } catch {
-    // saveStorySpec validates JSON before persistence; retain a useful validation error below.
+    // saveDeliverySpec validates JSON before persistence; retain a useful validation error below.
   }
   return {
     header,
@@ -194,7 +191,7 @@ function state(db: Db, draft: VerificationDraftRow) {
     recoveryChecks,
     activeRecoveries,
     expectedCriteria,
-    verificationPlan,
+    verificationFocus,
   };
 }
 
@@ -204,7 +201,7 @@ type TerminalAction = 'pass' | 'fail' | 'block' | 'request-input';
 function validationErrors(current: VerificationState, terminal: TerminalAction | null = null) {
   const errors: string[] = [];
   if (!current.header.summary?.trim()) errors.push('缺少验证结论摘要');
-  if (!current.expectedCriteria.length) errors.push('当前交付单元没有可读取的 resolved Slice Spec 验收标准');
+  if (!current.expectedCriteria.length) errors.push('当前交付单元没有可读取的已收敛交付规格验收标准');
   const expectedKeys = new Set(current.expectedCriteria.map((item) => item.id));
   const unknownCriteria = current.criteria
     .map((item) => item.criterion_key)
@@ -286,10 +283,10 @@ function renderStatus(draft: VerificationDraftRow, current: VerificationState) {
       lines.push(`- ${criterion.id}：${criterion.description} · ${evidence ? `${evidence.status} · ${evidence.method} · ${evidence.evidence}` : '尚未记录'}`);
     }
   }
-  if (current.verificationPlan.length) {
-    lines.push('', '规格验证计划（仅作为线索）：');
-    for (const step of current.verificationPlan) {
-      lines.push(`- ${step.criterionId} · ${step.kind}：${step.instruction}${step.command ? ` · ${step.command}` : ''}`);
+  if (current.verificationFocus.length) {
+    lines.push('', '额外验证关注点：');
+    for (const focus of current.verificationFocus) {
+      lines.push(`- ${focus.key}：${focus.expected} · Oracle：${focus.oracle}`);
     }
   }
   if (current.checks.length) {

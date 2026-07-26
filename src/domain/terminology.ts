@@ -17,7 +17,7 @@ const agentLabels: Record<string, string> = {
   system: '系统',
   'backlog-agent': '需求梳理 Agent',
   'story-splitter-agent': '交付规划 Agent',
-  'analyst-agent': '方案分析 Agent',
+  'analyst-agent': '交付分析 Agent',
   'repro-agent': '问题复现 Agent',
   'dev-agent': '开发实现 Agent',
   'test-agent': '验证 Agent',
@@ -38,7 +38,7 @@ const flowLabels: Record<string, string> = {
   backlog: '需求梳理',
   repro: '问题复现',
   split: '交付拆分',
-  analysis: '方案分析',
+  analysis: '交付分析',
   dev: '开发实现',
   test: '验证',
   review: '结卡报告',
@@ -53,7 +53,7 @@ const flowLabels: Record<string, string> = {
 const documentKindLabels: Record<string, string> = {
   context: '需求上下文',
   delivery_split: '交付拆分',
-  analysis: '方案分析',
+  analysis: '交付分析',
   repro: '问题复现',
   dev_note: '开发记录',
   test_result: '验证结果',
@@ -63,7 +63,7 @@ const documentKindLabels: Record<string, string> = {
 
 const confirmationKindLabels: Record<string, string> = {
   local: '需求级',
-  analysis: '方案分析',
+  analysis: '交付分析',
   test: '验证',
   review: '整体验收',
   feedback: '反馈处理',

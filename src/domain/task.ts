@@ -73,9 +73,9 @@ export function assertState(state: TaskState) {
     throw new Error('无效交付单元游标：必须满足 verification <= implementation <= analysis <= total');
   }
   if (state.resume_pending && ['analyst-agent', 'dev-agent', 'test-agent'].includes(state.current_subagent || '')) {
-    throw new Error('Analysis 与 Delivery 的恢复所有权必须保存在对应 Lane，不能占用任务级恢复标记');
+    throw new Error('交付分析与开发验证的恢复所有权必须保存在对应通道，不能占用需求级恢复标记');
   }
-  if (state.spec_resolved_index !== state.analysis_index) throw new Error('方案分析进度必须对应已解决的 Slice Spec');
+  if (state.spec_resolved_index !== state.analysis_index) throw new Error('交付分析进度必须对应已收敛的交付规格');
   if (state.agile_status === 'ready for dev' && state.total_stories === 0) throw new Error('进入单元推进前必须已有交付单元');
   if (state.agile_status === 'in review' && !(state.total_stories > 0 && state.test_index === state.dev_index && state.dev_index === state.analysis_index && state.analysis_index === state.total_stories)) {
     throw new Error('进入整体验收前必须完成全部交付单元');
@@ -178,7 +178,7 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
   }
   if (status === 'ready for dev' || status === 'in feedback') {
     if (d < a && codeSlotAvailable) return line('dev', 'dev-agent', d + 1, `实现交付单元 ${d + 1}，并占用代码槽`);
-    if (a < total) return line('analysis', 'analyst-agent', a + 1, `分析交付单元 ${a + 1} 的需求和方案`);
+    if (a < total) return line('analysis', 'analyst-agent', a + 1, `推演交付单元 ${a + 1} 并收敛决策`);
     if (total === 0) return line('split', 'story-splitter-agent', null, '拆分为可独立验收的交付单元');
     return null;
   }
@@ -186,7 +186,7 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
   if (t === d && d === a && a === total && total > 0) return line('review', 'review-agent', null, '全部交付单元已完成，进入整体验收');
   if (t < d) return line('test', 'test-agent', t + 1, `验证交付单元 ${t + 1}`);
   if (d < a) return line('dev', 'dev-agent', d + 1, `实现交付单元 ${d + 1}`);
-  if (a < total) return line('analysis', 'analyst-agent', a + 1, `分析交付单元 ${a + 1} 的需求和方案`);
+  if (a < total) return line('analysis', 'analyst-agent', a + 1, `推演交付单元 ${a + 1} 并收敛决策`);
   if (total === 0) return line('split', 'story-splitter-agent', null, '拆分为可独立验收的交付单元');
   return null;
 }

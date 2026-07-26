@@ -4,11 +4,11 @@ import { documentKindLabel } from '../domain/terminology';
 import { recoveryItemForPrompt, type RecoveryItem } from './recovery-items';
 import type { DelegationEnvelope, DocumentComment, ExecutionAttemptView, FeedbackGroup, RuntimeInputRequest } from './tasks';
 
-export const agentContextProtocol = 'loop-agent-context/v1';
+export const agentContextProtocol = 'loop-agent-context/v2';
 
 export type AgentContextResource = {
   ref: string;
-  kind: 'document' | 'slice_spec' | 'decision' | 'runtime_input' | 'feedback' | 'execution' | 'recovery';
+  kind: 'document' | 'delivery_spec' | 'decision' | 'runtime_input' | 'feedback' | 'execution' | 'recovery';
   title: string;
   scope: 'task' | `unit:${number}`;
   deliveryUnit: number | null;
@@ -67,7 +67,7 @@ export type AgentContextSnapshot = {
     };
     currentDeliveryUnit: DeliveryUnitContextValue | null;
     deliveryUnits: DeliveryUnitContextValue[];
-    currentSliceSpec: unknown | null;
+    currentDeliverySpec: unknown | null;
     answeredDecisionKeys: string[];
     userDecisions: unknown[];
   };
@@ -77,7 +77,7 @@ export type AgentContextSnapshot = {
     feedback: unknown[];
     recovery: unknown[];
   };
-  handoff: unknown[];
+  recentExecutionEvidence: unknown[];
   requiredContextRefs: string[];
   startupIndex: AgentContextIndexEntry[];
   resourceCount: number;
@@ -195,9 +195,25 @@ function executionValue(attempt: ExecutionAttemptView) {
   };
 }
 
-function sliceSpecValue<T extends { spec_json: string }>(spec: T) {
+function verificationDeliverySpecProjection(value: unknown) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const spec = value as Record<string, unknown>;
+  const rawHandoff = spec.handoff;
+  if (!rawHandoff || typeof rawHandoff !== 'object' || Array.isArray(rawHandoff)) return spec;
+  const {
+    implementationGuidance: _implementationGuidance,
+    ...verificationContract
+  } = rawHandoff as Record<string, unknown>;
+  return { ...spec, handoff: verificationContract };
+}
+
+function deliverySpecValue<T extends { spec_json: string }>(spec: T, agent: string) {
   const { spec_json: _specJson, ...metadata } = spec;
-  return { ...metadata, spec: parseJson(spec.spec_json) };
+  const parsed = parseJson(spec.spec_json);
+  return {
+    ...metadata,
+    spec: agent === 'test-agent' ? verificationDeliverySpecProjection(parsed) : parsed,
+  };
 }
 
 const requiredDocumentKinds: Record<string, string[]> = {
@@ -206,19 +222,44 @@ const requiredDocumentKinds: Record<string, string[]> = {
   'repro-agent': ['context', 'repro'],
   'analyst-agent': ['context', 'delivery_split', 'analysis', 'test_result'],
   'dev-agent': ['analysis', 'dev_note', 'test_result'],
-  'test-agent': ['analysis', 'dev_note', 'test_result'],
+  'test-agent': ['context', 'repro', 'delivery_split', 'test_result'],
   'review-agent': ['context', 'delivery_split', 'analysis', 'dev_note', 'test_result'],
 };
 
-function handoffAttempts(agent: string, storyIndex: number | null, attempts: ExecutionAttemptView[]) {
+function recentExecutionEvidence(agent: string, storyIndex: number | null, attempts: ExecutionAttemptView[]) {
   const relevant = attempts.filter((attempt) =>
-    agent === 'review-agent' || relevantToExecution(storyIndex, attempt.story_index));
+    (agent === 'review-agent' || relevantToExecution(storyIndex, attempt.story_index))
+    && (agent !== 'test-agent' || attempt.agent === 'test-agent'));
   const latest = new Map<string, ExecutionAttemptView>();
   for (const attempt of relevant) latest.set(`${attempt.agent}:${attempt.story_index ?? 'task'}`, attempt);
   return [...latest.values()]
     .sort((left, right) => right.created_at.localeCompare(left.created_at))
     .slice(0, agent === 'review-agent' ? 24 : 8)
     .map(executionValue);
+}
+
+const testVisibleDocumentKinds = new Set(['context', 'repro', 'delivery_split', 'test_result']);
+
+function resourceVisibleToAgent(resource: AgentContextResource, agent: string, storyIndex: number | null) {
+  if (agent !== 'test-agent') return true;
+  if (!relevantToExecution(storyIndex, resource.deliveryUnit)) return false;
+  if (resource.kind === 'document') {
+    const content = resource.content as { kind?: string; sourceAgent?: string };
+    if (!testVisibleDocumentKinds.has(content.kind || '')) return false;
+    return content.kind !== 'test_result' || content.sourceAgent === 'test-agent';
+  }
+  if (resource.kind === 'delivery_spec') {
+    return resource.deliveryUnit === storyIndex && resource.status === 'resolved';
+  }
+  if (resource.kind === 'runtime_input') {
+    const content = resource.content as { sourceAgent?: string };
+    return content.sourceAgent === 'test-agent';
+  }
+  if (resource.kind === 'execution') {
+    const content = resource.content as { agent?: string };
+    return content.agent === 'test-agent';
+  }
+  return true;
 }
 
 export function buildAgentContextSnapshot(input: {
@@ -232,11 +273,16 @@ export function buildAgentContextSnapshot(input: {
   const currentStory = delegation.storyIndex
     ? full.stories.find((story) => story.story_index === delegation.storyIndex) || null
     : null;
-  const currentSpecs = full.storySpecs.filter((spec) => spec.story_index === delegation.storyIndex);
+  const currentSpecs = full.deliverySpecs.filter((spec) => spec.story_index === delegation.storyIndex);
   const currentSpec = latestBy(
-    currentSpecs.filter((spec) => spec.status !== 'superseded'),
+    currentSpecs.filter((spec) =>
+      delegation.agent === 'test-agent'
+        ? spec.status === 'resolved'
+        : spec.status !== 'superseded'),
     (spec) => spec.revision,
-  ) || latestBy(currentSpecs, (spec) => spec.revision);
+  ) || (delegation.agent === 'test-agent'
+    ? null
+    : latestBy(currentSpecs, (spec) => spec.revision));
   const userDecisions = full.questions
     .filter((question) => relevantToExecution(delegation.storyIndex, question.story_index) && Boolean(question.answer))
     .map((question) => ({
@@ -282,9 +328,9 @@ export function buildAgentContextSnapshot(input: {
     || groupCommentIds.has(comment.comment_id)
     || input.activeFeedback.some((active) => active.comment_id === comment.comment_id));
 
-  const resources: AgentContextResource[] = [];
+  const allResources: AgentContextResource[] = [];
   for (const document of full.documents) {
-    resources.push({
+    allResources.push({
       ref: `DOC:${document.document_id}`,
       kind: 'document',
       title: document.title,
@@ -311,11 +357,11 @@ export function buildAgentContextSnapshot(input: {
       },
     });
   }
-  for (const spec of full.storySpecs) {
-    resources.push({
+  for (const spec of full.deliverySpecs) {
+    allResources.push({
       ref: `SPEC:${spec.spec_id}:r${spec.revision}`,
-      kind: 'slice_spec',
-      title: `交付单元 ${spec.story_index} Slice Spec r${spec.revision}`,
+      kind: 'delivery_spec',
+      title: `交付单元 ${spec.story_index} 交付规格 r${spec.revision}`,
       scope: scope(spec.story_index),
       deliveryUnit: spec.story_index,
       revision: spec.revision,
@@ -323,7 +369,7 @@ export function buildAgentContextSnapshot(input: {
       authority: spec.status === 'resolved' ? 'authoritative' : spec.status === 'superseded' ? 'historical' : 'supporting',
       updatedAt: spec.resolved_at || spec.created_at,
       summary: compact(parseJson(spec.spec_json)),
-      content: sliceSpecValue(spec),
+      content: deliverySpecValue(spec, delegation.agent),
     });
   }
   for (const question of full.questions) {
@@ -340,7 +386,7 @@ export function buildAgentContextSnapshot(input: {
       status: question.status,
       specRevision: question.spec_revision,
     };
-    resources.push({
+    allResources.push({
       ref: `DECISION:${question.question_id}`,
       kind: 'decision',
       title: question.title,
@@ -356,7 +402,7 @@ export function buildAgentContextSnapshot(input: {
   }
   for (const runtimeInput of full.runtimeInputs) {
     const value = runtimeInputValue(runtimeInput);
-    resources.push({
+    allResources.push({
       ref: `RUNTIME:${runtimeInput.request_id}`,
       kind: 'runtime_input',
       title: runtimeInput.title,
@@ -376,7 +422,7 @@ export function buildAgentContextSnapshot(input: {
     const commentStoryIndex = group?.delivery_unit_indexes?.[0]
       ?? full.documents.find((document) => document.document_id === comment.document_id)?.story_index
       ?? null;
-    resources.push({
+    allResources.push({
       ref: `FEEDBACK:${comment.comment_id}`,
       kind: 'feedback',
       title: `文档反馈 ${comment.comment_id}`,
@@ -395,7 +441,7 @@ export function buildAgentContextSnapshot(input: {
   }
   for (const attempt of full.executionAttempts) {
     const value = executionValue(attempt);
-    resources.push({
+    allResources.push({
       ref: `EXEC:${attempt.execution_id}`,
       kind: 'execution',
       title: `${attempt.agent} · attempt ${attempt.attempt}`,
@@ -410,28 +456,32 @@ export function buildAgentContextSnapshot(input: {
     });
   }
   for (const recovery of full.recoveryItems) {
-    const value = recoveryItemForPrompt(recovery);
-    resources.push({
+    const value = recoveryItemForPrompt(recovery, {
+      includeResolution: delegation.agent !== 'test-agent',
+    });
+    allResources.push({
       ref: `RECOVERY:${recovery.recovery_id}`,
       kind: 'recovery',
       title: `${recovery.recovery_id} · ${recovery.summary}`,
       scope: scope(recovery.story_index),
       deliveryUnit: recovery.story_index,
       revision: recovery.failure_count,
-      status: recovery.status,
+      status: delegation.agent === 'test-agent' ? 'pending_verification' : recovery.status,
       authority: ['pending', 'claimed', 'reopened'].includes(recovery.status) ? 'active_obligation' : 'historical',
-      updatedAt: recovery.updated_at,
+      updatedAt: delegation.agent === 'test-agent' ? recovery.created_at : recovery.updated_at,
       summary: compact(recovery.summary),
       content: value,
     });
   }
+  const resources = allResources.filter((resource) =>
+    resourceVisibleToAgent(resource, delegation.agent, delegation.storyIndex));
 
   const required = new Set<string>();
   if (currentSpec) required.add(`SPEC:${currentSpec.spec_id}:r${currentSpec.revision}`);
   if (delegation.agent === 'review-agent') {
     for (const story of full.stories) {
       const latest = latestBy(
-        full.storySpecs.filter((spec) => spec.story_index === story.story_index && spec.status !== 'superseded'),
+        full.deliverySpecs.filter((spec) => spec.story_index === story.story_index && spec.status !== 'superseded'),
         (spec) => spec.revision,
       );
       if (latest) required.add(`SPEC:${latest.spec_id}:r${latest.revision}`);
@@ -449,7 +499,7 @@ export function buildAgentContextSnapshot(input: {
     }).filter((value): value is number => Boolean(value)));
     for (const storyIndex of affectedUnits) {
       const latest = latestBy(
-        full.storySpecs.filter((spec) => spec.story_index === storyIndex && spec.status !== 'superseded'),
+        full.deliverySpecs.filter((spec) => spec.story_index === storyIndex && spec.status !== 'superseded'),
         (spec) => spec.revision,
       );
       if (latest) required.add(`SPEC:${latest.spec_id}:r${latest.revision}`);
@@ -467,11 +517,13 @@ export function buildAgentContextSnapshot(input: {
   for (const recovery of input.activeRecovery) required.add(`RECOVERY:${recovery.recovery_id}`);
   for (const runtimeInput of activeRuntimeInputs) required.add(`RUNTIME:${runtimeInput.requestId}`);
 
+  const visibleRefs = new Set(resources.map((resource) => resource.ref));
+  const visibleRequired = new Set([...required].filter((ref) => visibleRefs.has(ref)));
   const relevantResources = resources.filter((resource) =>
-    required.has(resource.ref)
+    visibleRequired.has(resource.ref)
     || relevantToExecution(delegation.storyIndex, resource.deliveryUnit));
   const startupIndex = [...relevantResources]
-    .sort((left, right) => Number(required.has(right.ref)) - Number(required.has(left.ref)) || (right.updatedAt || '').localeCompare(left.updatedAt || ''))
+    .sort((left, right) => Number(visibleRequired.has(right.ref)) - Number(visibleRequired.has(left.ref)) || (right.updatedAt || '').localeCompare(left.updatedAt || ''))
     .slice(0, 48)
     .map(indexEntry);
   const snapshotBody = {
@@ -506,7 +558,7 @@ export function buildAgentContextSnapshot(input: {
       },
       currentDeliveryUnit: currentStory ? deliveryUnitContextValue(currentStory) : null,
       deliveryUnits: full.stories.map(deliveryUnitContextValue),
-      currentSliceSpec: currentSpec ? sliceSpecValue(currentSpec) : null,
+      currentDeliverySpec: currentSpec ? deliverySpecValue(currentSpec, delegation.agent) : null,
       answeredDecisionKeys,
       userDecisions,
     },
@@ -514,10 +566,16 @@ export function buildAgentContextSnapshot(input: {
       questions: activeQuestions,
       runtimeInputs: activeRuntimeInputs,
       feedback: activeFeedback.map((comment) => feedbackPromptValue(comment, groupByComment.get(comment.comment_id))),
-      recovery: input.activeRecovery.map(recoveryItemForPrompt),
+      recovery: input.activeRecovery.map((recovery) => recoveryItemForPrompt(recovery, {
+        includeResolution: delegation.agent !== 'test-agent',
+      })),
     },
-    handoff: handoffAttempts(delegation.agent, delegation.storyIndex, full.executionAttempts),
-    requiredContextRefs: [...required],
+    recentExecutionEvidence: recentExecutionEvidence(
+      delegation.agent,
+      delegation.storyIndex,
+      full.executionAttempts,
+    ),
+    requiredContextRefs: [...visibleRequired],
     startupIndex,
     resourceCount: resources.length,
     resources,
@@ -546,8 +604,8 @@ export function renderAgentContextOverview(snapshot: AgentContextSnapshot) {
     '# Active Obligations',
     JSON.stringify(snapshot.activeObligations, null, 2),
     '',
-    '# Latest Handoff',
-    JSON.stringify(snapshot.handoff, null, 2),
+    '# Recent Execution Evidence',
+    JSON.stringify(snapshot.recentExecutionEvidence, null, 2),
     '',
     `Context resources: ${snapshot.resourceCount}. Use agent-context list/search/get to progressively disclose details.`,
   ].join('\n');

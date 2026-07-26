@@ -181,8 +181,41 @@ test('adds role drafts without losing progress from previously migrated agents',
       'development', 'REQ-existing', 1, 'dev-agent', 'editing', 'EXEC-existing')
   `).run();
   db.prepare(`
-    INSERT INTO development_drafts(draft_id, summary)
-    VALUES('DRAFT-development', '保留开发结论')
+    INSERT INTO development_drafts(draft_id, summary, implementation_notes)
+    VALUES('DRAFT-development', '保留开发结论', '保留实现说明')
+  `).run();
+  db.prepare(`
+    INSERT INTO development_criteria(draft_id, criterion_key, status, evidence, ordinal)
+    VALUES
+      ('DRAFT-development', 'covered', 'covered', '保留覆盖证据', 1),
+      ('DRAFT-development', 'not-covered', 'not_covered', '不保留未覆盖候选', 2)
+  `).run();
+  db.prepare(`
+    INSERT INTO development_changes(draft_id, path, summary, ordinal)
+    VALUES('DRAFT-development', 'src/legacy.ts', '不再依赖 Agent 记录的文件', 1)
+  `).run();
+  db.prepare(`
+    INSERT INTO development_tests(draft_id, test_key, command, passed, summary, ordinal)
+    VALUES
+      ('DRAFT-development', 'passed-check', 'npm test', 1, '保留通过检查', 1),
+      ('DRAFT-development', 'failed-check', 'npm run build', 0, '不迁移失败检查', 2)
+  `).run();
+  db.prepare(`
+    INSERT INTO development_risks(draft_id, risk_key, content, ordinal)
+    VALUES('DRAFT-development', 'known-risk', '保留残余风险', 1)
+  `).run();
+  db.prepare(`
+    INSERT INTO development_runtime_inputs(
+      draft_id, request_key, title, question, why, recommendation, ordinal
+    ) VALUES(
+      'DRAFT-development', 'preview-url', '预览地址', '使用哪个地址？',
+      '需要运行验证', '使用已配置地址', 1
+    )
+  `).run();
+  db.prepare(`
+    INSERT INTO development_recovery_resolutions(
+      draft_id, recovery_id, summary, evidence, ordinal
+    ) VALUES('DRAFT-development', 'REC-1', '已处理恢复事项', '回归通过', 1)
   `).run();
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/043_verification_drafts.sql'), 'utf8'));
   db.prepare(`
@@ -210,6 +243,7 @@ test('adds role drafts without losing progress from previously migrated agents',
   `).run();
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/045_review_drafts.sql'), 'utf8'));
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/046_internal_agent_drafts.sql'), 'utf8'));
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/051_simplify_development_drafts.sql'), 'utf8'));
 
   const context = db.prepare(`
     SELECT draft_type, goal
@@ -223,7 +257,7 @@ test('adds role drafts without losing progress from previously migrated agents',
       'delivery_plan_drafts', 'delivery_plan_units',
       'reproduction_drafts', 'reproduction_steps',
       'analysis_drafts', 'analysis_decisions',
-      'development_drafts', 'development_criteria',
+      'development_drafts', 'development_criteria', 'development_checks',
       'verification_drafts', 'verification_criteria',
       'feedback_drafts', 'feedback_draft_groups',
       'review_drafts', 'review_sections', 'review_evidence',
@@ -243,8 +277,44 @@ test('adds role drafts without losing progress from previously migrated agents',
     SELECT goal FROM analysis_drafts WHERE draft_id = 'DRAFT-analysis'
   `).get();
   const development = db.prepare(`
-    SELECT summary FROM development_drafts WHERE draft_id = 'DRAFT-development'
+    SELECT draft_id FROM development_drafts WHERE draft_id = 'DRAFT-development'
   `).get();
+  const developmentCriteria = db.prepare(`
+    SELECT criterion_key, evidence
+    FROM development_criteria
+    WHERE draft_id = 'DRAFT-development'
+    ORDER BY ordinal
+  `).all();
+  const developmentChecks = db.prepare(`
+    SELECT check_key, command, summary
+    FROM development_checks
+    WHERE draft_id = 'DRAFT-development'
+    ORDER BY ordinal
+  `).all();
+  const removedDevelopmentTables = db.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name IN ('development_changes', 'development_tests')
+  `).all();
+  const developmentDraftColumns = db.prepare('PRAGMA table_info(development_drafts)')
+    .all() as { name: string }[];
+  const developmentCriterionColumns = db.prepare('PRAGMA table_info(development_criteria)')
+    .all() as { name: string }[];
+  const developmentCheckColumns = db.prepare('PRAGMA table_info(development_checks)')
+    .all() as { name: string }[];
+  const retainedDevelopmentDetails = {
+    risks: db.prepare(`
+      SELECT risk_key, content FROM development_risks
+      WHERE draft_id = 'DRAFT-development'
+    `).all(),
+    runtimeInputs: db.prepare(`
+      SELECT request_key, title FROM development_runtime_inputs
+      WHERE draft_id = 'DRAFT-development'
+    `).all(),
+    recovery: db.prepare(`
+      SELECT recovery_id, summary FROM development_recovery_resolutions
+      WHERE draft_id = 'DRAFT-development'
+    `).all(),
+  };
   const verification = db.prepare(`
     SELECT summary FROM verification_drafts WHERE draft_id = 'DRAFT-verification'
   `).get();
@@ -261,6 +331,7 @@ test('adds role drafts without losing progress from previously migrated agents',
     'analysis_drafts',
     'delivery_plan_drafts',
     'delivery_plan_units',
+    'development_checks',
     'development_criteria',
     'development_drafts',
     'evolution_evaluator_drafts',
@@ -279,7 +350,44 @@ test('adds role drafts without losing progress from previously migrated agents',
   assert.deepEqual(plan, { rationale: '保留拆分依据', coverage: '保留覆盖说明' });
   assert.deepEqual(reproduction, { expected_behavior: '保留预期', actual_behavior: '保留实际' });
   assert.deepEqual(analysis, { goal: '保留分析目标' });
-  assert.deepEqual(development, { summary: '保留开发结论' });
+  assert.deepEqual(development, { draft_id: 'DRAFT-development' });
+  assert.deepEqual(developmentCriteria, [{
+    criterion_key: 'covered',
+    evidence: '保留覆盖证据',
+  }]);
+  assert.deepEqual(developmentChecks, []);
+  assert.deepEqual(removedDevelopmentTables, []);
+  assert.deepEqual(developmentDraftColumns.map((column) => column.name), [
+    'draft_id',
+    'repository_base_commit',
+    'initial_workspace_fingerprint',
+    'initial_workspace_tree',
+    'initial_workspace_changes_json',
+  ]);
+  assert.deepEqual(
+    developmentCriterionColumns.map((column) => column.name),
+    ['draft_id', 'criterion_key', 'evidence', 'ordinal'],
+  );
+  assert.deepEqual(
+    developmentCheckColumns.map((column) => column.name),
+    [
+      'draft_id',
+      'check_key',
+      'command',
+      'command_hash',
+      'summary',
+      'source_execution_id',
+      'source_receipt_key',
+      'head_commit',
+      'workspace_fingerprint',
+      'ordinal',
+    ],
+  );
+  assert.deepEqual(retainedDevelopmentDetails, {
+    risks: [{ risk_key: 'known-risk', content: '保留残余风险' }],
+    runtimeInputs: [{ request_key: 'preview-url', title: '预览地址' }],
+    recovery: [{ recovery_id: 'REC-1', summary: '已处理恢复事项' }],
+  });
   assert.deepEqual(verification, { summary: '保留验证结论' });
   assert.deepEqual(feedback, { mode: 'triage' });
   assert.deepEqual(foreignKeyViolations, []);

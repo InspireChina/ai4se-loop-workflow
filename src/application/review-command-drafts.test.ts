@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
+import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 import type { DelegationEnvelope } from './tasks';
 
 async function command(executionId: string, token: string, args: string[]) {
@@ -45,18 +46,17 @@ async function reviewDelegation(title: string) {
   db.prepare(`
     INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json, resolved_at)
     VALUES(?, ?, 1, 1, 'resolved', ?, CURRENT_TIMESTAMP)
-  `).run(randomUUID(), taskId, JSON.stringify({
-    goal: '用户可以识别完成状态',
-    scope: { included: ['状态映射'], excluded: ['新增 API'] },
-    behaviors: [{ scenario: '结果完成', expected: '显示已完成' }],
-    decisions: [],
-    decisionTree: [],
-    ambiguities: [],
-    acceptanceCriteria: [{ id: 'AC-1', description: '完成状态正确', oracle: '黑盒断言通过' }],
-    verificationPlan: [{ criterionId: 'AC-1', kind: 'command', instruction: '运行测试', command: 'npm test' }],
-    dependencies: [],
-    changeBudget: { capabilities: ['状态展示'], paths: ['src/status.ts'] },
-  }));
+  `).run(randomUUID(), taskId, JSON.stringify(deliverySpecFixture({
+    handoff: {
+      implementationGuidance: '保持现有状态映射。',
+      guardrails: [],
+      verificationFocus: [{
+        key: 'AC-1',
+        expected: '完成状态正确',
+        oracle: '黑盒断言通过',
+      }],
+    },
+  })));
   db.prepare(`
     UPDATE tasks
     SET agile_status = 'in review', current_subagent = 'review-agent',

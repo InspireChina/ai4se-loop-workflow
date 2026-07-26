@@ -165,6 +165,13 @@ test('persists Test rewind evidence, reopens one active item, and supersedes it 
     executionId: 'EXEC-dev-recovery-2',
     claims: [{ recoveryId: active[0]!.recovery_id, summary: 'Attempted the requested fix.', evidence: ['commit:def456'] }],
   });
+  const claimed = (await listRecoveryItemsForStage({ taskId, storyIndex: 1, stage: 'test' }))[0]!;
+  const testProjection = recoveryItemForPrompt(claimed, { includeResolution: false });
+  assert.match(JSON.stringify(testProjection), /retry-e2e/);
+  assert.doesNotMatch(JSON.stringify(testProjection), /Attempted the requested fix|commit:def456/);
+  assert.equal('resolution' in testProjection, false);
+  assert.equal(testProjection.status, 'pending_verification');
+  assert.match(JSON.stringify(recoveryItemForPrompt(claimed)), /Attempted the requested fix/);
   await createOrReopenRecoveryItem({
     taskId,
     storyIndex: 1,

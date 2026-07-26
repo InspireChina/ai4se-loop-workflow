@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
+import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 import type { DelegationEnvelope } from './tasks';
 
 async function command(executionId: string, token: string, args: string[]) {
@@ -43,18 +44,7 @@ async function completedRequirement(label: string) {
   db.prepare(`
     INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json, resolved_at)
     VALUES(?, ?, 1, 1, 'resolved', ?, CURRENT_TIMESTAMP)
-  `).run(randomUUID(), taskId, JSON.stringify({
-    goal: '既有能力',
-    scope: { included: ['既有范围'], excluded: [] },
-    behaviors: [{ scenario: '既有场景', expected: '保持既有行为' }],
-    decisions: [],
-    decisionTree: [],
-    ambiguities: [],
-    acceptanceCriteria: [{ id: 'AC-1', description: '既有能力有效', oracle: '检查既有结果' }],
-    verificationPlan: [{ criterionId: 'AC-1', kind: 'inspection', instruction: '检查既有结果' }],
-    dependencies: [],
-    changeBudget: { capabilities: ['既有能力'], paths: [] },
-  }));
+  `).run(randomUUID(), taskId, JSON.stringify(deliverySpecFixture()));
   db.prepare(`
     UPDATE tasks
     SET total_stories = 1, analysis_index = 1, dev_index = 1,

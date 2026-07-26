@@ -12,6 +12,7 @@ test('normalizes Cursor tool calls without retaining raw log lines', () => {
   assert.deepEqual(event?.name, 'loop.agent.tool');
   assert.equal(event?.phase, 'started');
   assert.equal(event?.tool, 'shell');
+  assert.equal(event?.toolClass, 'shell');
   assert.equal(event?.toolCallId, 'cursor-call-1');
   assert.deepEqual(event?.input, { command: 'echo token=secret' });
 });
@@ -25,9 +26,68 @@ test('normalizes Codex tool completion and Claude tool results', () => {
   }));
   assert.equal(codex?.phase, 'completed');
   assert.equal(codex?.tool, 'shell');
+  assert.equal(codex?.toolClass, 'shell');
+  assert.equal(codex?.success, true);
+  assert.equal(codex?.exitCode, 0);
+  assert.deepEqual(codex?.output, { result: 'passed', exitCode: 0, status: null });
   assert.equal(claude?.phase, 'completed');
   assert.equal(claude?.tool, 'tool');
+  assert.equal(claude?.toolClass, 'unknown');
   assert.equal(claude?.toolCallId, 'tool-1');
+  assert.equal(claude?.success, true);
+  assert.equal(claude?.exitCode, null);
+});
+
+test('marks a non-zero Cursor shell receipt as failed even when Cursor wraps it as a success result', () => {
+  const event = parseAgentTelemetryStdout('cursor', JSON.stringify({
+    type: 'tool_call',
+    subtype: 'completed',
+    call_id: 'cursor-call-failed',
+    tool_call: {
+      shellToolCall: {
+        result: {
+          success: {
+            exitCode: 2,
+            stdout: 'test failed',
+          },
+        },
+      },
+    },
+  }));
+
+  assert.equal(event?.phase, 'completed');
+  assert.equal(event?.toolClass, 'shell');
+  assert.equal(event?.success, false);
+  assert.equal(event?.exitCode, 2);
+  assert.equal(event?.level, 'ERROR');
+});
+
+test('fails closed when a Codex shell completion has no numeric exit code', () => {
+  const event = parseAgentTelemetryStdout('codex', JSON.stringify({
+    type: 'item.completed',
+    item: { type: 'command_execution', command: 'npm test', aggregated_output: 'done' },
+  }));
+
+  assert.equal(event?.toolClass, 'shell');
+  assert.equal(event?.success, false);
+  assert.equal(event?.exitCode, null);
+});
+
+test('classifies Claude Bash starts explicitly and reports provider-declared failures', () => {
+  const started = parseAgentTelemetryStdout('claude', JSON.stringify({
+    type: 'assistant',
+    message: { content: [{ type: 'tool_use', id: 'tool-bash', name: 'Bash', input: { command: 'npm test' } }] },
+  }));
+  const completed = parseAgentTelemetryStdout('claude', JSON.stringify({
+    type: 'user',
+    message: { content: [{ type: 'tool_result', tool_use_id: 'tool-bash', content: 'failed', is_error: true }] },
+  }));
+
+  assert.equal(started?.toolClass, 'shell');
+  assert.equal(completed?.toolClass, 'unknown');
+  assert.equal(completed?.success, false);
+  assert.equal(completed?.exitCode, null);
+  assert.equal(completed?.level, 'ERROR');
 });
 
 test('coalesces output separately while mapping errors and stderr at the correct level', () => {
@@ -143,12 +203,12 @@ test('labels Cursor shell wrappers around progressive commands as Agent domain a
   assert.match(parsed || '', /恢复问题复现草稿/);
 });
 
-test('labels progressive analysis decisions as Agent domain actions', () => {
+test('labels progressive delivery-analysis decisions as Agent domain actions', () => {
   const line = JSON.stringify({
     type: 'item.started',
     item: {
       type: 'command_execution',
-      command: 'node "/app/scripts/loop/loop-agent.mjs" analysis decision resolve --key output-mode',
+      command: 'node "/app/scripts/loop/loop-agent.mjs" delivery-analysis decision resolve --key output-mode',
     },
   });
   const parsed = getAgentExecutor('codex').parseStdout(line, {
@@ -158,17 +218,39 @@ test('labels progressive analysis decisions as Agent domain actions', () => {
     pipeline: 'resume',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /解决关键决策/);
+  assert.match(parsed || '', /关闭关键决策/);
 });
 
-test('labels progressive development verification as an Agent domain action', () => {
+test('labels the Analyst frozen delivery contract without Dev-to-Test handoff terminology', () => {
   const line = JSON.stringify({
     type: 'tool_call',
     subtype: 'started',
     tool_call: {
       shellToolCall: {
         args: {
-          command: 'node "/app/scripts/loop/loop-agent.mjs" implementation test upsert --key unit --passed true',
+          command: 'node "/app/scripts/loop/loop-agent.mjs" delivery-analysis contract set --text frozen',
+        },
+      },
+    },
+  });
+  const parsed = getAgentExecutor('cursor').parseStdout(line, {
+    agent: 'analyst-agent',
+    taskId: 'REQ-1',
+    storyIndex: 1,
+    pipeline: 'analysis',
+  });
+  assert.match(parsed || '', /保存冻结交付契约/);
+  assert.doesNotMatch(parsed || '', /开发.*交接/);
+});
+
+test('labels progressive development evidence selection as an Agent domain action', () => {
+  const line = JSON.stringify({
+    type: 'tool_call',
+    subtype: 'started',
+    tool_call: {
+      shellToolCall: {
+        args: {
+          command: 'node "/app/scripts/loop/loop-agent.mjs" implementation check record --key unit --receipt 00000042 --summary passed',
         },
       },
     },
@@ -180,7 +262,7 @@ test('labels progressive development verification as an Agent domain action', ()
     pipeline: 'dev',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /更新验证记录/);
+  assert.match(parsed || '', /选择关键检查/);
 });
 
 test('labels progressive independent verification evidence as an Agent domain action', () => {

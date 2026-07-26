@@ -41,7 +41,7 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
           const waitingForRequirementAnswers = !completedView && task.run_state === 'waiting_for_answers' && task.current_subagent === 'backlog-agent';
           const laneSummary = completedView ? '' : waitingForRequirementAnswers
             ? `${agentLabel(task.current_subagent)}（等待用户回答）`
-            : (task as TaskWithLanes).lanes.map((lane) => `${lane.lane === 'analysis' ? 'Analysis' : 'Delivery'}: ${agentLabel(lane.current_agent)}（${laneStatusLabels[lane.status] || lane.status}）`).join(' · ');
+            : (task as TaskWithLanes).lanes.map((lane) => `${lane.lane === 'analysis' ? '交付分析' : '开发验证'}：${agentLabel(lane.current_agent)}（${laneStatusLabels[lane.status] || lane.status}）`).join(' · ');
           const displayStatus = waitingForRequirementAnswers ? '等待需求澄清' : statusLabel(task.agile_status);
 
           return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}>

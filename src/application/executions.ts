@@ -48,6 +48,16 @@ export type ExecutionAttempt = {
 
 const RECOVERABLE = ['output_received', 'verifying', 'applying'] as const;
 
+export function shouldRecordDevCodeCommit(
+  agent: string,
+  result: { outcome?: string; changedFiles?: readonly string[] },
+) {
+  return agent === 'dev-agent'
+    && result.outcome === 'completed'
+    && Array.isArray(result.changedFiles)
+    && result.changedFiles.length > 0;
+}
+
 function delegationKey(delegation: DelegationEnvelope, inputHash: string) {
   return hash(JSON.stringify({
     taskId: delegation.taskId,
@@ -326,6 +336,6 @@ export async function failExecution(executionId: string, error: string, blocked 
     UPDATE execution_attempts
     SET status = ?, last_error = ?, finished_at = CURRENT_TIMESTAMP,
         heartbeat_at = CURRENT_TIMESTAMP
-    WHERE execution_id = ?
+    WHERE execution_id = ? AND status NOT IN ('cancelled', 'applied')
   `).run(blocked ? 'system_blocked' : 'retryable_failed', error, executionId);
 }

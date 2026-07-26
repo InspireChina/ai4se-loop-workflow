@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { deliveryUnitContractSchema } from '../domain/delivery-unit';
-import { AgentResultContractError, assertSliceSpecDecisionCoverage, sliceSpecSchema } from '../domain/agent-result';
+import { AgentResultContractError, assertDeliverySpecDecisionCoverage, deliverySpecSchema } from '../domain/agent-result';
 import { databaseConnection, paths } from '../infrastructure/database';
 import { isProcessAlive, readRunPid } from '../infrastructure/run-process';
 import { toUtcIsoString } from './event-time';
@@ -81,7 +81,7 @@ export type Story = {
   }[];
   depends_on_story_indexes: number[];
 };
-export type StorySpec = { spec_id: string; task_id: string; story_index: number; revision: number; status: 'draft' | 'waiting_for_answers' | 'resolved' | 'superseded'; spec_json: string; source_result_id: string | null; created_at: string; resolved_at: string | null };
+export type DeliverySpecRecord = { spec_id: string; task_id: string; story_index: number; revision: number; status: 'draft' | 'waiting_for_answers' | 'resolved' | 'superseded'; spec_json: string; source_result_id: string | null; created_at: string; resolved_at: string | null };
 export type Document = {
   document_id: string;
   task_id: string;
@@ -396,7 +396,7 @@ export async function getTask(taskId: string) {
       .filter((dependency) => dependency.story_index === story.story_index)
       .map((dependency) => dependency.depends_on_story_index),
   }));
-  const storySpecs = db.prepare('SELECT * FROM story_specs WHERE task_id = ? ORDER BY story_index, revision').all(taskId) as StorySpec[];
+  const deliverySpecs = db.prepare('SELECT * FROM story_specs WHERE task_id = ? ORDER BY story_index, revision').all(taskId) as DeliverySpecRecord[];
   const questions = db.prepare('SELECT * FROM questions WHERE task_id = ? ORDER BY created_at').all(taskId) as Question[];
   const runtimeInputs = db.prepare('SELECT * FROM runtime_input_requests WHERE task_id = ? ORDER BY created_at').all(taskId) as RuntimeInputRequest[];
   const documents = db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[];
@@ -444,7 +444,7 @@ export async function getTask(taskId: string) {
     task,
     lanes,
     stories,
-    storySpecs,
+    deliverySpecs,
     questions,
     runtimeInputs,
     documents,
@@ -742,7 +742,7 @@ export async function addStory(input: unknown) {
   db.exec('BEGIN');
   try {
     db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, ?, ?, ?)').run(value.taskId, nextIndex, value.title, directory);
-    db.prepare('UPDATE tasks SET total_stories = ?, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?').run(prospective.total_stories, `已新增交付单元 ${nextIndex}，等待方案分析`, value.actor, value.taskId);
+    db.prepare('UPDATE tasks SET total_stories = ?, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?').run(prospective.total_stories, `已新增交付单元 ${nextIndex}，等待交付分析`, value.actor, value.taskId);
     const after = fetchTask(db, value.taskId);
     if (after) refreshTaskLaneStatesInDb(db, after);
     addEvent(db, value.taskId, value.actor, 'StoryAdded', `新增交付单元 ${nextIndex}：${value.title}`);
@@ -785,7 +785,7 @@ export async function addPlannedDeliveryUnits(input: unknown) {
       WHERE task_id = ?
     `).run(
       prospective.total_stories,
-      `已规划 ${inserted.length} 个交付单元，等待方案分析`,
+      `已规划 ${inserted.length} 个交付单元，等待交付分析`,
       value.actor,
       value.taskId,
     );
@@ -809,17 +809,18 @@ export async function addPlannedDeliveryUnits(input: unknown) {
   }
 }
 
-export async function saveStorySpec(input: unknown) {
+export async function saveDeliverySpec(input: unknown) {
   const value = z.object({
     taskId: z.string().min(1),
     storyIndex: z.coerce.number().int().positive(),
     status: z.enum(['draft', 'waiting_for_answers', 'resolved']),
-    spec: sliceSpecSchema,
+    spec: deliverySpecSchema,
     sourceResultId: z.string().optional().nullable(),
   }).parse(input);
-  assertSliceSpecDecisionCoverage(value.spec);
-  if (value.status === 'resolved' && value.spec.ambiguities.length) throw new Error('resolved Slice Spec 不能包含未解决歧义');
-  if (value.status === 'waiting_for_answers' && !value.spec.ambiguities.length) throw new Error('等待回答的 Slice Spec 必须列出歧义');
+  assertDeliverySpecDecisionCoverage(value.spec);
+  const unresolvedDecisions = value.spec.decisions.filter((decision) => decision.status === 'needs_user_input');
+  if (value.status === 'resolved' && unresolvedDecisions.length) throw new Error('已收敛交付规格不能包含未解决决策');
+  if (value.status === 'waiting_for_answers' && !unresolvedDecisions.length) throw new Error('等待回答的交付规格必须列出待确认决策');
   const db = await databaseConnection();
   const task = fetchTask(db, value.taskId);
   if (!task || value.storyIndex > task.total_stories) throw new Error('交付单元不存在');
@@ -828,16 +829,18 @@ export async function saveStorySpec(input: unknown) {
       SELECT COUNT(*) AS count FROM questions
       WHERE task_id = ? AND story_index = ? AND status = 'pending'
     `).get(value.taskId, value.storyIndex) as { count: number }).count;
-    if (pending) throw new Error('仍有未回答的设计歧义，不能保存 resolved Slice Spec');
+    if (pending) throw new Error('仍有未回答的交付决策，不能保存已收敛交付规格');
     const answeredKeys = (db.prepare(`
       SELECT decision_key FROM questions
       WHERE task_id = ? AND story_index = ? AND status = 'answered' AND decision_key IS NOT NULL
     `).all(value.taskId, value.storyIndex) as { decision_key: string }[]).map((row) => row.decision_key);
-    const decisionKeys = new Set(value.spec.decisions.map((decision) => decision.key));
+    const decisionKeys = new Set(value.spec.decisions
+      .filter((decision) => decision.status === 'resolved')
+      .map((decision) => decision.key));
     const missingDecisions = answeredKeys.filter((key) => !decisionKeys.has(key));
     if (missingDecisions.length) {
       throw new AgentResultContractError(
-        `已回答问题的 decisionKey 是跨轮次稳定 ID，resolved Slice Spec 必须在 decisionTree 和 decisions 中原样复用，禁止改名或创建别名；缺少：${missingDecisions.join(', ')}`,
+        `已回答问题的 decisionKey 是跨轮次稳定 ID，已收敛交付规格必须在 decisions 中原样复用并关闭，禁止改名或创建别名；缺少：${missingDecisions.join(', ')}`,
       );
     }
   }
@@ -860,7 +863,7 @@ export async function saveStorySpec(input: unknown) {
         WHERE task_id = ? AND story_index = ? AND status = 'answered'
       `).run(value.taskId, value.storyIndex);
     }
-    addEvent(db, value.taskId, 'analyst-agent', 'SliceSpecSaved', `保存交付单元 ${value.storyIndex} 规格 v${revision}（${value.status}）。`);
+    addEvent(db, value.taskId, 'analyst-agent', 'DeliverySpecSaved', `保存交付单元 ${value.storyIndex} 的交付规格 v${revision}（${value.status}）。`);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
@@ -1215,7 +1218,7 @@ export async function submitClarificationAnswers(taskId: string) {
           ? '用户回答已提交，交回问题复现 Agent 重新复现并核对证据'
           : controlAgent === 'feedback-agent'
             ? '用户回答已提交，交回 Feedback Agent 继续当前反馈批次'
-          : '用户回答已提交，交回方案分析 Agent 重建完整规格',
+          : '用户回答已提交，交回交付分析 Agent 继续收敛交付规格',
       taskId,
     );
     if (analysisLevel) {
@@ -1258,7 +1261,7 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
     const pendingQuestions = lane.lane === 'analysis'
       ? (db.prepare("SELECT COUNT(*) AS count FROM questions WHERE task_id = ? AND status = 'pending'").get(taskId) as { count: number }).count
       : 0;
-    if (pendingQuestions) throw new Error('设计澄清必须通过提交回答恢复，不能用系统恢复命令绕过');
+    if (pendingQuestions) throw new Error('业务或交付决策必须通过提交回答恢复，不能用系统恢复命令绕过');
     if (lane.lane === 'delivery' && lane.current_agent === 'dev-agent') {
       const active = db.prepare(`${taskSelect} WHERE task_id != ?`).all(taskId) as Task[];
       const owner = active.find(occupiesCodeSlot);
@@ -1301,7 +1304,7 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
   }
   if (task.agile_status !== 'blocked') throw new Error('需求当前不在系统阻塞状态');
   const pendingQuestions = (db.prepare('SELECT COUNT(*) AS count FROM questions WHERE task_id = ? AND status = \'pending\'').get(taskId) as { count: number }).count;
-  if (pendingQuestions) throw new Error('设计澄清必须通过提交回答恢复，不能用系统恢复命令绕过');
+  if (pendingQuestions) throw new Error('业务或交付决策必须通过提交回答恢复，不能用系统恢复命令绕过');
   const resumeStatus = task.resume_status;
   if (!resumeStatus || resumeStatus === 'blocked') throw new Error('系统阻塞缺少可恢复状态');
   if (!task.current_subagent) throw new Error('系统阻塞缺少负责 Agent');
@@ -1386,7 +1389,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
     if (pending) throw new Error('仍有未回答的复现对齐问题，不能进入交付拆分');
   }
   if (changes.analysis_index !== undefined && changes.analysis_index > before.analysis_index && prospective.spec_resolved_index < changes.analysis_index) {
-    throw new Error(`交付单元 ${changes.analysis_index} 尚无已解决的 Slice Spec`);
+    throw new Error(`交付单元 ${changes.analysis_index} 尚无已收敛的交付规格`);
   }
   if (changes.analysis_index !== undefined && changes.analysis_index > before.analysis_index) {
     const resolvedSpec = db.prepare(`
@@ -1394,7 +1397,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
       WHERE task_id = ? AND story_index = ? AND status = 'resolved'
       LIMIT 1
     `).get(taskId, changes.analysis_index);
-    if (!resolvedSpec) throw new Error(`交付单元 ${changes.analysis_index} 缺少 resolved Slice Spec`);
+    if (!resolvedSpec) throw new Error(`交付单元 ${changes.analysis_index} 缺少已收敛的交付规格`);
   }
   if (changes.dev_index !== undefined && changes.dev_index > before.dev_index) {
     const resolvedSpec = db.prepare(`
@@ -1402,7 +1405,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
       WHERE task_id = ? AND story_index = ? AND status = 'resolved'
       LIMIT 1
     `).get(taskId, changes.dev_index);
-    if (!resolvedSpec) throw new Error(`交付单元 ${changes.dev_index} 缺少 resolved Slice Spec`);
+    if (!resolvedSpec) throw new Error(`交付单元 ${changes.dev_index} 缺少已收敛的交付规格`);
   }
   if (changes.agile_status === 'done' && before.closure_status !== 'acknowledged') throw new Error('当前版本的结卡报告尚未阅读');
   if (prospective.agile_status === 'in dev'
@@ -1779,7 +1782,7 @@ function laneLine(task: Task, lane: TaskLane, codeSlotAvailable: boolean, delive
   if (lane.lane === 'analysis') {
     if (lane.resume_pending && lane.current_agent) {
       const storyIndex = lane.current_story_index || Math.min(task.total_stories, task.analysis_index + 1);
-      return line('resume', lane.current_agent, storyIndex, 'none', '读取人工输入或恢复信息，并继续 Analysis Lane');
+      return line('resume', lane.current_agent, storyIndex, 'none', '读取人工输入或恢复信息，并继续交付分析通道');
     }
     if (task.analysis_index >= task.total_stories) return null;
     return line(
@@ -1794,7 +1797,7 @@ function laneLine(task: Task, lane: TaskLane, codeSlotAvailable: boolean, delive
   if (lane.resume_pending && lane.current_agent) {
     const storyIndex = lane.current_story_index || (lane.current_agent === 'test-agent' ? task.test_index + 1 : task.dev_index + 1);
     if (lane.current_agent === 'dev-agent' && !codeSlotAvailable) return null;
-    return line('resume', lane.current_agent, storyIndex, lane.current_agent === 'test-agent' ? 'browser' : 'none', '读取人工输入，并恢复 Delivery Lane');
+    return line('resume', lane.current_agent, storyIndex, lane.current_agent === 'test-agent' ? 'browser' : 'none', '读取人工输入，并恢复开发验证通道');
   }
   if (task.test_index < task.dev_index) return line('test', 'test-agent', task.test_index + 1, 'browser', `验证交付单元 ${task.test_index + 1}`);
   if (task.dev_index < task.analysis_index && codeSlotAvailable) return line('dev', 'dev-agent', task.dev_index + 1, 'none', `实现交付单元 ${task.dev_index + 1}`);

@@ -64,85 +64,65 @@ const feedbackResultSchema = z.discriminatedUnion('mode', [
   }),
 ]);
 
-const verificationStepBase = {
-  criterionId: z.string().min(1).max(120),
-  instruction: z.string().min(1).max(4000),
-};
-
 const decisionOptionSchema = z.object({
   id: z.string().min(1).max(100),
   label: z.string().min(1).max(240),
   consequences: z.array(z.string().min(1).max(1000)).min(1).max(20),
 });
 
-const decisionPointBase = {
+const deliveryDecisionBase = {
   key: z.string().min(1).max(240),
+  title: z.string().min(1).max(500),
+  type: z.enum(['business', 'technical']),
   question: z.string().min(1).max(4000),
   impact: z.string().min(1).max(4000),
-  options: z.array(decisionOptionSchema).min(2).max(20),
 };
 
-const decisionPointSchema = z.discriminatedUnion('status', [
+const deliveryDecisionSchema = z.discriminatedUnion('status', [
   z.object({
-    ...decisionPointBase,
-    status: z.literal('resolved_from_context'),
-    selectedOption: z.string().min(1).max(100),
-    source: z.enum(['code', 'user', 'convention']),
-    evidence: z.array(z.string().min(1).max(2000)).min(1).max(20),
+    ...deliveryDecisionBase,
+    status: z.literal('resolved'),
+    options: z.array(decisionOptionSchema).max(20).default([]),
+    selectedOption: z.string().min(1).max(100).optional(),
+    authority: z.enum(['upstream', 'user', 'project_evidence', 'agent_authority']),
+    decision: z.string().min(1).max(4000),
+    rationale: z.string().min(1).max(4000),
+    evidence: z.string().min(1).max(4000),
   }),
   z.object({
-    ...decisionPointBase,
+    ...deliveryDecisionBase,
     status: z.literal('needs_user_input'),
+    options: z.array(decisionOptionSchema).min(2).max(20),
+    authority: z.literal('needs_user_input'),
+    recommendationOption: z.string().min(1).max(100),
+    recommendationReason: z.string().min(1).max(4000),
   }),
 ]);
 
-export const sliceSpecSchema = z.preprocess(omitNullObjectProperties, z.object({
-  goal: z.string().min(1).max(4000),
-  scope: z.object({
-    included: z.array(z.string().min(1).max(2000)).min(1).max(100),
-    excluded: z.array(z.string().min(1).max(2000)).max(100).default([]),
-  }),
-  behaviors: z.array(z.object({
-    scenario: z.string().min(1).max(2000),
-    expected: z.string().min(1).max(4000),
-  })).min(1).max(100),
-  decisions: z.array(z.object({
-    key: z.string().min(1).max(240),
-    decision: z.string().min(1).max(4000),
-    rationale: z.string().min(1).max(4000),
-    source: z.enum(['code', 'user', 'convention', 'safe_default']),
-  })).max(200).default([]),
-  decisionTree: z.array(decisionPointSchema).max(200).default([]),
-  ambiguities: z.array(z.object({
-    key: z.string().min(1).max(240),
-    description: z.string().min(1).max(4000),
-  })).max(50).default([]),
-  acceptanceCriteria: z.array(z.object({
-    id: z.string().min(1).max(120),
-    description: z.string().min(1).max(4000),
-    oracle: z.string().min(1).max(4000),
-  })).min(1).max(100),
-  verificationPlan: z.array(z.discriminatedUnion('kind', [
-    z.object({
-      ...verificationStepBase,
-      kind: z.literal('command'),
-      command: z.string().min(1).max(2000),
-    }),
-    z.object({
-      ...verificationStepBase,
-      kind: z.literal('browser'),
-      command: z.string().min(1).max(2000).optional(),
-    }),
-    z.object({
-      ...verificationStepBase,
-      kind: z.literal('inspection'),
-      command: z.string().min(1).max(2000).optional(),
-    }),
-  ])).min(1).max(100),
-  dependencies: z.array(z.string().min(1).max(1000)).max(100).default([]),
-  changeBudget: z.object({
-    capabilities: z.array(z.string().min(1).max(500)).max(100).default([]),
-    paths: z.array(z.string().min(1).max(1000)).max(200).default([]),
+export const deliverySpecSchema = z.preprocess(omitNullObjectProperties, z.object({
+  unit: deliveryUnitContractSchema,
+  summary: z.string().min(1).max(10000),
+  impacts: z.array(z.object({
+    key: z.string().min(1).max(120),
+    area: z.string().min(1).max(1000),
+    finding: z.string().min(1).max(4000),
+    disposition: z.enum(['change', 'preserve', 'exclude', 'needs_decision']),
+    evidence: z.string().min(1).max(4000),
+    decisionKey: z.string().min(1).max(240).optional(),
+  })).min(1).max(200),
+  decisions: z.array(deliveryDecisionSchema).max(200).default([]),
+  handoff: z.object({
+    implementationGuidance: z.string().min(1).max(10000),
+    guardrails: z.array(z.object({
+      key: z.string().min(1).max(120),
+      content: z.string().min(1).max(4000),
+      rationale: z.string().min(1).max(4000),
+    })).max(100).default([]),
+    verificationFocus: z.array(z.object({
+      key: z.string().min(1).max(120),
+      expected: z.string().min(1).max(4000),
+      oracle: z.string().min(1).max(4000),
+    })).max(100).default([]),
   }),
 }));
 
@@ -156,7 +136,7 @@ export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object
   route: z.enum(['plan', 'repro']).optional(),
   reproVerdict: z.enum(['reproduced', 'not_reproduced']).optional(),
   deliveryUnits: z.array(deliveryUnitContractSchema).max(50).optional(),
-  spec: sliceSpecSchema.optional(),
+  spec: deliverySpecSchema.optional(),
   // Read-only compatibility for results queued before the terminology change.
   stories: z.array(deliveryUnitContractSchema).max(50).optional(),
   verdict: z.enum(['passed', 'failed', 'report_ready', 'ready_for_approval', 'changes_requested']).optional(),
@@ -194,7 +174,7 @@ export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object
 });
 
 export type AgentResult = z.infer<typeof agentResultSchema>;
-export type SliceSpec = z.infer<typeof sliceSpecSchema>;
+export type DeliverySpec = z.infer<typeof deliverySpecSchema>;
 
 export class AgentResultContractError extends Error {
   constructor(message: string) {
@@ -208,48 +188,70 @@ function duplicateKeys(keys: string[]) {
   return [...new Set(keys.filter((key) => seen.has(key) || !seen.add(key)))];
 }
 
-export function assertSliceSpecDecisionCoverage(spec: SliceSpec, questions?: AgentResult['questions']) {
-  if (!spec.decisionTree.length) throw new Error('Slice Spec 必须包含完整 decisionTree，不能省略关键设计决策覆盖');
-
-  const treeKeys = spec.decisionTree.map((point) => point.key);
+export function assertDeliverySpecDecisionCoverage(spec: DeliverySpec, questions?: AgentResult['questions']) {
+  const sourceKeys = spec.unit.sourceRefs.map((source) => source.key);
+  const duplicateSourceKeys = duplicateKeys(sourceKeys);
+  if (duplicateSourceKeys.length) throw new Error(`交付规格的 source key 不能重复：${duplicateSourceKeys.join(', ')}`);
+  const duplicateImpactKeys = duplicateKeys(spec.impacts.map((impact) => impact.key));
+  if (duplicateImpactKeys.length) throw new Error(`交付规格的 impact key 不能重复：${duplicateImpactKeys.join(', ')}`);
+  const duplicateGuardrailKeys = duplicateKeys(spec.handoff.guardrails.map((guardrail) => guardrail.key));
+  if (duplicateGuardrailKeys.length) throw new Error(`交付规格的 guardrail key 不能重复：${duplicateGuardrailKeys.join(', ')}`);
+  const duplicateFocusKeys = duplicateKeys(spec.handoff.verificationFocus.map((focus) => focus.key));
+  if (duplicateFocusKeys.length) throw new Error(`交付规格的 verification focus key 不能重复：${duplicateFocusKeys.join(', ')}`);
+  if (spec.handoff.verificationFocus.some((focus) => focus.key === 'unit-acceptance')) {
+    throw new Error('unit-acceptance 是系统保留的交付单元验收 key');
+  }
   const decisionKeys = spec.decisions.map((decision) => decision.key);
-  const ambiguityKeys = spec.ambiguities.map((ambiguity) => ambiguity.key);
-  const repeated = [...new Set([
-    ...duplicateKeys(treeKeys),
-    ...duplicateKeys(decisionKeys),
-    ...duplicateKeys(ambiguityKeys),
-  ])];
-  if (repeated.length) throw new Error(`Slice Spec 决策键不能重复：${repeated.join(', ')}`);
+  const repeated = duplicateKeys(decisionKeys);
+  if (repeated.length) throw new Error(`交付规格的 decision key 不能重复：${repeated.join(', ')}`);
 
-  const treeKeySet = new Set(treeKeys);
-  const unresolvedKeySet = new Set(spec.decisionTree
-    .filter((point) => point.status === 'needs_user_input')
-    .map((point) => point.key));
-  const unknownDecisionKeys = decisionKeys.filter((key) => !treeKeySet.has(key));
-  if (unknownDecisionKeys.length) throw new Error(`decisions 引用了 decisionTree 中不存在的决策：${unknownDecisionKeys.join(', ')}`);
-  const unknownAmbiguityKeys = ambiguityKeys.filter((key) => !unresolvedKeySet.has(key));
-  if (unknownAmbiguityKeys.length) throw new Error(`ambiguities 引用了非待确认决策：${unknownAmbiguityKeys.join(', ')}`);
-
-  for (const point of spec.decisionTree) {
-    const optionIds = point.options.map((option) => option.id);
+  const decisionKeySet = new Set(decisionKeys);
+  const unresolvedKeySet = new Set(spec.decisions
+    .filter((decision) => decision.status === 'needs_user_input')
+    .map((decision) => decision.key));
+  for (const decision of spec.decisions) {
+    const optionIds = decision.options.map((option) => option.id);
     const duplicateOptions = duplicateKeys(optionIds);
-    if (duplicateOptions.length) throw new Error(`决策 ${point.key} 的选项 id 不能重复：${duplicateOptions.join(', ')}`);
-    if (point.status === 'resolved_from_context' && !optionIds.includes(point.selectedOption)) {
-      throw new Error(`决策 ${point.key} 的 selectedOption 不在候选选项中`);
+    if (duplicateOptions.length) throw new Error(`决策 ${decision.key} 的选项 id 不能重复：${duplicateOptions.join(', ')}`);
+    if (decision.status === 'resolved' && decision.selectedOption && !optionIds.includes(decision.selectedOption)) {
+      throw new Error(`决策 ${decision.key} 的 selectedOption 不在候选选项中`);
+    }
+    if (decision.status === 'resolved' && optionIds.length && !decision.selectedOption) {
+      throw new Error(`决策 ${decision.key} 已记录候选选项但缺少 selectedOption`);
+    }
+    if (decision.status === 'needs_user_input' && !optionIds.includes(decision.recommendationOption)) {
+      throw new Error(`决策 ${decision.key} 的 recommendationOption 不在候选选项中`);
+    }
+  }
+
+  for (const impact of spec.impacts) {
+    if (impact.decisionKey && !decisionKeySet.has(impact.decisionKey)) {
+      throw new Error(`影响 ${impact.key} 引用了不存在的决策：${impact.decisionKey}`);
+    }
+    if (impact.disposition === 'needs_decision' && !impact.decisionKey) {
+      throw new Error(`待决策影响 ${impact.key} 必须关联 decisionKey`);
+    }
+    if (impact.disposition === 'needs_decision' && impact.decisionKey && !unresolvedKeySet.has(impact.decisionKey)) {
+      throw new Error(`待决策影响 ${impact.key} 必须关联尚未解决的决策`);
     }
   }
 
   if (questions === undefined) return;
   const missingQuestionKeys = questions.filter((question) => !question.decisionKey);
-  if (missingQuestionKeys.length) throw new Error('方案分析 Agent 的每个问题都必须包含 decisionKey');
+  if (missingQuestionKeys.length) throw new Error('交付分析 Agent 的每个问题都必须包含 decisionKey');
   const questionKeys = questions.map((question) => question.decisionKey!);
   const invalidQuestionKeys = questionKeys.filter((key) => !unresolvedKeySet.has(key));
   if (invalidQuestionKeys.length) throw new Error(`questions 引用了非待确认决策：${invalidQuestionKeys.join(', ')}`);
+  const questionKeySet = new Set(questionKeys);
+  const missingQuestions = [...unresolvedKeySet].filter((key) => !questionKeySet.has(key));
+  if (missingQuestions.length) {
+    throw new Error(`待确认决策缺少对应问题：${missingQuestions.join(', ')}`);
+  }
   for (const question of questions) {
-    const point = spec.decisionTree.find((item) => item.key === question.decisionKey);
-    if (!point) continue;
-    const treeOptionIds = new Set(point.options.map((option) => option.id));
-    const unknownOptions = question.alternatives.filter((option) => !treeOptionIds.has(option.id));
+    const decision = spec.decisions.find((item) => item.key === question.decisionKey);
+    if (!decision) continue;
+    const optionIds = new Set(decision.options.map((option) => option.id));
+    const unknownOptions = question.alternatives.filter((option) => !optionIds.has(option.id));
     if (unknownOptions.length) throw new Error(`问题 ${question.decisionKey} 引用了不存在的选项`);
   }
 }
@@ -269,12 +271,12 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
     throw new Error('repro-agent 未复现时必须通过 questions 请求人工对齐，不能使用 runtimeInputs');
   }
   if (result.questions.length && !canAskAlignmentQuestions) {
-    throw new Error(`${agent} 不允许创建设计澄清问题；运行所需信息请使用 runtimeInputs`);
+    throw new Error(`${agent} 不允许创建业务或交付决策问题；运行所需信息请使用 runtimeInputs`);
   }
   if (canAskAlignmentQuestions && result.questions.length && result.outcome !== 'needs_input') {
-    throw new Error(`${agent} 创建设计澄清问题时 outcome 必须为 needs_input`);
+    throw new Error(`${agent} 创建业务或交付决策问题时 outcome 必须为 needs_input`);
   }
-  if (result.questions.length && result.runtimeInputs.length) throw new Error('同一次结果不能混合设计澄清问题和运行信息请求');
+  if (result.questions.length && result.runtimeInputs.length) throw new Error('同一次结果不能混合业务/交付决策问题和运行信息请求');
   if (result.runtimeInputs.length) {
     if (result.outcome !== 'needs_input') throw new Error('包含 runtimeInputs 时 outcome 必须为 needs_input');
     return;
@@ -285,7 +287,7 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
     }
   }
   if (agent === 'analyst-agent' && result.outcome === 'needs_input' && !result.questions.length) {
-    throw new Error('方案分析 Agent 返回 needs_input 时必须提供与未决决策一一对应的 questions');
+    throw new Error('交付分析 Agent 返回 needs_input 时必须提供与未决决策一一对应的 questions');
   }
   if (result.outcome !== 'completed' && !(canAskAlignmentQuestions && result.questions.length)) return;
 
@@ -299,8 +301,8 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
       break;
     case 'analyst-agent':
       if (!result.artifact) throw new Error('analyst-agent 结果缺少 artifact');
-      if (!result.spec) throw new Error('方案分析 Agent 结果缺少结构化 Slice Spec');
-      assertSliceSpecDecisionCoverage(result.spec, result.questions);
+      if (!result.spec) throw new Error('交付分析 Agent 结果缺少结构化交付规格');
+      assertDeliverySpecDecisionCoverage(result.spec, result.questions);
       break;
     case 'repro-agent':
       if (!result.artifact) throw new Error('repro-agent 结果缺少 artifact');

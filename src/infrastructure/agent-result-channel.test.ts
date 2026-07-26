@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 import { agentResultChannelEnv, createAgentResultChannel, readAgentResultChannel, removeAgentResultChannel } from './agent-result-channel';
 
 test('submits one Agent result through the execution-scoped CLI channel', (t) => {
@@ -112,38 +113,42 @@ test('returns the full contract error to the Agent and accepts a corrected resub
   });
   const result = {
     outcome: 'completed',
-    summary: 'A complete Slice Spec is ready.',
+    summary: 'A complete delivery specification is ready.',
     artifact: { title: 'Analysis', content: 'Complete analysis.' },
-    spec: {
-      goal: 'Define one objectively verifiable behavior.',
-      scope: { included: ['One behavior'], excluded: [] },
-      behaviors: [{ scenario: 'The behavior runs', expected: 'The expected result is visible' }],
-      decisions: [{ key: 'state-shape', decision: 'Keep the existing state shape', rationale: 'The current public contract proves it', source: 'code' }],
-      decisionTree: [{
+    spec: deliverySpecFixture({
+      decisions: [{
         key: 'state-shape',
+        type: 'technical',
+        title: 'Public state shape',
         question: 'Should the existing public state shape change?',
         impact: 'A change would affect compatibility.',
         options: [
           { id: 'keep', label: 'Keep it', consequences: ['Preserves compatibility'] },
           { id: 'change', label: 'Change it', consequences: ['Requires compatibility work'] },
         ],
-        status: 'resolved_from_context',
+        status: 'resolved',
         selectedOption: 'keep',
-        source: 'code',
-        evidence: ['The current public interface defines the existing state shape.'],
+        authority: 'project_evidence',
+        decision: 'Keep the existing state shape',
+        rationale: 'The current public contract proves it',
+        evidence: 'The current public interface defines the existing state shape.',
       }],
-      ambiguities: [],
-      acceptanceCriteria: [
-        { id: 'AC-1', description: 'The state can be inspected', oracle: 'Inspect the state' },
-        { id: 'AC-2', description: 'The runtime command succeeds', oracle: 'Run node --version' },
-      ],
-      verificationPlan: [
-        { criterionId: 'AC-1', kind: 'inspection', instruction: 'Inspect the state', command: null },
-        { criterionId: 'AC-2', kind: 'command', instruction: 'Check the runtime', command: null },
-      ],
-      dependencies: [],
-      changeBudget: { capabilities: [], paths: [] },
-    },
+      unit: {
+        ...deliverySpecFixture().unit,
+        sourceRefs: [
+          { key: 'acceptance:inspect', kind: 'acceptance', content: 'State is inspectable', sourceRef: 'TEST:inspect' },
+          { key: 'acceptance:runtime', kind: 'acceptance', content: 'Runtime command succeeds', sourceRef: 'TEST:runtime' },
+        ],
+      },
+      handoff: {
+        implementationGuidance: 'Preserve the public state shape.',
+        guardrails: [],
+        verificationFocus: [
+          { key: 'AC-1', expected: 'The state can be inspected', oracle: 'Inspect the state' },
+          { key: 'AC-2', expected: 'The runtime command succeeds', oracle: '' },
+        ],
+      },
+    } as never),
   };
   writeFileSync(input, JSON.stringify(result));
   const environment = { ...process.env, ...agentResultChannelEnv(channel, 'analyst-agent') };
@@ -153,12 +158,12 @@ test('returns the full contract error to the Agent and accepts a corrected resub
     env: environment,
   });
   assert.notEqual(rejected.status, 0);
-  assert.match(rejected.stderr, /verificationPlan/);
-  assert.match(rejected.stderr, /command/);
+  assert.match(rejected.stderr, /verificationFocus/);
+  assert.match(rejected.stderr, /oracle/);
   assert.equal(readAgentResultChannel(channel), null);
   assert.equal(existsSync(input), true);
 
-  (result.spec.verificationPlan[1] as { command: string | null }).command = 'node --version';
+  result.spec.handoff.verificationFocus[1].oracle = 'Run node --version';
   writeFileSync(input, JSON.stringify(result));
   const accepted = execFileSync(process.execPath, [join(process.cwd(), 'scripts', 'loop', 'submit-agent-result.mjs'), '--input', input, '--consume'], {
     cwd: process.cwd(),
@@ -168,6 +173,6 @@ test('returns the full contract error to the Agent and accepts a corrected resub
   assert.match(accepted, /submitted successfully/);
   assert.equal(existsSync(input), false);
   const submitted = JSON.parse(readAgentResultChannel(channel)!);
-  assert.equal('command' in submitted.spec.verificationPlan[0], false);
-  assert.equal(submitted.spec.verificationPlan[1].command, 'node --version');
+  assert.equal(submitted.spec.handoff.verificationFocus[0].oracle, 'Inspect the state');
+  assert.equal(submitted.spec.handoff.verificationFocus[1].oracle, 'Run node --version');
 });

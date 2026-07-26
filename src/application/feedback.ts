@@ -635,7 +635,7 @@ export async function applyFeedbackSplitResult(input: {
       WHERE task_id = ?
     `).run(
       lastIndex,
-      `反馈新增 ${inserted.length} 个交付单元，等待方案分析`,
+      `反馈新增 ${inserted.length} 个交付单元，等待交付分析`,
       input.taskId,
     );
     db.prepare(`

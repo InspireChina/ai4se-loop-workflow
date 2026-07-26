@@ -14,7 +14,7 @@ function resumedDevTask(): TaskState {
 }
 
 test('does not dispatch lane agents from the legacy task-level resume owner', () => {
-  assert.throws(() => assertState(resumedDevTask()), /恢复所有权必须保存在对应 Lane/);
+  assert.throws(() => assertState(resumedDevTask()), /恢复所有权必须保存在对应通道/);
   assert.equal(nextDelegation(resumedDevTask(), false), null);
   assert.equal(nextDelegation(resumedDevTask(), true), null);
 });

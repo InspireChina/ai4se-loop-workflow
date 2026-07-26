@@ -585,9 +585,42 @@ test('exposes only the new business-context protocol and rejects every legacy co
   assert.match(help, /requirement-context intent set/);
   assert.match(help, /requirement-context assertion upsert/);
   assert.match(help, /requirement-context impact upsert/);
+  assert.match(help, /正常完成：status → intent\/assertions\/change\/impacts\/acceptance\/classification/);
+  assert.match(help, /help assertion/);
+  assert.match(help, /help question/);
   assert.doesNotMatch(help, /requirement-context goal set/);
   assert.doesNotMatch(help, /requirement-context outcome set/);
   assert.doesNotMatch(help, /requirement-context fact /);
+
+  const assertionHelp = await command(active.executionId, active.token!, ['help', 'assertion']);
+  assert.match(assertionHelp, /Actual、Expected、Target 各至少需要一条/);
+  assert.match(assertionHelp, /observed\s+通过运行/);
+  assert.match(assertionHelp, /dismiss.*supersede/s);
+  assert.match(assertionHelp, /使用 supersede 前.*先创建同类型、不同 key 的 active 新结论/s);
+
+  const impactHelp = await command(active.executionId, active.token!, ['help', 'impact']);
+  assert.match(impactHelp, /needs_decision\s+是否改变属于新的业务选择/);
+  assert.match(impactHelp, /technical\s+已识别的技术后果/);
+
+  const questionHelp = await command(active.executionId, active.token!, ['help', 'question']);
+  assert.match(questionHelp, /至少两次 option-add/);
+  assert.match(questionHelp, /普通问题本身不要求 assertion 或 impact 反向引用/);
+  assert.match(questionHelp, /逐字复用原 decision key/);
+
+  const scopeHelp = await command(active.executionId, active.token!, ['help', 'scope']);
+  assert.match(scopeHelp, /bug\s+Actual 偏离已有明确 Expected/);
+  assert.match(scopeHelp, /约束与范围.*可选边界/s);
+
+  const finishHelp = await command(active.executionId, active.token!, ['help', 'finish']);
+  assert.match(finishHelp, /可靠的 Actual\/Expected\/Target/);
+  assert.match(finishHelp, /requirement-context request-clarification/);
+  assert.match(finishHelp, /澄清最低必填/);
+  assert.match(finishHelp, /只有 complete 执行包含分类在内的最终完成校验/);
+
+  await assert.rejects(
+    command(active.executionId, active.token!, ['help', 'unknown']),
+    /可用主题：context、assertion、impact、question、scope、finish/,
+  );
   await command(active.executionId, active.token!, ['requirement-context', 'status']);
   for (const args of [
     ['requirement-context', 'goal', 'set', '--text', 'legacy'],
@@ -662,6 +695,50 @@ test('exposes the same execution-scoped protocol through the cross-platform Node
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test('story splitter help explains business units, source coverage, dependencies, and revisions', async () => {
+  const { taskId, delegation } = await taskReadyForSplit('交付规划命令帮助');
+  const active = await beginDelegation(delegation, `${taskId}-delivery-plan-help`);
+
+  const help = await command(active.executionId, active.token!, ['help']);
+  assert.match(help, /可独立验收的业务闭环/);
+  assert.match(help, /help unit/);
+  assert.match(help, /help source/);
+  assert.match(help, /同一语义修正：原 key upsert/);
+  assert.doesNotMatch(help, /requirement-context intent set/);
+
+  const unitHelp = await command(active.executionId, active.token!, ['help', 'unit']);
+  assert.match(unitHelp, /不能按数据库、API、页面或测试等技术层拆分/);
+  assert.match(unitHelp, /至少承接一项 change 或 acceptance/);
+
+  const sourceHelp = await command(active.executionId, active.token!, ['help', 'source']);
+  assert.match(sourceHelp, /Agent 不能创建或改写来源/);
+  assert.match(sourceHelp, /preserve\s+相关单元必须继承的不变约束/);
+  assert.match(sourceHelp, /所有冻结输入都必须被至少一个有效单元承接/);
+  assert.match(sourceHelp, /不会自动迁移来源关联/);
+
+  const dependencyHelp = await command(active.executionId, active.token!, ['help', 'dependency']);
+  assert.match(dependencyHelp, /不能为了执行顺序被强行串联/);
+  assert.match(dependencyHelp, /当前草稿中的 active 单元/);
+  assert.match(dependencyHelp, /既有历史单元不能作为 --on/);
+  assert.match(dependencyHelp, /多个有效单元时必须填写排序与依赖说明/);
+
+  const revisionHelp = await command(active.executionId, active.token!, ['help', 'revision']);
+  assert.match(revisionHelp, /补充或纠正同一个业务闭环时使用相同 key/);
+  assert.match(revisionHelp, /不能重新激活/);
+  assert.match(revisionHelp, /不会自动迁移来源、顺序或依赖/);
+
+  const finishHelp = await command(active.executionId, active.token!, ['help', 'finish']);
+  assert.match(finishHelp, /1 至 50 个有效交付单元/);
+  assert.match(finishHelp, /交付规划 Agent 不向用户提问/);
+  assert.match(finishHelp, /validate 与 complete 使用同一套结构校验/);
+  assert.match(finishHelp, /delivery-plan complete/);
+
+  await assert.rejects(
+    command(active.executionId, active.token!, ['help', 'unknown']),
+    /可用主题：context、unit、source、dependency、revision、finish/,
+  );
 });
 
 test('story splitter progressively restores, validates and submits an ordered delivery plan', async () => {

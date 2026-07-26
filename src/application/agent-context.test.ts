@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 import type { DelegationEnvelope } from './tasks';
 
 function delegation(taskId: string, overrides: Partial<DelegationEnvelope> = {}): DelegationEnvelope {
@@ -90,11 +91,21 @@ test('builds a compact execution snapshot while preserving full context for just
   db.prepare(`
     INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json)
     VALUES('SPEC-context-unit-1', ?, 1, 1, 'resolved', ?)
-  `).run(taskId, JSON.stringify({ goal: 'Implement the current unit', acceptanceCriteria: [{ id: 'AC-1', description: 'Works' }] }));
+  `).run(taskId, JSON.stringify(deliverySpecFixture()));
   db.prepare(`
     INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json)
     VALUES('SPEC-context-unit-2', ?, 2, 1, 'resolved', ?)
-  `).run(taskId, JSON.stringify({ goal: 'Implement the future unit', acceptanceCriteria: [{ id: 'AC-2', description: 'Works later' }] }));
+  `).run(taskId, JSON.stringify(deliverySpecFixture({
+    handoff: {
+      implementationGuidance: 'Preserve the future behavior.',
+      guardrails: [],
+      verificationFocus: [{
+        key: 'AC-2',
+        expected: 'Works later',
+        oracle: 'Future assertion passes',
+      }],
+    },
+  })));
   const questionId = await addQuestion({
     taskId, storyIndex: 1, actor: 'analyst-agent', kind: 'analysis', title: 'Retry policy',
     question: 'Which configuration should retry use?', decisionKey: 'retry-policy',
@@ -143,6 +154,302 @@ test('builds a compact execution snapshot while preserving full context for just
   const stored = await getExecutionAgentContextSnapshot(started.attempt.execution_id);
   assert.equal(stored.snapshotId, snapshot.snapshotId);
   assert.match(renderAgentContextResource(stored, `DOC:${currentDocumentId}`), /FULL-CONTEXT-TAIL/);
+});
+
+test('hard-isolates Test context from Dev narratives while preserving the frozen verification contract', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { beginExecutionAttempt } = await import('./executions');
+  const {
+    createOrReopenRecoveryItem,
+    listRecoveryItemsForStage,
+    recordRecoveryClaims,
+  } = await import('./recovery-items');
+  const {
+    addRuntimeInputRequest,
+    createTask,
+    getTaskContext,
+    saveDeliverySpec,
+    upsertDocument,
+  } = await import('./tasks');
+  const {
+    agentContextProtocol,
+    buildAgentContextSnapshot,
+    renderAgentContextEvidence,
+    renderAgentContextList,
+    renderAgentContextOverview,
+    renderAgentContextResource,
+    renderAgentContextSearch,
+  } = await import('./agent-context');
+  const db = await databaseConnection();
+  const taskId = await createTask({
+    title: 'Independent verification context',
+    description: 'Verify one frozen delivery contract without Dev narration.',
+  });
+  db.prepare(`
+    INSERT INTO stories(task_id, story_index, title, directory)
+    VALUES(?, 1, 'Independent verification unit', 'unit-001')
+  `).run(taskId);
+  db.prepare(`
+    UPDATE tasks
+    SET agile_status = 'in dev', current_subagent = 'test-agent',
+        total_stories = 1, analysis_index = 1, spec_resolved_index = 1,
+        dev_index = 1, test_index = 0
+    WHERE task_id = ?
+  `).run(taskId);
+  await saveDeliverySpec({
+    taskId,
+    storyIndex: 1,
+    status: 'resolved',
+    spec: deliverySpecFixture({
+      summary: 'BUSINESS-CONTRACT-SENTINEL',
+      impacts: [{
+        key: 'visible-impact',
+        area: 'Visible business behavior',
+        finding: 'BUSINESS-IMPACT-SENTINEL',
+        disposition: 'change',
+        evidence: 'Confirmed by the frozen Analyst contract.',
+      }],
+      decisions: [{
+        key: 'visible-decision',
+        title: 'Visible decision',
+        type: 'business',
+        question: 'Which behavior is authoritative?',
+        impact: 'The observable result changes.',
+        status: 'resolved',
+        options: [],
+        authority: 'project_evidence',
+        decision: 'BUSINESS-DECISION-SENTINEL',
+        rationale: 'The project contract is explicit.',
+        evidence: 'Frozen Analyst evidence.',
+      }],
+      handoff: {
+        implementationGuidance: 'IMPL-GUIDANCE-SENTINEL',
+        guardrails: [{
+          key: 'visible-guardrail',
+          content: 'GUARDRAIL-SENTINEL',
+          rationale: 'Preserve the adjacent behavior.',
+        }],
+        verificationFocus: [{
+          key: 'visible-focus',
+          expected: 'FOCUS-EXPECTED-SENTINEL',
+          oracle: 'FOCUS-ORACLE-SENTINEL',
+        }],
+      },
+    }),
+  });
+  db.prepare(`
+    INSERT INTO story_specs(
+      spec_id, task_id, story_index, revision, status, spec_json
+    ) VALUES(?, ?, 1, 2, 'draft', ?)
+  `).run(
+    `SPEC-unresolved-${taskId}`,
+    taskId,
+    JSON.stringify(deliverySpecFixture({
+      summary: 'PENDING-SPEC-SENTINEL',
+      handoff: {
+        implementationGuidance: 'PENDING-IMPL-GUIDANCE-SENTINEL',
+        guardrails: [],
+        verificationFocus: [],
+      },
+    })),
+  );
+  const analysisDocumentId = await upsertDocument({
+    taskId,
+    storyIndex: 1,
+    kind: 'analysis',
+    title: 'Analyst rendering with implementation direction',
+    content: 'ANALYSIS-DOC-SENTINEL IMPL-GUIDANCE-SENTINEL',
+    actor: 'analyst-agent',
+  });
+  const devDocumentId = await upsertDocument({
+    taskId,
+    storyIndex: 1,
+    kind: 'dev_note',
+    title: 'Dev implementation result',
+    content: 'DEV-NOTE-SENTINEL',
+    actor: 'dev-agent',
+  });
+  const testDocumentId = await upsertDocument({
+    taskId,
+    storyIndex: 1,
+    kind: 'test_result',
+    title: 'Prior independent verification',
+    content: 'TEST-RESULT-SENTINEL',
+    actor: 'test-agent',
+  });
+  await addRuntimeInputRequest({
+    taskId,
+    storyIndex: 1,
+    sourceAgent: 'dev-agent',
+    title: 'Dev-only runtime input',
+    question: 'DEV-RUNTIME-SENTINEL',
+  });
+  await addRuntimeInputRequest({
+    taskId,
+    storyIndex: 1,
+    sourceAgent: 'test-agent',
+    title: 'Test runtime input',
+    question: 'TEST-RUNTIME-SENTINEL',
+  });
+  const recovery = await createOrReopenRecoveryItem({
+    taskId,
+    storyIndex: 1,
+    kind: 'test_failure',
+    sourceAgent: 'test-agent',
+    targetStage: 'dev',
+    summary: 'ORIGINAL-FAILURE-SUMMARY-SENTINEL',
+    details: {
+      expected: 'ORIGINAL-FAILURE-EXPECTED-SENTINEL',
+      actual: 'ORIGINAL-FAILURE-ACTUAL-SENTINEL',
+    },
+    sourceExecutionId: `EXEC-original-test-${taskId}`,
+  });
+  await recordRecoveryClaims({
+    taskId,
+    storyIndex: 1,
+    agent: 'dev-agent',
+    executionId: `EXEC-dev-claim-${taskId}`,
+    claims: [{
+      recoveryId: recovery.recovery_id,
+      summary: 'DEV-RECOVERY-CLAIM-SENTINEL',
+      evidence: ['DEV-RECOVERY-EVIDENCE-SENTINEL'],
+    }],
+  });
+
+  const devAttempt = await beginExecutionAttempt({
+    runId: `RUN-dev-context-${taskId}`,
+    delegation: delegation(taskId, {
+      agent: 'dev-agent',
+      pipeline: 'dev',
+      currentSubagent: 'dev-agent',
+    }),
+    prompt: 'Dev context sentinel',
+    baseCommit: 'DEV-BASE-COMMIT-SENTINEL',
+  });
+  db.prepare(`
+    UPDATE execution_attempts
+    SET status = 'applied', result_json = ?, code_commit = ?,
+        finished_at = CURRENT_TIMESTAMP
+    WHERE execution_id = ?
+  `).run(
+    JSON.stringify({ outcome: 'completed', summary: 'DEV-EXEC-SENTINEL' }),
+    'DEV-CODE-COMMIT-SENTINEL',
+    devAttempt.attempt.execution_id,
+  );
+  const testAttempt = await beginExecutionAttempt({
+    runId: `RUN-test-context-${taskId}`,
+    delegation: delegation(taskId, {
+      agent: 'test-agent',
+      pipeline: 'test',
+      resource: 'browser',
+      currentSubagent: 'test-agent',
+      devIndex: 1,
+    }),
+    prompt: 'Test context sentinel',
+    baseCommit: 'TEST-BASE-COMMIT-SENTINEL',
+  });
+  db.prepare(`
+    UPDATE execution_attempts
+    SET status = 'applied', result_json = ?, finished_at = CURRENT_TIMESTAMP
+    WHERE execution_id = ?
+  `).run(
+    JSON.stringify({ outcome: 'completed', summary: 'TEST-EXEC-SENTINEL' }),
+    testAttempt.attempt.execution_id,
+  );
+
+  const full = await getTaskContext(taskId);
+  const activeRecovery = await listRecoveryItemsForStage({
+    taskId,
+    storyIndex: 1,
+    stage: 'test',
+  });
+  const snapshot = buildAgentContextSnapshot({
+    delegation: delegation(taskId, {
+      agent: 'test-agent',
+      pipeline: 'test',
+      resource: 'browser',
+      currentSubagent: 'test-agent',
+      devIndex: 1,
+    }),
+    full,
+    activeFeedback: [],
+    activeRecovery,
+    repositoryBaseCommit: 'TEST-CURRENT-HEAD-SENTINEL',
+  });
+
+  assert.equal(agentContextProtocol, 'loop-agent-context/v2');
+  assert.equal(snapshot.protocol, 'loop-agent-context/v2');
+  const serialized = JSON.stringify(snapshot);
+  for (const hidden of [
+    'ANALYSIS-DOC-SENTINEL',
+    'IMPL-GUIDANCE-SENTINEL',
+    'DEV-NOTE-SENTINEL',
+    'DEV-RUNTIME-SENTINEL',
+    'DEV-EXEC-SENTINEL',
+    'DEV-BASE-COMMIT-SENTINEL',
+    'DEV-CODE-COMMIT-SENTINEL',
+    'DEV-RECOVERY-CLAIM-SENTINEL',
+    'DEV-RECOVERY-EVIDENCE-SENTINEL',
+    'PENDING-SPEC-SENTINEL',
+    'PENDING-IMPL-GUIDANCE-SENTINEL',
+  ]) {
+    assert.doesNotMatch(serialized, new RegExp(hidden));
+    assert.equal(
+      renderAgentContextSearch(snapshot, hidden),
+      `No context resources matched: ${hidden}`,
+    );
+  }
+  for (const visible of [
+    'BUSINESS-CONTRACT-SENTINEL',
+    'BUSINESS-IMPACT-SENTINEL',
+    'BUSINESS-DECISION-SENTINEL',
+    'GUARDRAIL-SENTINEL',
+    'FOCUS-EXPECTED-SENTINEL',
+    'FOCUS-ORACLE-SENTINEL',
+    'ORIGINAL-FAILURE-SUMMARY-SENTINEL',
+    'ORIGINAL-FAILURE-EXPECTED-SENTINEL',
+    'ORIGINAL-FAILURE-ACTUAL-SENTINEL',
+    'TEST-RUNTIME-SENTINEL',
+    'TEST-EXEC-SENTINEL',
+    'TEST-RESULT-SENTINEL',
+  ]) {
+    assert.match(serialized, new RegExp(visible));
+  }
+  assert.deepEqual(
+    snapshot.recentExecutionEvidence.map((item) => (item as { agent: string }).agent),
+    ['test-agent'],
+  );
+  assert.equal(snapshot.resources.some((resource) => resource.ref === `DOC:${analysisDocumentId}`), false);
+  assert.equal(snapshot.resources.some((resource) => resource.ref === `DOC:${devDocumentId}`), false);
+  assert.equal(snapshot.resources.some((resource) => resource.ref === `DOC:${testDocumentId}`), true);
+  assert.throws(
+    () => renderAgentContextResource(snapshot, `DOC:${devDocumentId}`),
+    /Context reference not found/,
+  );
+  assert.doesNotMatch(renderAgentContextList(snapshot), /dev_note|DEV-NOTE-SENTINEL/);
+  assert.doesNotMatch(renderAgentContextEvidence(snapshot, 'dev'), /DEV-/);
+  assert.doesNotMatch(renderAgentContextOverview(snapshot), /DEV-/);
+  assert.equal(
+    snapshot.requiredContextRefs.every((ref) =>
+      snapshot.resources.some((resource) => resource.ref === ref)),
+    true,
+  );
+  const projectedSpec = snapshot.authoritativeFacts.currentDeliverySpec as {
+    spec: { handoff: Record<string, unknown> };
+  };
+  assert.equal('implementationGuidance' in projectedSpec.spec.handoff, false);
+  assert.deepEqual(
+    snapshot.activeObligations.recovery.map((item) => 'resolution' in (item as object)),
+    [false],
+  );
+  assert.deepEqual(
+    snapshot.activeObligations.recovery.map((item) => (item as { status: string }).status),
+    ['pending_verification'],
+  );
+  assert.equal(
+    snapshot.resources.find((resource) => resource.ref === `RECOVERY:${recovery.recovery_id}`)?.status,
+    'pending_verification',
+  );
 });
 
 test('prioritizes the latest forward feedback group while keeping old documents as historical execution context', async () => {

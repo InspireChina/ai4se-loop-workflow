@@ -16,7 +16,7 @@ import {
   getTask,
   rewindTask,
   resolveRuntimeInputs,
-  saveStorySpec,
+  saveDeliverySpec,
   setTaskLaneState,
   updateTask,
   upsertDocument,
@@ -310,12 +310,12 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     || delegation.agent === 'repro-agent'
     || delegation.agent === 'feedback-agent';
   if (result.questions.length && !canAskAlignmentQuestions) {
-    throw new Error(`${delegation.agent} 不允许创建设计澄清问题；运行所需信息请使用 runtimeInputs`);
+    throw new Error(`${delegation.agent} 不允许创建业务或交付决策问题；运行所需信息请使用 runtimeInputs`);
   }
   if (delegation.agent === 'repro-agent' && result.runtimeInputs.length) {
     throw new Error('repro-agent 未复现时必须通过 questions 请求人工对齐，不能使用 runtimeInputs');
   }
-  if (result.questions.length && result.runtimeInputs.length) throw new Error('同一次结果不能混合设计澄清问题和运行信息请求');
+  if (result.questions.length && result.runtimeInputs.length) throw new Error('同一次结果不能混合业务/交付决策问题和运行信息请求');
   if (result.runtimeInputs.length) {
     if (result.outcome !== 'needs_input') throw new Error('包含 runtimeInputs 时 outcome 必须为 needs_input');
     await saveRuntimeInputs(delegation, result, sourceExecutionId);
@@ -406,17 +406,19 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       await updateTask(delegation.taskId, actor, {
         agile_status: detail.task.agile_status === 'in dev' ? 'in dev' : 'ready for dev',
         current_subagent: 'analyst-agent',
-        next_step: `已拆分 ${result.deliveryUnits.length} 个交付单元，等待逐个进行方案分析`,
+        next_step: `已拆分 ${result.deliveryUnits.length} 个交付单元，等待逐个进行交付分析`,
       });
       return 'advanced' as const;
     }
     case 'analyst-agent': {
       requireArtifact(result, delegation.agent);
-      if (!delegation.storyIndex) throw new Error('方案分析 Agent 缺少交付单元序号');
-      if (!result.spec) throw new Error('方案分析 Agent 结果缺少结构化 Slice Spec');
+      if (!delegation.storyIndex) throw new Error('交付分析 Agent 缺少交付单元序号');
+      if (!result.spec) throw new Error('交付分析 Agent 结果缺少结构化交付规格');
       if (result.questions.length) {
-        if (!result.spec.ambiguities.length) throw new Error('方案分析 Agent 提问时必须在 Slice Spec 中列出对应歧义');
-        const saved = await saveStorySpec({
+        if (!result.spec.decisions.some((decision) => decision.status === 'needs_user_input')) {
+          throw new Error('交付分析 Agent 提问时必须在交付规格中列出对应待确认决策');
+        }
+        const saved = await saveDeliverySpec({
           taskId: delegation.taskId,
           storyIndex: delegation.storyIndex,
           status: 'waiting_for_answers',
@@ -426,8 +428,8 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         await saveQuestions(delegation, result, saved.revision);
         return 'blocked' as const;
       }
-      if (result.outcome !== 'completed') throw new Error('没有待澄清问题时，方案分析 Agent 必须完成当前规格');
-      await saveStorySpec({
+      if (result.outcome !== 'completed') throw new Error('没有待澄清问题时，交付分析 Agent 必须完成当前规格');
+      await saveDeliverySpec({
         taskId: delegation.taskId,
         storyIndex: delegation.storyIndex,
         status: 'resolved',
@@ -438,8 +440,8 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         analysis_index: delegation.storyIndex,
         spec_resolved_index: delegation.storyIndex,
         next_step: delegation.pipeline === 'resume'
-          ? `交付单元 ${delegation.storyIndex} 的方案已按人工答复更新`
-          : `交付单元 ${delegation.storyIndex} 的方案分析完成，无待确认设计决策`,
+          ? `交付单元 ${delegation.storyIndex} 的交付规格已按人工答复收敛`
+          : `交付单元 ${delegation.storyIndex} 的交付分析完成，无待确认关键决策`,
       });
       await recordRecoveryClaims({
         taskId: delegation.taskId,
@@ -553,7 +555,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         summary: result.summary,
         details: {
           verdict: result.verdict,
-          expected: '当前交付单元满足 resolved Slice Spec 与验收标准',
+          expected: '当前交付单元满足已收敛的交付规格与验收标准',
           actual: result.summary,
           tests: result.tests || [],
           failureKind,

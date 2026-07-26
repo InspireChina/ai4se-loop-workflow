@@ -195,6 +195,36 @@ test('records one safe delegation trace and normalized Cursor, Codex, and Claude
   }
 });
 
+test('reports durable evidence failures without suppressing later telemetry or CLI output', async () => {
+  const record = recordedTelemetry();
+  const persisted: Array<Record<string, unknown>> = [];
+  const program = [
+    'console.log(JSON.stringify({type:"item.started",item:{id:"call-1",type:"command_execution",command:"npm test"}}));',
+    'console.log("provider diagnostic fixture");',
+    'console.log(JSON.stringify({type:"item.completed",item:{id:"call-1",type:"command_execution",command:"npm test",exit_code:0,aggregated_output:"passed"}}));',
+    'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}));',
+  ].join('');
+
+  const { result, logs } = await run(fixtureExecutor('codex', program), record.telemetry, {
+    recordTelemetryEvent: async (event) => {
+      persisted.push(event);
+      if (event.sequence === 1) throw new Error('injected receipt failure');
+    },
+  });
+
+  assert.deepEqual(result, {
+    exitCode: 0,
+    finalText: 'done',
+    evidencePersistenceError: 'injected receipt failure',
+  });
+  assert.deepEqual(persisted.map((event) => event.sequence), [1, 2, 3]);
+  assert.deepEqual(persisted.map((event) => event.name), ['loop.agent.tool', 'loop.agent.diagnostic', 'loop.agent.tool']);
+  assert.deepEqual(persisted.map((event) => event.phase), ['started', undefined, 'completed']);
+  assert.ok(logs.some((line) => line.includes('本地执行证据写入失败')));
+  assert.equal(record.toolSpans.length, 1, 'receipt failure must not suppress Langfuse start');
+  assert.equal(record.toolEnds.length, 1, 'receipt failure must not suppress Langfuse completion');
+});
+
 test('maps non-zero, spawn error, timeout, and signal exits without telemetry affecting local execution', async () => {
   const cases: Array<{ name: string; executor: AgentExecutor; expected: string }> = [
     { name: 'non-zero', executor: fixtureExecutor('codex', 'process.exit(7)'), expected: 'failed' },

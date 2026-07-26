@@ -215,7 +215,10 @@ export async function resolveActiveRecoveryItems(input: {
   return items.map((item) => item.recovery_id);
 }
 
-export function recoveryItemForPrompt(item: RecoveryItem) {
+export function recoveryItemForPrompt(
+  item: RecoveryItem,
+  options: { includeResolution?: boolean } = {},
+) {
   let details: Record<string, unknown> = {};
   let resolution: Record<string, unknown> | null = null;
   try { details = JSON.parse(item.details_json) as Record<string, unknown>; } catch { details = { raw: item.details_json }; }
@@ -223,7 +226,7 @@ export function recoveryItemForPrompt(item: RecoveryItem) {
   return {
     recoveryId: item.recovery_id,
     kind: item.kind,
-    status: item.status,
+    status: options.includeResolution === false ? 'pending_verification' : item.status,
     sourceAgent: item.source_agent,
     targetStage: item.target_stage,
     deliveryUnit: item.story_index,
@@ -231,6 +234,6 @@ export function recoveryItemForPrompt(item: RecoveryItem) {
     details,
     failureCount: item.failure_count,
     sourceExecutionId: item.source_execution_id,
-    resolution,
+    ...(options.includeResolution === false ? {} : { resolution }),
   };
 }

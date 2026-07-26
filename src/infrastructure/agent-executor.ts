@@ -25,16 +25,21 @@ export type AgentRunMetrics = {
 
 export type AgentEnvironment = Record<string, string | undefined>;
 
+export type AgentToolClass = 'shell' | 'other' | 'unknown';
+
 export type AgentTelemetryEvent = {
   name: 'loop.agent.tool' | 'loop.agent.output' | 'loop.agent.diagnostic';
   phase?: 'started' | 'completed';
   executor: AgentExecutorId;
   tool?: string;
+  toolClass?: AgentToolClass;
   toolCallId?: string;
   sequence?: number;
   summary?: string;
   input?: unknown;
   output?: unknown;
+  success?: boolean;
+  exitCode?: number | null;
   level?: 'DEFAULT' | 'WARNING' | 'ERROR';
 };
 
@@ -230,6 +235,16 @@ function stringifyValue(value: unknown) {
   try { return JSON.stringify(value); } catch { return String(value); }
 }
 
+function classifyAgentTool(tool: string): AgentToolClass {
+  const normalized = tool.trim().toLowerCase();
+  return normalized === 'shell' || normalized === 'bash' ? 'shell' : normalized ? 'other' : 'unknown';
+}
+
+function numericExitCode(...values: unknown[]) {
+  const value = values.find((candidate) => typeof candidate === 'number' && Number.isFinite(candidate));
+  return typeof value === 'number' ? value : null;
+}
+
 function meta(executor: AgentExecutorId, context: AgentExecutionContext) {
   return `executor=${executor} lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline}`;
 }
@@ -295,35 +310,26 @@ function summarizeCommand(command: string) {
     if (normalized.includes(' reproduction validate')) return '校验问题复现草稿';
     if (normalized.includes(' reproduction request-alignment')) return '提交人工对齐请求';
     if (normalized.includes(' reproduction complete')) return '完成问题复现';
-    if (normalized.includes(' analysis status')) return '恢复方案规格草稿';
-    if (normalized.includes(' analysis goal set')) return '保存交付单元目标';
-    if (normalized.includes(' analysis scope ')) return '更新方案范围';
-    if (normalized.includes(' analysis behavior ')) return '更新用户可观察行为';
-    if (normalized.includes(' analysis decision option-')) return '更新决策选项';
-    if (normalized.includes(' analysis decision recommend')) return '更新决策推荐';
-    if (normalized.includes(' analysis decision depends-')) return '更新决策依赖';
-    if (normalized.includes(' analysis decision resolve')) return '解决关键决策';
-    if (normalized.includes(' analysis decision reopen')) return '重新打开关键决策';
-    if (normalized.includes(' analysis decision ')) return '更新关键决策';
-    if (normalized.includes(' analysis criterion ')) return '更新验收标准';
-    if (normalized.includes(' analysis verification ')) return '更新验证计划';
-    if (normalized.includes(' analysis dependency ')) return '更新方案依赖';
-    if (normalized.includes(' analysis budget ')) return '更新 Change Budget';
-    if (normalized.includes(' analysis validate')) return '校验方案规格草稿';
-    if (normalized.includes(' analysis request-clarification')) return '提交方案澄清问题';
-    if (normalized.includes(' analysis complete')) return '完成方案分析';
+    if (normalized.includes(' delivery-analysis status')) return '恢复交付分析草稿';
+    if (normalized.includes(' delivery-analysis summary set')) return '保存交付分析结论';
+    if (normalized.includes(' delivery-analysis contract set')) return '保存冻结交付契约';
+    if (normalized.includes(' delivery-analysis impact ')) return '更新实际影响';
+    if (normalized.includes(' delivery-analysis decision option-')) return '更新决策选项';
+    if (normalized.includes(' delivery-analysis decision ask')) return '提交决策建议';
+    if (normalized.includes(' delivery-analysis decision resolve')) return '关闭关键决策';
+    if (normalized.includes(' delivery-analysis decision reopen')) return '重新打开关键决策';
+    if (normalized.includes(' delivery-analysis decision ')) return '更新关键决策';
+    if (normalized.includes(' delivery-analysis guardrail ')) return '更新保护约束';
+    if (normalized.includes(' delivery-analysis verification-focus ')) return '更新验证关注点';
+    if (normalized.includes(' delivery-analysis validate')) return '校验交付分析草稿';
+    if (normalized.includes(' delivery-analysis request-clarification')) return '提交关键决策问题';
+    if (normalized.includes(' delivery-analysis complete')) return '完成交付分析';
     if (normalized.includes(' implementation status')) return '恢复开发实现草稿';
-    if (normalized.includes(' implementation summary set')) return '保存开发结论';
-    if (normalized.includes(' implementation assessment set')) return '保存走查模式';
-    if (normalized.includes(' implementation notes set')) return '保存实现说明';
     if (normalized.includes(' implementation criterion ')) return '更新验收覆盖';
-    if (normalized.includes(' implementation change ')) return '更新代码变更';
-    if (normalized.includes(' implementation test ')) return '更新验证记录';
+    if (normalized.includes(' implementation check ')) return '选择关键检查';
     if (normalized.includes(' implementation risk ')) return '更新残余风险';
     if (normalized.includes(' implementation runtime-input ')) return '更新运行信息请求';
     if (normalized.includes(' implementation recovery ')) return '更新恢复事项';
-    if (normalized.includes(' implementation commit set')) return '记录开发提交';
-    if (normalized.includes(' implementation failure set')) return '记录开发失败';
     if (normalized.includes(' implementation validate')) return '校验开发实现草稿';
     if (normalized.includes(' implementation request-input')) return '提交运行信息请求';
     if (normalized.includes(' implementation complete')) return '完成开发实现';
@@ -514,11 +520,30 @@ export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: strin
       const { tool, toolCallId, args, result } = toolNameFromCursor(event);
       if (String(event.type) === 'tool_call' || event.tool_call) {
         const completed = String(event.subtype) === 'completed';
+        const successResult = result?.success;
+        const successPayload = successResult && typeof successResult === 'object'
+          ? successResult as Record<string, unknown>
+          : undefined;
+        const errorPayload = result?.error && typeof result.error === 'object'
+          ? result.error as Record<string, unknown>
+          : undefined;
+        const exitCode = completed
+          ? numericExitCode(result?.exitCode, successPayload?.exitCode, errorPayload?.exitCode)
+          : undefined;
+        const explicitSuccess = completed
+          ? Boolean(successResult) && !result?.error && !result?.failure && (exitCode === null || exitCode === 0)
+          : undefined;
+        const failed = completed && (
+          Boolean(result?.error || result?.failure)
+          || (exitCode !== null && exitCode !== 0)
+        );
         return {
           name: 'loop.agent.tool', executor, tool, toolCallId: toolCallId || undefined,
+          toolClass: classifyAgentTool(tool),
           phase: completed ? 'completed' : 'started',
           summary: completed ? summarizeResult(result) : summarizeCommand(stringifyValue(args?.command)) || stringifyValue(args?.description),
-          level: completed && result?.error ? 'ERROR' : 'DEFAULT',
+          level: failed ? 'ERROR' : 'DEFAULT',
+          ...(completed ? { success: explicitSuccess, exitCode } : {}),
           ...(completed ? { output: result } : { input: args }),
         };
       }
@@ -535,15 +560,30 @@ export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: strin
       if ((type === 'item.started' || type === 'item.completed') && item && ['command_execution', 'mcp_tool_call', 'file_change', 'web_search'].includes(itemType)) {
         const completed = type === 'item.completed';
         const tool = itemType === 'command_execution' ? 'shell' : stringifyValue(item.name || itemType);
+        const toolClass = itemType === 'command_execution' ? 'shell' : classifyAgentTool(tool);
         const detail = itemType === 'command_execution' ? summarizeCommand(stringifyValue(item.command)) : stringifyValue(item.arguments || item.changes || item.query);
-        const failed = completed && (item.status === 'failed' || (typeof item.exit_code === 'number' && item.exit_code !== 0));
+        const exitCode = completed ? numericExitCode(item.exit_code) : undefined;
+        const status = stringifyValue(item.status).toLowerCase();
+        const failed = completed && (status === 'failed' || (exitCode !== null && exitCode !== 0));
+        const explicitSuccess = completed
+          ? itemType === 'command_execution'
+            ? exitCode === 0 && status !== 'failed'
+            : ['completed', 'success', 'succeeded'].includes(status)
+          : undefined;
         return {
-          name: 'loop.agent.tool', executor, tool,
+          name: 'loop.agent.tool', executor, tool, toolClass,
           toolCallId: stringifyValue(item.id || item.call_id || item.callId) || undefined,
           phase: completed ? 'completed' : 'started',
           summary: completed ? compact(stringifyValue(item.aggregated_output || item.result || item.exit_code), 500) : compact(detail, 500),
           level: failed ? 'ERROR' : 'DEFAULT',
-          ...(completed ? { output: item.aggregated_output ?? item.result ?? item.exit_code } : { input: item.arguments || item.command || item.changes || item.query }),
+          ...(completed ? { success: explicitSuccess, exitCode } : {}),
+          ...(completed ? {
+            output: {
+              result: item.aggregated_output ?? item.result ?? '',
+              exitCode: item.exit_code ?? null,
+              status: item.status ?? null,
+            },
+          } : { input: item.arguments || item.command || item.changes || item.query }),
         };
       }
       if (type === 'error' || type === 'turn.failed') return telemetryDiagnostic(executor, stringifyValue(event.message || event.error || line));
@@ -556,6 +596,7 @@ export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: strin
       const toolUse = blocks.find((block) => block.type === 'tool_use');
       if (toolUse) return {
         name: 'loop.agent.tool', executor, tool: stringifyValue(toolUse.name),
+        toolClass: classifyAgentTool(stringifyValue(toolUse.name)),
         toolCallId: stringifyValue(toolUse.id) || undefined,
         phase: 'started', summary: summarizeCommand(stringifyValue((toolUse.input as Record<string, unknown> | undefined)?.command)), input: toolUse.input,
       };
@@ -565,7 +606,10 @@ export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: strin
       const toolResult = claudeContentBlocks(event).find((block) => block.type === 'tool_result');
       if (toolResult) return {
         name: 'loop.agent.tool', executor, tool: 'tool', toolCallId: stringifyValue(toolResult.tool_use_id) || undefined,
+        toolClass: 'unknown',
         phase: 'completed', summary: compact(stringifyValue(toolResult.content), 500), output: toolResult.content,
+        success: toolResult.is_error !== true,
+        exitCode: null,
         level: toolResult.is_error ? 'ERROR' : 'DEFAULT',
       };
     }
@@ -591,6 +635,7 @@ export function parseAgentTelemetryStdoutEvents(executor: AgentExecutorId, line:
       if (tools.length) return tools.map((toolUse) => ({
         name: 'loop.agent.tool', executor,
         tool: stringifyValue(toolUse.name),
+        toolClass: classifyAgentTool(stringifyValue(toolUse.name)),
         toolCallId: stringifyValue(toolUse.id) || undefined,
         phase: 'started',
         summary: summarizeCommand(stringifyValue((toolUse.input as Record<string, unknown> | undefined)?.command)),
@@ -602,10 +647,13 @@ export function parseAgentTelemetryStdoutEvents(executor: AgentExecutorId, line:
       if (results.length) return results.map((toolResult) => ({
         name: 'loop.agent.tool', executor,
         tool: 'tool',
+        toolClass: 'unknown',
         toolCallId: stringifyValue(toolResult.tool_use_id) || undefined,
         phase: 'completed',
         summary: compact(stringifyValue(toolResult.content), 500),
         output: toolResult.content,
+        success: toolResult.is_error !== true,
+        exitCode: null,
         level: toolResult.is_error ? 'ERROR' : 'DEFAULT',
       }));
     }

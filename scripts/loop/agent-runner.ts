@@ -1,5 +1,6 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
+import { createHash } from 'node:crypto';
 import { agentExecutionOptions, getAgentExecutorSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
 import { enqueueSoftwareMaintenance } from '../../src/application/software-maintenance';
 import { buildAgentContextSnapshot } from '../../src/application/agent-context';
@@ -32,6 +33,7 @@ import {
   markExecutionStage,
   recordExecutionReceipt,
   recoverNextExecutionAttempt,
+  shouldRecordDevCodeCommit,
   type ExecutionAttempt,
 } from '../../src/application/executions';
 import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTask, getTaskContext, markDelegationLaneRunning, reconcileStaleTaskLanes, recordRuntimeEventWithFallback, settleDelegationLane, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
@@ -43,13 +45,13 @@ import {
 import { AgentResultContractError, parseAgentResult } from '../../src/domain/agent-result';
 import { agentCommandPrompt } from '../../src/domain/agent-command-profile';
 import { agentLabel, deliveryUnitLabel } from '../../src/domain/terminology';
-import { getAgentExecutor, type AgentExecutor } from '../../src/infrastructure/agent-executor';
+import { getAgentExecutor, type AgentExecutor, type AgentToolClass } from '../../src/infrastructure/agent-executor';
 import { executeDelegation } from '../../src/infrastructure/delegation-execution';
 import { startDispatchRetryRun } from '../../src/infrastructure/agent-runner';
 import { resolveAgentExecutionLimits } from '../../src/infrastructure/agent-execution-limits';
 import { paths } from '../../src/infrastructure/database';
 import { gitHead } from '../../src/infrastructure/git';
-import { createLangfuseTelemetry } from '../../src/infrastructure/langfuse';
+import { createLangfuseTelemetry, sanitizeLangfuseValue } from '../../src/infrastructure/langfuse';
 import { startMaintenanceRunner } from '../../src/infrastructure/maintenance-runner';
 
 const runId = process.argv[2];
@@ -124,7 +126,6 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
     activeRecovery,
     repositoryBaseCommit,
   });
-  const contextCommand = `npm --prefix ${JSON.stringify(paths.appRoot)} run loopctl -- agent-context`;
   const commandPrompt = agentCommandPrompt(paths.appRoot, delegation.agent, delegation.pipeline);
   if (!commandPrompt) {
     throw new Error(`${delegation.agent}/${delegation.pipeline} 没有配置渐进式命令协议`);
@@ -143,9 +144,11 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
       '',
       '# Resume Decision Identity Contract',
       '已回答问题的 decisionKey 是由 Harness 管理的跨轮次稳定 ID，不是可优化的自然语言名称。',
-      '必须在新 Slice Spec 的 decisionTree 和 decisions 中逐字复用下面全部 key；禁止改名、翻译、缩写、创建别名或用新的 key 替代。',
+      '必须在当前交付规格的 decisions 中逐字复用下面全部 key；禁止改名、翻译、缩写、创建别名或用新的 key 替代。',
       JSON.stringify(contextSnapshot.authoritativeFacts.answeredDecisionKeys),
     ] : []),
+    '',
+    commandPrompt,
     '',
     `# Role Prompt · v${runtime.promptVersion} · ${runtime.promptStatus}`,
     runtime.prompt,
@@ -161,30 +164,22 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
     `Context Snapshot: ${contextSnapshot.snapshotId}`,
     '',
     '# Working Context Pack',
-    '下面只包含本次执行必须立即知道的权威事实、活动义务和最近交接。它是本次 execution 的冻结快照。',
+    '下面只包含本次执行必须立即知道的权威事实、活动义务和最近执行证据。它是本次 execution 的冻结快照。',
     JSON.stringify({
       work: contextSnapshot.work,
       authoritativeFacts: contextSnapshot.authoritativeFacts,
       activeObligations: contextSnapshot.activeObligations,
-      handoff: contextSnapshot.handoff,
+      recentExecutionEvidence: contextSnapshot.recentExecutionEvidence,
     }, null, 2),
     '',
     '# Context Index',
     `快照共有 ${contextSnapshot.resourceCount} 个资源。下面是与当前工作最相关的索引，不代表全部资料。不要因为某份资料未内联就假设它不存在。`,
     JSON.stringify(contextSnapshot.startupIndex, null, 2),
     '',
-    '# Just-in-time Context Commands',
-    '你可以且应当使用下面的只读命令逐步获取上下文。命令自动绑定当前 execution 的冻结快照，不会读取运行中后来发生的状态变化。',
-    `概览：${contextCommand} overview`,
-    `列出：${contextCommand} list [--kind document|slice_spec|decision|runtime_input|feedback|execution|recovery] [--scope current|task|all]`,
-    `读取：${contextCommand} get <context-ref>`,
-    `搜索：${contextCommand} search --query <keyword>`,
-    `证据：${contextCommand} evidence [--stage context|repro|plan|analysis|dev|test|review]`,
-    `历史：${contextCommand} history <context-ref>`,
+    '# Required Context Refs',
     `优先检查的 Context refs（${contextSnapshot.requiredContextRefs.length}）：${contextSnapshot.requiredContextRefs.length ? contextSnapshot.requiredContextRefs.slice(0, 48).join(', ') : '无；根据当前任务按需搜索'}${contextSnapshot.requiredContextRefs.length > 48 ? '；其余请通过 list 按需发现' : ''}`,
-    '只读取当前工作所需的资料；不要一次性展开全部索引。仓库代码、Git 状态和测试环境属于实时 Ground Truth，应继续通过现有文件与命令行工具检查。',
-    '发生冲突时，优先级依次为：当前 Active Obligations 和明确用户答复、当前非 superseded Slice Spec、当前需求描述、supporting 文档、historical 记录。代码与测试结果用于判断实现现状，不能自行覆盖产品需求。',
-    '在声称缺少上下文、提出 questions 或 runtimeInputs 前，必须先用 list/search/get 检查快照，并用仓库工具检查可推导的事实。',
+    '按照前面的 Agent Tool Contract 按需读取，不要一次性展开全部索引。',
+    '发生冲突时，优先级依次为：当前 Active Obligations 和明确用户答复、当前未被替代的交付规格、当前需求描述、supporting 文档、historical 记录。代码与测试结果用于判断实现现状，不能自行覆盖产品需求。',
     ...(activeFeedback.length ? [
       '',
       '# Active Feedback Contract',
@@ -195,11 +190,9 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
       '',
       '# Active Recovery Contract',
       '下面是 Test Agent 持久化的未解决失败证据。它们不是历史备注，而是当前交付单元需要继续闭环的上下文。',
-      '方案分析 Agent 和开发实现 Agent 应处理与当前阶段有关的事项；可以在 recoveryResolutions 中说明处理方式，但 Claim 不是推进的硬条件，也不能自行关闭事项。只有后续 Test Agent 独立验证通过才能关闭失败事项。',
+      '交付分析 Agent 和开发实现 Agent 应处理与当前阶段有关的事项；可以在 recoveryResolutions 中说明处理方式，但 Claim 不是推进的硬条件，也不能自行关闭事项。只有后续 Test Agent 独立验证通过才能关闭失败事项。',
       '具体内容已包含在 Working Context Pack.activeObligations.recovery，并以 RECOVERY ref 持久化在快照中。',
     ] : []),
-    '',
-    commandPrompt,
   ].join('\n');
   return { prompt, runtime, contextSnapshot };
 }
@@ -213,6 +206,83 @@ async function isRunActive() {
   return Boolean(run?.active && run.runId === runId);
 }
 
+function commandFromToolInput(input: unknown) {
+  if (typeof input === 'string') return input;
+  if (!input || typeof input !== 'object' || Array.isArray(input)) return undefined;
+  const command = (input as Record<string, unknown>).command;
+  return typeof command === 'string' ? command : undefined;
+}
+
+function commandMetadata(command: string | undefined) {
+  if (command === undefined) return {};
+  return {
+    commandHash: createHash('sha256').update(command).digest('hex'),
+    originalLength: command.length,
+  };
+}
+
+function createDurableToolEventNormalizer() {
+  type StartedTool = {
+    toolClass: AgentToolClass;
+    command?: string;
+  };
+  const startedByCallId = new Map<string, StartedTool>();
+  const anonymousStarts: StartedTool[] = [];
+
+  return (event: {
+    name: string;
+    phase?: string;
+    executor: string;
+    tool?: string;
+    toolClass?: AgentToolClass;
+    toolCallId?: string;
+    sequence: number;
+    summary?: string;
+    input?: unknown;
+    success?: boolean;
+    exitCode?: number | null;
+    level?: string;
+  }) => {
+    if (event.name !== 'loop.agent.tool') return null;
+    const eventToolClass = event.toolClass ?? 'unknown';
+    const eventCommand = commandFromToolInput(event.input);
+    let started: StartedTool | undefined;
+    if (event.phase === 'started') {
+      started = { toolClass: eventToolClass, command: eventCommand };
+      if (event.toolCallId) startedByCallId.set(event.toolCallId, started);
+      else anonymousStarts.push(started);
+    } else if (event.phase === 'completed') {
+      started = event.toolCallId
+        ? startedByCallId.get(event.toolCallId)
+        : anonymousStarts.shift();
+      if (event.toolCallId) startedByCallId.delete(event.toolCallId);
+    }
+    const toolClass = eventToolClass === 'unknown'
+      ? started?.toolClass ?? 'unknown'
+      : eventToolClass;
+    const command = eventCommand ?? started?.command;
+    const isCompleted = event.phase === 'completed';
+    const acceptedCheck = isCompleted && toolClass === 'shell' && event.success === true;
+    return sanitizeLangfuseValue({
+      name: event.name,
+      phase: event.phase,
+      executor: event.executor,
+      tool: event.tool,
+      toolClass,
+      toolCallId: event.toolCallId,
+      sequence: event.sequence,
+      summary: event.summary,
+      level: isCompleted ? (acceptedCheck ? 'DEFAULT' : 'ERROR') : event.level,
+      ...(isCompleted ? {
+        success: event.success === true,
+        exitCode: event.exitCode ?? null,
+      } : {}),
+      ...commandMetadata(command),
+      ...(command !== undefined ? { input: { command } } : {}),
+    });
+  };
+}
+
 async function runDelegation(
   delegation: DelegationEnvelope,
   prompt: string,
@@ -223,6 +293,7 @@ async function runDelegation(
 ) {
   const { maxRuntimeMs, idleTimeoutMs } = resolveAgentExecutionLimits(process.env);
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
+  const durableToolEvent = createDurableToolEventNormalizer();
   const diagnostics: string[] = [];
   const execution = await executeDelegation({
     runId,
@@ -242,6 +313,16 @@ async function runDelegation(
     appendLog: async (message) => {
       if (/(?:错误|失败|warning|warn|error|timeout|timed out|not found)/i.test(message) && diagnostics.length < 30) diagnostics.push(message.slice(0, 1000));
       return appendLoopRunLog(runId, message);
+    },
+    recordTelemetryEvent: async (event) => {
+      const receipt = durableToolEvent(event);
+      if (!receipt) return;
+      await recordExecutionReceipt(
+        executionId,
+        'tool_event',
+        String(event.sequence).padStart(8, '0'),
+        receipt,
+      );
     },
     maxRuntimeMs,
     idleTimeoutMs,
@@ -267,21 +348,21 @@ async function processDurableResult(attempt: ExecutionAttempt, delegation: Deleg
     await appendLoopRunLog(runId, `[运行] ${agentLabel(delegation.agent)} 返回时需求已结束，结果仅保留为证据，不再应用`);
     return { outcome };
   }
-  if (delegation.agent === 'dev-agent' && result.outcome === 'completed') {
-    if (!codeCommit) {
-      const currentHead = gitHead(paths.root);
-      if (currentHead && currentHead !== attempt.base_commit) {
-        codeCommit = currentHead;
-        await recordExecutionReceipt(attempt.execution_id, 'code_commit', codeCommit, {
-          taskId: delegation.taskId,
-          storyIndex: delegation.storyIndex,
-          mode: 'agent_committed',
-        });
-        await appendLoopRunLog(runId, `[运行] 检测到开发实现 Agent 创建的 commit：${codeCommit.slice(0, 10)}`);
-      } else {
-        await appendLoopRunLog(runId, '[运行] 开发实现 Agent 未创建新 commit；当前工作区仍将交给 Test Agent 独立验证');
-      }
+  if (shouldRecordDevCodeCommit(delegation.agent, result) && !codeCommit) {
+    const currentHead = gitHead(paths.root);
+    if (currentHead) {
+      codeCommit = currentHead;
+      await recordExecutionReceipt(attempt.execution_id, 'code_commit', codeCommit, {
+        taskId: delegation.taskId,
+        storyIndex: delegation.storyIndex,
+        mode: 'agent_committed',
+      });
+      await appendLoopRunLog(runId, `[运行] 记录开发实现 Agent 变更所在 commit：${codeCommit.slice(0, 10)}`);
+    } else {
+      await appendLoopRunLog(runId, '[运行] 开发实现 Agent 声明了代码变更，但当前 Git HEAD 不可读；不记录代码提交证据');
     }
+  } else if (delegation.agent === 'dev-agent' && result.outcome === 'completed' && !result.changedFiles?.length) {
+    await appendLoopRunLog(runId, '[运行] 开发实现 Agent 走查确认无需代码变更；不记录代码提交证据');
   }
 
   await markExecutionStage(attempt.execution_id, 'applying');
@@ -428,6 +509,15 @@ async function executeDelegationStep(
     if (execution.cancelled) {
       await cancelExecution(durable.attempt.execution_id);
       await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 已随需求取消，代码槽已释放`);
+      return;
+    }
+    if (execution.evidencePersistenceError) {
+      await handleExecutionFailure(
+        durable.attempt,
+        delegation,
+        `本地执行证据写入失败，将自动重试：${execution.evidencePersistenceError}`,
+        true,
+      );
       return;
     }
     const commandSubmission = await readAgentCommandSubmission(durable.attempt.execution_id);

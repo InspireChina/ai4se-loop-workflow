@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DelegationEnvelope } from './tasks';
+import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 
 async function command(executionId: string, token: string, args: string[]) {
   const { runAgentCommand } = await import('./agent-command-drafts');
@@ -22,7 +23,7 @@ async function begin(delegation: DelegationEnvelope, suffix: string) {
 
 async function verificationDelegation(title: string) {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask, pipelineForTask, saveStorySpec } = await import('./tasks');
+  const { createTask, pipelineForTask, saveDeliverySpec } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare(`
     UPDATE tasks
@@ -48,51 +49,21 @@ async function verificationDelegation(title: string) {
       VALUES(?, 1, '用户看到结果页完成状态', 'story-001')
     `).run(taskId);
   })();
-  await saveStorySpec({
+  await saveDeliverySpec({
     taskId,
     storyIndex: 1,
     status: 'resolved',
-    spec: {
-      goal: '用户可以识别结果已经完成',
-      scope: { included: ['结果页完成状态'], excluded: ['任务调度'] },
-      behaviors: [{ scenario: '结果已生成', expected: '页面展示完成状态' }],
-      decisions: [{
-        key: 'status-label',
-        decision: '使用现有完成状态文案',
-        rationale: '保持产品术语一致',
-        source: 'convention',
-      }],
-      decisionTree: [{
-        key: 'status-label',
-        question: '完成状态使用什么文案？',
-        impact: '影响用户可观察文案',
-        options: [
-          { id: 'existing', label: '现有文案', consequences: ['保持一致'] },
-          { id: 'new', label: '新文案', consequences: ['需要更新其他页面'] },
-        ],
-        status: 'resolved_from_context',
-        selectedOption: 'existing',
-        source: 'convention',
-        evidence: ['仓库已有相同状态组件'],
-      }],
-      ambiguities: [],
-      acceptanceCriteria: [{
-        id: 'AC-status',
-        description: '结果完成后页面展示完成状态',
-        oracle: '页面存在可识别的完成状态',
-      }],
-      verificationPlan: [{
-        criterionId: 'AC-status',
-        kind: 'command',
-        instruction: '运行状态组件测试',
-        command: 'npm test',
-      }],
-      dependencies: [],
-      changeBudget: {
-        capabilities: ['结果状态展示'],
-        paths: ['src/result-status.ts'],
+    spec: deliverySpecFixture({
+      handoff: {
+        implementationGuidance: '复用现有结果状态组件。',
+        guardrails: [],
+        verificationFocus: [{
+          key: 'AC-status',
+          expected: '结果完成后页面展示完成状态',
+          oracle: '页面存在可识别的完成状态',
+        }],
       },
-    },
+    }),
   });
   const delegation = (await pipelineForTask(taskId)).find((item) =>
     item.agent === 'test-agent' && item.storyIndex === 1);
@@ -109,6 +80,11 @@ async function recordPassedVerification(executionId: string, token: string) {
     'verification', 'criterion', 'upsert', '--key', 'AC-status',
     '--status', 'passed', '--method', 'command',
     '--evidence', '状态组件黑盒调用返回预期完成文案',
+  ]);
+  await command(executionId, token, [
+    'verification', 'criterion', 'upsert', '--key', 'unit-acceptance',
+    '--status', 'passed', '--method', 'inspection',
+    '--evidence', '从触发到完成状态的用户可观察闭环符合交付单元验收。',
   ]);
   await command(executionId, token, [
     'verification', 'check', 'upsert', '--key', 'result-status-suite',
@@ -134,6 +110,7 @@ test('verification agent progressively records independent evidence and advances
   );
   const initial = await command(started.executionId, started.token!, ['verification', 'status']);
   assert.match(initial, /验证草稿 v1/);
+  assert.match(initial, /unit-acceptance.*尚未记录/);
   assert.match(initial, /AC-status.*尚未记录/);
   await recordPassedVerification(started.executionId, started.token!);
   await command(started.executionId, started.token!, ['verification', 'pass']);
@@ -169,6 +146,11 @@ test('verification failure classifies implementation evidence and deterministica
     'verification', 'criterion', 'upsert', '--key', 'AC-status',
     '--status', 'failed', '--method', 'command',
     '--evidence', 'resultStatus(true) 实际返回旧文案',
+  ]);
+  await command(started.executionId, started.token!, [
+    'verification', 'criterion', 'upsert', '--key', 'unit-acceptance',
+    '--status', 'failed', '--method', 'command',
+    '--evidence', '从触发到完成状态的交付闭环因错误文案而不满足。',
   ]);
   await command(started.executionId, started.token!, [
     'verification', 'check', 'upsert', '--key', 'result-status-suite',
@@ -275,6 +257,11 @@ test('verification block preserves environment evidence without misrouting to de
     'verification', 'criterion', 'upsert', '--key', 'AC-status',
     '--status', 'not-tested', '--method', 'browser',
     '--evidence', '浏览器启动失败，尚未观察产品行为',
+  ]);
+  await command(started.executionId, started.token!, [
+    'verification', 'criterion', 'upsert', '--key', 'unit-acceptance',
+    '--status', 'not-tested', '--method', 'browser',
+    '--evidence', '运行环境不可用，尚不能观察完整交付闭环。',
   ]);
   await command(started.executionId, started.token!, [
     'verification', 'check', 'upsert', '--key', 'browser-start',

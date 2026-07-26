@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
+import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 
 test('updates an existing task-level document instead of inserting a duplicate NULL-story row', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
@@ -493,37 +494,32 @@ test('resumes Analysis by lane ownership when Delivery leaves test-agent at task
       title: 'Resolved guide scope',
       content: 'The guide keeps its existing scope according to the user answer.',
     },
-    spec: {
-      goal: 'Keep the guide within its confirmed scope.',
-      scope: { included: ['Existing guide surface'], excluded: ['Unrelated pages'] },
-      behaviors: [{ scenario: 'The guide is displayed', expected: 'Only the confirmed scope is shown' }],
-      decisions: [{ key: 'guide-scope', decision: 'Keep the existing scope', rationale: 'User answer', source: 'user' }],
-      decisionTree: [{
+    spec: deliverySpecFixture({
+      decisions: [{
         key: 'guide-scope',
+        type: 'business',
+        title: 'Guide scope',
         question: 'Should the guide expand its scope?',
         impact: 'Changes the visible guide surface.',
         options: [
           { id: 'keep', label: 'Keep scope', consequences: ['No unrelated expansion'] },
           { id: 'expand', label: 'Expand scope', consequences: ['Additional pages are included'] },
         ],
-        status: 'resolved_from_context',
+        status: 'resolved',
         selectedOption: 'keep',
-        source: 'user',
-        evidence: ['The user answered: Keep the existing scope.'],
+        authority: 'user',
+        decision: 'Keep the existing scope',
+        rationale: 'User answer',
+        evidence: 'The user answered: Keep the existing scope.',
       }],
-      ambiguities: [],
-      acceptanceCriteria: [{ id: 'AC-1', description: 'The guide remains scoped', oracle: 'Inspect the rendered guide' }],
-      verificationPlan: [{ criterionId: 'AC-1', kind: 'inspection', instruction: 'Inspect the guide scope' }],
-      dependencies: [],
-      changeBudget: { capabilities: ['Guide scope'], paths: [] },
-    },
+    }),
   })));
 
   detail = await getTask(taskId);
   assert.equal(detail?.task.analysis_index, 2);
   assert.equal(detail?.task.spec_resolved_index, 2);
   assert.equal(detail?.task.resume_pending, 0);
-  assert.equal(detail?.storySpecs.find((spec) => spec.story_index === 2)?.status, 'resolved');
+  assert.equal(detail?.deliverySpecs.find((spec) => spec.story_index === 2)?.status, 'resolved');
   db.prepare(`
     UPDATE tasks
     SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle', current_subagent = NULL
@@ -597,8 +593,8 @@ test('acknowledges the current review report as read without an approval decisio
 
 // 评论驱动的逆向回退契约已由 forward-feedback.test.ts 中的前向追加场景取代。
 
-test('versions Slice Specs and advances Dev without requiring a commit', async () => {
-  const { addQuestion, answerQuestion, getTask, saveStorySpec, updateTask } = await import('./tasks');
+test('versions delivery specs and advances Dev without requiring a commit', async () => {
+  const { addQuestion, answerQuestion, getTask, saveDeliverySpec, updateTask } = await import('./tasks');
   const { AgentResultContractError } = await import('../domain/agent-result');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -609,13 +605,19 @@ test('versions Slice Specs and advances Dev without requiring a commit', async (
   `).run(taskId);
   db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Contracted unit', 'story-001')").run(taskId);
 
-  const baseSpec = {
-    goal: 'Deliver one deterministic behavior.',
-    scope: { included: ['The contracted behavior'], excluded: ['Other features'] },
-    behaviors: [{ scenario: 'The behavior is invoked', expected: 'The documented result is produced' }],
-    decisions: [],
-    decisionTree: [{
+  const baseSpec = deliverySpecFixture({
+    impacts: [{
+      key: 'output-contract',
+      area: 'Visible output',
+      finding: 'The output mode changes the visible contract.',
+      disposition: 'needs_decision',
+      evidence: 'The delivery unit admits two distinct output contracts.',
+      decisionKey: 'output-mode',
+    }],
+    decisions: [{
       key: 'output-mode',
+      type: 'business',
+      title: 'Output mode',
       question: 'Which output mode should be used?',
       impact: 'Changes the visible output contract.',
       options: [
@@ -623,14 +625,12 @@ test('versions Slice Specs and advances Dev without requiring a commit', async (
         { id: 'text', label: 'Readable text', consequences: ['Optimized for direct reading'] },
       ],
       status: 'needs_user_input' as const,
+      authority: 'needs_user_input' as const,
+      recommendationOption: 'structured',
+      recommendationReason: 'The existing consumers use structured data.',
     }],
-    ambiguities: [{ key: 'output-mode', description: 'The output mode must be chosen.' }],
-    acceptanceCriteria: [{ id: 'AC-1', description: 'The runtime is available', oracle: 'node --version exits with zero' }],
-    verificationPlan: [{ criterionId: 'AC-1', kind: 'command' as const, instruction: 'Check Node runtime', command: 'node --version' }],
-    dependencies: [],
-    changeBudget: { capabilities: ['One behavior'], paths: [] },
-  };
-  const first = await saveStorySpec({ taskId, storyIndex: 1, status: 'waiting_for_answers', spec: baseSpec });
+  });
+  const first = await saveDeliverySpec({ taskId, storyIndex: 1, status: 'waiting_for_answers', spec: baseSpec });
   const questionId = await addQuestion({
     taskId,
     storyIndex: 1,
@@ -643,22 +643,29 @@ test('versions Slice Specs and advances Dev without requiring a commit', async (
   });
   await answerQuestion({ taskId, questionId, answer: 'Use structured JSON.' });
   await assert.rejects(
-    saveStorySpec({
+    saveDeliverySpec({
       taskId,
       storyIndex: 1,
       status: 'resolved',
       spec: {
         ...baseSpec,
-        decisions: [{ key: 'structured-output-mode', decision: 'Structured JSON', rationale: 'User answer', source: 'user' as const }],
-        decisionTree: [{
-          ...baseSpec.decisionTree[0],
-          key: 'structured-output-mode',
-          status: 'resolved_from_context' as const,
-          selectedOption: 'structured',
-          source: 'user' as const,
-          evidence: ['The user answered: Use structured JSON.'],
+        impacts: [{
+          ...baseSpec.impacts[0],
+          disposition: 'change' as const,
+          decisionKey: 'structured-output-mode',
         }],
-        ambiguities: [],
+        decisions: [{
+          ...baseSpec.decisions[0],
+          key: 'structured-output-mode',
+          status: 'resolved' as const,
+          selectedOption: 'structured',
+          authority: 'user' as const,
+          decision: 'Structured JSON',
+          rationale: 'User answer',
+          evidence: 'The user answered: Use structured JSON.',
+          recommendationOption: undefined,
+          recommendationReason: undefined,
+        }],
       },
     }),
     (error: unknown) => error instanceof AgentResultContractError
@@ -666,22 +673,28 @@ test('versions Slice Specs and advances Dev without requiring a commit', async (
       && /output-mode/.test(error.message),
   );
   const afterRenamedKey = await getTask(taskId);
-  assert.deepEqual(afterRenamedKey?.storySpecs.map((spec) => [spec.revision, spec.status]), [[1, 'waiting_for_answers']]);
-  const second = await saveStorySpec({
+  assert.deepEqual(afterRenamedKey?.deliverySpecs.map((spec) => [spec.revision, spec.status]), [[1, 'waiting_for_answers']]);
+  const second = await saveDeliverySpec({
     taskId,
     storyIndex: 1,
     status: 'resolved',
     spec: {
       ...baseSpec,
-      decisions: [{ key: 'output-mode', decision: 'Structured JSON', rationale: 'User answer', source: 'user' as const }],
-      decisionTree: [{
-        ...baseSpec.decisionTree[0],
-        status: 'resolved_from_context' as const,
-        selectedOption: 'structured',
-        source: 'user' as const,
-        evidence: ['The user answered: Use structured JSON.'],
+      impacts: [{
+        ...baseSpec.impacts[0],
+        disposition: 'change' as const,
       }],
-      ambiguities: [],
+      decisions: [{
+        ...baseSpec.decisions[0],
+        status: 'resolved' as const,
+        selectedOption: 'structured',
+        authority: 'user' as const,
+        decision: 'Structured JSON',
+        rationale: 'User answer',
+        evidence: 'The user answered: Use structured JSON.',
+        recommendationOption: undefined,
+        recommendationReason: undefined,
+      }],
     },
   });
   assert.equal(first.revision, 1);
@@ -696,7 +709,7 @@ test('versions Slice Specs and advances Dev without requiring a commit', async (
   });
 
   const detail = await getTask(taskId);
-  assert.deepEqual(detail?.storySpecs.map((item) => [item.revision, item.status]), [[1, 'superseded'], [2, 'resolved']]);
+  assert.deepEqual(detail?.deliverySpecs.map((item) => [item.revision, item.status]), [[1, 'superseded'], [2, 'resolved']]);
   assert.equal(detail?.questions.find((item) => item.question_id === questionId)?.status, 'resolved');
 });
 
@@ -796,7 +809,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
     agent: 'dev-agent',
     storyIndex: 1,
     resource: 'none',
-    description: '读取人工输入，并恢复 Delivery Lane',
+        description: '读取人工输入，并恢复开发验证通道',
   });
 
   addExecution('execution-runtime-dev-resume', 'dev-agent', 'resume');
@@ -913,6 +926,35 @@ test('keeps retry attempts in one logical generation even when the rebuilt promp
   assert.equal(rework.attempt.attempt, 1);
   assert.notEqual(rework.attempt.delegation_key, first.attempt.delegation_key);
   await completeExecution(rework.attempt.execution_id);
+});
+
+test('does not let a late execution failure overwrite cancellation', async () => {
+  const { createTask, pipelineAllEnvelopes } = await import('./tasks');
+  const {
+    beginExecutionAttempt,
+    cancelExecution,
+    failExecution,
+  } = await import('./executions');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Cancellation wins over late failure' });
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id != ?").run(taskId);
+  const delegation = (await pipelineAllEnvelopes()).find((item) => item.taskId === taskId);
+  assert.ok(delegation);
+
+  const started = await beginExecutionAttempt({
+    runId: 'run-cancel-before-failure',
+    delegation,
+    prompt: 'stable prompt',
+  });
+  await cancelExecution(started.attempt.execution_id, 'user cancelled');
+  await failExecution(started.attempt.execution_id, 'late receipt failure', false);
+
+  const row = db.prepare(`
+    SELECT status, last_error
+    FROM execution_attempts WHERE execution_id = ?
+  `).get(started.attempt.execution_id) as { status: string; last_error: string };
+  assert.deepEqual(row, { status: 'cancelled', last_error: 'user cancelled' });
 });
 
 test('records a late Agent result after cancellation without reopening task lanes or applying effects', async () => {
@@ -1335,7 +1377,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 27);
+  assert.equal(original.profile.prompt_seed_revision, 32);
   assert.ok(original.currentPrompt.content.length > 800);
   assert.match(original.currentPrompt.content, /# 角色目标/);
   assert.match(original.currentPrompt.content, /# 完成条件/);
@@ -1353,17 +1395,17 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
   await ensureAgentRuntimeWorkspace();
   const upgradedSeed = await getAgentProfile('backlog-agent');
-  assert.equal(upgradedSeed.profile.prompt_seed_revision, 27);
+  assert.equal(upgradedSeed.profile.prompt_seed_revision, 32);
   assert.equal(upgradedSeed.currentPrompt.source, 'seed');
   assert.ok(upgradedSeed.currentPrompt.version > 1);
   assert.match(upgradedSeed.currentPrompt.content, /# 工作原则/);
   const resumedBacklog = await loadAgentRuntime('backlog-agent', 'resume');
   assert.match(resumedBacklog.prompt, /用户已经确认的决策/);
   const resumedAnalyst = await loadAgentRuntime('analyst-agent', 'resume');
-  assert.match(resumedAnalyst.prompt, /decisionKey 是跨轮次不可变的系统标识/);
+  assert.match(resumedAnalyst.prompt, /decision key 是跨轮次不可变的系统标识/);
   assert.match(resumedAnalyst.prompt, /逐字复用/);
 
-  const promptContent = `${original.currentPrompt.content}\n\n- 在修改前先读取相关 Slice Spec。`;
+  const promptContent = `${original.currentPrompt.content}\n\n- 在修改前先读取相关交付规格。`;
   const promptVersion = await saveAgentPrompt({ agentId: 'dev-agent', content: promptContent, reason: 'test prompt version' });
   const memoryRevision = await saveAgentMemory({
     agentId: 'dev-agent',
@@ -1381,7 +1423,7 @@ test('materializes editable Agent Prompt and Memory outside the workspace with v
   const preservedHumanPrompt = await getAgentProfile('dev-agent');
   assert.equal(preservedHumanPrompt.currentPrompt.version, promptVersion);
   assert.equal(preservedHumanPrompt.currentPrompt.source, 'human');
-  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 27);
+  assert.equal(preservedHumanPrompt.profile.prompt_seed_revision, 32);
 
   const localPrompt = `${promptContent}\n- 本地文件修改也必须形成版本。`;
   writeFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), localPrompt);

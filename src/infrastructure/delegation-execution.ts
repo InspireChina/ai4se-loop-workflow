@@ -17,6 +17,7 @@ export type DelegationExecutionInput = {
   description: string;
   telemetry: LangfuseTelemetry;
   appendLog: (message: string) => Promise<unknown>;
+  recordTelemetryEvent?: (event: AgentTelemetryEvent & { sequence: number }) => Promise<unknown>;
   maxRuntimeMs: number;
   idleTimeoutMs: number;
   resultKind?: AgentResultKind;
@@ -30,6 +31,7 @@ export type DelegationExecutionResult = {
   finalText: string;
   submittedResult?: string | null;
   resultSubmissionError?: string | null;
+  evidencePersistenceError?: string | null;
   cancelled?: true;
 };
 
@@ -94,6 +96,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   let finalText = '';
   let submittedResult: string | null = null;
   let resultSubmissionError: string | null = null;
+  let evidencePersistenceError: string | null = null;
   let temporaryPrompt: TemporaryPrompt | null = null;
   let resultChannel: AgentResultChannel | null = null;
   const finalTextAccumulator = createAgentFinalTextAccumulator(executor.id);
@@ -106,7 +109,17 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   const enqueueTelemetry = (event: AgentTelemetryEvent | null) => {
     if (!event) return;
     const sequenced = { ...event, sequence: ++telemetrySequence };
-    telemetryQueue = telemetryQueue.catch(() => undefined).then(async () => { await trace.event(sequenced); }).catch(() => undefined);
+    telemetryQueue = telemetryQueue.catch(() => undefined).then(async () => {
+      try {
+        await input.recordTelemetryEvent?.(sequenced);
+      } catch (error) {
+        if (!evidencePersistenceError) {
+          evidencePersistenceError = error instanceof Error ? error.message : String(error);
+          enqueueLog(`[执行器错误] executor=${executor.id} agent=${context.agent} - 本地执行证据写入失败：${evidencePersistenceError}`);
+        }
+      }
+      try { await trace.event(sequenced); } catch { /* telemetry is best-effort and must not block the CLI */ }
+    }).catch(() => undefined);
   };
 
   try {
@@ -210,6 +223,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     }
     await logQueue;
     await telemetryQueue;
+    await logQueue;
     finalText = finalTextAccumulator.value();
     if (resultChannel) {
       try {
@@ -225,10 +239,12 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     else if (terminalExitCode && terminalExitCode !== 0) await appendLog(`[错误] ${context.agent} 执行失败 code=${terminalExitCode}`);
     else await appendLog(`[Agent] 完成 lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - 处理完成`);
     traceStatus = timedOut ? 'timed_out' : executionFailed ? 'execution_error' : terminalExitCode === 0 ? 'completed' : terminalExitCode === null ? 'cancelled' : 'failed';
+    if (evidencePersistenceError) traceStatus = 'execution_error';
     return {
       exitCode: terminalExitCode ?? 1,
       finalText,
       ...(input.resultKind ? { submittedResult, resultSubmissionError } : {}),
+      ...(evidencePersistenceError ? { evidencePersistenceError } : {}),
       ...(cancelled ? { cancelled: true as const } : {}),
     };
   } finally {

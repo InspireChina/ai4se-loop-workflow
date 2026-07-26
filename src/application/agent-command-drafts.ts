@@ -1,8 +1,10 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { agentResultSchema, type AgentResult } from '../domain/agent-result';
 import {
+  agentContextHelpLines,
   agentCommandProfile,
   agentCommandWorkKey,
+  loopAgentCommandPrefix,
   type AgentCommandProfile,
 } from '../domain/agent-command-profile';
 import { databaseConnection, hash } from '../infrastructure/database';
@@ -11,11 +13,12 @@ import {
   runReproductionCommand,
 } from './reproduction-command-drafts';
 import {
-  analysisHelp,
-  runAnalysisCommand,
-} from './analysis-command-drafts';
+  deliveryAnalysisHelp,
+  runDeliveryAnalysisCommand,
+} from './delivery-analysis-command-drafts';
 import {
   developmentHelp,
+  prepareDevelopmentRepositorySnapshot,
   runDevelopmentCommand,
 } from './development-command-drafts';
 import {
@@ -477,24 +480,129 @@ function cloneReproductionDraft(
   `).run(target.draft_id, source.draft_id);
 }
 
-function cloneAnalysisDraft(
+function initializeDeliveryAnalysisContract(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  execution: ExecutionRow,
+  draft: DraftRow,
+) {
+  if (!execution.story_index) throw new Error('交付分析缺少当前交付单元');
+  const unit = db.prepare(`
+    SELECT unit_key, title, actor, trigger_condition, observable_outcome, acceptance
+    FROM stories
+    WHERE task_id = ? AND story_index = ?
+  `).get(execution.task_id, execution.story_index) as {
+    unit_key: string | null;
+    title: string;
+    actor: string | null;
+    trigger_condition: string | null;
+    observable_outcome: string | null;
+    acceptance: string | null;
+  } | undefined;
+  if (!unit) throw new Error(`交付单元不存在：${execution.story_index}`);
+  const missing = [
+    ['unit key', unit.unit_key],
+    ['参与者', unit.actor],
+    ['触发条件', unit.trigger_condition],
+    ['可观察结果', unit.observable_outcome],
+    ['验收语义', unit.acceptance],
+  ].filter((entry) => !entry[1]?.trim()).map((entry) => entry[0]);
+  if (missing.length) {
+    throw new Error(`交付单元契约不完整，不能开始交付分析：缺少${missing.join('、')}`);
+  }
+  db.prepare(`
+    INSERT INTO delivery_analysis_drafts(
+      draft_id, unit_key, title, actor, trigger_condition, observable_outcome, acceptance
+    ) VALUES(?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    draft.draft_id,
+    unit.unit_key,
+    unit.title,
+    unit.actor,
+    unit.trigger_condition,
+    unit.observable_outcome,
+    unit.acceptance,
+  );
+  const sources = db.prepare(`
+    SELECT source_key, source_kind, content, source_ref
+    FROM delivery_unit_context_links
+    WHERE task_id = ? AND story_index = ?
+    ORDER BY source_key
+  `).all(execution.task_id, execution.story_index) as {
+    source_key: string;
+    source_kind: 'change' | 'preserve' | 'technical' | 'acceptance';
+    content: string;
+    source_ref: string;
+  }[];
+  if (!sources.length) throw new Error('交付单元没有可追溯的上游来源，不能开始交付分析');
+  for (const [index, source] of sources.entries()) {
+    db.prepare(`
+      INSERT INTO delivery_analysis_source_items(
+        draft_id, source_key, source_kind, content, source_ref, ordinal
+      ) VALUES(?, ?, ?, ?, ?, ?)
+    `).run(
+      draft.draft_id,
+      source.source_key,
+      source.source_kind,
+      source.content,
+      source.source_ref,
+      index + 1,
+    );
+  }
+  const dependencies = db.prepare(`
+    SELECT dependency.depends_on_story_index AS story_index,
+           upstream.unit_key, upstream.title
+    FROM delivery_unit_dependencies dependency
+    JOIN stories upstream
+      ON upstream.task_id = dependency.task_id
+     AND upstream.story_index = dependency.depends_on_story_index
+    WHERE dependency.task_id = ? AND dependency.story_index = ?
+    ORDER BY dependency.depends_on_story_index
+  `).all(execution.task_id, execution.story_index) as {
+    story_index: number;
+    unit_key: string | null;
+    title: string;
+  }[];
+  for (const [index, dependency] of dependencies.entries()) {
+    if (!dependency.unit_key?.trim()) {
+      throw new Error(`前置交付单元 ${dependency.story_index} 缺少稳定 unit key`);
+    }
+    db.prepare(`
+      INSERT INTO delivery_analysis_upstream_dependencies(
+        draft_id, story_index, unit_key, title, ordinal
+      ) VALUES(?, ?, ?, ?, ?)
+    `).run(
+      draft.draft_id,
+      dependency.story_index,
+      dependency.unit_key,
+      dependency.title,
+      index + 1,
+    );
+  }
+}
+
+function cloneDeliveryAnalysisContract(
   db: Awaited<ReturnType<typeof databaseConnection>>,
   source: DraftRow,
   target: DraftRow,
 ) {
   db.prepare(`
-    INSERT INTO analysis_drafts(draft_id, goal)
-    SELECT ?, goal FROM analysis_drafts WHERE draft_id = ?
+    INSERT INTO delivery_analysis_drafts(
+      draft_id, unit_key, title, actor, trigger_condition, observable_outcome,
+      acceptance, summary, implementation_guidance
+    )
+    SELECT ?, unit_key, title, actor, trigger_condition, observable_outcome,
+           acceptance, summary, implementation_guidance
+    FROM delivery_analysis_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   for (const table of [
-    ['analysis_scope_items', 'scope_key, direction, content, ordinal'],
-    ['analysis_behaviors', 'behavior_key, scenario, expected, ordinal'],
-    ['analysis_decisions', `decision_key, title, question, impact, status,
-      selected_option_id, source, decision_text, rationale, evidence,
-      recommendation_option_id, recommendation_reason, depends_on_json, ordinal`],
-    ['analysis_acceptance_criteria', 'criterion_key, description, oracle, ordinal'],
-    ['analysis_dependencies', 'dependency_key, content, ordinal'],
-    ['analysis_budget_items', 'budget_key, kind, content, ordinal'],
+    ['delivery_analysis_source_items', 'source_key, source_kind, content, source_ref, ordinal'],
+    ['delivery_analysis_upstream_dependencies', 'story_index, unit_key, title, ordinal'],
+    ['delivery_analysis_decisions', `decision_key, decision_type, title, question, impact, authority, status,
+      selected_option_id, decision_text, rationale, evidence,
+      recommendation_option_id, recommendation_reason, ordinal`],
+    ['delivery_analysis_impacts', 'impact_key, area, finding, disposition, evidence, decision_key, ordinal'],
+    ['delivery_analysis_guardrails', 'guardrail_key, content, rationale, ordinal'],
+    ['delivery_analysis_verification_focus', 'focus_key, expected, oracle, ordinal'],
   ] as const) {
     db.prepare(`
       INSERT INTO ${table[0]}(draft_id, ${table[1]})
@@ -502,18 +610,11 @@ function cloneAnalysisDraft(
     `).run(target.draft_id, source.draft_id);
   }
   db.prepare(`
-    INSERT INTO analysis_decision_options(
+    INSERT INTO delivery_analysis_decision_options(
       draft_id, decision_key, option_id, label, consequence, ordinal
     )
     SELECT ?, decision_key, option_id, label, consequence, ordinal
-    FROM analysis_decision_options WHERE draft_id = ?
-  `).run(target.draft_id, source.draft_id);
-  db.prepare(`
-    INSERT INTO analysis_verification_steps(
-      draft_id, verification_key, criterion_key, kind, instruction, command, ordinal
-    )
-    SELECT ?, verification_key, criterion_key, kind, instruction, command, ordinal
-    FROM analysis_verification_steps WHERE draft_id = ?
+    FROM delivery_analysis_decision_options WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
 }
 
@@ -522,25 +623,47 @@ function cloneDevelopmentDraft(
   source: DraftRow,
   target: DraftRow,
 ) {
+  const activeRecovery = Boolean((db.prepare(`
+    SELECT 1 AS active
+    FROM recovery_items
+    WHERE task_id = ? AND story_index IS ?
+      AND status IN ('pending', 'claimed', 'reopened')
+    LIMIT 1
+  `).get(target.task_id, target.story_index) as { active: number } | undefined));
+  // A Test-originated correction must establish fresh claims and checks. A
+  // waiting-for-answers draft is only a continuation of the same correction,
+  // so its progressive judgments remain available after the user responds.
+  const startsCorrectionCycle = activeRecovery && source.status !== 'waiting_for_answers';
   db.prepare(`
     INSERT INTO development_drafts(
-      draft_id, summary, assessment_mode, implementation_notes, commit_sha, failure_summary
+      draft_id, repository_base_commit,
+      initial_workspace_fingerprint, initial_workspace_tree, initial_workspace_changes_json
     )
-    SELECT ?, summary, assessment_mode, implementation_notes, commit_sha, failure_summary
+    SELECT ?, repository_base_commit,
+           initial_workspace_fingerprint, initial_workspace_tree, initial_workspace_changes_json
     FROM development_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   for (const table of [
-    ['development_criteria', 'criterion_key, status, evidence, ordinal'],
-    ['development_changes', 'path, summary, ordinal'],
-    ['development_tests', 'test_key, command, passed, summary, ordinal'],
+    ['development_criteria', 'criterion_key, evidence, ordinal'],
     ['development_risks', 'risk_key, content, ordinal'],
     ['development_runtime_inputs', 'request_key, title, question, why, recommendation, ordinal'],
-    ['development_recovery_resolutions', 'recovery_id, summary, evidence, ordinal'],
   ] as const) {
     db.prepare(`
       INSERT INTO ${table[0]}(draft_id, ${table[1]})
       SELECT ?, ${table[1]} FROM ${table[0]} WHERE draft_id = ?
     `).run(target.draft_id, source.draft_id);
+  }
+  if (!startsCorrectionCycle) {
+    for (const table of [
+      ['development_checks', `check_key, command, command_hash, summary, source_execution_id,
+        source_receipt_key, head_commit, workspace_fingerprint, ordinal`],
+      ['development_recovery_resolutions', 'recovery_id, summary, evidence, ordinal'],
+    ] as const) {
+      db.prepare(`
+        INSERT INTO ${table[0]}(draft_id, ${table[1]})
+        SELECT ?, ${table[1]} FROM ${table[0]} WHERE draft_id = ?
+      `).run(target.draft_id, source.draft_id);
+    }
   }
 }
 
@@ -663,11 +786,24 @@ function createDraft(
       if (source) cloneReproductionDraft(db, source, created);
       else db.prepare('INSERT INTO reproduction_drafts(draft_id) VALUES(?)').run(draftId);
     } else if (profile.draftType === 'analysis') {
-      if (source) cloneAnalysisDraft(db, source, created);
-      else db.prepare('INSERT INTO analysis_drafts(draft_id) VALUES(?)').run(draftId);
+      if (source) {
+        cloneDeliveryAnalysisContract(db, source, created);
+      } else {
+        initializeDeliveryAnalysisContract(db, execution, created);
+      }
     } else if (profile.draftType === 'development') {
       if (source) cloneDevelopmentDraft(db, source, created);
-      else db.prepare('INSERT INTO development_drafts(draft_id) VALUES(?)').run(draftId);
+      else {
+        db.prepare(`
+          INSERT INTO development_drafts(draft_id, repository_base_commit)
+          VALUES(?, ?)
+        `).run(draftId, execution.base_commit);
+      }
+      db.prepare(`
+        UPDATE development_drafts
+        SET repository_base_commit = COALESCE(repository_base_commit, ?)
+        WHERE draft_id = ?
+      `).run(execution.base_commit, draftId);
     } else if (profile.draftType === 'verification') {
       if (source) cloneVerificationDraft(db, source, created);
       else db.prepare('INSERT INTO verification_drafts(draft_id) VALUES(?)').run(draftId);
@@ -691,16 +827,26 @@ function ensureDraft(
   profile: AgentCommandProfile,
   workKey: string,
 ) {
+  const ensureDevelopmentBaseline = (draft: DraftRow) => {
+    if (profile.draftType === 'development') {
+      db.prepare(`
+        UPDATE development_drafts
+        SET repository_base_commit = COALESCE(repository_base_commit, ?)
+        WHERE draft_id = ?
+      `).run(execution.base_commit, draft.draft_id);
+    }
+    return draft;
+  };
   const latest = latestDraft(db, workKey);
   if (!latest) return createDraft(db, execution, profile, workKey);
-  if (latest.last_execution_id === execution.execution_id) return latest;
+  if (latest.last_execution_id === execution.execution_id) return ensureDevelopmentBaseline(latest);
   if (latest.status === 'editing') {
     db.prepare(`
       UPDATE agent_work_drafts
       SET last_execution_id = ?, updated_at = CURRENT_TIMESTAMP
       WHERE draft_id = ?
     `).run(execution.execution_id, latest.draft_id);
-    return { ...latest, last_execution_id: execution.execution_id };
+    return ensureDevelopmentBaseline({ ...latest, last_execution_id: execution.execution_id });
   }
   return createDraft(db, execution, profile, workKey, latest);
 }
@@ -1524,9 +1670,375 @@ function submitDeliveryPlan(
   return '交付计划已提交成功。普通最终回复不再用于推进流程，可以结束本轮。';
 }
 
-function helpText(execution: ExecutionRow, profile: AgentCommandProfile) {
+const requirementContextCommandIndex = [
+  '  requirement-context intent set --text <业务意图>',
+  '  requirement-context change set --text <Actual、Expected 与 TO-BE 的变化摘要>',
+  '  requirement-context assertion upsert --key <key> --perspective <actual|expected|target> --statement <陈述> --evidence <observed|reported|inferred|decided|conflicted> --source <来源> [--decision <问题key>]',
+  '  requirement-context assertion dismiss --key <key> --reason <理由>',
+  '  requirement-context assertion supersede --key <旧key> --by <新key> --reason <理由>',
+  '  requirement-context impact upsert --key <key> --statement <影响> --disposition <change|preserve|needs_decision|technical> --rationale <依据> --source <来源> [--decision <问题key>]',
+  '  requirement-context impact dismiss --key <key> --reason <理由>',
+  '  requirement-context impact supersede --key <旧key> --by <新key> --reason <理由>',
+  '  requirement-context acceptance upsert --key <key> --text <验收语义> --source <来源>',
+  '  requirement-context acceptance dismiss --key <key> --reason <理由>',
+  '  requirement-context acceptance supersede --key <旧key> --by <新key> --reason <理由>',
+  '  requirement-context classification set <feature|bug|tech|other>',
+  '  requirement-context constraint add --key <key> --text <内容>',
+  '  requirement-context constraint remove --key <key>',
+  '  requirement-context scope include|exclude --key <key> --text <内容>',
+  '  requirement-context scope remove --key <key>',
+  '  requirement-context question add --key <key> --title <标题> --question <问题> --impact <影响>',
+  '  requirement-context question option-add --key <问题key> --id <选项id> --label <名称> --consequence <后果>',
+  '  requirement-context question recommend --key <问题key> --option <选项id> --reason <理由>',
+  '  requirement-context question remove --key <key>',
+  '  requirement-context validate',
+];
+
+function requirementContextHelp(terminalActions: string[], topic?: string | null) {
+  if (topic === 'assertion') {
+    return [
+      '业务语义陈述用于区分当前实际发生的 Actual、当前本来要求的 Expected 和本次完成后的 Target。',
+      '',
+      '  requirement-context intent set --text <业务意图>',
+      '  requirement-context change set --text <Actual、Expected 与 TO-BE 的变化摘要>',
+      '  requirement-context assertion upsert --key <稳定key> --perspective <actual|expected|target> --statement <陈述> --evidence <observed|reported|inferred|decided|conflicted> --source <来源> [--decision <问题key>]',
+      '',
+      'perspective：',
+      '  actual    当前真实发生或存在的业务行为。',
+      '  expected  当前业务原本应满足的语义，用于区分 Bug 与主动变化。',
+      '  target    本次交付完成后希望成立的业务语义。',
+      '',
+      'evidence：',
+      '  observed    通过运行、数据或可重复检查直接观察。',
+      '  reported    用户或可靠上游明确陈述，但尚未独立观察。',
+      '  inferred    根据现有证据推断；不能单独作为完成时的可靠 Actual、Expected 或 Target。',
+      '  decided     用户或权威上游已经明确决定。',
+      '  conflicted  证据相互冲突，必须关联待回答的 decision key 后请求澄清。',
+      '',
+      '完成需求上下文时，Actual、Expected、Target 各至少需要一条非 inferred、非 conflicted 的可靠陈述。',
+      '',
+      '修订：',
+      '  requirement-context assertion dismiss --key <key> --reason <理由>',
+      '  requirement-context assertion supersede --key <旧key> --by <新key> --reason <理由>',
+      '  同一语义的补充或纠正复用原 key；错误候选用 dismiss。使用 supersede 前，必须先创建同类型、不同 key 的 active 新结论。',
+      '',
+      '需求级验收语义：',
+      '  requirement-context acceptance upsert --key <稳定key> --text <验收语义> --source <来源>',
+      '  requirement-context acceptance dismiss --key <key> --reason <理由>',
+      '  requirement-context acceptance supersede --key <旧key> --by <新key> --reason <理由>',
+      '  正常完成时至少需要一条 active 验收语义；supersede 同样要求先创建同类型、不同 key 的 active 新条目。',
+    ];
+  }
+  if (topic === 'impact') {
+    return [
+      '业务影响记录目标变化会波及的业务语义；识别影响不等于自动扩大本轮范围。',
+      '',
+      '  requirement-context impact upsert --key <稳定key> --statement <影响> --disposition <change|preserve|needs_decision|technical> --rationale <依据> --source <来源> [--decision <问题key>]',
+      '',
+      'disposition：',
+      '  change          为使目标业务语义成立，本轮必须同步改变。',
+      '  preserve        与本次变化相关，但必须维持原有业务行为。',
+      '  needs_decision  是否改变属于新的业务选择，必须关联待回答的 decision key。',
+      '  technical       已识别的技术后果，不在需求梳理阶段决定，由后续交付分析承接。',
+      '',
+      '  requirement-context impact dismiss --key <key> --reason <理由>',
+      '  requirement-context impact supersede --key <旧key> --by <新key> --reason <理由>',
+      '  同一影响的补充或纠正复用原 key；无效影响用 dismiss。使用 supersede 前，必须先创建不同 key 的 active 新影响。',
+    ];
+  }
+  if (topic === 'question') {
+    return [
+      '只有无法从现有上下文和证据推导、并且会实质改变业务目标、规则、参与者、范围、分类或验收结果的问题才提交给用户。',
+      '',
+      '提问路径：',
+      '  question add → 至少两次 option-add → question recommend → validate → request-clarification',
+      '',
+      '  requirement-context question add --key <稳定decision key> --title <标题> --question <问题> --impact <不同回答的业务影响>',
+      '  requirement-context question option-add --key <问题key> --id <选项id> --label <名称> --consequence <后果>',
+      '  requirement-context question recommend --key <问题key> --option <推荐选项id> --reason <推荐理由>',
+      '  requirement-context question remove --key <key>',
+      '',
+      '每个未回答问题至少需要两个真实互斥选项、一个推荐选项和推荐理由。question remove 只用于尚未提交给用户的错误候选。',
+      '若问题源于 conflicted assertion 或 needs_decision impact，必须用同一 decision key 关联；普通问题本身不要求 assertion 或 impact 反向引用。',
+      '',
+      '恢复轮：',
+      '  先执行 status，逐字复用原 decision key 和用户答案；将关联的 conflicted assertion 更新为可靠结论，将 needs_decision impact 更新为 change、preserve 或 technical，再完成其余上下文。不得换 key 或重复询问。',
+    ];
+  }
+  if (topic === 'scope') {
+    return [
+      '约束与范围是按当前需求确有必要时才填写的可选边界，不应为了表单完整制造条目。',
+      '',
+      '约束：',
+      '  requirement-context constraint add --key <稳定key> --text <必须遵守的业务或交付约束>',
+      '  requirement-context constraint remove --key <key>',
+      '',
+      '范围：',
+      '  requirement-context scope include --key <稳定key> --text <明确属于本轮的业务范围>',
+      '  requirement-context scope exclude --key <稳定key> --text <明确不属于本轮的业务范围>',
+      '  requirement-context scope remove --key <key>',
+      '',
+      '分类：',
+      '  requirement-context classification set <feature|bug|tech|other>',
+      '  feature  主动改变业务能力或业务语义。',
+      '  bug      Actual 偏离已有明确 Expected。',
+      '  tech     主要改变工程属性并保持业务语义。',
+      '  other    确实不属于前三类的有效需求。',
+      '  分类只表达需求类型；bug 由 Application 路由到问题复现，其余类型路由到交付规划。',
+    ];
+  }
+  if (topic === 'finish') {
+    return [
+      '校验不会推进流程；可以反复执行并根据错误继续修改草稿。',
+      '',
+      '  requirement-context validate',
+      '',
+      '正常完成路径：',
+      '  status → intent → Actual/Expected/Target assertions → change → impacts → acceptance → classification → validate → complete',
+      `  ${terminalActions.find((action) => action.endsWith(' complete')) || 'requirement-context complete'}`,
+      '  必填：业务意图、可靠的 Actual/Expected/Target、变化摘要、至少一条有效影响、至少一条需求级验收语义和需求分类。',
+      '  可选：约束、显式范围和问题；只有业务上真实存在时才创建。',
+      '',
+      '澄清路径：',
+      '  完成必要调查并记录至少一条带来源陈述 → 建立有效问题与选项 → validate → request-clarification',
+      `  ${terminalActions.find((action) => action.endsWith(' request-clarification')) || 'requirement-context request-clarification'}`,
+      '  澄清最低必填：业务意图、至少一条 active 且带来源的业务语义陈述，以及至少一个结构完整的未回答问题。',
+      '  澄清阶段不要求猜测尚未确定的完整 Target 或需求分类；用户回答后由新的 resume execution 在原 key 上继续。',
+      '',
+      'validate 的含义：',
+      '  存在未回答问题时，validate 自动按 request-clarification 的最低结构校验。',
+      '  没有未回答问题时，validate 检查完整上下文结构，但仍不校验 classification；只有 complete 执行包含分类在内的最终完成校验。',
+      '',
+      '普通最终文本、Markdown 或手写 JSON 都不会结束 execution。',
+    ];
+  }
+  if (topic) {
+    throw new Error(`需求上下文 help 不支持主题：${topic}。可用主题：context、assertion、impact、question、scope、finish`);
+  }
+  return [
+    '完成需求上下文必须建立可靠的 Actual、Expected、Target，说明业务变化及影响，并形成需求级验收语义和分类。',
+    '约束、显式范围和问题是可选项；只有真实存在时才创建。',
+    '',
+    '标准路径：',
+    '  正常完成：status → intent/assertions/change/impacts/acceptance/classification → validate → complete',
+    '  用户澄清：question + options + recommendation；若源于冲突或待决影响则关联同一 decision key → validate → request-clarification',
+    '  恢复处理：status → 复用原 decision key 消费回答 → 更新关联语义与影响 → complete',
+    '',
+    '命令索引：',
+    ...requirementContextCommandIndex,
+    '',
+    '终止命令：',
+    ...terminalActions.map((action) => `  ${action}`),
+    '',
+    '主题帮助：',
+    '  help context    只读上下文工具与使用时机',
+    '  help assertion  Actual、Expected、Target、证据状态和验收语义',
+    '  help impact     业务影响与 disposition 含义',
+    '  help question   用户澄清与恢复路径',
+    '  help scope      约束、范围与分类',
+    '  help finish     必填项、校验与终止命令',
+  ];
+}
+
+const deliveryPlanCommandIndex = [
+  '  delivery-plan rationale set --text <拆分依据>',
+  '  delivery-plan coverage set --text <整体覆盖说明>',
+  '  delivery-plan ordering set --text <排序与依赖说明>',
+  '  delivery-plan unit upsert --key <稳定key> --title <标题> --actor <参与者> --trigger <触发条件> --outcome <可观察结果> --acceptance <验收标准>',
+  '  delivery-plan unit dismiss --key <稳定key> --reason <理由>',
+  '  delivery-plan unit supersede --key <旧key> --by <新key> --reason <理由>',
+  '  delivery-plan unit move --key <稳定key> --position <从1开始的位置>',
+  '  delivery-plan unit source add --key <单元key> --source <规划输入key>',
+  '  delivery-plan unit source remove --key <单元key> --source <规划输入key>',
+  '  delivery-plan unit dependency add --key <单元key> --on <前置单元key>',
+  '  delivery-plan unit dependency remove --key <单元key> --on <前置单元key>',
+  '  delivery-plan validate',
+];
+
+function deliveryPlanHelp(terminalActions: string[], topic?: string | null) {
+  if (topic === 'unit') {
+    return [
+      '交付单元必须是参与者在明确触发下获得可观察结果、并能独立验收的最小业务闭环；不能按数据库、API、页面或测试等技术层拆分。',
+      '',
+      '  delivery-plan unit upsert --key <稳定key> --title <标题> --actor <参与者> --trigger <触发条件> --outcome <可观察结果> --acceptance <验收标准>',
+      '  delivery-plan unit move --key <稳定key> --position <从1开始的位置>',
+      '',
+      '每个单元都必须填写参与者、触发条件、可观察结果和独立验收语义。一个简单需求可以只有一个单元；拆开后形成半成品时应合并，包含多个独立业务结果时应继续拆分。',
+      '每个有效单元必须关联至少一项真实规划输入，并且至少承接一项 change 或 acceptance。',
+      '一个计划允许 1 至 50 个有效单元；有效单元标题不能重复，unit key 不能与当前需求中已有的历史交付单元冲突。',
+    ];
+  }
+  if (topic === 'source') {
+    return [
+      '规划输入由 Application 在草稿创建时冻结。Agent 不能创建或改写来源，只能把每项关联到真正承接它的交付单元。',
+      '',
+      '  delivery-plan unit source add --key <单元key> --source <规划输入key>',
+      '  delivery-plan unit source remove --key <单元key> --source <规划输入key>',
+      '',
+      'source kind：',
+      '  change      必须由一个或多个单元实现的业务变化。',
+      '  preserve    相关单元必须继承的不变约束，通常不单独形成交付单元。',
+      '  technical   需要传给后续交付分析的技术后果，通常不单独形成交付单元。',
+      '  acceptance  所有单元组合后必须覆盖的需求级验收语义。',
+      '',
+      '所有冻结输入都必须被至少一个有效单元承接；同一输入可以关联多个确实相关的单元，但不能为了通过校验建立虚假关联。',
+      'dismiss 或 supersede 不会自动迁移来源关联；旧单元失活后，其关联不再计入覆盖，新单元必须重新建立真实来源关联。',
+    ];
+  }
+  if (topic === 'dependency') {
+    return [
+      '依赖只表示业务上真实存在的前置关系；并行可交付的单元不能为了执行顺序被强行串联。',
+      '',
+      '  delivery-plan ordering set --text <推荐顺序与依赖依据>',
+      '  delivery-plan unit dependency add --key <单元key> --on <前置单元key>',
+      '  delivery-plan unit dependency remove --key <单元key> --on <前置单元key>',
+      '  delivery-plan unit move --key <单元key> --position <从1开始的位置>',
+      '',
+      '依赖两端必须是当前草稿中的 active 单元；status 中列出的既有历史单元不能作为 --on。依赖不能指向自身、不能成环，每个单元最多声明 50 个前置单元。',
+      'unit move 只调整顺序，不会创建依赖；dependency add 只建立依赖，也不会自动移动单元。前置单元必须显式排在依赖它的单元之前。',
+      '只有一个有效单元时 ordering 可省略；存在多个有效单元时必须填写排序与依赖说明，即使它们之间没有前置依赖。',
+    ];
+  }
+  if (topic === 'revision') {
+    return [
+      'unit key 是跨 attempt 的稳定业务身份。补充或纠正同一个业务闭环时使用相同 key 执行 upsert，禁止换 key 堆叠同义单元。',
+      '',
+      '  delivery-plan unit dismiss --key <稳定key> --reason <理由>',
+      '  delivery-plan unit supersede --key <旧key> --by <新key> --reason <理由>',
+      '',
+      'dismiss 用于调查后确认不是有效交付单元的错误候选；supersede 用于旧单元确实被另一个不同稳定身份的新单元取代。',
+      '已 dismissed 或 superseded 的 key 保留为历史，不能重新激活；新增计划的 key 也不能与当前需求已有交付单元重复。',
+      '修订不会自动迁移来源、顺序或依赖。替换时先创建 active 新单元并补齐来源；在旧单元仍 active 时移除或改接引用它的依赖；最后再 supersede 旧单元。',
+    ];
+  }
+  if (topic === 'finish') {
+    return [
+      '校验不会推进流程；可以反复执行并根据覆盖、顺序或引用错误继续修改。',
+      '',
+      '  delivery-plan validate',
+      '',
+      '正常路径：',
+      '  status → rationale/coverage → unit upsert → source add → 必要的 ordering/dependency/move → validate → complete',
+      `  ${terminalActions.find((action) => action.endsWith(' complete')) || 'delivery-plan complete'}`,
+      '',
+      '完成要求：',
+      '  必填拆分依据、整体覆盖说明、全部冻结规划输入的真实承接关系，以及 1 至 50 个有效交付单元。',
+      '  每个单元必须形成独立业务闭环、关联至少一个来源，并至少承接 change 或 acceptance。',
+      '  多单元计划必须说明推荐顺序；依赖必须无环并与顺序一致。',
+      '  排序说明和依赖在单单元计划中可省略；交付规划 Agent 不向用户提问。',
+      '  validate 与 complete 使用同一套结构校验；validate 只反馈问题且不终止，complete 是唯一会提交计划并结束 execution 的命令。',
+      '',
+      '普通最终文本、Markdown 或手写 JSON 都不会结束 execution。',
+    ];
+  }
+  if (topic) {
+    throw new Error(`交付计划 help 不支持主题：${topic}。可用主题：context、unit、source、dependency、revision、finish`);
+  }
+  return [
+    '完成交付计划必须说明拆分依据与整体覆盖，并用有序、可独立验收的业务闭环承接全部冻结规划输入。',
+    '排序说明只在多单元时必填；依赖只在业务上真实存在时创建。',
+    '',
+    '标准路径：',
+    '  status → rationale/coverage → unit upsert → source add → 必要的 ordering/dependency/move → validate → complete',
+    '  错误候选：unit dismiss；被不同新单元取代：unit supersede；同一语义修正：原 key upsert',
+    '',
+    '命令索引：',
+    ...deliveryPlanCommandIndex,
+    '',
+    '终止命令：',
+    ...terminalActions.map((action) => `  ${action}`),
+    '',
+    '主题帮助：',
+    '  help context     只读上下文工具与使用时机',
+    '  help unit        交付单元的业务闭环语义',
+    '  help source      冻结规划输入与承接关系',
+    '  help dependency  排序、前置依赖与移动',
+    '  help revision    稳定 key、dismiss 与 supersede',
+    '  help finish      必填项、校验与完成',
+  ];
+}
+
+function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?: string | null) {
+  const appRoot = process.env.LOOP_APP_ROOT?.trim() || '<Loop App Root>';
+  const command = loopAgentCommandPrefix(appRoot);
+  if (topic === 'context') {
+    return [
+      `当前身份：${execution.agent} · ${execution.pipeline}`,
+      '',
+      '只读上下文工具：',
+      '这些命令只读取当前 execution 创建时冻结的 Context Snapshot，不修改需求、草稿或流程状态。',
+      ...agentContextHelpLines(appRoot),
+      '',
+      '使用顺序：',
+      '  1. 先执行当前角色的 status，恢复草稿和稳定 key。',
+      '  2. Prompt 已给出 required refs 时优先使用 get。',
+      '  3. 不知道 ref 或怀疑资料未展示时使用 search/list。',
+      '  4. 核对前序执行时使用 evidence；仅在版本或替代冲突时使用 history。',
+      '  5. 再使用仓库文件、Git 和测试工具确认实时 Ground Truth。',
+      '  6. 完成上述调查后仍无法唯一确定，才声明缺少信息或提交问题。',
+    ].join('\n');
+  }
+  if (topic) {
+    if (profile.draftType === 'requirement_context') {
+      return [
+        `当前身份：${execution.agent} · ${execution.pipeline}`,
+        `帮助主题：${topic}`,
+        '',
+        ...requirementContextHelp(profile.terminalActions, topic),
+        '',
+        '长文本参数：',
+        '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
+        `  返回完整索引：${command} help`,
+      ].join('\n');
+    }
+    if (profile.draftType === 'delivery_plan') {
+      return [
+        `当前身份：${execution.agent} · ${execution.pipeline}`,
+        `帮助主题：${topic}`,
+        '',
+        ...deliveryPlanHelp(profile.terminalActions, topic),
+        '',
+        '长文本参数：',
+        '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
+        `  返回完整索引：${command} help`,
+      ].join('\n');
+    }
+    if (profile.draftType === 'analysis') {
+      return [
+        `当前身份：${execution.agent} · ${execution.pipeline}`,
+        `帮助主题：${topic}`,
+        '',
+        ...deliveryAnalysisHelp(profile.terminalActions, topic),
+        '',
+        '长文本参数：',
+        '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
+        `  返回完整索引：${command} help`,
+      ].join('\n');
+    }
+    if (profile.draftType === 'development') {
+      return [
+        `当前身份：${execution.agent} · ${execution.pipeline}`,
+        `帮助主题：${topic}`,
+        '',
+        ...developmentHelp(profile.terminalActions, topic),
+        '',
+        '长文本参数：',
+        '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
+        `  返回完整索引：${command} help`,
+      ].join('\n');
+    }
+    throw new Error(`当前角色 help 不支持主题：${topic}。可用主题：context`);
+  }
   const common = [
     `当前身份：${execution.agent} · ${execution.pipeline}`,
+    '',
+    '公共诊断命令：',
+    `  ${command} help`,
+    `  ${command} whoami`,
+    '',
+    '只读上下文工具：',
+    '这些命令只读取当前 execution 创建时冻结的 Context Snapshot，不修改需求、草稿或流程状态。',
+    ...agentContextHelpLines(appRoot),
     '',
     '每次启动必须先执行：',
     `  ${profile.namespace} status`,
@@ -1536,24 +2048,10 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile) {
   if (profile.draftType === 'delivery_plan') {
     return [
       ...common,
-      '  delivery-plan rationale set --text <拆分依据>',
-      '  delivery-plan coverage set --text <整体覆盖说明>',
-      '  delivery-plan ordering set --text <排序与依赖说明>',
-      '  delivery-plan unit upsert --key <稳定key> --title <标题> --actor <参与者> --trigger <触发条件> --outcome <可观察结果> --acceptance <验收标准>',
-      '  delivery-plan unit dismiss --key <稳定key> --reason <理由>',
-      '  delivery-plan unit supersede --key <旧key> --by <新key> --reason <理由>',
-      '  delivery-plan unit move --key <稳定key> --position <从1开始的位置>',
-      '  delivery-plan unit source add --key <单元key> --source <规划输入key>',
-      '  delivery-plan unit source remove --key <单元key> --source <规划输入key>',
-      '  delivery-plan unit dependency add --key <单元key> --on <前置单元key>',
-      '  delivery-plan unit dependency remove --key <单元key> --on <前置单元key>',
-      '  delivery-plan validate',
+      ...deliveryPlanHelp(profile.terminalActions, null),
       '',
       '长文本参数：',
       '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
-      '',
-      '终止命令：',
-      ...profile.terminalActions.map((action) => `  ${action}`),
     ].join('\n');
   }
   if (profile.draftType === 'reproduction') {
@@ -1568,7 +2066,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile) {
   if (profile.draftType === 'analysis') {
     return [
       ...common,
-      ...analysisHelp(profile.terminalActions),
+      ...deliveryAnalysisHelp(profile.terminalActions, null),
       '',
       '长文本参数：',
       '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
@@ -1577,7 +2075,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile) {
   if (profile.draftType === 'development') {
     return [
       ...common,
-      ...developmentHelp(profile.terminalActions),
+      ...developmentHelp(profile.terminalActions, null),
       '',
       '长文本参数：',
       '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
@@ -1612,33 +2110,10 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile) {
   }
   return [
     ...common,
-    '  requirement-context intent set --text <业务意图>',
-    '  requirement-context change set --text <Actual、Expected 与 TO-BE 的变化摘要>',
-    '  requirement-context assertion upsert --key <key> --perspective <actual|expected|target> --statement <陈述> --evidence <observed|reported|inferred|decided|conflicted> --source <来源> [--decision <问题key>]',
-    '  requirement-context assertion dismiss --key <key> --reason <理由>',
-    '  requirement-context assertion supersede --key <旧key> --by <新key> --reason <理由>',
-    '  requirement-context impact upsert --key <key> --statement <影响> --disposition <change|preserve|needs_decision|technical> --rationale <依据> --source <来源> [--decision <问题key>]',
-    '  requirement-context impact dismiss --key <key> --reason <理由>',
-    '  requirement-context impact supersede --key <旧key> --by <新key> --reason <理由>',
-    '  requirement-context acceptance upsert --key <key> --text <验收语义> --source <来源>',
-    '  requirement-context acceptance dismiss --key <key> --reason <理由>',
-    '  requirement-context acceptance supersede --key <旧key> --by <新key> --reason <理由>',
-    '  requirement-context classification set <feature|bug|tech|other>',
-    '  requirement-context constraint add --key <key> --text <内容>',
-    '  requirement-context constraint remove --key <key>',
-    '  requirement-context scope include|exclude --key <key> --text <内容>',
-    '  requirement-context scope remove --key <key>',
-    '  requirement-context question add --key <key> --title <标题> --question <问题> --impact <影响>',
-    '  requirement-context question option-add --key <问题key> --id <选项id> --label <名称> --consequence <后果>',
-    '  requirement-context question recommend --key <问题key> --option <选项id> --reason <理由>',
-    '  requirement-context question remove --key <key>',
-    '  requirement-context validate',
+    ...requirementContextHelp(profile.terminalActions, null),
     '',
     '长文本参数：',
     '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
-    '',
-    '终止命令：',
-    ...profile.terminalActions.map((action) => `  ${action}`),
   ].join('\n');
 }
 
@@ -2002,7 +2477,22 @@ function reviseContextItemLifecycle(
 export async function issueAgentCommandToken(executionId: string) {
   const db = await databaseConnection();
   const execution = executionInDb(db, executionId);
-  if (!execution || !agentCommandProfile(execution.agent, execution.pipeline)) return null;
+  const profile = execution
+    ? agentCommandProfile(execution.agent, execution.pipeline)
+    : null;
+  if (!execution || !profile) return null;
+  if (profile.draftType === 'development') {
+    const workKey = agentCommandWorkKey(
+      execution.agent,
+      execution.pipeline,
+      execution.task_id,
+      execution.story_index,
+      execution.delegation_key,
+    );
+    if (!workKey) return null;
+    const draft = ensureDraft(db, execution, profile, workKey);
+    prepareDevelopmentRepositorySnapshot(db, draft, execution);
+  }
   const token = randomBytes(32).toString('hex');
   db.prepare(`
     UPDATE execution_attempts SET command_token_hash = ?, heartbeat_at = CURRENT_TIMESTAMP
@@ -2037,8 +2527,9 @@ export async function runAgentCommand(input: {
     ? positionals.slice(0, 3).join(' ')
     : positionals.join(' ');
 
-  if (command === 'help') {
-    return helpText(execution, profile);
+  if (positionals[0] === 'help') {
+    if (positionals.length > 2) throw new Error('help 最多接受一个主题');
+    return helpText(execution, profile, positionals[1] || null);
   }
   if (command === 'whoami') {
     return `${execution.agent} · ${execution.pipeline} · execution=${execution.execution_id}`;
@@ -2055,7 +2546,7 @@ export async function runAgentCommand(input: {
     return runReproductionCommand({ db, execution, draft, command, flags });
   }
   if (profile.draftType === 'analysis') {
-    return runAnalysisCommand({ db, execution, draft, command, flags });
+    return runDeliveryAnalysisCommand({ db, execution, draft, command, flags });
   }
   if (profile.draftType === 'development') {
     return runDevelopmentCommand({ db, execution, draft, command, flags });

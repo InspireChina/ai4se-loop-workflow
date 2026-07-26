@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 import { randomUUID } from 'node:crypto';
 import { parseAgentResult } from '../domain/agent-result';
 import { databaseConnection } from '../infrastructure/database';
@@ -25,18 +26,7 @@ async function completedRequirement(label: string, options: { readyToClose?: boo
   db.prepare(`
     INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json, resolved_at)
     VALUES(?, ?, 1, 1, 'resolved', ?, CURRENT_TIMESTAMP)
-  `).run(randomUUID(), taskId, JSON.stringify({
-    goal: '既有能力',
-    scope: { included: ['既有范围'], excluded: [] },
-    behaviors: [{ scenario: '既有场景', expected: '保持既有行为' }],
-    decisions: [],
-    decisionTree: [],
-    ambiguities: [],
-    acceptanceCriteria: [{ id: 'AC-1', description: '既有能力有效', oracle: '检查既有结果' }],
-    verificationPlan: [{ criterionId: 'AC-1', kind: 'inspection', instruction: '检查既有结果' }],
-    dependencies: [],
-    changeBudget: { capabilities: ['既有能力'], paths: [] },
-  }));
+  `).run(randomUUID(), taskId, JSON.stringify(deliverySpecFixture()));
   db.prepare(`
     UPDATE tasks
     SET total_stories = 1, analysis_index = 1, dev_index = 1, test_index = 1, spec_resolved_index = 1
@@ -111,35 +101,30 @@ async function delegation(taskId: string, pipeline?: string) {
   return line as DelegationEnvelope;
 }
 
-const resolvedSpec = {
-  goal: '完成反馈新增交付单元',
-  scope: { included: ['反馈要求的行为'], excluded: ['改写既有交付单元'] },
-  behaviors: [{ scenario: '用户触发反馈场景', expected: '新增行为满足反馈' }],
+const resolvedSpec = deliverySpecFixture({
   decisions: [{
     key: 'feedback-unit-boundary',
-    decision: '只追加新的交付单元',
-    rationale: '保留既有交付历史',
-    source: 'user',
-  }],
-  decisionTree: [{
-    key: 'feedback-unit-boundary',
+    type: 'business',
+    title: '反馈单元边界',
     question: '如何承载反馈修订？',
     impact: '决定是否改写历史交付',
     options: [
       { id: 'append', label: '追加交付单元', consequences: ['历史保持不变'] },
       { id: 'rewrite', label: '改写旧单元', consequences: ['历史语义会漂移'] },
     ],
-    status: 'resolved_from_context',
+    status: 'resolved',
     selectedOption: 'append',
-    source: 'user',
-    evidence: ['用户确认只使用向前追加流程'],
+    authority: 'user',
+    decision: '只追加新的交付单元',
+    rationale: '保留既有交付历史',
+    evidence: '用户确认只使用向前追加流程',
   }],
-  ambiguities: [],
-  acceptanceCriteria: [{ id: 'AC-FB', description: '反馈行为有效', oracle: '自动化验证通过' }],
-  verificationPlan: [{ criterionId: 'AC-FB', kind: 'command', instruction: '运行反馈测试', command: 'npm test' }],
-  dependencies: [],
-  changeBudget: { capabilities: ['新增反馈行为'], paths: ['src/'] },
-};
+  handoff: {
+    implementationGuidance: '以向前追加单元处理反馈。',
+    guardrails: [],
+    verificationFocus: [{ key: 'AC-FB', expected: '反馈行为有效', oracle: '自动化验证通过' }],
+  },
+});
 
 test('行为修订只追加新交付单元，并经过 Analysis、Dev、Test 和独立反馈验证', async () => {
   const { taskId, documentId } = await completedRequirement('行为修订');
@@ -429,7 +414,7 @@ test('反馈验证未通过会开启新批次，不回退旧单元或改写历�
     [detail?.task.analysis_index, detail?.task.dev_index, detail?.task.test_index],
     [2, 2, 2],
   );
-  assert.equal(detail?.storySpecs.filter((spec) => spec.story_index === 1).length, 1);
+  assert.equal(detail?.deliverySpecs.filter((spec) => spec.story_index === 1).length, 1);
   const reopenedEvent = detail?.events.find((event) => event.event_type === 'FeedbackReopened');
   assert.ok(reopenedEvent);
   assert.doesNotMatch(reopenedEvent.summary, new RegExp(commentId));
@@ -527,7 +512,7 @@ test('直接回复、历史说明和长期建议在原位闭环，不改写历�
 
   const detail = await getTask(taskId);
   assert.equal(detail?.stories.length, 1);
-  assert.equal(detail?.storySpecs.filter((spec) => spec.story_index === 1).length, 1);
+  assert.equal(detail?.deliverySpecs.filter((spec) => spec.story_index === 1).length, 1);
   assert.equal(detail?.documents.length, 1);
   assert.equal(detail?.documentComments.every((item) => item.status === 'resolved'), true);
   assert.equal(detail?.feedbackGroups.every((group) => group.status === 'completed'), true);

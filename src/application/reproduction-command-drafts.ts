@@ -302,7 +302,7 @@ function buildResult(current: ReproductionState, action: 'complete' | 'request-a
   return agentResultSchema.parse({
     outcome: complete ? 'completed' : 'needs_input',
     summary: complete
-      ? '问题已稳定复现并形成可供方案分析使用的证据'
+      ? '问题已稳定复现并形成可供交付分析使用的证据'
       : `当前条件未能稳定复现，仍需用户对齐 ${questions.length} 项信息`,
     artifact: {
       title: complete ? '问题复现证据' : '问题复现记录',
