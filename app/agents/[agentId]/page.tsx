@@ -1,9 +1,9 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { BrainCircuit, MemoryStick, Sparkles } from 'lucide-react';
+import { BrainCircuit, MemoryStick, RotateCcw, Sparkles } from 'lucide-react';
 import { getAgentProfile } from '../../../src/application/agent-profiles';
-import { isFlowAgentId } from '../../../src/domain/agent-profile';
-import { saveAgentMemoryAction, saveAgentPromptAction, setAgentAutoEvolutionAction } from '../../actions';
+import { AGENT_PROMPT_SEED_REVISION, isFlowAgentId } from '../../../src/domain/agent-profile';
+import { resetAgentPromptAction, saveAgentMemoryAction, saveAgentPromptAction, setAgentAutoEvolutionAction } from '../../actions';
 
 export const dynamic = 'force-dynamic';
 
@@ -11,6 +11,9 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
   const { agentId } = await params;
   if (!isFlowAgentId(agentId)) notFound();
   const detail = await getAgentProfile(agentId);
+  const usesLatestSystemTemplate = detail.currentPrompt.content.trim() === detail.definition.prompt.trim()
+    && detail.currentPrompt.template_version === AGENT_PROMPT_SEED_REVISION
+    && !detail.candidatePrompt;
   const selectedPrompt = detail.candidatePrompt || detail.currentPrompt;
   const effectivePrompt = [
     '# Harness Core Contract（只读）',
@@ -51,6 +54,13 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
       </div>
 
       <aside className="agent-side-column">
+        <form action={resetAgentPromptAction} className="card settings">
+          <input type="hidden" name="agentId" value={agentId}/>
+          <div className="settings-section-head"><span className="executor-icon"><RotateCcw size={18}/></span><div><strong>系统模板</strong><p className="muted settings-description">用当前代码中的最新系统模板替换这个项目的 Prompt。Memory 不变，尚未完成的 Prompt Canary 会被清除。</p></div><span className={`badge ${usesLatestSystemTemplate ? 'green' : 'amber'}`}>{usesLatestSystemTemplate ? '已是最新' : `可重置到 V${AGENT_PROMPT_SEED_REVISION}`}</span></div>
+          <label className="checkbox"><input type="checkbox" name="confirm" required disabled={usesLatestSystemTemplate}/>我确认覆盖当前项目保存的 Prompt</label>
+          <button className="button secondary" type="submit" disabled={usesLatestSystemTemplate}>重置为最新系统模板</button>
+        </form>
+
         <form action={setAgentAutoEvolutionAction} className="card settings">
           <input type="hidden" name="agentId" value={agentId}/>
           <strong>自动演化</strong>

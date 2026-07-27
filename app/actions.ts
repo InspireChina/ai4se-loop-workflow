@@ -2,7 +2,7 @@
 
 import { redirect } from 'next/navigation';
 import { normalizeWorkspaceRoot, setAgentExecutorSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
-import { saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
+import { resetAgentPromptToSystemTemplate, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
 import { setSoftwareMaintenanceSettings } from '../src/application/software-maintenance';
 import {
   addDocumentComment,
@@ -199,6 +199,13 @@ export async function acknowledgeClosureAction(formData: FormData) {
 export async function saveAgentPromptAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
   await saveAgentPrompt({ agentId, content: formData.get('content'), reason: formData.get('reason') });
+  redirect(`/agents/${agentId}`);
+}
+
+export async function resetAgentPromptAction(formData: FormData) {
+  const agentId = String(formData.get('agentId'));
+  if (formData.get('confirm') !== 'on') throw new Error('请先确认重置当前项目 Prompt');
+  await resetAgentPromptToSystemTemplate({ agentId });
   redirect(`/agents/${agentId}`);
 }
 

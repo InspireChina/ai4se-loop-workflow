@@ -1369,6 +1369,7 @@ test('initializes one project-owned Prompt from the system template without over
     agentProfileInternals,
     getAgentProfile,
     loadAgentRuntime,
+    resetAgentPromptToSystemTemplate,
     saveAgentMemory,
     saveAgentPrompt,
   } = await import('./agent-profiles');
@@ -1478,6 +1479,26 @@ test('initializes one project-owned Prompt from the system template without over
   assert.equal(runtime.prompt, projectPrompt);
   assert.match(runtime.prompt, /在修改前先读取相关交付规格/);
   assert.match(runtime.memory, /npm test/);
+
+  const resetRevision = await resetAgentPromptToSystemTemplate({ agentId: 'dev-agent' });
+  const reset = await getAgentProfile('dev-agent');
+  assert.equal(resetRevision, promptRevision + 1);
+  assert.equal(reset.currentPrompt.version, resetRevision);
+  assert.equal(reset.currentPrompt.template_version, 1);
+  assert.equal(reset.currentPrompt.source, 'system');
+  assert.equal(reset.currentPrompt.reason, '用户重置为系统模板 V1');
+  assert.equal(reset.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
+  assert.equal(reset.currentMemory.revision, memoryRevision);
+  assert.equal(reset.candidatePrompt, null);
+  assert.equal(
+    readFileSync(join(reset.runtimeDirectory, 'PROMPT.md'), 'utf8').trim(),
+    AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt,
+  );
+  assert.match(readFileSync(join(reset.runtimeDirectory, 'MEMORY.md'), 'utf8'), /npm test/);
+  assert.equal(
+    await resetAgentPromptToSystemTemplate({ agentId: 'dev-agent' }),
+    resetRevision,
+  );
 });
 
 test('promotes repeated evolution evidence and gates Prompt changes through deterministic Canary runs', async () => {

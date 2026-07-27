@@ -399,13 +399,29 @@ export async function getAgentProfile(agentIdInput: string, ensure = true) {
   };
 }
 
-async function replaceProjectPrompt(agentId: FlowAgentId, contentInput: string, reason: string) {
+async function replaceProjectPrompt(
+  agentId: FlowAgentId,
+  contentInput: string,
+  reason: string,
+  source: CurrentPrompt['source'] = 'human',
+  templateVersionInput?: number,
+  skipIfUnchanged = false,
+) {
   const content = promptSchema.parse(contentInput);
   const db = await databaseConnection();
   const replaced = db.transaction(() => {
     const profile = db.prepare('SELECT * FROM agent_profiles WHERE agent_id = ?').get(agentId) as AgentProfile;
     const currentPrompt = currentPromptInDb(db, agentId);
     const candidate = promptCandidateInDb(db, agentId);
+    const templateVersion = templateVersionInput ?? currentPrompt.template_version;
+    if (
+      skipIfUnchanged
+      && currentPrompt.content_hash === hash(content)
+      && currentPrompt.template_version === templateVersion
+      && !candidate
+    ) {
+      return { revision: currentPrompt.version, memoryRevision: profile.current_memory_revision };
+    }
     const revision = currentPrompt.version + 1;
     let candidateFingerprint = '';
     try {
@@ -414,13 +430,14 @@ async function replaceProjectPrompt(agentId: FlowAgentId, contentInput: string, 
     db.prepare(`
       UPDATE agent_prompts
       SET version = ?,
+          template_version = ?,
           content = ?,
           content_hash = ?,
-          source = 'human',
+          source = ?,
           reason = ?,
           updated_at = CURRENT_TIMESTAMP
       WHERE agent_id = ?
-    `).run(revision, content, hash(content), reason, agentId);
+    `).run(revision, templateVersion, content, hash(content), source, reason, agentId);
     db.prepare('DELETE FROM agent_prompt_candidates WHERE agent_id = ?').run(agentId);
     if (candidateFingerprint) {
       db.prepare(`
@@ -466,6 +483,21 @@ export async function saveAgentPrompt(input: { agentId: string; content: unknown
   if (!isFlowAgentId(input.agentId)) throw new Error('未知 Agent');
   await ensureAgentRuntimeWorkspace();
   const revision = await replaceProjectPrompt(input.agentId, String(input.content ?? ''), String(input.reason || '用户编辑项目 Agent Prompt'));
+  try { revalidatePath('/agents', 'layout'); } catch { /* Non-request usage. */ }
+  return revision;
+}
+
+export async function resetAgentPromptToSystemTemplate(input: { agentId: string }) {
+  if (!isFlowAgentId(input.agentId)) throw new Error('未知 Agent');
+  await ensureAgentRuntimeWorkspace();
+  const revision = await replaceProjectPrompt(
+    input.agentId,
+    AGENT_PROFILE_DEFINITIONS[input.agentId].prompt,
+    `用户重置为系统模板 V${AGENT_PROMPT_SEED_REVISION}`,
+    'system',
+    AGENT_PROMPT_SEED_REVISION,
+    true,
+  );
   try { revalidatePath('/agents', 'layout'); } catch { /* Non-request usage. */ }
   return revision;
 }
