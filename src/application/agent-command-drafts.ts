@@ -1208,18 +1208,14 @@ function renderArtifact(state: ReturnType<typeof draftState>) {
     const assertions = state.assertions.filter((item) =>
       item.perspective === perspective && item.lifecycle_status === 'active');
     return assertions.length
-      ? assertions.map((item) =>
-        `- ${item.statement}（证据状态：${item.evidence_status}；来源：${item.source}`
-        + `${item.decision_key ? `；decision：${item.decision_key}` : ''}）`)
+      ? assertions.map((item) => `- ${item.statement}`)
       : [`- ${fallback}`];
   };
   const impactSection = (disposition: ContextImpact['disposition'], fallback: string) => {
     const impacts = state.impacts.filter((item) =>
       item.disposition === disposition && item.lifecycle_status === 'active');
     return impacts.length
-      ? impacts.map((item) =>
-        `- ${item.statement}（依据：${item.rationale}；来源：${item.source}`
-        + `${item.decision_key ? `；decision：${item.decision_key}` : ''}）`)
+      ? impacts.map((item) => `- ${item.statement}`)
       : [`- ${fallback}`];
   };
   const lines = [
@@ -1273,7 +1269,7 @@ function renderArtifact(state: ReturnType<typeof draftState>) {
       state.acceptance.filter((item) => item.lifecycle_status === 'active').length
         ? state.acceptance
           .filter((item) => item.lifecycle_status === 'active')
-          .map((item) => `- ${item.content}（来源：${item.source}）`)
+          .map((item) => `- ${item.content}`)
         : ['- 尚未明确']
     ),
     '',
@@ -1291,21 +1287,6 @@ function renderArtifact(state: ReturnType<typeof draftState>) {
     '',
     ...(excluded.length ? excluded.map((item) => `- ${item.content}`) : ['- 尚未明确']),
   ];
-  const inactiveAssertions = state.assertions.filter((item) => item.lifecycle_status !== 'active');
-  const inactiveImpacts = state.impacts.filter((item) => item.lifecycle_status !== 'active');
-  const inactiveAcceptance = state.acceptance.filter((item) => item.lifecycle_status !== 'active');
-  if (inactiveAssertions.length || inactiveImpacts.length || inactiveAcceptance.length) {
-    lines.push('', '## 已修正的历史结论', '');
-    for (const item of inactiveAssertions) {
-      lines.push(`- 业务语义 \`${item.assertion_key}\`：${item.lifecycle_status}；${item.lifecycle_reason || '未记录原因'}`);
-    }
-    for (const item of inactiveImpacts) {
-      lines.push(`- 业务影响 \`${item.impact_key}\`：${item.lifecycle_status}；${item.lifecycle_reason || '未记录原因'}`);
-    }
-    for (const item of inactiveAcceptance) {
-      lines.push(`- 验收语义 \`${item.acceptance_key}\`：${item.lifecycle_status}；${item.lifecycle_reason || '未记录原因'}`);
-    }
-  }
   const answered = state.questions.filter((question) => question.answer);
   if (answered.length) {
     lines.push('', '## 用户确认决策', '');

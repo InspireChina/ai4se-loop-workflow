@@ -213,6 +213,12 @@ test('requires status first, accepts progressive edits, and submits a determinis
     '--text', '导出当前筛选条件命中的数据',
   ]);
 
+  const populatedStatus = await command(active.executionId, active.token!, ['requirement-context', 'status']);
+  assert.match(populatedStatus, /current-export · actual · observed · active/);
+  assert.match(populatedStatus, /来源：仓库列表导出入口与筛选查询实现/);
+  assert.match(populatedStatus, /filtered-export-data · change · active/);
+  assert.match(populatedStatus, /依据：否则目标业务行为无法成立；来源：filtered-export-target/);
+
   assert.equal(
     await command(active.executionId, active.token!, ['requirement-context', 'validate']),
     '业务变化上下文草稿结构校验通过；complete 仍会校验分类和未回答问题。',
@@ -236,6 +242,8 @@ test('requires status first, accepts progressive edits, and submits a determinis
   assert.match(result?.artifact?.content || '', /## TO-BE/);
   assert.match(result?.artifact?.content || '', /必须保持不变/);
   assert.match(result?.artifact?.content || '', /导出当前筛选条件命中的数据/);
+  assert.doesNotMatch(result?.artifact?.content || '', /证据状态：|来源：|依据：|decision：/);
+  assert.doesNotMatch(result?.artifact?.content || '', /仓库列表导出入口与筛选查询实现|filtered-export-target/);
 
   await applyAgentResult('RUN-command-progressive', active.delegation, result!, {
     executionId: active.executionId,
@@ -245,6 +253,10 @@ test('requires status first, accepts progressive edits, and submits a determinis
   assert.equal(detail?.task.item_type, 'feature');
   assert.equal(detail?.task.agile_status, 'in plan');
   assert.equal(detail?.task.current_subagent, 'story-splitter-agent');
+  const contextDocument = detail?.documents.find((document) => document.kind === 'context');
+  assert.ok(contextDocument);
+  assert.match(contextDocument.content, /列表已经支持组合筛选，但当前导出不继承筛选结果/);
+  assert.doesNotMatch(contextDocument.content, /证据状态：|来源：|依据：|decision：/);
 });
 
 test('routes an evidence-backed Actual versus Expected deviation to reproduction', async () => {
