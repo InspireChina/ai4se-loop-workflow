@@ -491,7 +491,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               attempt.base_commit ? `base commit: ${attempt.base_commit}` : '',
               attempt.code_commit ? `code commit: ${attempt.code_commit}` : '',
               attempt.verification_id ? `verification: ${attempt.verification_id}` : '',
-              attempt.prompt_version ? `prompt: Base v${attempt.prompt_version} · Overlay r${attempt.prompt_overlay_revision || 0} · ${attempt.prompt_hash || ''}` : '',
+              attempt.prompt_version ? `prompt: Project r${attempt.prompt_version} · template v${attempt.prompt_template_version || 1} · ${attempt.prompt_hash || ''}` : '',
               attempt.memory_revision ? `memory: r${attempt.memory_revision} · ${attempt.memory_hash || ''}` : '',
               attempt.last_error ? `error: ${attempt.last_error}` : '',
             ].filter(Boolean).join('\n')}</pre>

@@ -1363,15 +1363,14 @@ test('counts one active Analysis lane once when both its execution and queued re
   assert.equal(dispatched.length, 3);
 });
 
-test('composes an upgradable V1 Base Prompt with a durable project Overlay and Memory history', async () => {
+test('initializes one project-owned Prompt from the system template without overwriting project edits', async () => {
   const {
-    composeRolePrompt,
     ensureAgentRuntimeWorkspace,
     agentProfileInternals,
     getAgentProfile,
     loadAgentRuntime,
     saveAgentMemory,
-    saveAgentPromptOverlay,
+    saveAgentPrompt,
   } = await import('./agent-profiles');
   const { databaseConnection, hash } = await import('../infrastructure/database');
   const { AGENT_PROFILE_DEFINITIONS } = await import('../domain/agent-profile');
@@ -1381,7 +1380,9 @@ test('composes an upgradable V1 Base Prompt with a durable project Overlay and M
   const original = await getAgentProfile('dev-agent');
   assert.equal(original.profile.prompt_seed_revision, 1);
   assert.equal(original.currentPrompt.version, 1);
-  assert.equal(original.currentOverlay, null);
+  assert.equal(original.currentPrompt.template_version, 1);
+  assert.equal(original.currentPrompt.source, 'system');
+  assert.equal(original.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
   assert.equal('promptHistory' in original, false);
   assert.equal(existsSync(join(original.runtimeDirectory, 'history')), false);
   assert.equal(existsSync(join(original.runtimeDirectory, 'candidates')), false);
@@ -1402,10 +1403,10 @@ test('composes an upgradable V1 Base Prompt with a durable project Overlay and M
   agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
   await ensureAgentRuntimeWorkspace();
   const upgradedSeed = await getAgentProfile('backlog-agent');
-  assert.equal(upgradedSeed.profile.prompt_seed_revision, 1);
+  assert.equal(upgradedSeed.profile.prompt_seed_revision, 0);
   assert.equal(upgradedSeed.currentPrompt.version, 1);
-  assert.equal(upgradedSeed.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt);
-  assert.match(upgradedSeed.currentPrompt.content, /# 工作原则/);
+  assert.equal(upgradedSeed.currentPrompt.content, legacyPrompt);
+  assert.equal(upgradedSeed.currentPrompt.source, 'system');
   assert.equal(
     (db.prepare("SELECT COUNT(*) AS count FROM agent_prompts WHERE agent_id = 'backlog-agent'").get() as { count: number }).count,
     1,
@@ -1415,6 +1416,7 @@ test('composes an upgradable V1 Base Prompt with a durable project Overlay and M
   await ensureAgentRuntimeWorkspace();
   const resetBaseline = await getAgentProfile('backlog-agent');
   assert.equal(resetBaseline.currentPrompt.version, 1);
+  assert.equal(resetBaseline.currentPrompt.template_version, 1);
   assert.match(resetBaseline.currentPrompt.content, /# 工作原则/);
   assert.doesNotMatch(resetBaseline.currentPrompt.content, /完成时提供分类、流程方向/);
   assert.match(
@@ -1427,19 +1429,18 @@ test('composes an upgradable V1 Base Prompt with a durable project Overlay and M
   assert.match(resumedAnalyst.prompt, /decision key 是跨轮次不可变的系统标识/);
   assert.match(resumedAnalyst.prompt, /逐字复用/);
 
-  const overlayContent = '- 在修改前先读取相关交付规格。';
-  const overlayRevision = await saveAgentPromptOverlay({ agentId: 'dev-agent', content: overlayContent, reason: 'test prompt overlay' });
+  const projectPrompt = `${original.currentPrompt.content}\n\n# 当前项目约定\n\n- 在修改前先读取相关交付规格。`;
+  const promptRevision = await saveAgentPrompt({ agentId: 'dev-agent', content: projectPrompt, reason: 'test project prompt' });
   const memoryRevision = await saveAgentMemory({
     agentId: 'dev-agent',
     content: '# Durable Memory\n\n- 项目使用 npm test 运行确定性测试。',
     reason: 'test memory revision',
   });
   const edited = await getAgentProfile('dev-agent');
-  assert.equal(edited.currentPrompt.version, 1);
-  assert.equal(edited.currentPrompt.content_hash, original.currentPrompt.content_hash);
-  assert.equal(edited.currentOverlay?.revision, overlayRevision);
-  assert.equal(edited.currentOverlay?.source, 'human');
-  assert.equal(edited.currentOverlay?.content, overlayContent);
+  assert.equal(edited.currentPrompt.version, promptRevision);
+  assert.equal(edited.currentPrompt.source, 'human');
+  assert.equal(edited.currentPrompt.content, projectPrompt);
+  assert.equal(edited.currentPrompt.content_hash, hash(projectPrompt));
   assert.equal(edited.currentMemory.revision, memoryRevision);
   assert.equal(edited.memoryHistory.length, original.memoryHistory.length + 1);
   assert.equal(
@@ -1448,29 +1449,21 @@ test('composes an upgradable V1 Base Prompt with a durable project Overlay and M
   );
   assert.equal(
     readFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), 'utf8').trim(),
-    composeRolePrompt(edited.currentPrompt, edited.currentOverlay),
+    projectPrompt,
   );
   assert.match(readFileSync(join(edited.runtimeDirectory, 'MEMORY.md'), 'utf8'), /npm test/);
 
-  db.prepare(`
-    UPDATE agent_prompts SET content = ?, content_hash = ?, reason = '模拟旧应用内置 Prompt'
-    WHERE agent_id = 'dev-agent'
-  `).run(legacyPrompt, hash(legacyPrompt));
-  db.prepare("UPDATE agent_profiles SET prompt_seed_revision = 0 WHERE agent_id = 'dev-agent'").run();
   await ensureAgentRuntimeWorkspace();
-  const upgradedWithOverlay = await getAgentProfile('dev-agent');
-  assert.equal(upgradedWithOverlay.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
-  assert.equal(upgradedWithOverlay.currentOverlay?.revision, overlayRevision);
-  assert.equal(upgradedWithOverlay.currentOverlay?.content, overlayContent);
-  assert.equal(upgradedWithOverlay.profile.prompt_seed_revision, 1);
+  const preserved = await getAgentProfile('dev-agent');
+  assert.equal(preserved.currentPrompt.content, projectPrompt);
+  assert.equal(preserved.currentPrompt.version, promptRevision);
 
-  const localPrompt = `${overlayContent}\n- 这条旧本地内容不得反向导入数据库。`;
+  const localPrompt = `${projectPrompt}\n- 这条旧本地内容不得反向导入数据库。`;
   writeFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), localPrompt);
   await ensureAgentRuntimeWorkspace();
   const reconciled = await getAgentProfile('dev-agent');
-  assert.equal(reconciled.currentPrompt.version, 1);
-  assert.equal(reconciled.currentOverlay?.revision, overlayRevision);
-  assert.doesNotMatch(reconciled.currentOverlay?.content || '', /旧本地内容/);
+  assert.equal(reconciled.currentPrompt.version, promptRevision);
+  assert.equal(reconciled.currentPrompt.content, projectPrompt);
   assert.doesNotMatch(readFileSync(join(reconciled.runtimeDirectory, 'PROMPT.md'), 'utf8'), /旧本地内容/);
   assert.equal(
     (db.prepare("SELECT COUNT(*) AS count FROM agent_prompts WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
@@ -1478,11 +1471,11 @@ test('composes an upgradable V1 Base Prompt with a durable project Overlay and M
   );
   const runtime = await loadAgentRuntime('dev-agent', 'plan');
   assert.equal(runtime.promptVersion, reconciled.currentPrompt.version);
-  assert.equal(runtime.promptOverlayRevision, overlayRevision);
-  assert.equal(runtime.promptHash, hash(composeRolePrompt(reconciled.currentPrompt, reconciled.currentOverlay)));
+  assert.equal(runtime.promptTemplateVersion, 1);
+  assert.equal(runtime.promptHash, hash(projectPrompt));
   assert.equal(runtime.promptStatus, 'active');
   assert.equal(runtime.evolutionCandidateId, null);
-  assert.match(runtime.prompt, /# Project Prompt Overlay/);
+  assert.equal(runtime.prompt, projectPrompt);
   assert.match(runtime.prompt, /在修改前先读取相关交付规格/);
   assert.match(runtime.memory, /npm test/);
 });
@@ -1551,12 +1544,17 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
   assert.ok(detail.candidatePrompt);
   assert.equal(detail.profile.canary_remaining, 3);
   assert.equal(hash(detail.candidatePrompt!.content), detail.candidatePrompt!.content_hash);
-  assert.doesNotMatch(detail.candidatePrompt!.content, /# 角色目标/);
-  assert.equal(detail.candidatePrompt!.base_overlay_revision, detail.currentOverlay?.revision || 0);
+  assert.match(detail.candidatePrompt!.content, /# 角色目标/);
+  assert.equal(detail.candidatePrompt!.base_prompt_revision, detail.currentPrompt.version);
+  assert.ok(
+    detail.candidatePrompt!.content.indexOf(detail.currentPrompt.content)
+    < detail.candidatePrompt!.content.indexOf('EVOLUTION:verify-before-completion'),
+  );
   const candidateId = detail.candidatePrompt!.candidate_id;
   const candidateRuntime = await loadAgentRuntime('dev-agent');
   assert.equal(candidateRuntime.evolutionCandidateId, candidateId);
-  assert.equal(candidateRuntime.promptOverlayRevision, detail.candidatePrompt!.revision);
+  assert.equal(candidateRuntime.promptVersion, detail.candidatePrompt!.revision);
+  assert.equal(candidateRuntime.promptTemplateVersion, detail.currentPrompt.template_version);
   assert.match(candidateRuntime.prompt, /# 角色目标/);
   assert.match(candidateRuntime.prompt, /EVOLUTION:verify-before-completion/);
   assert.equal(
@@ -1606,21 +1604,21 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
     runId: 'run-canary-serial-1',
     delegation: canaryDelegation(taskA),
     prompt: candidateRuntime.prompt,
-    promptVersion: detail.currentPrompt.version,
-    promptOverlayRevision: detail.candidatePrompt!.revision,
+    promptVersion: detail.candidatePrompt!.revision,
+    promptTemplateVersion: detail.currentPrompt.template_version,
     promptHash: candidateRuntime.promptHash,
     evolutionCandidateId: candidateId,
   });
-  assert.equal(activeCanary.attempt.prompt_version, detail.currentPrompt.version);
-  assert.equal(activeCanary.attempt.prompt_overlay_revision, detail.candidatePrompt!.revision);
+  assert.equal(activeCanary.attempt.prompt_version, detail.candidatePrompt!.revision);
+  assert.equal(activeCanary.attempt.prompt_template_version, detail.currentPrompt.template_version);
   assert.equal(activeCanary.attempt.prompt_hash, candidateRuntime.promptHash);
   await assert.rejects(
     beginExecutionAttempt({
       runId: 'run-canary-serial-2',
       delegation: canaryDelegation(taskB),
       prompt: candidateRuntime.prompt,
-      promptVersion: detail.currentPrompt.version,
-      promptOverlayRevision: detail.candidatePrompt!.revision,
+      promptVersion: detail.candidatePrompt!.revision,
+      promptTemplateVersion: detail.currentPrompt.template_version,
       promptHash: candidateRuntime.promptHash,
       evolutionCandidateId: candidateId,
     }),
@@ -1636,9 +1634,8 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
   }
   detail = await getAgentProfile('dev-agent');
   assert.equal(detail.candidatePrompt, null);
-  assert.match(detail.currentOverlay!.content, /EVOLUTION:verify-before-completion/);
-  assert.equal(hash(detail.currentOverlay!.content), detail.currentOverlay!.content_hash);
-  assert.doesNotMatch(detail.currentPrompt.content, /EVOLUTION:verify-before-completion/);
+  assert.match(detail.currentPrompt.content, /EVOLUTION:verify-before-completion/);
+  assert.equal(hash(detail.currentPrompt.content), detail.currentPrompt.content_hash);
   assert.equal(detail.observations.find((item) => item.fingerprint === 'verify-before-completion')?.status, 'promoted_prompt');
   assert.equal(
     (db.prepare("SELECT COUNT(*) AS count FROM agent_prompts WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
@@ -1648,17 +1645,11 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
     (db.prepare("SELECT COUNT(*) AS count FROM agent_prompt_candidates WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
     0,
   );
-  const promotedOverlay = detail.currentOverlay!;
-  const releasedBase = detail.currentPrompt;
-  db.prepare(`
-    UPDATE agent_prompts SET content = '模拟旧 Base', content_hash = 'legacy-base'
-    WHERE agent_id = 'dev-agent'
-  `).run();
+  const promotedPrompt = detail.currentPrompt;
   await ensureAgentRuntimeWorkspace();
   detail = await getAgentProfile('dev-agent');
-  assert.equal(detail.currentPrompt.content_hash, releasedBase.content_hash);
-  assert.equal(detail.currentOverlay?.revision, promotedOverlay.revision);
-  assert.equal(detail.currentOverlay?.content_hash, promotedOverlay.content_hash);
+  assert.equal(detail.currentPrompt.version, promotedPrompt.version);
+  assert.equal(detail.currentPrompt.content_hash, promotedPrompt.content_hash);
   const upgradedRuntime = await loadAgentRuntime('dev-agent');
   assert.match(upgradedRuntime.prompt, /# 角色目标/);
   assert.match(upgradedRuntime.prompt, /EVOLUTION:verify-before-completion/);
@@ -1667,7 +1658,7 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
   await evaluate('evo-rollback-2', taskB, 'avoid-ambiguous-tool-order', 'prompt');
   await evaluate('evo-rollback-3', taskB, 'avoid-ambiguous-tool-order', 'prompt');
   detail = await getAgentProfile('dev-agent');
-  const currentOverlayBeforeRejectedCanary = detail.currentOverlay!;
+  const currentPromptBeforeRejectedCanary = detail.currentPrompt;
   const rejectedCandidateId = detail.candidatePrompt!.candidate_id;
   for (const index of [1, 2, 3]) addExecution(`late-canary-success-${index}`, taskA, rejectedCandidateId);
   addExecution('late-canary-failure', taskB, rejectedCandidateId);
@@ -1675,13 +1666,13 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
   await ensureAgentRuntimeWorkspace();
   detail = await getAgentProfile('dev-agent');
   assert.ok(detail.candidatePrompt);
-  assert.equal(detail.currentOverlay?.content_hash, currentOverlayBeforeRejectedCanary.content_hash);
+  assert.equal(detail.currentPrompt.content_hash, currentPromptBeforeRejectedCanary.content_hash);
   db.prepare("UPDATE execution_attempts SET status = 'retryable_failed' WHERE execution_id = 'late-canary-failure'").run();
   await ensureAgentRuntimeWorkspace();
   detail = await getAgentProfile('dev-agent');
   assert.equal(detail.candidatePrompt, null);
-  assert.equal(detail.currentOverlay?.revision, currentOverlayBeforeRejectedCanary.revision);
-  assert.equal(detail.currentOverlay?.content_hash, currentOverlayBeforeRejectedCanary.content_hash);
+  assert.equal(detail.currentPrompt.version, currentPromptBeforeRejectedCanary.version);
+  assert.equal(detail.currentPrompt.content_hash, currentPromptBeforeRejectedCanary.content_hash);
   assert.equal(
     (db.prepare("SELECT COUNT(*) AS count FROM agent_prompt_candidates WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
     0,

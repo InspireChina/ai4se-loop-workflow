@@ -188,41 +188,38 @@ async function createPromptCandidate(agentId: FlowAgentId, observation: Evolutio
   const detail = await getAgentProfile(agentId, false);
   if (detail.candidatePrompt) return;
   const marker = `<!-- EVOLUTION:${observation.fingerprint} -->`;
-  if (detail.currentOverlay?.content.includes(marker)) return;
+  if (detail.currentPrompt.content.includes(marker)) return;
   const addition = [marker, `- ${observation.guidance}`].join('\n');
-  const currentOverlay = detail.currentOverlay?.content.trim() || '';
-  const content = currentOverlay
-    ? `${currentOverlay}\n\n${addition}`
-    : `## Learned operating rules\n\n${addition}`;
-  if (content.length > 20_000 || addition.length > 1_200 || !safeEvolutionGuidance(addition)) return;
+  const content = `${detail.currentPrompt.content.trim()}\n\n## 自动演化建议\n\n${addition}`;
+  if (content.length > 100_000 || addition.length > 1_200 || !safeEvolutionGuidance(addition)) return;
   const candidateId = randomUUID();
-  const revision = (detail.currentOverlay?.revision || 0) + 1;
+  const revision = detail.currentPrompt.version + 1;
   const evidenceJson = JSON.stringify({
     executionId: evidence.executionId,
     fingerprint: observation.fingerprint,
   });
   const created = db.transaction(() => {
     const current = db.prepare(`
-      SELECT revision, content_hash FROM agent_prompt_overlays WHERE agent_id = ?
-    `).get(agentId) as { revision: number; content_hash: string } | undefined;
+      SELECT version, content_hash FROM agent_prompts WHERE agent_id = ?
+    `).get(agentId) as { version: number; content_hash: string } | undefined;
     const existing = db.prepare(`
       SELECT 1 FROM agent_prompt_candidates WHERE agent_id = ?
     `).get(agentId);
     if (
       existing
-      || (current?.revision || 0) !== (detail.currentOverlay?.revision || 0)
-      || (current?.content_hash || null) !== (detail.currentOverlay?.content_hash || null)
+      || current?.version !== detail.currentPrompt.version
+      || current?.content_hash !== detail.currentPrompt.content_hash
     ) return false;
     db.prepare(`
       INSERT INTO agent_prompt_candidates(
-        candidate_id, agent_id, revision, base_overlay_revision, content, content_hash,
+        candidate_id, agent_id, revision, base_prompt_revision, content, content_hash,
         source, reason, evidence_json, remaining_runs
       ) VALUES(?, ?, ?, ?, ?, ?, 'evolution', ?, ?, 3)
     `).run(
       candidateId,
       agentId,
       revision,
-      detail.currentOverlay?.revision || 0,
+      detail.currentPrompt.version,
       content,
       hash(content),
       `自动演化：${observation.fingerprint}`,

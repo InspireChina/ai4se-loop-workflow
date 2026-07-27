@@ -8,7 +8,7 @@ export const dynamic = 'force-dynamic';
 export default async function AgentsPage() {
   const profiles = await listAgentProfiles();
   return <>
-    <header><p className="eyebrow">AGENT RUNTIME</p><h1>Agent 配置</h1><p className="muted">查看内置 Base Prompt，管理当前项目的 Prompt Overlay、长期记忆和自动演化状态。项目配置保存在隔离的本地 Runtime Workspace，不进入目标仓库 Git。</p></header>
+    <header><p className="eyebrow">AGENT RUNTIME</p><h1>Agent 配置</h1><p className="muted">管理当前项目各 Agent 的完整 Prompt、长期记忆和自动演化状态。每个项目独立保存自己的配置，不进入目标仓库 Git。</p></header>
     <section className="agent-grid">
       {profiles.map((profile) => {
         const definition = AGENT_PROFILE_DEFINITIONS[profile.agent_id as FlowAgentId];
@@ -16,7 +16,7 @@ export default async function AgentsPage() {
           <div className="agent-card-head"><span className="executor-icon"><Bot size={18}/></span><span className={`badge ${profile.candidate_prompt_version ? 'amber' : profile.auto_evolve ? 'green' : 'blue'}`}>{profile.candidate_prompt_version ? `Canary · ${profile.canary_remaining}` : profile.auto_evolve ? '自动演化' : '仅手工'}</span></div>
           <div><h2>{definition.label}</h2><p className="muted">{definition.description}</p></div>
           <div className="agent-stats">
-            <span><GitBranch size={14}/>Base v{profile.current_prompt_version} · Overlay r{profile.current_prompt_overlay_revision}</span>
+            <span><GitBranch size={14}/>Prompt r{profile.current_prompt_version}</span>
             <span><Database size={14}/>Memory r{profile.current_memory_revision}</span>
             <span><BrainCircuit size={14}/>{profile.observation_count} 条观察</span>
           </div>

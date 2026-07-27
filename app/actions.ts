@@ -2,7 +2,7 @@
 
 import { redirect } from 'next/navigation';
 import { normalizeWorkspaceRoot, setAgentExecutorSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
-import { saveAgentMemory, saveAgentPromptOverlay, setAgentAutoEvolution } from '../src/application/agent-profiles';
+import { saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
 import { setSoftwareMaintenanceSettings } from '../src/application/software-maintenance';
 import {
   addDocumentComment,
@@ -196,9 +196,9 @@ export async function acknowledgeClosureAction(formData: FormData) {
   redirect(`/tasks/${formData.get('taskId')}`);
 }
 
-export async function saveAgentPromptOverlayAction(formData: FormData) {
+export async function saveAgentPromptAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
-  await saveAgentPromptOverlay({ agentId, content: formData.get('content'), reason: formData.get('reason') });
+  await saveAgentPrompt({ agentId, content: formData.get('content'), reason: formData.get('reason') });
   redirect(`/agents/${agentId}`);
 }
 

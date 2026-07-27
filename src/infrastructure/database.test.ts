@@ -42,7 +42,7 @@ test('materializes persistent task lanes and execution lane correlation', async 
   assert.equal(recoveryColumns.some((column) => column.name === 'failure_count'), true);
 });
 
-test('stores one Base Prompt, one project Overlay and one ephemeral Canary without recoverable Prompt history', async () => {
+test('stores one project-owned Current Prompt and one ephemeral Canary without Prompt layers or history', async () => {
   const db = await databaseConnection();
   const promptTables = db.prepare(`
     SELECT name
@@ -60,16 +60,21 @@ test('stores one Base Prompt, one project Overlay and one ephemeral Canary witho
   assert.deepEqual(promptTables.map((row) => row.name), [
     'agent_memory_versions',
     'agent_prompt_candidates',
-    'agent_prompt_overlays',
     'agent_prompts',
   ]);
 
   const currentPromptPrimaryKey = db.prepare("PRAGMA table_info('agent_prompts')").all() as { name: string; pk: number }[];
   assert.equal(currentPromptPrimaryKey.find((column) => column.name === 'agent_id')?.pk, 1);
-  const overlayPrimaryKey = db.prepare("PRAGMA table_info('agent_prompt_overlays')").all() as { name: string; pk: number }[];
-  assert.equal(overlayPrimaryKey.find((column) => column.name === 'agent_id')?.pk, 1);
+  assert.ok(currentPromptPrimaryKey.some((column) => column.name === 'template_version'));
+  assert.ok(currentPromptPrimaryKey.some((column) => column.name === 'source'));
+  const candidateColumns = db.prepare("PRAGMA table_info('agent_prompt_candidates')").all() as { name: string }[];
+  assert.ok(candidateColumns.some((column) => column.name === 'base_prompt_revision'));
+  assert.equal(candidateColumns.some((column) => column.name === 'base_overlay_revision'), false);
   const executionColumns = db.prepare("PRAGMA table_info('execution_attempts')").all() as { name: string }[];
-  assert.ok(executionColumns.some((column) => column.name === 'prompt_overlay_revision'));
+  assert.ok(executionColumns.some((column) => column.name === 'prompt_template_version'));
+  assert.equal(executionColumns.some((column) => column.name === 'prompt_overlay_revision'), false);
+  const profileColumns = db.prepare("PRAGMA table_info('agent_profiles')").all() as { name: string }[];
+  assert.equal(profileColumns.some((column) => column.name === 'current_prompt_overlay_revision'), false);
 
   const candidateIndexes = db.prepare("PRAGMA index_list('agent_prompt_candidates')").all() as { name: string; unique: number }[];
   const uniqueCandidateColumns = candidateIndexes
@@ -89,7 +94,7 @@ test('scopes context Chat write commands to the active turn', async () => {
   assert.ok(requestTable);
 });
 
-test('resets legacy Prompt configuration to an empty V1 baseline before reseeding', () => {
+test('migrates legacy Prompt layers to one empty project Current Prompt baseline before reseeding', () => {
   const db = new Database(':memory:');
   db.exec(`
     PRAGMA foreign_keys = ON;
@@ -133,22 +138,39 @@ test('resets legacy Prompt configuration to an empty V1 baseline before reseedin
   `);
 
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/055_prompt_v1_baseline.sql'), 'utf8'));
+  db.prepare(`
+    INSERT INTO agent_prompts(agent_id, version, content, content_hash, reason)
+    VALUES('dev-agent', 1, 'system template', 'base-hash', 'V1 template')
+  `).run();
+  db.prepare(`
+    INSERT INTO agent_prompt_overlays(
+      agent_id, revision, content, content_hash, source, reason
+    ) VALUES('dev-agent', 1, 'project customization', 'overlay-hash', 'human', 'project rule')
+  `).run();
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/058_project_current_prompt.sql'), 'utf8'));
 
   const tables = db.prepare(`
     SELECT name FROM sqlite_master
     WHERE type = 'table' AND name LIKE 'agent_prompt%'
     ORDER BY name
   `).all() as { name: string }[];
-  assert.deepEqual(tables.map((row) => row.name), ['agent_prompt_candidates', 'agent_prompt_overlays', 'agent_prompts']);
-  assert.equal((db.prepare('SELECT COUNT(*) AS count FROM agent_prompts').get() as { count: number }).count, 0);
-  assert.equal((db.prepare('SELECT COUNT(*) AS count FROM agent_prompt_overlays').get() as { count: number }).count, 0);
+  assert.deepEqual(tables.map((row) => row.name), ['agent_prompt_candidates', 'agent_prompts']);
+  const migratedPrompt = db.prepare(`
+    SELECT version, template_version, source, content, content_hash
+    FROM agent_prompts WHERE agent_id = 'dev-agent'
+  `).get() as { version: number; template_version: number; source: string; content: string; content_hash: string };
+  assert.equal(migratedPrompt.version, 2);
+  assert.equal(migratedPrompt.template_version, 1);
+  assert.equal(migratedPrompt.source, 'human');
+  assert.match(migratedPrompt.content, /system template/);
+  assert.match(migratedPrompt.content, /project customization/);
+  assert.equal(migratedPrompt.content_hash, '');
   assert.equal((db.prepare('SELECT COUNT(*) AS count FROM agent_prompt_candidates').get() as { count: number }).count, 0);
   assert.deepEqual(db.prepare(`
-    SELECT current_prompt_version, current_prompt_overlay_revision, candidate_prompt_version, canary_remaining, prompt_seed_revision
+    SELECT current_prompt_version, candidate_prompt_version, canary_remaining, prompt_seed_revision
     FROM agent_profiles WHERE agent_id = 'dev-agent'
   `).get(), {
-    current_prompt_version: 1,
-    current_prompt_overlay_revision: 0,
+    current_prompt_version: 2,
     candidate_prompt_version: null,
     canary_remaining: 0,
     prompt_seed_revision: 1,

@@ -201,7 +201,7 @@ LoopWork 主要保存以下信息：
 
 - 原始需求、交付单元和当前流程状态。
 - 版本化交付规格、决策事实和待确认问题。
-- 每次 Agent 实际收到的完整 Prompt snapshot、execution input hash、Base Prompt version、Overlay revision、组合 Role Prompt hash、Memory revision/hash 和结构化 Result。
+- 每次 Agent 实际收到的完整 Prompt snapshot、execution input hash、项目 Prompt revision、初始模板 version、Prompt hash、Memory revision/hash 和结构化 Result。
 - Test Agent 的命令、观察、失败分类和验证 Evidence。
 - 执行前后的 Git HEAD、Agent 创建的 Commit 和工作区状态。
 - 运行日志、结构化事件和 Trace 关联信息。
@@ -209,7 +209,7 @@ LoopWork 主要保存以下信息：
 
 这些数据共同回答三个问题：系统已经做了什么；哪些结论已经被验证；下一步应该由谁处理什么工作。
 
-Agent 配置历史与 execution 审计是两个不同边界。当前全套修正版统一作为新的 V1 Base；配置域中每个 Agent 只有一条随应用升级的 Base Prompt、一条可选项目 Overlay，自动演化期间至多增加一个临时 Overlay candidate。旧 Prompt/Overlay 历史不保留，也不提供 UI 恢复入口。candidate 三次 Canary 全部成功后覆盖当前 Overlay 并被删除，任一次失败则直接丢弃，当前 Overlay 保持不变。Base 升级不会覆盖 Overlay，Memory 继续保留 revision 历史。与此同时，已经发生的每次 execution 必须保留当时完整的 Prompt snapshot、execution input hash、Base version、Overlay revision 和组合 Role Prompt hash；该快照只用于审计，不能恢复为当前配置。
+Agent 配置与 execution 审计是两个不同边界。系统模板只在项目第一次初始化 Agent 时复制为该项目的完整 Current Prompt；之后用户直接编辑，应用升级不覆盖。配置域中每个项目的每个 Agent 只有一条 Current Prompt，自动演化期间至多增加一个临时 candidate，不保留 Prompt 历史，也不提供 UI 恢复入口。candidate 三次 Canary 全部成功且原 Prompt revision 未变化后替换当前 Prompt；任一次失败或用户编辑则直接丢弃。Memory 继续保留 revision 历史。与此同时，已经发生的每次 execution 必须保留当时完整的 Prompt snapshot、execution input hash、项目 Prompt revision、初始模板 version 和 Prompt hash；该快照只用于审计，不能恢复为当前配置。
 
 外层 Workflow 还需要为 Agent 提供受控工具，使 Agent 可以提交结构化结果、请求澄清或运行信息，但不能直接修改业务数据库或任意推进流程状态。
 
@@ -217,7 +217,7 @@ Agent 配置历史与 execution 审计是两个不同边界。当前全套修正
 
 长期无人值守不意味着系统不会失败，而是失败后不需要人重新理解整个过程。
 
-LoopWork 中，每次 Agent 调用都对应一个持久化的 `execution_attempt`。系统在调用前保存实际发送给模型的完整 Prompt snapshot、execution input hash、Base version、Overlay revision、组合 Role Prompt hash、Memory revision/hash、上下文输入和起始 Git HEAD；Agent Result 和状态应用分别保存 Receipt。配置域后续更新 Base/Overlay 或丢弃 candidate 不会改写这份审计。Execution 不使用超时租约，Loop Run 通过 Runner 进程存活和短周期心跳识别主动停止、崩溃与突然关机。
+LoopWork 中，每次 Agent 调用都对应一个持久化的 `execution_attempt`。系统在调用前保存实际发送给模型的完整 Prompt snapshot、execution input hash、项目 Prompt revision、初始模板 version、Prompt hash、Memory revision/hash、上下文输入和起始 Git HEAD；Agent Result 和状态应用分别保存 Receipt。配置域后续更新 Current Prompt 或丢弃 candidate 不会改写这份审计。Execution 不使用超时租约，Loop Run 通过 Runner 进程存活和短周期心跳识别主动停止、崩溃与突然关机。
 
 系统根据失败位置选择不同的恢复方式：
 
@@ -273,7 +273,7 @@ flowchart LR
     result -->|"否"| reopen["新反馈批次"]
 ```
 
-只有已经处理并验证为 `resolved` 的重复反馈才能进入 Memory revision 或 Overlay candidate。Overlay candidate 仍必须独立通过 Canary，成功后覆盖当前 Overlay，失败则丢弃；它不会形成可恢复的 Prompt 历史。这样当前任务修复和长期能力学习相互关联，但不会把未经验证的评论直接写入长期规则。
+只有已经处理并验证为 `resolved` 的重复反馈才能进入 Memory revision 或 Prompt candidate。Prompt candidate 仍必须独立通过 Canary，成功且原 revision 未变化后替换 Current Prompt，失败则丢弃；它不会形成可恢复的 Prompt 历史。这样当前任务修复和长期能力学习相互关联，但不会把未经验证的评论直接写入长期规则。
 
 ## 4. L4 Delivery
 
@@ -377,7 +377,7 @@ L4 End-to-End 需要让任意工程结果都能够回到原始业务目标：
 | Memory、Evidence 和 Trace | 领域知识、AC 和项目经验 |
 | 权限、人工 Gate 和 Adapter 接口 | 仓库、工具、环境和风险策略 |
 
-长期 Memory 不能只是保存全部对话。它应分别保存当前任务状态、用户决策、项目知识和验证证据，并带有来源、作用域和 revision 历史，只向当前 Agent 提供需要的内容。Prompt 不复用这套历史模型：当前修正版从 V1 Base 开始，配置域只保留一条随应用升级的 Base Prompt、一条可选项目 Overlay 和至多一个临时 Overlay candidate。
+长期 Memory 不能只是保存全部对话。它应分别保存当前任务状态、用户决策、项目知识和验证证据，并带有来源、作用域和 revision 历史，只向当前 Agent 提供需要的内容。Prompt 不复用这套历史模型：每个项目的每个 Agent 只保留一条由系统模板初始化、随后由项目完全控制的 Current Prompt，以及至多一个临时 candidate。
 
 LoopWork 已经具备这套 Infra 的早期形态，包括确定性编排、Agent Profile、版本化交付规格、execution attempt、Test Evidence、Recovery Item、rewind、日志、Trace 和 Memory。下一步可以将固定流程抽象为可配置的 Workflow Profile，并通过 Agent、Skill、Policy 和 Adapter 支持不同项目及 L4 Profile。
 

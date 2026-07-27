@@ -98,7 +98,7 @@ prototype/              历史资料，不参与运行
 | 版本化最小单元契约 | SQLite `story_specs` |
 | Test 失败与恢复证据 | SQLite `documents` / `recovery_items` |
 | Agent 执行尝试与副作用收据 | SQLite `execution_attempts` / `execution_receipts` |
-| Agent Base Prompt、项目 Overlay、临时 Overlay candidate 与 Memory revision 历史 | SQLite `agent_profiles` / `agent_prompts` / `agent_prompt_overlays` / `agent_prompt_candidates` / `agent_memory_versions` |
+| 项目 Agent Prompt、临时 Prompt candidate 与 Memory revision 历史 | SQLite `agent_profiles` / `agent_prompts` / `agent_prompt_candidates` / `agent_memory_versions` |
 | 当前实际 Agent 文件 | `data/<repo-hash>/agent-runtime/agents/<agent>/PROMPT.md` / `MEMORY.md` |
 | 演化观察与评估 | SQLite `agent_observations` / `agent_evolution_runs` 与 Runtime daily memory |
 | 机器可分析运行事件 | SQLite `runtime_events` |
@@ -164,15 +164,15 @@ Application 负责校验最小结果协议、写入数据库和推进状态。�
 
 ## 7. Agent Runtime 与演化
 
-应用启动 Loop 前初始化 `data/<repo-hash>/agent-runtime`。它位于应用数据目录、被 Git 忽略且按目标 repo 隔离。当前全套修正版 Prompt 作为新的 V1 Base 初始化；每个 Agent 只有一条由应用代码拥有的 Base Prompt，以及至多一条项目 Overlay。应用启动时总是把 Base 更新到当前内置版本，人工编辑与自动演化只能修改 Overlay，因此产品升级与项目经验互不覆盖。自动演化期间至多存在一个临时 Overlay Canary candidate。旧 Prompt/Overlay 历史在升级时删除，产品不提供历史查看或恢复入口。本地 `PROMPT.md` 是 `Base + Overlay` 的单向物化结果，文件修改不会反向导入，也不能成为历史版本或恢复来源。Memory 独立保留 revision 历史。
+应用启动 Loop 前初始化 `data/<repo-hash>/agent-runtime`。它位于应用数据目录、被 Git 忽略且按目标 repo 隔离。系统代码只提供版本化 Prompt Template：某个项目第一次初始化 Agent 时，把当时模板复制为该项目数据库中的完整 Current Prompt；此后用户直接编辑这一份 Prompt，应用升级不会覆盖。新项目使用最新模板，旧项目新增此前不存在的 Agent 时只初始化该 Agent。Core Contract、实际工具和状态机权限位于可编辑 Prompt 之外，不能通过 Prompt 扩大。自动演化基于当前 Prompt revision 产生一份完整 candidate；用户保存 Prompt 会立即丢弃 candidate，只有原 Prompt 未变化且三次 Canary 全部成功时 candidate 才能替换当前 Prompt。配置域不保留 Prompt 历史或恢复入口。本地 `PROMPT.md` 是项目 Current Prompt 的单向物化结果，文件修改不会反向导入。Memory 独立保留 revision 历史。
 
-Runner 按 `Core Contract → Agent Tool Contract → Base Role Prompt + Project Prompt Overlay → Durable Memory → recent daily memory → Working Context Pack → Context Index / Required Refs` 组装最终输入，并把实际发送给模型的完整 Prompt snapshot、execution input hash、Base Prompt version、Overlay revision、组合 Role Prompt hash、Memory revision/hash 和完整 Context Snapshot 写入 execution attempt。配置域后续更新 Base/Overlay 或丢弃 candidate 都不能改写这份 execution 审计，也不能把审计快照恢复为当前配置。Agent Tool Contract 在角色说明之前列出 execution 绑定的草稿命令、全部只读 `agent-context` 命令、实时仓库调查工具的用途及选择顺序；`loop-agent help` 复用同一只读工具清单，并提供当前角色的命令语义与主题帮助。启动 Prompt 只内联当前工作的高信号事实；完整资料保存在快照中，通过 `LOOP_EXECUTION_ID` 绑定的只读命令按需展开。运行期间产生的新评论或状态变化不改变本次快照，由下一次 execution 获取。Core Contract、工具权限、最小结果协议和提交通道不开放编辑，避免自定义 Prompt 改写权限或状态机。
+Runner 按 `Core Contract → Agent Tool Contract → Project Current Prompt → Durable Memory → recent daily memory → Working Context Pack → Context Index / Required Refs` 组装最终输入，并把实际发送给模型的完整 Prompt snapshot、execution input hash、项目 Prompt revision、初始模板 version、Prompt hash、Memory revision/hash 和完整 Context Snapshot 写入 execution attempt。配置域后续更新 Prompt 或丢弃 candidate 都不能改写这份 execution 审计，也不能把审计快照恢复为当前配置。Agent Tool Contract 在角色说明之前列出 execution 绑定的草稿命令、全部只读 `agent-context` 命令、实时仓库调查工具的用途及选择顺序；`loop-agent help` 复用同一只读工具清单，并提供当前角色的命令语义与主题帮助。启动 Prompt 只内联当前工作的高信号事实；完整资料保存在快照中，通过 `LOOP_EXECUTION_ID` 绑定的只读命令按需展开。运行期间产生的新评论或状态变化不改变本次快照，由下一次 execution 获取。Core Contract、工具权限、最小结果协议和提交通道不开放编辑，避免自定义 Prompt 改写权限或状态机。
 
 所有 Agent 都使用 Application 管理的数据库草稿和领域命令，每次新进程都必须重新查看 status；失败命令可自行修正重试，成功终止命令与结果收据持久化保存，因此 Runner 在终止命令后崩溃也不会重跑模型。流程 Agent 的凭证绑定 execution；Prompt 演化和软件维护 Agent 的凭证绑定内部工作 ID 与本次进程会话，分别使用 `evolution` 和 `maintenance` 命名空间。任何 Agent 的普通最终回复或手写 JSON 都不推进流程。
 
 Prompt 演化草稿逐项保存本轮摘要和最多五条稳定 observation key，Application 在 `evolution complete` 时校验 fingerprint、类别、建议、目标、置信度、复用标记和引用评论 UUID，再生成 Evolution Result。软件维护草稿逐项保存结果、分类、稳定 incident fingerprint、根因、置信度、变更文件和针对性测试；`fixed` 必须声明实际变更文件并至少记录一条通过的测试，之后仍由独立 Maintenance Harness 校验真实 diff、保护路径、完整测试与生产构建。
 
-Evolution Evaluator 是主执行后的 best-effort 旁路：它在同类型 Agent 的一次结果成功应用后运行，而不是在评论保存时运行。开放评论按任务形成 Triage 批次，再由 Application 应用有效分组并创建直接回复、问题复现、追加交付单元、报告修订或长期学习工作；Evaluator 读取评论、批次、处理声明和验证结果作为演化证据。业务评论的 `status=open` 会一直保留到必要流程完成并通过独立验证，和 `evolution_status=analyzed` 相互独立。成功恢复时，已使用的运行信息问答也会作为 evidence 输入，但不得把具体用户数据、具体卡号、地址、账号或凭据写入 Memory；明确的仓库级模板和通用占位符可以提炼。观察首先进入 daily memory 与去重 occurrence 表；只有 `occurrence >= 3`、`distinct requirements >= 2`、`confidence >= 0.75` 且通过安全规则时才提升。Memory 直接形成新 revision 并保留 revision 历史；Prompt 演化只形成一个 Overlay candidate，并只由带匹配 `evolution_candidate_id` 的真实 execution attempt 消耗三次 Canary。同一 candidate 同时只允许一个 execution，Application 以持久化的 execution status/result 作为幂等、可重放的 Canary 收据；即使进程在 execution 结束后崩溃，下次初始化也会重新计算。三次全部成功后，Application 用 candidate 原子覆盖当前 Overlay 并删除 candidate；任一次失败都直接丢弃 candidate，当前 Overlay 保持不变，不产生可恢复的旧版本。Evaluator 失败不改变主执行结果。
+Evolution Evaluator 是主执行后的 best-effort 旁路：它在同类型 Agent 的一次结果成功应用后运行，而不是在评论保存时运行。开放评论按任务形成 Triage 批次，再由 Application 应用有效分组并创建直接回复、问题复现、追加交付单元、报告修订或长期学习工作；Evaluator 读取评论、批次、处理声明和验证结果作为演化证据。业务评论的 `status=open` 会一直保留到必要流程完成并通过独立验证，和 `evolution_status=analyzed` 相互独立。成功恢复时，已使用的运行信息问答也会作为 evidence 输入，但不得把具体用户数据、具体卡号、地址、账号或凭据写入 Memory；明确的仓库级模板和通用占位符可以提炼。观察首先进入 daily memory 与去重 occurrence 表；只有 `occurrence >= 3`、`distinct requirements >= 2`、`confidence >= 0.75` 且通过安全规则时才提升。Memory 直接形成新 revision 并保留 revision 历史；Prompt 演化只形成一个完整 Current Prompt candidate，并只由带匹配 `evolution_candidate_id` 的真实 execution attempt 消耗三次 Canary。同一 candidate 同时只允许一个 execution，Application 以持久化的 execution status/result 作为幂等、可重放的 Canary 收据；即使进程在 execution 结束后崩溃，下次初始化也会重新计算。三次全部成功且 candidate 基于的 Current Prompt revision 未变化时，Application 用 candidate 原子替换当前 Prompt 并删除 candidate；任一次失败或用户并发编辑都直接丢弃 candidate，当前 Prompt 保持不变。Evaluator 失败不改变主执行结果。
 
 数据库文档以 Markdown 预览呈现，并允许文件级或选区级评论。评论保存文档 revision、引用原文和渲染文本偏移；文档更新只增加 revision，不改写历史锚点。Runner 把当前活动评论作为 Obligation 内联，并把任务资料以 ref 写入 Context Index；Agent 只在需要时读取正文。Evolution Evaluator 另外读取该 Agent 全局尚未分析的评论，并通过 `evidenceCommentIds` 显式关联 observation。成功评估后评论才转为 analyzed，评估失败继续保留为 pending。评论只是高价值证据，仍受跨需求阈值、单一 Prompt candidate 和 Canary 约束。
 
@@ -239,7 +239,7 @@ Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。A
 | 需求详情 | 顶部 Steps、交付单元、交付规格、关键决策、运行信息、Test 文档、execution attempts、结卡报告和事件；右侧上下文 Chat 只读事实，同一 turn 可提交任意多个稳定 key 变更请求，进入 Feedback 闭环并按实际边界向前追加任意多个交付单元。 |
 | 运行面板 | 开始/停止 Loop，查看占满工作区的流式分层日志。 |
 | 项目设置 | 工作区根目录、执行器；Codex 显示模型和思考强度，Claude 显示可选模型。 |
-| Agent 配置 | 各角色只读 Base Prompt、可编辑项目 Overlay、Memory 编辑、Effective Prompt 预览、临时 Overlay Canary 状态、Memory revision 历史、daily memory、观察与自动演化状态；初始修正版为 V1，不展示 Prompt/Overlay 历史或恢复入口。 |
+| Agent 配置 | 各角色按项目独立的完整 Prompt 编辑、Memory 编辑、Effective Prompt 预览、临时 Prompt Canary 状态、Memory revision 历史、daily memory、观察与自动演化状态；不展示 Prompt 历史或恢复入口。 |
 | 软件演化 | 结构化事件数量、维护队列、根因、修复候选、Harness、自动落地与拒绝原因。 |
 
 顶部 Steps 固定为：
@@ -258,9 +258,9 @@ Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。A
 - 回答只形成决策事实；必须由交付分析 Agent 在原 decision key 上消费回答并生成已收敛的新规格后才能进入开发。
 - Test Agent 的验证文档关联当前交付单元和规格，失败证据持久化为 Recovery Item 并注入后续 Analysis、Dev 与 Test execution。
 - Agent 进程在结构化输出后中断时能从原 attempt 恢复，不重复调用 Agent。
-- 每个 attempt 持久化实际发送给模型的完整 Prompt snapshot、execution input hash、Base version、Overlay revision、组合 Role Prompt hash 和 Memory revision/hash；配置域后续变化不改写审计，目标 repo Git 不影响 Runtime Workspace。
-- 当前全套修正版作为 V1 Base；配置域中每个 Agent 始终只有一条代码拥有的 Base、一条可选项目 Overlay 和至多一个临时 Overlay candidate，旧 Prompt/Overlay 历史被删除，UI 不提供恢复入口。
-- 单次观察不能自动改长期 Overlay；满足跨需求阈值后仍必须通过三次 Canary，成功后 candidate 覆盖当前 Overlay，失败则丢弃 candidate 且当前 Overlay 不变。
+- 每个 attempt 持久化实际发送给模型的完整 Prompt snapshot、execution input hash、项目 Prompt revision、初始模板 version、Prompt hash 和 Memory revision/hash；配置域后续变化不改写审计，目标 repo Git 不影响 Runtime Workspace。
+- 每个项目的每个 Agent 始终只有一条完整 Current Prompt 和至多一个临时 candidate；系统模板仅在首次初始化时复制，应用升级不覆盖项目 Prompt，配置域不保存 Prompt 历史，UI 不提供恢复入口。
+- 单次观察不能自动改当前 Prompt；满足跨需求阈值后仍必须通过三次 Canary，成功且原 revision 未变化时 candidate 替换当前 Prompt，失败或用户编辑则丢弃 candidate。
 - finally 不同步运行维护 Agent；主 Runner 即使维护入队失败也能正常结束或继续派发。
 - runtime event 必须关联 run/execution 并在落库前脱敏 secret；原始异常不得泄露到维护 Prompt。
 - 软件修复只在独立 worktree 发生，保护边界、变更预算、test/build 或 clean-baseline 任一失败都不得自动落地主仓库。

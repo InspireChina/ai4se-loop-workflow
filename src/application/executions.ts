@@ -37,7 +37,7 @@ export type ExecutionAttempt = {
   heartbeat_at: string | null;
   last_error: string | null;
   prompt_version: number | null;
-  prompt_overlay_revision: number | null;
+  prompt_template_version: number | null;
   prompt_hash: string | null;
   memory_revision: number | null;
   memory_hash: string | null;
@@ -186,7 +186,7 @@ export async function beginExecutionAttempt(input: {
   prompt: string;
   baseCommit?: string;
   promptVersion?: number;
-  promptOverlayRevision?: number;
+  promptTemplateVersion?: number;
   promptHash?: string;
   memoryRevision?: number;
   memoryHash?: string;
@@ -258,7 +258,7 @@ export async function beginExecutionAttempt(input: {
       INSERT INTO execution_attempts(
         execution_id, run_id, task_id, story_index, agent, pipeline, lane,
         delegation_key, attempt, status, input_hash, input_json, base_commit,
-        prompt_version, prompt_overlay_revision, prompt_hash, memory_revision, memory_hash, evolution_candidate_id,
+        prompt_version, prompt_template_version, prompt_hash, memory_revision, memory_hash, evolution_candidate_id,
         heartbeat_at, started_at
       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `).run(
@@ -275,7 +275,7 @@ export async function beginExecutionAttempt(input: {
       inputJson,
       input.baseCommit || null,
       input.promptVersion || null,
-      input.promptOverlayRevision ?? null,
+      input.promptTemplateVersion ?? null,
       input.promptHash || null,
       input.memoryRevision || null,
       input.memoryHash || null,
