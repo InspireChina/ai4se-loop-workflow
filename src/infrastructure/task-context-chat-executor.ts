@@ -8,10 +8,12 @@ import { paths } from './database';
 
 type ContextChatRun = {
   taskId: string;
+  sessionId: string;
+  messageId: string;
   executor: AgentExecutorId;
   providerSessionId: string | null;
   message: string;
-  writeAllowed: boolean;
+  commandToken: string;
   executionOptions: AgentExecutionOptions;
 };
 
@@ -56,7 +58,6 @@ export function buildTaskContextChatPrompt(
   taskId: string,
   message: string,
   firstTurn: boolean,
-  options: { writeAllowed?: boolean } = {},
 ) {
   const freshness = [
     '在回答涉及当前状态、文档、活动、规格、问题或验证证据的问题前，必须重新运行只读命令获取最新事实；不要依赖会话中较早的事实。',
@@ -67,32 +68,27 @@ export function buildTaskContextChatPrompt(
     `文档列表：npm --prefix ${commandPath(paths.appRoot)} run loopctl -- document-list --task-id ${taskId}`,
     `读取文档：npm --prefix ${commandPath(paths.appRoot)} run loopctl -- document-get --task-id ${taskId} --kind <kind> [--story <n>]`,
   ].join('\n');
+  const changeCommand = `npm --prefix ${commandPath(paths.appRoot)} run loopctl -- context-chat-change --key <稳定请求-key> --title <标题> --request <完整变更意图> [--acceptance <验收关注>]`;
   const commonContract = [
-    '你是 LoopWork 中当前需求唯一会话的上下文与轻量修改 Agent。你的职责是帮助用户理解需求、仓库代码、交付文档、活动记录、执行状态和证据，并在明确边界内执行小型界面修改。',
+    '你是 LoopWork 中当前需求唯一会话的上下文 Agent。你的职责是帮助用户理解需求、仓库代码、交付文档、活动记录、执行状态和证据，并把用户确认需要实施的变化提交到向前追加的 Feedback 闭环。',
     `当前需求固定为 ${taskId}。LoopWork 应用根目录为 ${paths.appRoot}，目标仓库根目录为 ${paths.root}。`,
     '每轮都必须重新读取最新需求事实；不要把较早轮次中的需求、状态或代码结论当作当前事实。',
-    '始终禁止修改 Loop 数据库、需求状态、交付文档、评论、问题、Agent 配置、权限、密钥、环境配置或调度状态，也禁止发布和部署。',
-    '禁止调用 task-update、task-context-init、task-rewind、task-cancel、system-unblock、document-upsert、question-add 或任何其他 Loop 写命令。代码修改只能遵守本轮下方给出的能力边界。',
+    '始终禁止修改目标仓库文件或 Git，也禁止直接修改 Loop 数据库、需求状态、既有交付单元、交付文档、问题、Agent 配置、权限、密钥、环境配置或调度状态，禁止发布和部署。',
+    '禁止调用 task-update、story-add、task-context-init、task-rewind、task-cancel、system-unblock、document-upsert、question-add 或任何其他 Loop 写命令。唯一允许的写操作是下方当前会话绑定的 context-chat-change 领域命令。',
     '回答应简洁直接。涉及 LoopWork 事实时尽量给出可核对引用：文档 ID/版本/交付单元、事件 actor/时间，或仓库文件路径与行号。不要声称已经执行任何未执行的操作。',
-  ];
-  const writeContract = options.writeAllowed ? [
-    '当前需求没有 Dev Agent 或 Test Agent 正在执行，本轮已获得轻量代码修改权限。其他需求的执行状态不影响本轮模式。即使旧会话中曾出现“只读”说明，也以本轮更新后的能力边界为准。',
-    '用户当前消息本身就是授权，不需要再次请求确认。你必须自行判断请求是否同时满足：改动小、局部、可快速验证、不违背当前需求和已经对齐的用户决策。',
-    '允许的典型范围是 UI 呈现、布局、样式、可访问性和 wording。没有固定路径白名单，但改动语义必须保持轻量。',
-    '不得借此改变业务规则、验收标准、API 契约、数据模型、数据库 schema/migration、权限、安全边界、依赖或基础设施。若请求涉及这些内容，或与需求文档/用户决策冲突，停止修改并直接说明应通过文档反馈或正常 Loop 对齐。',
-    '修改前先读取任务上下文并检查 git status --short，保留工作区里原有的其他改动。只编辑当前请求需要的文件，只暂存并提交自己本轮的修改。',
-    '完成修改后运行与改动最相关的最小验证。验证通过才创建一个 Git commit；提交信息应清楚说明这是 UI 或 wording 轻量修改。',
-    '如果无法让验证通过，必须撤销自己本轮产生的全部文件修改，不提交代码，并向用户说明失败原因。不得回退、覆盖或提交进入本轮前已存在的改动。',
-    '普通回复中说明实际修改、验证结果和 commit；不要返回 JSON。无须推动或更改 Loop 状态。',
-  ] : [
-    '当前需求有 Dev Agent、Test Agent 或上一条 Chat 消息正在执行。为避免同一需求内相互干扰，本轮只允许读取和解释，不能修改代码、文件或 Git。',
-    '允许使用 Read、Glob、Grep、rg、sed、git status --short、git diff、git log、git show 等只读工具。使用 Shell 时也必须保持只读。',
-    '如果用户要求代码变更，说明当前需求正在执行 Dev/Test，本轮不能写入；不要用任何方式绕过。',
+    '允许使用 Read、Glob、Grep、rg、sed、git status --short、git diff、git log、git show 等只读工具；使用 Shell 时也必须保持只读。',
+    '如果用户只是询问、解释、比较或探索方案，直接回答，不创建变更请求。',
+    '如果用户明确希望改变当前产品行为、界面、文案、代码或技术实现，先读取上下文判断其确实是需要实施的新变化，再按独立业务闭环拆成边界清楚的变更请求。',
+    `提交变更请求：${changeCommand}`,
+    '命令成功表示请求已经进入与详情文档评论相同的 Feedback 闭环。不要直接声称交付单元已经创建；Feedback Agent 会先判断它是回复、缺陷、行为修订、范围新增还是技术调整，并在需要实施时向前追加交付单元，再完整经过 Analysis、Dev、Test 和独立反馈验证。',
+    '同一个 Chat turn 可以调用任意多次 context-chat-change，没有数量上限。每个独立变化使用不同的稳定 key；同一变化重试时必须复用原 key，Application 会返回原记录而不是重复创建。',
+    '一个变更请求可以由 Feedback Agent 直接形成一个交付单元，也可以继续拆成多个交付单元；Chat 和 Harness 都不得预设交付单元数量上限。',
+    '命令失败时根据完整错误修正参数并重试；如果提示需求尚未形成交付单元或已经终态，向用户说明当前不能在本需求追加。',
+    '普通回复中说明结论；若已成功调用命令，明确说明提交了多少条变更请求、后续将由 Loop 判断并追加所需数量的交付单元。不要返回 JSON。',
   ];
   const contract = [
-    ...(firstTurn ? [] : ['本轮能力契约会覆盖旧轮次中已经过时的只读说明。']),
+    ...(firstTurn ? [] : ['本轮能力契约会覆盖旧轮次中“可以直接轻量修改代码”的过时说明。']),
     ...commonContract,
-    ...writeContract,
   ].join('\n');
   return `${contract}\n\n${freshness}\n\n用户问题：\n${message}`;
 }
@@ -115,9 +111,12 @@ function codexSessionId(stdout: string) {
 
 export async function runTaskContextChatTurn(input: ContextChatRun) {
   const firstTurn = !input.providerSessionId;
-  const prompt = buildTaskContextChatPrompt(input.taskId, input.message, firstTurn, {
-    writeAllowed: input.writeAllowed,
-  });
+  const prompt = buildTaskContextChatPrompt(input.taskId, input.message, firstTurn);
+  const chatCommandEnv = {
+    LOOP_CONTEXT_CHAT_SESSION_ID: input.sessionId,
+    LOOP_CONTEXT_CHAT_MESSAGE_ID: input.messageId,
+    LOOP_CONTEXT_CHAT_COMMAND_TOKEN: input.commandToken,
+  };
   let providerSessionId = input.providerSessionId || '';
   let result: ProcessResult;
 
@@ -135,7 +134,7 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
         ...launch.prefixArgs,
         '--print', '--output-format', 'stream-json', ...taskContextChatPermissionArgs('cursor'), '--resume', providerSessionId,
         temporary.reference,
-      ], undefined, 10 * 60 * 1000, launch.env);
+      ], undefined, 10 * 60 * 1000, { ...launch.env, ...chatCommandEnv });
     } finally {
       removeTemporaryPrompt(temporary);
     }
@@ -146,7 +145,7 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
       ...taskContextChatPermissionArgs('claude'), '--tools', 'Read,Glob,Grep,Bash',
       ...(input.executionOptions.model ? ['--model', input.executionOptions.model] : []),
       ...(firstTurn ? ['--session-id', providerSessionId] : ['--resume', providerSessionId]),
-    ], prompt);
+    ], prompt, 10 * 60 * 1000, chatCommandEnv);
   } else {
     const common = [
       '--json', ...taskContextChatPermissionArgs('codex'),
@@ -154,8 +153,8 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
       ...(input.executionOptions.reasoningEffort ? ['--config', `model_reasoning_effort="${input.executionOptions.reasoningEffort}"`] : []),
     ];
     result = firstTurn
-      ? await runProcess(process.env.CODEX_CLI || 'codex', ['exec', ...common, '-C', paths.root, '-'], prompt)
-      : await runProcess(process.env.CODEX_CLI || 'codex', ['exec', 'resume', ...common, providerSessionId, '-'], prompt);
+      ? await runProcess(process.env.CODEX_CLI || 'codex', ['exec', ...common, '-C', paths.root, '-'], prompt, 10 * 60 * 1000, chatCommandEnv)
+      : await runProcess(process.env.CODEX_CLI || 'codex', ['exec', 'resume', ...common, providerSessionId, '-'], prompt, 10 * 60 * 1000, chatCommandEnv);
     if (firstTurn) providerSessionId = codexSessionId(result.stdout);
   }
 

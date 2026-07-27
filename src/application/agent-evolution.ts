@@ -186,27 +186,58 @@ async function promoteMemory(agentId: FlowAgentId, observation: EvolutionResult[
 async function createPromptCandidate(agentId: FlowAgentId, observation: EvolutionResult['observations'][number], evidence: EvolutionEvidence) {
   const db = await databaseConnection();
   const detail = await getAgentProfile(agentId, false);
-  if (detail.profile.candidate_prompt_version) return;
+  if (detail.candidatePrompt) return;
   const marker = `<!-- EVOLUTION:${observation.fingerprint} -->`;
-  if (detail.currentPrompt.content.includes(marker)) return;
+  if (detail.currentOverlay?.content.includes(marker)) return;
   const addition = [marker, `- ${observation.guidance}`].join('\n');
-  const content = `${detail.currentPrompt.content.trimEnd()}\n\n## Learned operating rules\n\n${addition}\n`;
+  const currentOverlay = detail.currentOverlay?.content.trim() || '';
+  const content = currentOverlay
+    ? `${currentOverlay}\n\n${addition}`
+    : `## Learned operating rules\n\n${addition}`;
   if (content.length > 20_000 || addition.length > 1_200 || !safeEvolutionGuidance(addition)) return;
-  const version = ((db.prepare('SELECT COALESCE(MAX(version), 0) AS version FROM agent_prompt_versions WHERE agent_id = ?').get(agentId) as { version: number }).version || 0) + 1;
-  db.transaction(() => {
+  const candidateId = randomUUID();
+  const revision = (detail.currentOverlay?.revision || 0) + 1;
+  const evidenceJson = JSON.stringify({
+    executionId: evidence.executionId,
+    fingerprint: observation.fingerprint,
+  });
+  const created = db.transaction(() => {
+    const current = db.prepare(`
+      SELECT revision, content_hash FROM agent_prompt_overlays WHERE agent_id = ?
+    `).get(agentId) as { revision: number; content_hash: string } | undefined;
+    const existing = db.prepare(`
+      SELECT 1 FROM agent_prompt_candidates WHERE agent_id = ?
+    `).get(agentId);
+    if (
+      existing
+      || (current?.revision || 0) !== (detail.currentOverlay?.revision || 0)
+      || (current?.content_hash || null) !== (detail.currentOverlay?.content_hash || null)
+    ) return false;
     db.prepare(`
-      INSERT INTO agent_prompt_versions(agent_id, version, content, content_hash, status, source, reason, evidence_json)
-      VALUES(?, ?, ?, ?, 'candidate', 'evolution', ?, ?)
-    `).run(agentId, version, content, hash(content.trim()), `自动演化：${observation.fingerprint}`, JSON.stringify({ executionId: evidence.executionId, fingerprint: observation.fingerprint }));
+      INSERT INTO agent_prompt_candidates(
+        candidate_id, agent_id, revision, base_overlay_revision, content, content_hash,
+        source, reason, evidence_json, remaining_runs
+      ) VALUES(?, ?, ?, ?, ?, ?, 'evolution', ?, ?, 3)
+    `).run(
+      candidateId,
+      agentId,
+      revision,
+      detail.currentOverlay?.revision || 0,
+      content,
+      hash(content),
+      `自动演化：${observation.fingerprint}`,
+      evidenceJson,
+    );
     db.prepare(`
       UPDATE agent_profiles
       SET candidate_prompt_version = ?, canary_remaining = 3, last_evolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
       WHERE agent_id = ?
-    `).run(version, agentId);
+    `).run(revision, agentId);
     db.prepare("UPDATE agent_observations SET status = 'prompt_candidate' WHERE agent_id = ? AND fingerprint = ?").run(agentId, observation.fingerprint);
-  })();
-  agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory(agentId), 'PROMPT.md'), content);
-  await agentProfileInternals.writeManifest();
+    return true;
+  }).immediate();
+  if (!created) return;
+  await ensureAgentRuntimeWorkspace();
 }
 
 async function storeObservation(evidence: EvolutionEvidence, observationInput: unknown) {
@@ -334,44 +365,9 @@ export async function recordExecutionFailureObservation(input: { executionId: st
   });
 }
 
-export async function updatePromptCanary(agentIdInput: string, succeeded: boolean, executionId: string) {
+export async function updatePromptCanary(agentIdInput: string, _succeeded: boolean, _executionId: string) {
   if (!isFlowAgentId(agentIdInput)) return;
-  const agentId = agentIdInput;
+  // Execution status/result_json is the durable, idempotent Canary receipt.
+  // Workspace reconciliation derives the candidate state from those facts.
   await ensureAgentRuntimeWorkspace();
-  const db = await databaseConnection();
-  const detail = await getAgentProfile(agentId, false);
-  const candidate = detail.candidatePrompt;
-  if (!candidate) return;
-  const attempt = db.prepare('SELECT evolution_candidate_id FROM execution_attempts WHERE execution_id = ?').get(executionId) as { evolution_candidate_id: string | null } | undefined;
-  if (attempt?.evolution_candidate_id !== `${agentId}:prompt:v${candidate.version}`) return;
-  let fingerprint = '';
-  try { fingerprint = String(JSON.parse(candidate.evidence_json || '{}').fingerprint || ''); } catch { /* Invalid legacy evidence cannot alter observation state. */ }
-  if (!succeeded) {
-    db.transaction(() => {
-      db.prepare("UPDATE agent_prompt_versions SET status = 'rolled_back' WHERE agent_id = ? AND version = ?").run(agentId, candidate.version);
-      db.prepare('UPDATE agent_profiles SET candidate_prompt_version = NULL, canary_remaining = 0, updated_at = CURRENT_TIMESTAMP WHERE agent_id = ?').run(agentId);
-      if (fingerprint) db.prepare("UPDATE agent_observations SET status = 'rejected' WHERE agent_id = ? AND fingerprint = ?").run(agentId, fingerprint);
-    })();
-    agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory(agentId), 'PROMPT.md'), `${detail.currentPrompt.content.trim()}\n`);
-    await agentProfileInternals.writeManifest();
-    return;
-  }
-  const remaining = Math.max(0, detail.profile.canary_remaining - 1);
-  if (remaining > 0) {
-    db.prepare('UPDATE agent_profiles SET canary_remaining = ?, updated_at = CURRENT_TIMESTAMP WHERE agent_id = ?').run(remaining, agentId);
-    await agentProfileInternals.writeManifest();
-    return;
-  }
-  db.transaction(() => {
-    db.prepare("UPDATE agent_prompt_versions SET status = 'superseded' WHERE agent_id = ? AND version = ?").run(agentId, detail.currentPrompt.version);
-    db.prepare("UPDATE agent_prompt_versions SET status = 'active', reason = COALESCE(reason, '') || ? WHERE agent_id = ? AND version = ?").run(`；Canary 通过，最终 execution ${executionId}`, agentId, candidate.version);
-    if (fingerprint) db.prepare("UPDATE agent_observations SET status = 'promoted_prompt' WHERE agent_id = ? AND fingerprint = ?").run(agentId, fingerprint);
-    db.prepare(`
-      UPDATE agent_profiles
-      SET current_prompt_version = ?, candidate_prompt_version = NULL, canary_remaining = 0,
-          last_evolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-      WHERE agent_id = ?
-    `).run(candidate.version, agentId);
-  })();
-  await agentProfileInternals.writeManifest();
 }

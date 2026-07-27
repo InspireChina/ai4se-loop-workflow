@@ -82,6 +82,7 @@ function getWorkspaceDatabase(dbPath: string) {
   if (!database) {
     mkdirSync(dirname(dbPath), { recursive: true });
     database = new Database(dbPath);
+    database.pragma('busy_timeout = 5000');
     database.exec('PRAGMA foreign_keys = ON');
     workspaceDatabases.set(dbPath, database);
   }

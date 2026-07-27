@@ -37,6 +37,7 @@ export type ExecutionAttempt = {
   heartbeat_at: string | null;
   last_error: string | null;
   prompt_version: number | null;
+  prompt_overlay_revision: number | null;
   prompt_hash: string | null;
   memory_revision: number | null;
   memory_hash: string | null;
@@ -45,6 +46,13 @@ export type ExecutionAttempt = {
   started_at: string | null;
   finished_at: string | null;
 };
+
+export class PromptCanaryDeferredError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PromptCanaryDeferredError';
+  }
+}
 
 const RECOVERABLE = ['output_received', 'verifying', 'applying'] as const;
 
@@ -178,6 +186,7 @@ export async function beginExecutionAttempt(input: {
   prompt: string;
   baseCommit?: string;
   promptVersion?: number;
+  promptOverlayRevision?: number;
   promptHash?: string;
   memoryRevision?: number;
   memoryHash?: string;
@@ -191,68 +200,90 @@ export async function beginExecutionAttempt(input: {
     contextSnapshot: input.contextSnapshot,
   });
   const inputHash = hash(inputJson);
-  let key = delegationKey(input.delegation, inputHash);
-  let previous = db.prepare(`
-    SELECT * FROM execution_attempts
-    WHERE delegation_key = ?
-    ORDER BY attempt DESC LIMIT 1
-  `).get(key) as ExecutionAttempt | undefined;
-  const latestLogical = db.prepare(`
-    SELECT * FROM execution_attempts
-    WHERE task_id = ? AND story_index IS ? AND agent = ? AND pipeline = ?
-      AND COALESCE(lane, CASE
-        WHEN agent = 'analyst-agent' THEN 'analysis'
-        WHEN agent IN ('dev-agent', 'test-agent') THEN 'delivery'
-        ELSE 'control'
-      END) = ?
-    ORDER BY rowid DESC
-    LIMIT 1
-  `).get(
-    input.delegation.taskId,
-    input.delegation.storyIndex,
-    input.delegation.agent,
-    input.delegation.pipeline,
-    input.delegation.lane || laneForAgent(input.delegation.agent),
-  ) as ExecutionAttempt | undefined;
-  if (latestLogical?.status === 'retryable_failed' && storedRetrySignature(latestLogical) === retrySignature(input.delegation)) {
-    key = latestLogical.delegation_key;
-    previous = latestLogical;
-  }
-  if (previous && RECOVERABLE.includes(previous.status as typeof RECOVERABLE[number])) {
-    return { attempt: previous, recovered: true };
-  }
-  if (previous?.status === 'applied') return { attempt: previous, recovered: true };
+  return db.transaction(() => {
+    let key = delegationKey(input.delegation, inputHash);
+    let previous = db.prepare(`
+      SELECT * FROM execution_attempts
+      WHERE delegation_key = ?
+      ORDER BY attempt DESC LIMIT 1
+    `).get(key) as ExecutionAttempt | undefined;
+    const latestLogical = db.prepare(`
+      SELECT * FROM execution_attempts
+      WHERE task_id = ? AND story_index IS ? AND agent = ? AND pipeline = ?
+        AND COALESCE(lane, CASE
+          WHEN agent = 'analyst-agent' THEN 'analysis'
+          WHEN agent IN ('dev-agent', 'test-agent') THEN 'delivery'
+          ELSE 'control'
+        END) = ?
+      ORDER BY rowid DESC
+      LIMIT 1
+    `).get(
+      input.delegation.taskId,
+      input.delegation.storyIndex,
+      input.delegation.agent,
+      input.delegation.pipeline,
+      input.delegation.lane || laneForAgent(input.delegation.agent),
+    ) as ExecutionAttempt | undefined;
+    if (latestLogical?.status === 'retryable_failed' && storedRetrySignature(latestLogical) === retrySignature(input.delegation)) {
+      key = latestLogical.delegation_key;
+      previous = latestLogical;
+    }
+    if (previous && RECOVERABLE.includes(previous.status as typeof RECOVERABLE[number])) {
+      return { attempt: previous, recovered: true };
+    }
+    if (previous?.status === 'applied') return { attempt: previous, recovered: true };
 
-  const attemptNumber = (previous?.attempt || 0) + 1;
-  const executionId = randomUUID();
-  db.prepare(`
-    INSERT INTO execution_attempts(
-      execution_id, run_id, task_id, story_index, agent, pipeline, lane,
-      delegation_key, attempt, status, input_hash, input_json, base_commit,
-      prompt_version, prompt_hash, memory_revision, memory_hash, evolution_candidate_id,
-      heartbeat_at, started_at
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-  `).run(
-    executionId,
-    input.runId,
-    input.delegation.taskId,
-    input.delegation.storyIndex,
-    input.delegation.agent,
-    input.delegation.pipeline,
-    input.delegation.lane || laneForAgent(input.delegation.agent),
-    key,
-    attemptNumber,
-    inputHash,
-    inputJson,
-    input.baseCommit || null,
-    input.promptVersion || null,
-    input.promptHash || null,
-    input.memoryRevision || null,
-    input.memoryHash || null,
-    input.evolutionCandidateId || null,
-  );
-  const attempt = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(executionId) as ExecutionAttempt;
-  return { attempt, recovered: false };
+    if (input.evolutionCandidateId) {
+      const candidate = db.prepare(`
+        SELECT 1 FROM agent_prompt_candidates
+        WHERE candidate_id = ? AND agent_id = ?
+      `).get(input.evolutionCandidateId, input.delegation.agent);
+      if (!candidate) {
+        throw new PromptCanaryDeferredError('Prompt Canary 已结束，等待使用当前 Prompt 重新派发');
+      }
+      const active = db.prepare(`
+        SELECT execution_id FROM execution_attempts
+        WHERE evolution_candidate_id = ?
+          AND status IN ('planned', 'running', 'output_received', 'verifying', 'applying')
+        LIMIT 1
+      `).get(input.evolutionCandidateId) as { execution_id: string } | undefined;
+      if (active) {
+        throw new PromptCanaryDeferredError(`Prompt Canary 正由 execution ${active.execution_id} 验证，当前 Agent 稍后重试`);
+      }
+    }
+
+    const attemptNumber = (previous?.attempt || 0) + 1;
+    const executionId = randomUUID();
+    db.prepare(`
+      INSERT INTO execution_attempts(
+        execution_id, run_id, task_id, story_index, agent, pipeline, lane,
+        delegation_key, attempt, status, input_hash, input_json, base_commit,
+        prompt_version, prompt_overlay_revision, prompt_hash, memory_revision, memory_hash, evolution_candidate_id,
+        heartbeat_at, started_at
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `).run(
+      executionId,
+      input.runId,
+      input.delegation.taskId,
+      input.delegation.storyIndex,
+      input.delegation.agent,
+      input.delegation.pipeline,
+      input.delegation.lane || laneForAgent(input.delegation.agent),
+      key,
+      attemptNumber,
+      inputHash,
+      inputJson,
+      input.baseCommit || null,
+      input.promptVersion || null,
+      input.promptOverlayRevision ?? null,
+      input.promptHash || null,
+      input.memoryRevision || null,
+      input.memoryHash || null,
+      input.evolutionCandidateId || null,
+    );
+    const attempt = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(executionId) as ExecutionAttempt;
+    return { attempt, recovered: false };
+  }).immediate();
 }
 
 export async function recoverNextExecutionAttempt() {

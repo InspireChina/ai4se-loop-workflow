@@ -25,6 +25,7 @@ import {
   upsertDocument,
 } from '../../src/application/tasks';
 import { databaseConnection, paths } from '../../src/infrastructure/database';
+import { submitTaskContextChatChangeRequest } from '../../src/application/task-context-chat';
 import type { Actor, TaskStatus } from '../../src/domain/task';
 import type { TaskLaneKind } from '../../src/application/task-lanes';
 import {
@@ -289,6 +290,23 @@ async function main() {
     case 'task-context':
       console.log(JSON.stringify(await getTaskContext(requireValue(args, 'taskId')), null, 2));
       return;
+    case 'context-chat-change': {
+      const sessionId = process.env.LOOP_CONTEXT_CHAT_SESSION_ID;
+      const messageId = process.env.LOOP_CONTEXT_CHAT_MESSAGE_ID;
+      const token = process.env.LOOP_CONTEXT_CHAT_COMMAND_TOKEN;
+      if (!sessionId || !messageId || !token) throw new Error('context-chat-change 只能在当前上下文 Chat turn 内使用');
+      const result = await submitTaskContextChatChangeRequest({
+        sessionId,
+        messageId,
+        token,
+        requestKey: requireValue(args, 'key'),
+        title: requireValue(args, 'title'),
+        request: requireValue(args, 'request'),
+        acceptance: optional(args, 'acceptance'),
+      });
+      console.log(`${result.created ? '变更请求已提交' : '变更请求已存在'} request=${result.requestId} comment=${result.commentId}，等待 Feedback 闭环处理`);
+      return;
+    }
     case 'agent-context': {
       const executionId = process.env.LOOP_EXECUTION_ID;
       if (!executionId) throw new Error('agent-context 只能在流程 Agent execution 内使用');

@@ -1,6 +1,7 @@
 'use client';
 
 import { FormEvent, useEffect, useRef, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import { Bot, LoaderCircle, Send, WandSparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -16,6 +17,7 @@ export function TaskContextChat({
   initialSession: TaskContextChatSession | null;
   initialMessages: TaskContextChatMessage[];
 }) {
+  const router = useRouter();
   const [messages, setMessages] = useState(initialMessages);
   const [executor, setExecutor] = useState(initialSession?.executor || null);
   const [sending, setSending] = useState(false);
@@ -56,11 +58,18 @@ export function TaskContextChat({
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ message }),
       });
-      const body = await response.json() as { message?: TaskContextChatMessage; executor?: AgentExecutorId; error?: string };
+      const body = await response.json() as {
+        message?: TaskContextChatMessage;
+        executor?: AgentExecutorId;
+        changeRequestSubmitted?: boolean;
+        changeRequestCount?: number;
+        error?: string;
+      };
       if (!response.ok || !body.message) throw new Error(body.error || '上下文 Agent 未返回回答');
       setMessages((current) => [...current, body.message!]);
       setExecutor(body.executor || executor);
       setSessionState('idle');
+      if (body.changeRequestSubmitted) router.refresh();
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       setSessionState('idle');
@@ -75,13 +84,13 @@ export function TaskContextChat({
         <h2><Bot size={16}/>上下文对话</h2>
         <small>当前需求唯一会话{executor ? ` · ${executor}` : ''}</small>
       </div>
-      <span className="read-only-chip"><WandSparkles size={13}/>安全模式</span>
+      <span className="read-only-chip"><WandSparkles size={13}/>向前追加</span>
     </div>
     <div className="context-chat-messages" aria-live="polite">
       {messages.length === 0 && <div className="context-chat-empty">
         <Bot size={22}/>
-        <strong>查询上下文，或完成一个轻量调整</strong>
-        <p>当前需求的 Dev/Test 运行时只读；否则可直接修改不违背需求的 UI、样式和 wording，并提交自己的代码。其他需求的状态不影响本对话。</p>
+        <strong>查询上下文，或提出新的修改</strong>
+        <p>Chat 不直接修改代码。需要实施的变化会进入与文档评论相同的 Feedback 闭环，并可按实际边界追加任意多个交付单元，再重新经过分析、开发和验证。</p>
       </div>}
       {messages.map((message) => <article className={`context-chat-message ${message.role}`} key={message.messageId}>
         <small>{message.role === 'user' ? '你' : '上下文 Agent'}</small>
@@ -105,13 +114,13 @@ export function TaskContextChat({
         }}
         disabled={busy}
         maxLength={20_000}
-        placeholder="例如：把这个按钮文案改得更清楚，并直接提交"
+        placeholder="例如：这个按钮文案需要更清楚，请作为后续修改处理"
         aria-label="向上下文 Agent 提问"
       />
       <button className="button" type="submit" disabled={busy || !draft.trim()} aria-label="发送">
         <Send size={15}/>
       </button>
     </form>
-    <small className="context-chat-note">Enter 发送 · Shift + Enter 换行 · 可修改轻量 UI / wording，不会改变 Loop 状态</small>
+    <small className="context-chat-note">Enter 发送 · Shift + Enter 换行 · 修改请求只向前追加，不改写既有交付事实</small>
   </section>;
 }

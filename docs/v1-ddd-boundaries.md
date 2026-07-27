@@ -24,7 +24,7 @@
 | 等待运行信息 | 需求在原 Agile 状态等待运行信息，`run_state=waiting_for_runtime_input`；回答后恢复原 Agent 和交付单元。 |
 | 系统阻塞 | 自动恢复耗尽或执行环境异常，`run_state=system_blocked`；不伪装成人工决策。 |
 | 代码槽 | 本地单工作区中开发实现写代码时的串行保护。 |
-| Agent Profile | 某个流程 Agent 当前生效的 Prompt、Memory、版本与演化策略。 |
+| Agent Profile | 某个流程 Agent 的代码内置 Base Prompt、项目 Overlay、至多一个临时 Overlay candidate、带 revision 历史的 Memory 与演化策略；当前全套修正版从 V1 Base 开始。 |
 | 演化观察 | 从真实 execution 证据提取的可复用候选经验；它不是事实，必须经累计和验证后才能提升。 |
 | 运行事件 | 与 run / execution 关联、已脱敏的机器可分析日志事实。 |
 | 软件维护任务 | 主 Runner 在 finally 写入的 durable outbox；独立维护进程据此诊断 Loop Engineering 自身。 |
@@ -107,13 +107,15 @@ Application 从 Agent 的结构化结果写入文档，UI 直接读取数据库�
 
 ### 2.7 Agent 配置与演化（Agent Configuration and Evolution）
 
-负责按项目隔离各流程 Agent 的实际 Role Prompt、Durable Memory、daily observation、文件评论证据、版本历史和 Prompt Canary。
+负责各流程 Agent 的代码内置 Base Prompt、按项目隔离的 Prompt Overlay、至多一个临时 Overlay Canary candidate、带 revision 历史的 Durable Memory、daily observation 和文件评论证据。
 
-- 模型：`AgentProfile`、`PromptVersion`、`MemoryRevision`、`ArtifactCommentEvidence`、`RuntimeInputEvidence`、`EvolutionObservation`、`EvolutionRun`
-- 关键命令：保存 Prompt、保存 Memory、切换自动演化、提升 Memory、创建 Prompt candidate、记录 Canary、回滚 candidate
+- 模型：`AgentProfile`、`BasePrompt`、`PromptOverlay`、`PromptOverlayCandidate`、`MemoryRevision`、`ArtifactCommentEvidence`、`RuntimeInputEvidence`、`EvolutionObservation`、`EvolutionRun`
+- 关键命令：保存项目 Overlay、保存 Memory、切换自动演化、提升 Memory、创建 Overlay candidate、记录 Canary、接受或丢弃 candidate
 - 依赖：Loop 编排提供 execution evidence；不依赖需求状态迁移
 
-内置 Prompt 只负责首次 seed。SQLite 保存版本与证据，本地 Runtime Workspace 物化当前实际文件；目标代码库不拥有这套配置。文件评论和已用于成功恢复的运行信息回答都可成为演化证据；Evaluator 只能提炼跨任务可复用的仓库约定或操作方法，不能记忆具体用户数据、具体卡号、地址、账号或凭据，只有明确的仓库级模板和通用占位符可以保留。Evolution Evaluator 只能提出结构化观察，不能写流程状态、修改 Core Contract 或自行决定提升。Prompt candidate 必须由匹配 candidate ID 的真实 execution attempt 验证，任何失败立即回滚；整个演化链路不能阻塞主 Loop。
+当前全套修正版 Prompt 作为新的 V1 Base 初始化。每个 Agent 必须且只能有一条由应用代码拥有的 Base Prompt，并可有一条按 repo 隔离的项目 Overlay；应用升级始终更新 Base，人工编辑和自动演化只更新 Overlay。自动演化期间至多有一个 Overlay Canary candidate；旧 Prompt/Overlay 历史删除，UI 不允许查看或恢复。本地 Runtime Workspace 只从数据库单向物化 `Base + Overlay`，`PROMPT.md` 文件修改不得反向导入；目标代码库不拥有这套配置。文件评论和已用于成功恢复的运行信息回答都可成为演化证据；Evaluator 只能提炼跨任务可复用的仓库约定或操作方法，不能记忆具体用户数据、具体卡号、地址、账号或凭据，只有明确的仓库级模板和通用占位符可以保留。Evolution Evaluator 只能提出结构化观察，不能写流程状态、修改 Core Contract 或自行决定提升。Overlay candidate 必须由匹配 candidate ID 的真实 execution attempt 验证：同一 candidate 同时最多一个 execution，Application 从持久化 execution 终态可重放地计算结果；三次 Canary 全部成功时原子覆盖当前 Overlay 并删除 candidate，任一次失败时丢弃 candidate 且当前 Overlay 不变。Base 可独立升级并与 candidate 重新组合。Memory 提升继续生成并保留新的 revision；整个演化链路不能阻塞主 Loop。
+
+Prompt 配置历史与 execution 审计严格分离。每个 `ExecutionAttempt` 永久保存当次实际发送给模型的完整 Prompt snapshot、execution input hash、Base version、Overlay revision、组合 Role Prompt hash 以及 Memory revision/hash；Base/Overlay 更新或 candidate 被丢弃都不能改写该快照，也不能把历史 execution 快照恢复为当前配置。
 
 ### 2.8 软件自维护（Autonomous Software Maintenance）
 
@@ -162,6 +164,10 @@ classDiagram
     +deliveryUnitIndex
   }
   class AgentProfile
+  class BasePrompt
+  class PromptOverlay
+  class PromptOverlayCandidate
+  class MemoryRevision
   class EvolutionObservation
   class RuntimeEvent
   class SoftwareMaintenanceJob
@@ -176,8 +182,12 @@ classDiagram
   DeliveryUnit "1" --> "0..*" DeliveryDocument
   LoopRun "1" --> "0..*" ExecutionAttempt
   ExecutionAttempt --> Requirement
+  AgentProfile "1" *-- "1" BasePrompt
+  AgentProfile "1" *-- "0..1" PromptOverlay
+  AgentProfile "1" *-- "0..1" PromptOverlayCandidate
+  AgentProfile "1" *-- "1..*" MemoryRevision
   AgentProfile "1" --> "0..*" EvolutionObservation
-  ExecutionAttempt --> AgentProfile : records version/hash
+  ExecutionAttempt --> AgentProfile : snapshots prompt/memory
   ExecutionAttempt --> RuntimeEvent : correlates
   SoftwareMaintenanceJob --> RuntimeEvent : evidence range
 ```
@@ -198,8 +208,8 @@ classDiagram
 12. 同一任务最多同时运行一个 Analysis Agent 和一个 Delivery Agent；Delivery 严格执行 `Dev(N) → Test(N)`，且 `dev_index <= analysis_index`。该顺序只约束仓库状态形成的先后，不授权 Test 读取 Dev 的结果叙事。
 13. 全局最多派发四个 Analysis Agent、一个 Dev Agent 和一个需要独占浏览器的 Agent；同优先级 Analysis 按 Lane 等待时间调度。
 14. 同一个 execution attempt 的 Agent Commit（如有）、验证和 Agent Result 必须幂等记录。
-15. execution attempt 必须记录实际使用的 Prompt/Memory 版本和哈希。
-16. Prompt 自动提升必须满足证据阈值并通过三次真实 Canary；任一次失败立即回滚。
+15. execution attempt 必须记录实际发送给模型的完整 Prompt snapshot、execution input hash、Base version、Overlay revision、组合 Role Prompt hash 和 Memory revision/hash；配置变化不得改写审计快照。
+16. 当前全套修正版从 V1 Base 开始；每个 Agent 必须且只能有一条代码拥有的 Base Prompt，可有一条项目 Overlay，并且至多有一个临时 Overlay candidate。自动提升必须满足证据阈值并通过三次真实 Canary，全部成功后覆盖当前 Overlay，任一次失败则丢弃 candidate。配置域不得保存旧 Prompt/Overlay 历史或提供恢复能力。
 17. 主 Runner 的 finally 只能持久化维护任务，不能同步修改代码或等待 Maintenance Agent。
 18. runtime event 在持久化前必须脱敏，并保留 run/execution correlation、severity 和稳定异常 fingerprint。
 19. 软件修复候选只能在独立 worktree 生成；变更预算、保护路径、test/build 和 clean baseline 缺一不可。
@@ -221,7 +231,7 @@ classDiagram
 | 文档、确认事项和结果入库 | Application |
 | 运行信息请求、回答与原阶段恢复 | 当前 Agent 提出；Application 持久化和恢复；用户仅补充事实 |
 | Git 提交 | 开发实现 Agent；有代码改动时提交本轮相关文件，无改动走查不制造 Commit；Runner 只记录执行前后 HEAD |
-| Prompt / Memory 版本与自动演化 | Agent Configuration；Harness 约束提升与回滚 |
+| Base Prompt、项目 Overlay、临时 candidate、Memory revisions 与自动演化 | Agent Configuration；Harness 约束 candidate 的验证、覆盖或丢弃 |
 | Loop Engineering 自身缺陷诊断 | Software Maintenance Agent 提议；Git/Harness 决定候选与落地 |
 
 角色提交能力由 Agent Profile 或内部工作类型明确声明。需求梳理 Agent 使用 `loop-agent requirement-context`，交付规划 Agent 使用 `loop-agent delivery-plan`，问题复现 Agent 使用 `loop-agent reproduction`，交付分析 Agent 使用 `loop-agent delivery-analysis`，开发实现 Agent 使用 `loop-agent implementation`，验证 Agent 使用 `loop-agent verification`，反馈处理 Agent 使用 `loop-agent feedback`，结卡报告 Agent 使用 `loop-agent review`，Prompt 演化评估器使用 `loop-agent evolution`，软件维护 Agent 使用 `loop-agent maintenance`。所有角色渐进维护 Application 拥有的草稿：每次进程启动先读取 status，编辑命令只更新草稿，角色终止命令才产生 Result Receipt。流程 execution token 或内部工作 token 只授权当前 Agent 的命令空间，Agent 不接触 SQLite。普通最终回复和手写 JSON 不承担控制面协议。
@@ -240,11 +250,11 @@ classDiagram
 
 `ReviewDraft` 属于结卡 Application 能力，以需求下一报告修订版本或反馈报告工作组为稳定身份。它冻结 Application 生成且带内容指纹的 `RequiredSubject`，用 `Reconciliation` 把每个 subject 映射到最终可观察结果和 Context Snapshot 中带版本指纹的 evidence ref，用 `ClosureGap` 保存证据缺失、最终事实冲突或未闭合义务，并用固定 section kind 保存报告表达。普通结卡只有 `report_ready` 和 `closure_gap` 两种成功结果：前者要求全部 subject 已对账、每项结论有独立且通过的 Test execution、证据仍与冻结版本一致且报告核心章节齐备；后者不生成报告、不阻塞也不回退，Application 在交付前沿连续且 execution 快照仍匹配时，为每个 gap 幂等追加新的 Delivery Unit，使其重新经过 Analysis、Dev、Test 与 Review。报告表达更正继承并锁定当前报告基线，只能产生待 Feedback Agent 独立验证的候选新版本。报告文档、Task 状态、Feedback 工作组和 Agent Result 在同一个事务中发布，重放使用原 execution delegation 而不是当前 Task 反向重建。Review 不创建问题或运行信息请求。
 
-`InternalAgentDraft` 属于内部演化与维护 Application 能力，不进入 Task 聚合，也不占用业务 Lane。Evolution 草稿以 `evolution_id` 为稳定身份，保存摘要和稳定 observation key；Maintenance 草稿以 `job_id` 为稳定身份，保存诊断、真实文件声明和针对性测试。新的进程会获得新的 session 与 token，但继承原工作草稿且必须重新执行 status。终止命令只产生内部结果收据；Memory/Prompt 提升、真实 diff 验证、提交与自动落地仍由既有确定性 Harness 负责。
+`InternalAgentDraft` 属于内部演化与维护 Application 能力，不进入 Task 聚合，也不占用业务 Lane。Evolution 草稿以 `evolution_id` 为稳定身份，保存摘要和稳定 observation key；Maintenance 草稿以 `job_id` 为稳定身份，保存诊断、真实文件声明和针对性测试。新的进程会获得新的 session 与 token，但继承原工作草稿且必须重新执行 status。终止命令只产生内部结果收据；Memory revision 提升、Overlay candidate 的验证与覆盖或丢弃、真实 diff 验证、提交与自动落地仍由既有确定性 Harness 负责。
 
 ## 6. SQLite 持久化映射
 
-为避免一次高风险数据迁移，V1 暂时保留已有物理表名和列名。它们是基础设施兼容细节，不得出现在产品界面或 Agent Prompt 中。
+V1 的 Requirement / Delivery Unit 等业务表暂时保留已有物理名，它们是基础设施兼容细节，不得出现在产品界面或 Agent Prompt 中。Prompt 配置是明确例外：本次基线迁移删除旧历史表，以 Base Prompt、项目 Overlay 和临时 candidate 表表达新的领域不变量。
 
 | 产品模型 | 当前物理实现 |
 |---|---|
@@ -259,7 +269,7 @@ classDiagram
 | Loop Run / logs | `loop_meta` / `run_logs`。 |
 | Agent Result | `agent_results`。 |
 | Execution Attempt / Receipt | `execution_attempts` / `execution_receipts`。 |
-| Agent Profile / Prompt / Memory | `agent_profiles` / `agent_prompt_versions` / `agent_memory_versions`。 |
+| Agent Profile / Base Prompt / Prompt Overlay / Overlay Candidate / Memory | `agent_profiles` / `agent_prompts` / `agent_prompt_overlays` / `agent_prompt_candidates` / `agent_memory_versions`；Base 表每个 Agent 一条，Overlay 与 candidate 表每个 Agent 至多一条，均不作为历史版本库；Memory 表保留 revision 历史。 |
 | Evolution Observation / Run | `agent_observations` / `agent_observation_occurrences` / `agent_evolution_runs`。 |
 | Runtime Event | `runtime_events`。 |
 | Software Maintenance Job / Candidate | `software_maintenance_jobs` 与本地 Git worktree/branch。 |

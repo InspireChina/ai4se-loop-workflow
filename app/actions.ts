@@ -2,7 +2,7 @@
 
 import { redirect } from 'next/navigation';
 import { normalizeWorkspaceRoot, setAgentExecutorSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
-import { rollbackAgentPrompt, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
+import { saveAgentMemory, saveAgentPromptOverlay, setAgentAutoEvolution } from '../src/application/agent-profiles';
 import { setSoftwareMaintenanceSettings } from '../src/application/software-maintenance';
 import {
   addDocumentComment,
@@ -196,9 +196,9 @@ export async function acknowledgeClosureAction(formData: FormData) {
   redirect(`/tasks/${formData.get('taskId')}`);
 }
 
-export async function saveAgentPromptAction(formData: FormData) {
+export async function saveAgentPromptOverlayAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
-  await saveAgentPrompt({ agentId, content: formData.get('content'), reason: formData.get('reason') });
+  await saveAgentPromptOverlay({ agentId, content: formData.get('content'), reason: formData.get('reason') });
   redirect(`/agents/${agentId}`);
 }
 
@@ -211,12 +211,6 @@ export async function saveAgentMemoryAction(formData: FormData) {
 export async function setAgentAutoEvolutionAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
   await setAgentAutoEvolution({ agentId, enabled: formData.get('enabled') });
-  redirect(`/agents/${agentId}`);
-}
-
-export async function rollbackAgentPromptAction(formData: FormData) {
-  const agentId = String(formData.get('agentId'));
-  await rollbackAgentPrompt({ agentId, version: formData.get('version') });
   redirect(`/agents/${agentId}`);
 }
 

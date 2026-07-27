@@ -42,6 +42,123 @@ test('materializes persistent task lanes and execution lane correlation', async 
   assert.equal(recoveryColumns.some((column) => column.name === 'failure_count'), true);
 });
 
+test('stores one Base Prompt, one project Overlay and one ephemeral Canary without recoverable Prompt history', async () => {
+  const db = await databaseConnection();
+  const promptTables = db.prepare(`
+    SELECT name
+    FROM sqlite_master
+    WHERE type = 'table'
+      AND name IN (
+        'agent_prompts',
+        'agent_prompt_overlays',
+        'agent_prompt_candidates',
+        'agent_prompt_versions',
+        'agent_memory_versions'
+      )
+    ORDER BY name
+  `).all() as { name: string }[];
+  assert.deepEqual(promptTables.map((row) => row.name), [
+    'agent_memory_versions',
+    'agent_prompt_candidates',
+    'agent_prompt_overlays',
+    'agent_prompts',
+  ]);
+
+  const currentPromptPrimaryKey = db.prepare("PRAGMA table_info('agent_prompts')").all() as { name: string; pk: number }[];
+  assert.equal(currentPromptPrimaryKey.find((column) => column.name === 'agent_id')?.pk, 1);
+  const overlayPrimaryKey = db.prepare("PRAGMA table_info('agent_prompt_overlays')").all() as { name: string; pk: number }[];
+  assert.equal(overlayPrimaryKey.find((column) => column.name === 'agent_id')?.pk, 1);
+  const executionColumns = db.prepare("PRAGMA table_info('execution_attempts')").all() as { name: string }[];
+  assert.ok(executionColumns.some((column) => column.name === 'prompt_overlay_revision'));
+
+  const candidateIndexes = db.prepare("PRAGMA index_list('agent_prompt_candidates')").all() as { name: string; unique: number }[];
+  const uniqueCandidateColumns = candidateIndexes
+    .filter((index) => index.unique === 1)
+    .map((index) => (db.prepare(`PRAGMA index_info('${index.name}')`).all() as { name: string }[]).map((column) => column.name));
+  assert.equal(uniqueCandidateColumns.some((columns) => columns.length === 1 && columns[0] === 'agent_id'), true);
+});
+
+test('scopes context Chat write commands to the active turn', async () => {
+  const db = await databaseConnection();
+  const columns = db.prepare("PRAGMA table_info('task_context_chat_sessions')").all() as { name: string }[];
+  assert.ok(columns.some((column) => column.name === 'command_token_hash'));
+  const requestTable = db.prepare(`
+    SELECT 1 FROM sqlite_master
+    WHERE type = 'table' AND name = 'task_context_chat_change_requests'
+  `).get();
+  assert.ok(requestTable);
+});
+
+test('resets legacy Prompt configuration to an empty V1 baseline before reseeding', () => {
+  const db = new Database(':memory:');
+  db.exec(`
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE agent_profiles (
+      agent_id TEXT PRIMARY KEY,
+      current_prompt_version INTEGER NOT NULL,
+      candidate_prompt_version INTEGER,
+      canary_remaining INTEGER NOT NULL,
+      prompt_seed_revision INTEGER NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE execution_attempts (
+      execution_id TEXT PRIMARY KEY
+    );
+    CREATE TABLE agent_prompt_versions (
+      agent_id TEXT NOT NULL REFERENCES agent_profiles(agent_id) ON DELETE CASCADE,
+      version INTEGER NOT NULL,
+      content TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      status TEXT NOT NULL,
+      source TEXT NOT NULL,
+      reason TEXT,
+      evidence_json TEXT,
+      PRIMARY KEY(agent_id, version)
+    );
+    CREATE INDEX idx_agent_prompt_versions_history
+      ON agent_prompt_versions(agent_id, version DESC);
+    CREATE TABLE agent_observations (
+      observation_id TEXT PRIMARY KEY,
+      status TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL
+    );
+    INSERT INTO agent_profiles VALUES('dev-agent', 35, 36, 2, 35, 'old');
+    INSERT INTO agent_prompt_versions(
+      agent_id, version, content, content_hash, status, source
+    ) VALUES
+      ('dev-agent', 34, 'old prompt', 'old', 'superseded', 'seed'),
+      ('dev-agent', 35, 'current prompt', 'current', 'active', 'human'),
+      ('dev-agent', 36, 'candidate prompt', 'candidate', 'candidate', 'evolution');
+    INSERT INTO agent_observations VALUES('observation', 'prompt_candidate', 'old');
+  `);
+
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/055_prompt_v1_baseline.sql'), 'utf8'));
+
+  const tables = db.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type = 'table' AND name LIKE 'agent_prompt%'
+    ORDER BY name
+  `).all() as { name: string }[];
+  assert.deepEqual(tables.map((row) => row.name), ['agent_prompt_candidates', 'agent_prompt_overlays', 'agent_prompts']);
+  assert.equal((db.prepare('SELECT COUNT(*) AS count FROM agent_prompts').get() as { count: number }).count, 0);
+  assert.equal((db.prepare('SELECT COUNT(*) AS count FROM agent_prompt_overlays').get() as { count: number }).count, 0);
+  assert.equal((db.prepare('SELECT COUNT(*) AS count FROM agent_prompt_candidates').get() as { count: number }).count, 0);
+  assert.deepEqual(db.prepare(`
+    SELECT current_prompt_version, current_prompt_overlay_revision, candidate_prompt_version, canary_remaining, prompt_seed_revision
+    FROM agent_profiles WHERE agent_id = 'dev-agent'
+  `).get(), {
+    current_prompt_version: 1,
+    current_prompt_overlay_revision: 0,
+    candidate_prompt_version: null,
+    canary_remaining: 0,
+    prompt_seed_revision: 1,
+  });
+  assert.equal(
+    (db.prepare("SELECT status FROM agent_observations WHERE observation_id = 'observation'").get() as { status: string }).status,
+    'rejected',
+  );
+});
+
 test('migrates legacy waiting and blocked task state into isolated lanes without moving cursors', () => {
   const db = new Database(':memory:');
   db.exec(`

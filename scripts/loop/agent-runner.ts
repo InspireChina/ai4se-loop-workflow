@@ -34,6 +34,7 @@ import {
   recordExecutionReceipt,
   recoverNextExecutionAttempt,
   shouldRecordDevCodeCommit,
+  PromptCanaryDeferredError,
   type ExecutionAttempt,
 } from '../../src/application/executions';
 import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTask, getTaskContext, markDelegationLaneRunning, reconcileStaleTaskLanes, recordRuntimeEventWithFallback, settleDelegationLane, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
@@ -150,7 +151,7 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
     '',
     commandPrompt,
     '',
-    `# Role Prompt · v${runtime.promptVersion} · ${runtime.promptStatus}`,
+    `# Role Prompt · Base v${runtime.promptVersion} · Overlay r${runtime.promptOverlayRevision} · ${runtime.promptStatus}`,
     runtime.prompt,
     '',
     `# Durable Memory · r${runtime.memoryRevision}`,
@@ -460,6 +461,7 @@ async function executeDelegationStep(
       prompt: builtPrompt.prompt,
       baseCommit: headBefore,
       promptVersion: builtPrompt.runtime.promptVersion,
+      promptOverlayRevision: builtPrompt.runtime.promptOverlayRevision,
       promptHash: builtPrompt.runtime.promptHash,
       memoryRevision: builtPrompt.runtime.memoryRevision,
       memoryHash: builtPrompt.runtime.memoryHash,
@@ -564,6 +566,11 @@ async function executeDelegationStep(
       await handleExecutionFailure(durable.attempt, delegation, reason, error instanceof AgentResultContractError);
     }
   } catch (error) {
+    if (error instanceof PromptCanaryDeferredError) {
+      await appendLoopRunLog(runId, `[演化] requirement=${delegation.taskId} agent=${delegation.agent} ${error.message}`);
+      await sleep(Number(process.env.LOOP_CANARY_DISPATCH_RETRY_MS || 5_000));
+      return;
+    }
     unexpectedFailure = error;
     const reason = `任务级 Agent 执行异常：${error instanceof Error ? error.message : String(error)}`;
     if (attempt) await handleExecutionFailure(attempt, delegation, reason, false);

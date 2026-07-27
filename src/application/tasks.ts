@@ -20,6 +20,7 @@ import {
   type TaskLane,
   type TaskLaneKind,
 } from './task-lanes';
+import { taskContextChatTurnIsRunning } from './task-context-chat';
 import { insertDeliveryUnitContractsInDb } from './delivery-units';
 import {
   assertActorCanCreate,
@@ -33,7 +34,6 @@ import {
   type TaskStatus,
 } from '../domain/task';
 import type { RecoveryItem } from './recovery-items';
-import { taskContextChatIsRunning } from './task-context-chat';
 import {
   cancelFeedbackForTask,
   nextFeedbackDispatchInDb,
@@ -199,7 +199,7 @@ export type RuntimeInputRequest = {
   resolved_at: string | null;
 };
 export type ClosureAcknowledgement = { acknowledgement_id: string; task_id: string; review_document_id: string; review_revision: number; acknowledged_by: string; acknowledged_at: string };
-export type ExecutionAttemptView = { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; lane: string | null; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; result_outcome: string | null; result_verdict: string | null; result_summary: string | null; last_error: string | null; created_at: string; started_at: string | null; finished_at: string | null };
+export type ExecutionAttemptView = { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; lane: string | null; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_overlay_revision: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; result_outcome: string | null; result_verdict: string | null; result_summary: string | null; last_error: string | null; created_at: string; started_at: string | null; finished_at: string | null };
 export type Event = { event_id: string; actor: string; event_type: string; summary: string; created_at: string };
 export type RunStatus = {
   runId: string;
@@ -426,7 +426,7 @@ export async function getTask(taskId: string) {
   const executionAttempts = db.prepare(`
     SELECT execution_id, run_id, task_id, story_index, agent, pipeline, lane, attempt, status,
            input_hash, base_commit, code_commit, verification_id,
-           prompt_version, prompt_hash, memory_revision, memory_hash, evolution_candidate_id, last_error,
+           prompt_version, prompt_overlay_revision, prompt_hash, memory_revision, memory_hash, evolution_candidate_id, last_error,
            json_extract(result_json, '$.outcome') AS result_outcome,
            json_extract(result_json, '$.verdict') AS result_verdict,
            json_extract(result_json, '$.summary') AS result_summary,
@@ -1857,11 +1857,11 @@ export async function pipelineForTask(taskId: string): Promise<Delegation[]> {
   const allActive = activeLaneExecutions(db);
   const active = allActive.filter((item) => item.task_id === taskId);
   const lanes = taskLanesInDb(db, task);
-  const feedback = nextFeedbackDispatchInDb(db, taskId);
+  const feedback = taskContextChatTurnIsRunning(db, taskId) ? undefined : nextFeedbackDispatchInDb(db, taskId);
   if (feedback && feedbackCanDispatch(task, lanes)) return active.length ? [] : [feedbackDelegation(task, feedback)];
   if (task.agile_status === 'blocked') return [];
   const otherActive = db.prepare(`${taskSelect} WHERE task_id != ?`).all(taskId) as Task[];
-  const deliveryTaskAvailable = !taskContextChatIsRunning(db, taskId);
+  const deliveryTaskAvailable = true;
   const codeSlotAvailable = !otherActive.some(occupiesCodeSlot) && !allActive.some((item) => item.task_id !== taskId && item.agent === 'dev-agent');
   const control = controlLine(task, codeSlotAvailable, lanes);
   if (control) return active.length ? [] : [control];
@@ -2006,11 +2006,13 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
   const lines: DelegationEnvelope[] = [];
   const analysisCandidates: { task: Task; lane: TaskLane }[] = [];
   for (const task of tasks) {
-    const deliveryTaskAvailable = !taskContextChatIsRunning(db, task.task_id);
+    const deliveryTaskAvailable = true;
     refreshTaskLaneStatesInDb(db, task);
     const lanes = taskLanesInDb(db, task);
     const taskCodeAvailable = occupiesCodeSlot(task) || (codeAvailable && (!readyDev || task.task_id === readyDev));
-    const feedback = nextFeedbackDispatchInDb(db, task.task_id);
+    const feedback = taskContextChatTurnIsRunning(db, task.task_id)
+      ? undefined
+      : nextFeedbackDispatchInDb(db, task.task_id);
     const taskHasActive = active.some((item) => item.task_id === task.task_id);
     if (feedback && feedbackCanDispatch(task, lanes)) {
       if (!taskHasActive) lines.push(feedbackDelegation(task, feedback));
@@ -2038,7 +2040,7 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
   }
   for (const candidate of analysisCandidates.sort(compareAnalysisCandidates)) {
     if (!analysisSlots) break;
-    const deliveryTaskAvailable = !taskContextChatIsRunning(db, candidate.task.task_id);
+    const deliveryTaskAvailable = true;
     const line = laneLine(candidate.task, candidate.lane, true, deliveryTaskAvailable);
     if (!line) continue;
     lines.push(toEnvelope(candidate.task, line));

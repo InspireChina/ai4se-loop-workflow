@@ -8,7 +8,7 @@ test('keeps one executor-bound context chat per task and persists its transcript
 
   const first = await beginTaskContextChatTurn(taskId, 'What is the current state?', 'cursor');
   assert.equal(first.session.executor, 'cursor');
-  assert.equal(first.writeAllowed, true);
+  assert.match(first.commandToken, /^[0-9a-f-]{36}$/);
   await assert.rejects(() => beginTaskContextChatTurn(taskId, 'Can this overlap?', 'claude'), /正在回答/);
 
   const answer = await completeTaskContextChatTurn({
@@ -38,71 +38,112 @@ test('keeps one executor-bound context chat per task and persists its transcript
   });
 });
 
-test('uses only the current task Dev or Test execution to choose the Chat mode', async () => {
-  const { createTask } = await import('./tasks');
+test('submits unlimited keyed change requests from one Chat turn into the existing Feedback loop', async () => {
+  const { createTask, pipelineForTask } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
-  const { beginTaskContextChatTurn, completeTaskContextChatTurn } = await import('./task-context-chat');
-  const devTaskId = await createTask({ title: 'Active Dev' });
-  const taskId = await createTask({ title: 'Context chat dynamic mode' });
+  const {
+    beginTaskContextChatTurn,
+    completeTaskContextChatTurn,
+    submitTaskContextChatChangeRequest,
+  } = await import('./task-context-chat');
+  const taskId = await createTask({ title: 'Context chat forward feedback' });
   const db = await databaseConnection();
   db.prepare(`
-    INSERT INTO execution_attempts(
-      execution_id, run_id, task_id, agent, pipeline, delegation_key,
-      attempt, status, input_hash, input_json
-    ) VALUES('EXEC-chat-dev', 'RUN-chat-dev', ?, 'dev-agent', 'dev', 'chat-dev-key', 1, 'running', 'hash', '{}')
-  `).run(devTaskId);
-  const claimed = await beginTaskContextChatTurn(taskId, 'Change this button label', 'codex');
-  assert.equal(claimed.writeAllowed, true);
-  await completeTaskContextChatTurn({
-    sessionId: claimed.session.sessionId,
-    content: 'Another task does not affect this lightweight change.',
-    providerSessionId: 'codex-session-1',
-  });
-
-  db.prepare(`
-    INSERT INTO execution_attempts(
-      execution_id, run_id, task_id, agent, pipeline, delegation_key,
-      attempt, status, input_hash, input_json
-    ) VALUES('EXEC-chat-current-test', 'RUN-chat-current-test', ?, 'test-agent', 'test', 'chat-current-test-key', 1, 'running', 'hash', '{}')
+    INSERT INTO stories(task_id, story_index, title, directory)
+    VALUES(?, 1, 'Existing delivery unit', 'story-001')
   `).run(taskId);
-  const readOnly = await beginTaskContextChatTurn(taskId, 'Change it again', 'codex');
-  assert.equal(readOnly.writeAllowed, false);
-  await completeTaskContextChatTurn({
-    sessionId: readOnly.session.sessionId,
-    content: 'This task is under Test, so this turn is read-only.',
-    providerSessionId: 'codex-session-1',
+  db.prepare(`
+    UPDATE tasks SET total_stories = 1, agile_status = 'in dev' WHERE task_id = ?
+  `).run(taskId);
+  const claimed = await beginTaskContextChatTurn(taskId, 'Change this button label', 'codex');
+  const submitted = await submitTaskContextChatChangeRequest({
+    sessionId: claimed.session.sessionId,
+    messageId: claimed.messageId,
+    token: claimed.commandToken,
+    requestKey: 'primary-action-label',
+    title: 'Clarify the primary action label',
+    request: 'Update the primary action wording without rewriting the completed delivery unit.',
+    acceptance: 'The new label is visible from the real task detail page.',
   });
-
-  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE execution_id = 'EXEC-chat-dev'").run();
-  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE execution_id = 'EXEC-chat-current-test'").run();
+  assert.equal(submitted.taskId, taskId);
+  assert.equal(submitted.created, true);
+  assert.ok(db.prepare(`
+    SELECT 1 FROM document_comments
+    WHERE comment_id = ? AND intent = 'change_request' AND feedback_status = 'submitted'
+  `).get(submitted.commentId));
+  assert.ok(db.prepare(`
+    SELECT 1 FROM documents
+    WHERE document_id = ? AND kind = 'context-chat-change-requests'
+  `).get(submitted.documentId));
+  assert.equal((await pipelineForTask(taskId)).some((item) => item.agent === 'feedback-agent'), false);
+  const repeated = await submitTaskContextChatChangeRequest({
+    sessionId: claimed.session.sessionId,
+    messageId: claimed.messageId,
+    token: claimed.commandToken,
+    requestKey: 'primary-action-label',
+    title: 'Duplicate retry',
+    request: 'A retry with the same stable key must not create a duplicate.',
+  });
+  assert.equal(repeated.created, false);
+  assert.equal(repeated.commentId, submitted.commentId);
+  const secondRequest = await submitTaskContextChatChangeRequest({
+    sessionId: claimed.session.sessionId,
+    messageId: claimed.messageId,
+    token: claimed.commandToken,
+    requestKey: 'secondary-empty-state',
+    title: 'Improve the empty state',
+    request: 'Treat this as a separate independently deliverable change.',
+  });
+  assert.equal(secondRequest.created, true);
+  assert.notEqual(secondRequest.commentId, submitted.commentId);
+  assert.equal(
+    (db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM task_context_chat_change_requests
+      WHERE session_id = ? AND message_id = ?
+    `).get(claimed.session.sessionId, claimed.messageId) as { count: number }).count,
+    2,
+  );
+  const completed = await completeTaskContextChatTurn({
+    sessionId: claimed.session.sessionId,
+    content: 'The change request entered the Feedback loop.',
+    providerSessionId: 'codex-session-1',
+    userMessageId: claimed.messageId,
+  });
+  assert.equal(completed.changeRequestSubmitted, true);
+  assert.equal(completed.changeRequestCount, 2);
+  const feedbackPipeline = await pipelineForTask(taskId);
+  assert.equal(feedbackPipeline[0]?.agent, 'feedback-agent');
+  assert.equal(feedbackPipeline[0]?.pipeline, 'feedback-triage');
+  assert.equal(feedbackPipeline[0]?.feedbackIds?.length, 2);
+  db.prepare("UPDATE tasks SET agile_status = 'cancelled' WHERE task_id = ?").run(taskId);
 });
 
-test('holds only the current task Delivery during a writable Chat turn while other work can continue', async () => {
+test('does not pause the current task Delivery lane while context Chat is running', async () => {
   const { createTask, pipelineForTask } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const { beginTaskContextChatTurn, completeTaskContextChatTurn } = await import('./task-context-chat');
   const taskId = await createTask({ title: 'Context chat workspace coordination' });
-  const otherTaskId = await createTask({ title: 'Other task delivery remains available' });
   const db = await databaseConnection();
-  db.prepare(`
-    UPDATE tasks
-    SET agile_status = 'ready for dev', total_stories = 2, analysis_index = 1,
-        spec_resolved_index = 1, dev_index = 0, test_index = 0
-    WHERE task_id = ?
-  `).run(taskId);
   db.prepare(`
     UPDATE tasks
     SET agile_status = 'ready for dev', total_stories = 1, analysis_index = 1,
         spec_resolved_index = 1, dev_index = 0, test_index = 0
     WHERE task_id = ?
-  `).run(otherTaskId);
-  const chat = await beginTaskContextChatTurn(taskId, 'Tighten the empty-state wording', 'codex');
-  assert.equal(chat.writeAllowed, true);
+  `).run(taskId);
+  db.prepare(`
+    INSERT INTO stories(task_id, story_index, title, directory)
+    VALUES(?, 1, 'Ready unit', 'story-001')
+  `).run(taskId);
+  db.prepare(`
+    INSERT INTO story_specs(
+      spec_id, task_id, story_index, revision, status, spec_json, resolved_at
+    ) VALUES('SPEC-chat-ready', ?, 1, 1, 'resolved', '{}', CURRENT_TIMESTAMP)
+  `).run(taskId);
+  const chat = await beginTaskContextChatTurn(taskId, 'Explain the current delivery state', 'codex');
 
   const pipeline = await pipelineForTask(taskId);
-  assert.deepEqual(pipeline.map((item) => [item.agent, item.storyIndex]), [['analyst-agent', 2]]);
-  const otherPipeline = await pipelineForTask(otherTaskId);
-  assert.deepEqual(otherPipeline.map((item) => [item.agent, item.storyIndex]), [['dev-agent', 1]]);
+  assert.deepEqual(pipeline.map((item) => [item.agent, item.storyIndex]), [['dev-agent', 1]]);
 
   await completeTaskContextChatTurn({
     sessionId: chat.session.sessionId,

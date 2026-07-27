@@ -275,11 +275,10 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .code-editor{min-height:320px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.55;tab-size:2}
 .memory-editor{min-height:240px}
 .effective-prompt{max-height:560px;margin:0}
-.version-list,.observation-list{display:grid;gap:0}
-.version-list>div,.observation-list>div{padding:11px 0;border-bottom:1px solid var(--line)}
-.version-list>div:last-child,.observation-list>div:last-child{border-bottom:0}
-.version-list>div>div{display:flex;align-items:center;justify-content:space-between;gap:8px}
-.version-list small,.observation-list small{display:block;margin-top:5px}
+.observation-list{display:grid;gap:0}
+.observation-list>div{padding:11px 0;border-bottom:1px solid var(--line)}
+.observation-list>div:last-child{border-bottom:0}
+.observation-list small{display:block;margin-top:5px}
 .observation-list b{display:block;margin-top:7px;font-size:13px}
 .observation-list p{font-size:12px;line-height:1.45;margin:5px 0;color:#526075}
 .daily-memory-list details{margin:0;border-bottom:1px solid var(--line)}
