@@ -94,6 +94,33 @@ function plannedUnit(key: string, title: string, sourceKeys: string[] = [`change
   };
 }
 
+async function applyNextFeedbackPlan(
+  taskId: string,
+  units: ReturnType<typeof plannedUnit>[],
+) {
+  const split = await delegation(taskId, 'feedback-split');
+  assert.ok(split.feedbackBatchId);
+  assert.ok(split.feedbackGroupId);
+  const db = await databaseConnection();
+  const draftId = `DRAFT-feedback-split-${randomUUID()}`;
+  db.prepare(`
+    INSERT INTO agent_work_drafts(
+      draft_id, work_key, draft_version, draft_type, task_id, agent,
+      status, terminal_action, submitted_at
+    ) VALUES(?, ?, 1, 'delivery_plan', ?, 'story-splitter-agent',
+      'submitted', 'complete', CURRENT_TIMESTAMP)
+  `).run(draftId, `delivery-plan:${taskId}:feedback-split:${split.feedbackGroupId}`, taskId);
+  db.prepare('INSERT INTO delivery_plan_drafts(draft_id) VALUES(?)').run(draftId);
+  await applyFeedbackSplitResult({
+    taskId,
+    batchId: split.feedbackBatchId,
+    groupId: split.feedbackGroupId,
+    deliveryUnits: units,
+    sourceDeliveryPlanDraftId: draftId,
+  });
+  return split;
+}
+
 async function delegation(taskId: string, pipeline?: string) {
   const lines = await pipelineForTask(taskId);
   const line = lines.find((item) => !pipeline || item.pipeline === pipeline);
@@ -179,9 +206,23 @@ test('行为修订只追加新交付单元，并经过 Analysis、Dev、Test 和
 
   let detail = await getTask(taskId);
   assert.equal(detail?.task.agile_status, 'in feedback');
+  assert.equal(detail?.stories.length, 1, 'Feedback Triage 不应直接写入残缺交付单元');
+  assert.equal(detail?.feedbackGroups[0]?.status, 'waiting_for_plan');
+  await applyNextFeedbackPlan(taskId, [
+    plannedUnit('feedback-empty-state', '补充空状态提示', [
+      'change:feedback:empty-state',
+      'acceptance:feedback:empty-state:1',
+    ]),
+  ]);
+  detail = await getTask(taskId);
   assert.equal(detail?.stories.length, 2);
   assert.equal(detail?.stories[0].origin_type, 'original');
   assert.equal(detail?.stories[1].origin_type, 'feedback_behavior');
+  assert.equal(detail?.stories[1].unit_key, 'feedback-empty-state');
+  assert.equal(detail?.stories[1].actor, '管理员');
+  assert.match(detail?.stories[1].trigger_condition || '', /发起对应操作/);
+  assert.match(detail?.stories[1].observable_outcome || '', /可观察结果/);
+  assert.match(detail?.stories[1].acceptance || '', /独立验收/);
   assert.deepEqual(
     [detail?.task.analysis_index, detail?.task.dev_index, detail?.task.test_index],
     [1, 1, 1],
@@ -279,6 +320,14 @@ test('Bug 反馈先复现，未复现时可人工对齐，复现后才追加修�
     reproVerdict: 'reproduced',
     route: 'plan',
   }));
+  assert.equal((await getTask(taskId))?.stories.length, 1, '复现只确认事实，不应直接写入残缺修复单元');
+  assert.equal((await getTask(taskId))?.feedbackGroups[0]?.status, 'waiting_for_plan');
+  await applyNextFeedbackPlan(taskId, [
+    plannedUnit('feedback-windows-crash-fix', '修复 Windows 保存崩溃', [
+      'change:feedback:windows-crash',
+      'acceptance:feedback:windows-crash:1',
+    ]),
+  ]);
   assert.equal((await getTask(taskId))?.stories[1].origin_type, 'feedback_bug');
 });
 
@@ -318,29 +367,10 @@ test('范围新增通过追加拆分产生多个单元；回复和历史说明�
     },
   }));
   assert.equal((await getTask(taskId))?.stories.length, 1);
-  const split = await delegation(taskId, 'feedback-split');
-  assert.ok(split.feedbackBatchId);
-  assert.ok(split.feedbackGroupId);
-  const db = await databaseConnection();
-  const draftId = `DRAFT-feedback-split-${randomUUID()}`;
-  db.prepare(`
-    INSERT INTO agent_work_drafts(
-      draft_id, work_key, draft_version, draft_type, task_id, agent,
-      status, terminal_action, submitted_at
-    ) VALUES(?, ?, 1, 'delivery_plan', ?, 'story-splitter-agent',
-      'submitted', 'complete', CURRENT_TIMESTAMP)
-  `).run(draftId, `delivery-plan:${taskId}:feedback-split:${split.feedbackGroupId}`, taskId);
-  db.prepare('INSERT INTO delivery_plan_drafts(draft_id) VALUES(?)').run(draftId);
-  await applyFeedbackSplitResult({
-    taskId,
-    batchId: split.feedbackBatchId,
-    groupId: split.feedbackGroupId,
-    deliveryUnits: [
-      plannedUnit('feedback-export', '增加导出能力'),
-      plannedUnit('feedback-batch-delete', '增加批量删除能力'),
-    ],
-    sourceDeliveryPlanDraftId: draftId,
-  });
+  await applyNextFeedbackPlan(taskId, [
+    plannedUnit('feedback-export', '增加导出能力'),
+    plannedUnit('feedback-batch-delete', '增加批量删除能力'),
+  ]);
   const detail = await getTask(taskId);
   assert.equal(detail?.stories.length, 3);
   assert.deepEqual(detail?.stories.slice(1).map((story) => story.origin_type), ['feedback_scope', 'feedback_scope']);
@@ -418,6 +448,12 @@ test('反馈验证未通过会开启新批次，不回退旧单元或改写历�
       }],
     },
   }));
+  await applyNextFeedbackPlan(taskId, [
+    plannedUnit('feedback-button-copy', '调整按钮文案', [
+      'change:feedback:button-copy',
+      'acceptance:feedback:button-copy:1',
+    ]),
+  ]);
   const db = await databaseConnection();
   db.prepare(`
     UPDATE tasks SET analysis_index = 2, dev_index = 2, test_index = 2, spec_resolved_index = 2
@@ -555,7 +591,7 @@ test('直接回复、历史说明和长期建议在原位闭环，不改写历�
   assert.equal(detail?.task.agile_status, 'ready_to_close');
 });
 
-test('技术调整与行为修订一样创建新的独立交付单元', async () => {
+test('技术调整也先经过交付规划，再创建完整的独立交付单元', async () => {
   const { taskId, documentId } = await completedRequirement('技术调整');
   const commentId = await comment(taskId, documentId, '把持久化边界收敛到统一仓储接口。');
   const triage = await delegation(taskId, 'feedback-triage');
@@ -576,9 +612,19 @@ test('技术调整与行为修订一样创建新的独立交付单元', async ()
     },
   }));
 
-  const detail = await getTask(taskId);
+  let detail = await getTask(taskId);
+  assert.equal(detail?.stories.length, 1);
+  assert.equal(detail?.feedbackGroups[0]?.status, 'waiting_for_plan');
+  await applyNextFeedbackPlan(taskId, [
+    plannedUnit('feedback-repository-boundary', '统一持久化仓储边界', [
+      'change:feedback:repository-boundary',
+      'acceptance:feedback:repository-boundary:1',
+    ]),
+  ]);
+  detail = await getTask(taskId);
   assert.equal(detail?.stories.length, 2);
   assert.equal(detail?.stories[1].origin_type, 'feedback_technical');
+  assert.equal(detail?.stories[1].unit_key, 'feedback-repository-boundary');
   assert.deepEqual(JSON.parse(detail?.stories[1].corrects_story_indexes_json || '[]'), [1]);
   assert.deepEqual(
     [detail?.task.analysis_index, detail?.task.dev_index, detail?.task.test_index],
@@ -646,6 +692,12 @@ test('反馈追加单元测试失败时只重做当前新单元，并保持反�
       }],
     },
   }));
+  await applyNextFeedbackPlan(taskId, [
+    plannedUnit('feedback-empty-state-action', '增加空状态操作入口', [
+      'change:feedback:empty-state-action',
+      'acceptance:feedback:empty-state-action:1',
+    ]),
+  ]);
   const analysis = await delegation(taskId, 'analysis');
   await applyAgentResult(`run-${randomUUID()}`, analysis, result({
     outcome: 'completed',

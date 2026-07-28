@@ -127,12 +127,6 @@ function activeGroups(db: Db, batchId: string) {
   `).all(batchId) as FeedbackGroup[];
 }
 
-function batchNumber(db: Db, batchId: string) {
-  return (db.prepare(`
-    SELECT batch_number AS value FROM feedback_batches WHERE batch_id = ?
-  `).get(batchId) as { value: number } | undefined)?.value;
-}
-
 function groupDisplayName(group: Pick<FeedbackGroup, 'title' | 'reason'>) {
   return group.title || group.reason;
 }
@@ -164,57 +158,6 @@ function originType(workType: FeedbackWorkType) {
   if (workType === 'scope_addition') return 'feedback_scope';
   if (workType === 'technical_change') return 'feedback_technical';
   return 'feedback_behavior';
-}
-
-function appendDeliveryUnitInDb(db: Db, input: {
-  taskId: string;
-  batchId: string;
-  groupId: string;
-  workType: FeedbackWorkType;
-  title: string;
-  affectedDeliveryUnits: number[];
-}) {
-  const task = db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(input.taskId) as TaskRow | undefined;
-  if (!task) throw new Error('需求不存在');
-  if (['done', 'cancelled'].includes(task.agile_status)) throw new Error('终态需求不能追加反馈交付单元');
-  const nextIndex = ((db.prepare(`
-    SELECT COALESCE(MAX(story_index), 0) AS value FROM stories WHERE task_id = ?
-  `).get(input.taskId) as { value: number }).value || 0) + 1;
-  db.prepare(`
-    INSERT INTO stories(
-      task_id, story_index, title, directory,
-      origin_type, origin_feedback_batch_id, corrects_story_indexes_json
-    ) VALUES(?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    input.taskId,
-    nextIndex,
-    input.title,
-    `story-${String(nextIndex).padStart(3, '0')}`,
-    originType(input.workType),
-    input.batchId,
-    JSON.stringify(input.affectedDeliveryUnits),
-  );
-  db.prepare(`
-    INSERT INTO feedback_group_delivery_units(group_id, task_id, story_index)
-    VALUES(?, ?, ?)
-  `).run(input.groupId, input.taskId, nextIndex);
-  db.prepare(`
-    UPDATE tasks
-    SET total_stories = ?, agile_status = 'in feedback', current_subagent = 'analyst-agent',
-        run_state = 'runnable', closure_status = 'none', review_document_id = NULL,
-        closure_acknowledged_at = NULL, blocked_reason = NULL, resume_status = NULL,
-        resume_pending = 0, completed_at = NULL,
-        next_step = ?, last_actor = 'feedback-agent', updated_at = CURRENT_TIMESTAMP
-    WHERE task_id = ?
-  `).run(nextIndex, `反馈新增交付单元 ${nextIndex}：${input.title}`, input.taskId);
-  addEvent(
-    db,
-    input.taskId,
-    'feedback-agent',
-    'FeedbackDeliveryUnitAdded',
-    `反馈批次 ${batchNumber(db, input.batchId) || '当前'} 新增交付单元 ${nextIndex}：${input.title}`,
-  );
-  return nextIndex;
 }
 
 function commentsForNewBatch(db: Db, taskId: string) {
@@ -335,7 +278,7 @@ export function nextFeedbackDispatchInDb(db: Db, taskId: string): FeedbackDispat
       groupId: plan.group_id,
       commentIds: groupComments,
       feedbackId: groupComments[0],
-      description: `把新增反馈范围拆分为追加交付单元：${plan.title || plan.reason}`,
+      description: `把反馈变化规划为完整的追加交付单元：${plan.title || plan.reason}`,
     };
   }
   const verify = groups.find((group) => group.status === 'ready_for_verification');
@@ -455,7 +398,8 @@ export async function applyFeedbackTriageGroups(input: {
       const immediate = ['reply', 'historical_correction', 'learning_only'].includes(group.workType);
       const status: FeedbackGroup['status'] = immediate ? 'completed'
         : group.workType === 'bug' ? 'waiting_for_repro'
-          : group.workType === 'scope_addition' ? 'waiting_for_plan'
+          : ['behavior_change', 'scope_addition', 'technical_change'].includes(group.workType)
+            ? 'waiting_for_plan'
             : 'executing';
       db.prepare(`
         INSERT INTO feedback_groups(
@@ -511,16 +455,6 @@ export async function applyFeedbackTriageGroups(input: {
           `).run(JSON.stringify(group.acceptance), group.reason, commentId);
         }
       }
-      if (group.workType === 'behavior_change' || group.workType === 'technical_change') {
-        appendDeliveryUnitInDb(db, {
-          taskId: input.taskId,
-          batchId: input.batchId,
-          groupId,
-          workType: group.workType,
-          title: group.title!,
-          affectedDeliveryUnits: group.affectedDeliveryUnits,
-        });
-      }
     }
     db.prepare(`
       UPDATE feedback_batches
@@ -562,17 +496,9 @@ export async function applyFeedbackReproResult(input: {
   if (!group || group.work_type !== 'bug' || group.status !== 'waiting_for_repro') throw new Error('反馈 Bug 分组当前不能应用复现结果');
   if (input.result.reproVerdict !== 'reproduced') throw new Error('反馈 Bug 只有成功复现后才能创建修复交付单元');
   db.transaction(() => {
-    appendDeliveryUnitInDb(db, {
-      taskId: input.taskId,
-      batchId: input.batchId,
-      groupId: input.groupId,
-      workType: 'bug',
-      title: group.title || '修复已复现的反馈问题',
-      affectedDeliveryUnits: JSON.parse(group.affected_story_indexes_json) as number[],
-    });
     db.prepare(`
       UPDATE feedback_groups
-      SET status = 'executing', source_execution_id = COALESCE(source_execution_id, ?),
+      SET status = 'waiting_for_plan', source_execution_id = COALESCE(source_execution_id, ?),
           updated_at = CURRENT_TIMESTAMP
       WHERE group_id = ?
     `).run(input.executionId || null, input.groupId);
@@ -582,7 +508,7 @@ export async function applyFeedbackReproResult(input: {
       WHERE task_id = ? AND source_agent = 'repro-agent' AND status = 'answered'
     `).run(input.taskId);
     updateBatchStatusInDb(db, input.batchId);
-    addEvent(db, input.taskId, 'repro-agent', 'FeedbackBugReproduced', `反馈「${groupDisplayName(group)}」已复现并创建修复交付单元`);
+    addEvent(db, input.taskId, 'repro-agent', 'FeedbackBugReproduced', `反馈「${groupDisplayName(group)}」已复现，等待规划修复交付单元`);
   })();
   refreshTask(input.taskId);
 }
@@ -599,14 +525,17 @@ export async function applyFeedbackSplitResult(input: {
   const group = db.prepare(`
     SELECT * FROM feedback_groups WHERE group_id = ? AND batch_id = ?
   `).get(input.groupId, input.batchId) as FeedbackGroup | undefined;
-  if (!group || group.work_type !== 'scope_addition' || group.status !== 'waiting_for_plan') throw new Error('反馈新增范围当前不能追加交付单元');
-  if (!input.deliveryUnits.length) throw new Error('反馈新增范围必须产生至少一个交付单元');
+  const plannableTypes: FeedbackWorkType[] = ['bug', 'behavior_change', 'scope_addition', 'technical_change'];
+  if (!group || !plannableTypes.includes(group.work_type) || group.status !== 'waiting_for_plan') {
+    throw new Error('当前反馈工作组不能应用交付规划');
+  }
+  if (!input.deliveryUnits.length) throw new Error('反馈交付规划必须产生至少一个交付单元');
   db.transaction(() => {
     const affectedDeliveryUnits = JSON.parse(group.affected_story_indexes_json) as number[];
     const inserted = insertDeliveryUnitContractsInDb(db, {
       taskId: input.taskId,
       units: input.deliveryUnits,
-      originType: 'feedback_scope',
+      originType: originType(group.work_type),
       originFeedbackBatchId: input.batchId,
       correctsStoryIndexes: affectedDeliveryUnits,
       sourceDeliveryPlanDraftId: input.sourceDeliveryPlanDraftId,
@@ -645,7 +574,7 @@ export async function applyFeedbackSplitResult(input: {
       WHERE group_id = ?
     `).run(input.executionId || null, input.groupId);
     updateBatchStatusInDb(db, input.batchId);
-    addEvent(db, input.taskId, 'story-splitter-agent', 'FeedbackScopeSplit', `反馈「${groupDisplayName(group)}」追加 ${input.deliveryUnits.length} 个交付单元`);
+    addEvent(db, input.taskId, 'story-splitter-agent', 'FeedbackDeliveryPlanned', `反馈「${groupDisplayName(group)}」规划并追加 ${input.deliveryUnits.length} 个交付单元`);
   })();
   refreshTask(input.taskId);
 }

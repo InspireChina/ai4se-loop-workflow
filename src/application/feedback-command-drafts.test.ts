@@ -119,6 +119,52 @@ async function recordBehaviorChange(
   ]);
 }
 
+async function planBehaviorChange(taskId: string) {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { pipelineForTask } = await import('./tasks');
+  const { applyFeedbackSplitResult } = await import('./feedback');
+  const split = (await pipelineForTask(taskId)).find((item) =>
+    item.pipeline === 'feedback-split') as DelegationEnvelope | undefined;
+  assert.ok(split?.feedbackBatchId);
+  assert.ok(split?.feedbackGroupId);
+  const db = await databaseConnection();
+  const draftId = `DRAFT-feedback-plan-${randomUUID()}`;
+  db.prepare(`
+    INSERT INTO agent_work_drafts(
+      draft_id, work_key, draft_version, draft_type, task_id, agent,
+      status, terminal_action, submitted_at
+    ) VALUES(?, ?, 1, 'delivery_plan', ?, 'story-splitter-agent',
+      'submitted', 'complete', CURRENT_TIMESTAMP)
+  `).run(draftId, `delivery-plan:${taskId}:feedback-split:${split.feedbackGroupId}`, taskId);
+  db.prepare('INSERT INTO delivery_plan_drafts(draft_id) VALUES(?)').run(draftId);
+  await applyFeedbackSplitResult({
+    taskId,
+    batchId: split.feedbackBatchId!,
+    groupId: split.feedbackGroupId!,
+    sourceDeliveryPlanDraftId: draftId,
+    deliveryUnits: [{
+      key: 'feedback-empty-state',
+      title: '补充空状态提示',
+      actor: '页面用户',
+      trigger: '页面用户进入没有数据的页面',
+      observableOutcome: '页面展示清晰且可识别的空状态提示',
+      acceptance: '用户可以从真实页面观察到空状态提示',
+      sourceRefs: [{
+        key: 'change:feedback:empty-state',
+        kind: 'change',
+        content: '补充空状态提示',
+        sourceRef: `FEEDBACK_GROUP:${split.feedbackGroupId}`,
+      }, {
+        key: 'acceptance:feedback:empty-state:1',
+        kind: 'acceptance',
+        content: '空数据时页面展示清晰且可识别的提示',
+        sourceRef: `FEEDBACK_GROUP:${split.feedbackGroupId}`,
+      }],
+      dependsOn: [],
+    }],
+  });
+}
+
 test('feedback triage progressively covers the frozen batch and appends forward work', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
@@ -151,10 +197,15 @@ test('feedback triage progressively covers the frozen batch and appends forward 
     executionId: started.executionId,
   });
   await completeExecution(started.executionId);
-  const detail = await getTask(taskId);
+  let detail = await getTask(taskId);
   assert.equal(detail?.feedbackGroups[0]?.work_type, 'behavior_change');
+  assert.equal(detail?.feedbackGroups[0]?.status, 'waiting_for_plan');
+  assert.equal(detail?.stories.length, 1);
+  await planBehaviorChange(taskId);
+  detail = await getTask(taskId);
   assert.equal(detail?.stories.length, 2);
   assert.equal(detail?.stories[1]?.origin_type, 'feedback_behavior');
+  assert.equal(detail?.stories[1]?.unit_key, 'feedback-empty-state');
 });
 
 test('feedback clarification preserves the original decision key and partial draft across resume', async () => {
@@ -256,6 +307,7 @@ test('feedback verify progressively records independent evidence and resolves on
     executionId: triage.executionId,
   });
   await completeExecution(triage.executionId);
+  await planBehaviorChange(taskId);
 
   const db = await databaseConnection();
   db.prepare(`

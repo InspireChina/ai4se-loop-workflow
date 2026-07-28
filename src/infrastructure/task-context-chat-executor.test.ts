@@ -21,7 +21,7 @@ test('builds a task-bound forward-feedback contract without direct code mutation
   assert.match(prompt, /与详情文档评论相同的 Feedback 闭环/);
   assert.match(prompt, /向前追加交付单元/);
   assert.match(prompt, /可以调用任意多次 context-chat-change，没有数量上限/);
-  assert.match(prompt, /一个变更请求.*可以继续拆成多个交付单元/);
+  assert.match(prompt, /一个变更请求.*规划成一个或多个完整交付单元/);
   assert.doesNotMatch(prompt, /轻量代码修改权限|创建一个 Git commit/);
   assert.match(prompt, /用户问题：\nMake the wording clearer/);
 });

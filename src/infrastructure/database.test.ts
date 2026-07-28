@@ -222,6 +222,156 @@ test('migrates legacy waiting and blocked task state into isolated lanes without
   db.close();
 });
 
+test('repairs incomplete feedback units by returning them to delivery planning', () => {
+  const db = new Database(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec(`
+    CREATE TABLE tasks (
+      task_id TEXT PRIMARY KEY,
+      agile_status TEXT NOT NULL,
+      current_subagent TEXT,
+      analysis_index INTEGER NOT NULL,
+      total_stories INTEGER NOT NULL,
+      run_state TEXT NOT NULL,
+      blocked_reason TEXT,
+      resume_status TEXT,
+      resume_pending INTEGER NOT NULL,
+      next_step TEXT,
+      last_actor TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE delivery_plan_drafts(draft_id TEXT PRIMARY KEY);
+    CREATE TABLE feedback_batches (
+      batch_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(task_id)
+    );
+    CREATE TABLE feedback_groups (
+      group_id TEXT PRIMARY KEY,
+      batch_id TEXT NOT NULL REFERENCES feedback_batches(batch_id),
+      work_type TEXT NOT NULL,
+      status TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE stories (
+      task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+      story_index INTEGER NOT NULL,
+      title TEXT NOT NULL,
+      directory TEXT NOT NULL,
+      origin_type TEXT NOT NULL,
+      origin_feedback_batch_id TEXT,
+      corrects_story_indexes_json TEXT,
+      unit_key TEXT,
+      actor TEXT,
+      trigger_condition TEXT,
+      observable_outcome TEXT,
+      acceptance TEXT,
+      source_delivery_plan_draft_id TEXT REFERENCES delivery_plan_drafts(draft_id),
+      PRIMARY KEY(task_id, story_index)
+    );
+    CREATE TABLE feedback_group_delivery_units (
+      group_id TEXT NOT NULL REFERENCES feedback_groups(group_id) ON DELETE CASCADE,
+      task_id TEXT NOT NULL,
+      story_index INTEGER NOT NULL,
+      PRIMARY KEY(group_id, task_id, story_index),
+      FOREIGN KEY(task_id, story_index)
+        REFERENCES stories(task_id, story_index) ON DELETE CASCADE
+    );
+    CREATE TABLE task_lanes (
+      task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+      lane TEXT NOT NULL,
+      status TEXT NOT NULL,
+      current_agent TEXT,
+      current_story_index INTEGER,
+      blocked_reason TEXT,
+      resume_pending INTEGER NOT NULL,
+      ready_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(task_id, lane)
+    );
+    CREATE TABLE task_events (
+      event_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(task_id),
+      actor TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      summary TEXT NOT NULL
+    );
+    INSERT INTO tasks(
+      task_id, agile_status, current_subagent, analysis_index, total_stories,
+      run_state, blocked_reason, resume_pending, next_step, last_actor
+    ) VALUES(
+      'REQ-feedback-repair', 'in feedback', 'analyst-agent', 1, 2,
+      'runnable', '交付单元契约不完整', 0, '分析交付单元 2', 'system'
+    );
+    INSERT INTO feedback_batches(batch_id, task_id)
+    VALUES('BATCH-feedback-repair', 'REQ-feedback-repair');
+    INSERT INTO feedback_groups(group_id, batch_id, work_type, status)
+    VALUES('GROUP-feedback-repair', 'BATCH-feedback-repair', 'behavior_change', 'executing');
+    INSERT INTO stories(
+      task_id, story_index, title, directory, origin_type,
+      unit_key, actor, trigger_condition, observable_outcome, acceptance
+    ) VALUES(
+      'REQ-feedback-repair', 1, '既有完整单元', 'story-001', 'original',
+      'existing-unit', '用户', '执行既有操作', '获得既有结果', '既有结果可验收'
+    );
+    INSERT INTO stories(
+      task_id, story_index, title, directory, origin_type, origin_feedback_batch_id
+    ) VALUES(
+      'REQ-feedback-repair', 2, '旧版残缺反馈单元', 'story-002',
+      'feedback_behavior', 'BATCH-feedback-repair'
+    );
+    INSERT INTO feedback_group_delivery_units(group_id, task_id, story_index)
+    VALUES('GROUP-feedback-repair', 'REQ-feedback-repair', 2);
+    INSERT INTO task_lanes(
+      task_id, lane, status, current_agent, current_story_index,
+      blocked_reason, resume_pending
+    ) VALUES(
+      'REQ-feedback-repair', 'analysis', 'system_blocked', 'analyst-agent', 2,
+      '交付单元契约不完整', 0
+    );
+  `);
+
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/059_repair_incomplete_feedback_units.sql'), 'utf8'));
+
+  assert.equal(
+    (db.prepare("SELECT COUNT(*) AS count FROM stories WHERE task_id = 'REQ-feedback-repair'").get() as { count: number }).count,
+    1,
+  );
+  assert.deepEqual(
+    db.prepare(`
+      SELECT total_stories, agile_status, current_subagent, run_state, blocked_reason
+      FROM tasks WHERE task_id = 'REQ-feedback-repair'
+    `).get(),
+    {
+      total_stories: 1,
+      agile_status: 'in feedback',
+      current_subagent: 'story-splitter-agent',
+      run_state: 'runnable',
+      blocked_reason: null,
+    },
+  );
+  assert.equal(
+    (db.prepare("SELECT status FROM feedback_groups WHERE group_id = 'GROUP-feedback-repair'").get() as { status: string }).status,
+    'waiting_for_plan',
+  );
+  assert.deepEqual(
+    db.prepare(`
+      SELECT status, current_agent, current_story_index, blocked_reason
+      FROM task_lanes WHERE task_id = 'REQ-feedback-repair' AND lane = 'analysis'
+    `).get(),
+    {
+      status: 'completed',
+      current_agent: null,
+      current_story_index: null,
+      blocked_reason: null,
+    },
+  );
+  assert.equal(
+    (db.prepare("SELECT event_type FROM task_events WHERE task_id = 'REQ-feedback-repair'").get() as { event_type: string }).event_type,
+    'IncompleteFeedbackUnitRepaired',
+  );
+  db.close();
+});
+
 test('removes legacy task-level resume ownership from lane agents', () => {
   const db = new Database(':memory:');
   db.exec(`
