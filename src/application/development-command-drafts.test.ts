@@ -167,7 +167,7 @@ async function recordCompletedImplementation(executionId: string, token: string)
   ]);
 }
 
-test('development help exposes judgments while Application owns machine facts', () => {
+test('development help exposes judgments without making Git a completion gate', () => {
   const terminalActions = [
     'implementation complete',
     'implementation request-input',
@@ -175,7 +175,7 @@ test('development help exposes judgments while Application owns machine facts', 
   ];
   const help = developmentHelp(terminalActions).join('\n');
   assert.match(help, /help evidence/);
-  assert.match(help, /Application 自动记录 Git、Commit、文件及 Runner 命令事实/);
+  assert.match(help, /Application 记录 Runner 命令事实/);
   assert.match(help, /status → 调查\/必要实现\/真实检查 → status 查看 receipt → criterion\/check → validate → complete/);
   assert.match(help, /修正、风险、恢复和运行信息属于按需路径/);
   assert.doesNotMatch(help, /handoff|开发交接|开发与验证交接/);
@@ -188,7 +188,8 @@ test('development help exposes judgments while Application owns machine facts', 
 
   const evidence = developmentHelp(terminalActions, 'evidence').join('\n');
   assert.match(evidence, /选择明确成功的 receipt/);
-  assert.match(evidence, /原始命令哈希、当前 HEAD 和工作区指纹/);
+  assert.match(evidence, /绑定该 receipt 的原始命令哈希/);
+  assert.match(evidence, /Git 历史、分支、HEAD 和未提交文件不使检查失效/);
   assert.match(evidence, /不要手抄 command、passed 或 exit code/);
   assert.match(evidence, /复用系统给出的 RECOVERY id/);
 
@@ -197,8 +198,8 @@ test('development help exposes judgments while Application owns machine facts', 
   assert.match(input, /不需要预先维护 failure 字段/);
 
   const finish = developmentHelp(terminalActions, 'finish').join('\n');
-  assert.match(finish, /HEAD 未变化时自动判为现有实现满足/);
-  assert.match(finish, /HEAD 已变化时自动识别 Commit 并生成真实文件清单/);
+  assert.match(finish, /基于当前仓库重新检查功能完整性/);
+  assert.match(finish, /Git 历史、分支、HEAD、Commit 和未提交文件.*不形成完成门禁/);
 
   assert.throws(
     () => developmentHelp(terminalActions, 'unknown'),
@@ -229,7 +230,7 @@ test('development agent proves an existing implementation without declaring a mo
   );
   const initial = await command(started.executionId, started.token!, ['implementation', 'status']);
   assert.match(initial, /开发实现草稿 v1/);
-  assert.match(initial, /仓库事实：HEAD 与开发周期基线相同/);
+  assert.match(initial, /仓库观察（仅供调查，不参与完成校验）/);
   assert.match(initial, /unit-acceptance.*尚未证明/);
   assert.match(initial, /AC-status.*尚未证明/);
   await assert.rejects(
@@ -273,14 +274,14 @@ test('development agent proves an existing implementation without declaring a mo
   await command(started.executionId, started.token!, ['implementation', 'complete']);
   const result = await readAgentCommandSubmission(started.executionId);
   assert.equal(result?.outcome, 'completed');
-  assert.deepEqual(result?.changedFiles, []);
+  assert.equal(result?.changedFiles, undefined);
   assert.equal(result?.tests?.[0]?.passed, true);
   assert.equal(result?.tests?.[0]?.command, 'npm test -- result-status');
   assert.match(
     result?.summary || '',
-    /^开发实现完成：2\/2 项验收语义已有实现证据，1 项开发检查通过；当前 HEAD .+ 与开发周期基线一致，无需代码变更。$/,
+    /^开发实现完成：2\/2 项验收语义已有实现证据，1 项开发检查通过。$/,
   );
-  assert.match(result?.artifact?.content || '', /走查确认现有实现已满足交付承诺/);
+  assert.doesNotMatch(result?.artifact?.content || '', /仓库事实|Git 基线|Commit/);
   assert.doesNotMatch(result?.artifact?.content || '', /开发与验证交接|开发交接/);
 
   await applyAgentResult(`RUN-development-existing-${taskId}`, delegation, result!, {
@@ -346,7 +347,7 @@ test('development runtime input keeps a stable request key and answer across res
   await recordCompletedImplementation(resumed.executionId, resumed.token!);
   await command(resumed.executionId, resumed.token!, ['implementation', 'complete']);
   const completed = await readAgentCommandSubmission(resumed.executionId);
-  assert.deepEqual(completed?.changedFiles, ['fixture.txt']);
+  assert.equal(completed?.changedFiles, undefined);
   await applyAgentResult(`RUN-development-resume-${taskId}`, resumedDelegation, completed!, {
     executionId: resumed.executionId,
   });
@@ -510,7 +511,7 @@ test('development recovery cycle requires every active recovery and a check from
   await completeExecution(resumed.executionId);
 });
 
-test('development completion accepts pre-existing dirty files when they remain unchanged', async () => {
+test('development completion ignores unrelated uncommitted files even when they change', async () => {
   const { paths } = await import('../infrastructure/database');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { completeExecution } = await import('./executions');
@@ -520,39 +521,40 @@ test('development completion accepts pre-existing dirty files when they remain u
   try {
     const started = await begin(delegation, `${taskId}-preserved-dirty`);
     const status = await command(started.executionId, started.token!, ['implementation', 'status']);
-    assert.match(status, /启动时已有未提交项：1/);
+    assert.match(status, /当前未提交项：1/);
     await recordCompletedImplementation(started.executionId, started.token!);
+    writeFileSync(dirtyPath, 'human documentation changed while Dev was running\n', 'utf8');
     await command(started.executionId, started.token!, ['implementation', 'complete']);
     const result = await readAgentCommandSubmission(started.executionId);
-    assert.deepEqual(result?.changedFiles, []);
+    assert.equal(result?.changedFiles, undefined);
     await completeExecution(started.executionId);
   } finally {
     rmSync(dirtyPath, { force: true });
   }
 });
 
-test('development startup snapshot cannot be polluted by file edits before status', async () => {
+test('development completion does not freeze files created before the first status read', async () => {
   const { paths } = await import('../infrastructure/database');
-  const { cancelExecution } = await import('./executions');
+  const { completeExecution } = await import('./executions');
+  const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { taskId, delegation } = await developmentDelegation('未提交代码事实校验');
   const started = await begin(delegation, `${taskId}-dirty`);
   const dirtyPath = join(paths.root, 'uncommitted-change.txt');
   writeFileSync(dirtyPath, 'not committed\n', 'utf8');
   try {
     const status = await command(started.executionId, started.token!, ['implementation', 'status']);
-    assert.match(status, /启动时已有未提交项：0/);
+    assert.match(status, /当前未提交项：1/);
     await recordCompletedImplementation(started.executionId, started.token!);
-    await assert.rejects(
-      command(started.executionId, started.token!, ['implementation', 'complete']),
-      /工作区未提交状态偏离了开发周期启动快照.*uncommitted-change\.txt/,
-    );
+    await command(started.executionId, started.token!, ['implementation', 'complete']);
+    const result = await readAgentCommandSubmission(started.executionId);
+    assert.equal(result?.changedFiles, undefined);
+    await completeExecution(started.executionId);
   } finally {
     rmSync(dirtyPath, { force: true });
-    await cancelExecution(started.executionId, 'test cleanup');
   }
 });
 
-test('development completion excludes a separately committed startup worktree snapshot', async () => {
+test('development completion does not attribute other commits to the execution', async () => {
   const { paths } = await import('../infrastructure/database');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { completeExecution } = await import('./executions');
@@ -571,7 +573,8 @@ test('development completion excludes a separately committed startup worktree sn
     await recordCompletedImplementation(started.executionId, started.token!);
     await command(started.executionId, started.token!, ['implementation', 'complete']);
     const result = await readAgentCommandSubmission(started.executionId);
-    assert.deepEqual(result?.changedFiles, ['fixture.txt']);
+    assert.equal(result?.changedFiles, undefined);
+    assert.doesNotMatch(result?.artifact?.content || '', /仓库事实|推进到 Commit/);
     await completeExecution(started.executionId);
   } finally {
     git(['rm', '-f', '--ignore-unmatch', relativePreexisting], paths.root);
@@ -582,35 +585,31 @@ test('development completion excludes a separately committed startup worktree sn
   }
 });
 
-test('development completion derives Git facts and rejects checks recorded before the final state', async () => {
+test('development completion does not block when Git history changes after a successful check', async () => {
   const { paths } = await import('../infrastructure/database');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { completeExecution } = await import('./executions');
-  const { taskId, delegation } = await developmentDelegation('自动识别开发提交');
+  const { taskId, delegation } = await developmentDelegation('Git 历史不形成完成门禁');
   const started = await begin(delegation, `${taskId}-changed`);
+  const originalHead = git(['rev-parse', 'HEAD'], paths.root);
   await command(started.executionId, started.token!, ['implementation', 'status']);
   await recordCompletedImplementation(started.executionId, started.token!);
-  appendFileSync(join(paths.root, 'fixture.txt'), 'implemented\n', 'utf8');
-  git(['add', 'fixture.txt'], paths.root);
-  git(['commit', '-m', 'implement delivery unit'], paths.root);
-  await assert.rejects(
-    command(started.executionId, started.token!, ['implementation', 'complete']),
-    /关键检查早于最终仓库状态.*status-component/,
-  );
-  const finalReceipt = await recordCapturedCommand(
-    started.executionId,
-    'npm test -- result-status',
-  );
-  await command(started.executionId, started.token!, [
-    'implementation', 'check', 'record', '--key', 'status-component',
-    '--receipt', finalReceipt,
-    '--summary', '最终仓库状态的完成分支回归通过。',
-  ]);
-  await command(started.executionId, started.token!, ['implementation', 'complete']);
-
-  const result = await readAgentCommandSubmission(started.executionId);
-  assert.deepEqual(result?.changedFiles, ['fixture.txt']);
-  assert.match(result?.artifact?.content || '', /Application 确认的仓库事实/);
-  assert.match(result?.artifact?.content || '', /推进到 Commit/);
-  await completeExecution(started.executionId);
+  try {
+    const tree = git(['write-tree'], paths.root);
+    const unrelatedHead = git(
+      ['commit-tree', tree, '-m', 'unrelated history for completion gate test'],
+      paths.root,
+    );
+    git(['reset', '--hard', unrelatedHead], paths.root);
+    const status = await command(started.executionId, started.token!, ['implementation', 'status']);
+    assert.match(status, new RegExp(`当前 HEAD：${unrelatedHead.slice(0, 12)}`));
+    assert.doesNotMatch(status, /不是 execution Git 基线|完成路径仍需处理：[\\s\\S]*HEAD/);
+    await command(started.executionId, started.token!, ['implementation', 'complete']);
+    const result = await readAgentCommandSubmission(started.executionId);
+    assert.equal(result?.outcome, 'completed');
+    assert.equal(result?.changedFiles, undefined);
+    await completeExecution(started.executionId);
+  } finally {
+    git(['reset', '--hard', originalHead], paths.root);
+  }
 });

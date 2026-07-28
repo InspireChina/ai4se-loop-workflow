@@ -13,7 +13,8 @@ import {
   upsertDocument,
   type DelegationEnvelope,
 } from './tasks';
-import { applyAgentResult } from './agent-results';
+import { applyAgentResult, applyNextQueuedAgentResult } from './agent-results';
+import { beginExecutionAttempt } from './executions';
 import { applyFeedbackSplitResult } from './feedback';
 
 async function completedRequirement(label: string, options: { readyToClose?: boolean } = {}) {
@@ -268,6 +269,98 @@ test('行为修订只追加新交付单元，并经过 Analysis、Dev、Test 和
   assert.equal(detail?.documentComments[0].status, 'resolved');
   assert.equal(detail?.feedbackGroups[0].status, 'completed');
   assert.equal(detail?.task.agile_status, 'in review');
+});
+
+test('新版本会重新应用被旧版范围守卫误拒绝的反馈交付规划结果', async () => {
+  const { taskId, documentId } = await completedRequirement('旧版反馈规划结果恢复');
+  const commentId = await comment(taskId, documentId, '增加新的状态提示。');
+  const triage = await delegation(taskId, 'feedback-triage');
+  await applyAgentResult(`run-${randomUUID()}`, triage, result({
+    outcome: 'completed',
+    summary: '形成行为修订工作组。',
+    feedback: {
+      mode: 'triage',
+      groups: [{
+        groupKey: 'legacy-plan-recovery',
+        commentIds: [commentId],
+        workType: 'behavior_change',
+        title: '增加新的状态提示',
+        affectedDeliveryUnits: [1],
+        reason: '需要改变用户可观察行为。',
+        acceptance: ['页面展示新的状态提示'],
+      }],
+    },
+  }));
+
+  const split = await delegation(taskId, 'feedback-split');
+  const planResult = result({
+    outcome: 'completed',
+    summary: '完成反馈交付规划。',
+    deliveryUnits: [plannedUnit('legacy-plan-recovery', '增加新的状态提示', [
+      'change:legacy-plan-recovery',
+      'acceptance:legacy-plan-recovery:1',
+    ])],
+  });
+  const { attempt } = await beginExecutionAttempt({
+    runId: `RUN-legacy-plan-${randomUUID()}`,
+    delegation: split,
+    prompt: '模拟升级前已完成的交付规划 execution',
+  });
+  const db = await databaseConnection();
+  const draftId = `DRAFT-legacy-plan-${randomUUID()}`;
+  db.prepare(`
+    INSERT INTO agent_work_drafts(
+      draft_id, work_key, draft_version, draft_type, task_id, agent,
+      status, terminal_execution_id, terminal_action, submitted_at
+    ) VALUES(?, ?, 1, 'delivery_plan', ?, 'story-splitter-agent',
+      'submitted', ?, 'complete', CURRENT_TIMESTAMP)
+  `).run(
+    draftId,
+    `delivery-plan:${taskId}:feedback-split:${split.feedbackGroupId}`,
+    taskId,
+    attempt.execution_id,
+  );
+  db.prepare('INSERT INTO delivery_plan_drafts(draft_id) VALUES(?)').run(draftId);
+  db.prepare(`
+    INSERT INTO agent_results(
+      result_id, run_id, task_id, story_index, agent, pipeline, outcome,
+      result_json, application_status, application_error, execution_id
+    ) VALUES(?, ?, ?, NULL, 'story-splitter-agent', 'feedback-split',
+      'completed', ?, 'failed', '反馈新增范围当前不能追加交付单元', ?)
+  `).run(
+    randomUUID(),
+    `RUN-legacy-plan-${randomUUID()}`,
+    taskId,
+    JSON.stringify(planResult),
+    attempt.execution_id,
+  );
+  db.prepare(`
+    UPDATE execution_attempts
+    SET status = 'system_blocked', result_json = ?,
+        last_error = '应用 Agent 结果失败：反馈新增范围当前不能追加交付单元',
+        finished_at = CURRENT_TIMESTAMP
+    WHERE execution_id = ?
+  `).run(JSON.stringify(planResult), attempt.execution_id);
+  db.prepare(`
+    UPDATE tasks
+    SET agile_status = 'blocked', current_subagent = 'story-splitter-agent',
+        run_state = 'system_blocked',
+        blocked_reason = '应用 Agent 结果失败：反馈新增范围当前不能追加交付单元'
+    WHERE task_id = ?
+  `).run(taskId);
+
+  const recovered = await applyNextQueuedAgentResult();
+  assert.equal(recovered.status, 'applied');
+  const detail = await getTask(taskId);
+  assert.equal(detail?.stories.length, 2);
+  assert.equal(detail?.stories[1].unit_key, 'legacy-plan-recovery');
+  assert.equal(detail?.task.agile_status, 'in feedback');
+  assert.equal(detail?.task.run_state, 'runnable');
+  assert.equal(detail?.task.blocked_reason, null);
+  assert.equal(
+    (db.prepare('SELECT status FROM execution_attempts WHERE execution_id = ?').get(attempt.execution_id) as { status: string }).status,
+    'applied',
+  );
 });
 
 test('Bug 反馈先复现，未复现时可人工对齐，复现后才追加修复单元', async () => {

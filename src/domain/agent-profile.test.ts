@@ -78,7 +78,8 @@ test('ships rigorous V1 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /开发者自验证.*不能代替验证 Agent.*最终验收/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /报告分析契约冲突.*由 Application 决定后续路径/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /不得静默改变承诺、直接向用户提问或自行选择 goto、回退阶段/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /有代码变化时形成边界清晰、可审查、可追溯的独立提交/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /有代码变化时按目标仓库规范形成边界清晰、可审查、可追溯的独立提交/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /不因分支、HEAD、其他 Commit 或无关未提交变化拒绝工作/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /不向验证 Agent 传递测试目标、测试步骤或通过结论/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /implementation (?:status|complete)/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /每次启动先|每完成一个文件|每个真实命令执行后|当前 HEAD|原 request key/);

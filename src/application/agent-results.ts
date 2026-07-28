@@ -703,8 +703,74 @@ export type QueuedApplicationResult =
   | { status: 'waiting'; resultId: string; taskId: string; storyIndex: number | null; agent: string; ownerTaskId: string }
   | { status: 'failed'; resultId: string; taskId: string; storyIndex: number | null; agent: string; reason: string };
 
+const LEGACY_FEEDBACK_PLAN_REJECTION = '反馈新增范围当前不能追加交付单元';
+
+function requeueLegacyFeedbackPlanResultsInDb(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+) {
+  const rows = db.prepare(`
+    SELECT result.result_id, result.execution_id, result.task_id
+    FROM agent_results result
+    JOIN tasks task ON task.task_id = result.task_id
+    WHERE result.agent = 'story-splitter-agent'
+      AND result.pipeline = 'feedback-split'
+      AND result.application_status = 'failed'
+      AND result.application_error = ?
+      AND task.agile_status NOT IN ('done', 'cancelled')
+  `).all(LEGACY_FEEDBACK_PLAN_REJECTION) as {
+    result_id: string;
+    execution_id: string | null;
+    task_id: string;
+  }[];
+  if (!rows.length) return 0;
+
+  db.transaction(() => {
+    const updateResult = db.prepare(`
+      UPDATE agent_results
+      SET application_status = 'pending', application_error = NULL,
+          applied_at = NULL, effect_outcome = NULL
+      WHERE result_id = ?
+        AND application_status = 'failed'
+        AND application_error = ?
+    `);
+    const updateExecution = db.prepare(`
+      UPDATE execution_attempts
+      SET status = 'output_received', last_error = NULL, finished_at = NULL,
+          heartbeat_at = CURRENT_TIMESTAMP
+      WHERE execution_id = ?
+    `);
+    const updateTask = db.prepare(`
+      UPDATE tasks
+      SET agile_status = 'in feedback', current_subagent = 'story-splitter-agent',
+          run_state = 'runnable', blocked_reason = NULL, resume_status = NULL,
+          resume_pending = 0,
+          next_step = '检测到旧版反馈交付规划误拒绝，正在重新应用已提交结果',
+          last_actor = 'system', updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ? AND agile_status NOT IN ('done', 'cancelled')
+    `);
+    const addRecoveryEvent = db.prepare(`
+      INSERT INTO task_events(event_id, task_id, actor, event_type, summary)
+      VALUES(?, ?, 'system', 'LegacyFeedbackPlanResultRequeued',
+        '恢复旧版本误拒绝的反馈交付规划结果，等待新版本重新应用')
+    `);
+    const recoveredTasks = new Set<string>();
+    for (const row of rows) {
+      const updated = updateResult.run(row.result_id, LEGACY_FEEDBACK_PLAN_REJECTION).changes;
+      if (!updated) continue;
+      if (row.execution_id) updateExecution.run(row.execution_id);
+      updateTask.run(row.task_id);
+      if (!recoveredTasks.has(row.task_id)) {
+        addRecoveryEvent.run(randomUUID(), row.task_id);
+        recoveredTasks.add(row.task_id);
+      }
+    }
+  })();
+  return rows.length;
+}
+
 export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationResult> {
   const db = await databaseConnection();
+  requeueLegacyFeedbackPlanResultsInDb(db);
   const row = db.prepare(`
     SELECT ar.result_id, ar.run_id, ar.task_id, ar.story_index, ar.agent, ar.pipeline, ar.outcome, ar.result_json, ar.execution_id
     FROM agent_results ar

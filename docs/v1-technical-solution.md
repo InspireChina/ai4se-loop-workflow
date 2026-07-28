@@ -152,7 +152,7 @@ Review Agent 通过渐进式最终事实对账草稿提交 `verdict=report_ready
 
 交付分析草稿按 `需求 + 交付单元` 隔离，普通分析和回答后的 `resume` 共用稳定工作键。新草稿冻结完整交付单元契约、上游来源与依赖；Do It Twice 只作为 Agent 的思考方法，Application 不要求保存完整推演。Agent 渐进保存分析摘要、实际影响、关键决策和交付契约。用户问题的 `decision_key` 是跨轮次身份：恢复版本复制上一版草稿和已回答事实，Agent 必须在原 key 上以 `user` 权限关闭并更新关联影响，不能通过重命名规避回答。`delivery-analysis request-clarification` 只为超出权限且会产生实质不同后果的最少未决决策生成问题；`delivery-analysis complete` 只校验所有影响已有处理方式、关键决策有权限与证据、回答被正确消费且交付契约完整。已解决技术决策不强制候选项，不存在关键决策时允许直接完成。
 
-开发实现草稿按 `需求 + 交付单元` 隔离，普通开发和运行信息补充后的 `resume` 共用稳定工作键与开发周期 Git 基线。Application 在签发 Dev execution 命令凭证、CLI 尚未获得控制权时固化首次 HEAD 与工作区快照，不能由 Agent 通过延迟 `status` 改写基线。Application 始终注入冻结交付单元验收 `unit-acceptance`，并在其后追加交付分析给出的验证关注点；Agent 必须逐条说明实现证据。CLI 的 provider-neutral tool event 按 execution 增量写入 `execution_receipts`；Agent 完成真实检查后重新读取 `status`，显式选择明确成功的 Shell/Bash receipt 并说明它为何支持交付结论，不再手填 command、passed 或 exit code。所选检查绑定 execution、receipt、原始命令哈希、HEAD 与工作区指纹；仓库状态变化或同一命令出现更新结果后必须重跑并重录。运行信息使用稳定 request key，回答后恢复到原草稿。`implementation complete` 时，Application 自动比较开发周期基线与当前 HEAD、识别 Commit、生成文件集合并核对工作区快照：启动前已有的无关未提交改动可保持原样，也可先形成 tree 与启动快照完全一致的独立 Commit；本轮改变或混入这些内容会被拒绝。有效基线后的 HEAD 未变化即接受有充分证据的零改动走查，HEAD 变化则投影真实提交事实，不再要求 Agent 声明 `existing` / `changed` 或重复记录 Git 数据。
+开发实现草稿按 `需求 + 交付单元` 隔离，普通开发和运行信息补充后的 `resume` 共用稳定工作键。Application 始终注入冻结交付单元验收 `unit-acceptance`，并在其后追加交付分析给出的验证关注点；Agent 每次执行都以当前仓库为准重新检查功能完整性，并逐条说明实现证据。CLI 的 provider-neutral tool event 按 execution 增量写入 `execution_receipts`；Agent 完成真实检查后重新读取 `status`，显式选择明确成功的 Shell/Bash receipt 并说明它为何支持交付结论，不再手填 command、passed 或 exit code。所选检查只绑定 execution、receipt 与原始命令哈希；同一命令出现更新结果后必须选择最新结果。运行信息使用稳定 request key，回答后恢复到原草稿。`implementation complete` 不比较 execution Commit 与当前 HEAD，不推断哪些文件属于本轮，也不因换分支、改写历史、其他 Commit 或未提交文件而拒绝完成；Git 状态最多作为 Agent 调查当前仓库的观察信息。完成门槛只由冻结契约的实现证据、Agent 选择的真实成功检查、运行信息与恢复事项构成。现有实现已经满足契约时，允许以充分走查和验证证据零改动完成。
 
 验证草稿按 `需求 + 交付单元` 隔离，普通验证和运行信息补充后的 `resume` 共用稳定工作键。第一阶段，Agent 用稳定 plan key 声明场景渠道、测试准备、从真实入口开始的测试步骤、预期观察以及覆盖的交付验收、验证关注点或恢复事项；每项 `unit-acceptance` 至少由一个 `frontend` 场景覆盖，`api` 场景可以补充业务边界、错误反馈、数据语义或形成独立反例，但必须关联冻结契约中的业务期望。计划冻结后不得无痕改写；第二阶段逐项追加通过、失败或阻塞结果和 Agent 自己取得的观察。Test 的 Context Snapshot 排除 Dev 文档、Dev execution 摘要、自检、变更说明、Commit message 与恢复声明；它只继承自己的草稿和原始失败事实。`verification complete` 在全部活动场景都有结果后，根据失败分类和运行状态确定性生成通过、实现回流、规格回流或阻塞结论；前端地址、浏览器、账号、设备或测试数据等必要资源不可获得时允许环境阻塞。`verification request-input` 只产生运行信息请求，不推进交付单元。Application 信任 Test Agent 的专业观察和证据分类，不额外要求执行回执或仓库沙箱。
 
@@ -220,9 +220,9 @@ Agent
 
 开发实现 Agent 走查、修改和验证代码，并自行决定是否按仓库规范提交本轮相关改动。Application 与 Runner 共同负责：
 
-1. 在 Dev execution 签发命令凭证、CLI 尚未获得控制权时持久化 Git HEAD 与工作区快照；恢复执行沿用同一开发周期基线，不清理或 checkpoint 当前工作区。
+1. Dev execution 直接使用当前仓库；恢复执行也重新观察当前状态，不清理或 checkpoint 工作区，不冻结 Git Commit、分支、HEAD 或未提交文件。
 2. 执行当前交付单元。
-3. 若 Agent 创建了 commit，记录执行后的 HEAD；没有 commit 也允许继续。
+3. 若 Agent 创建了 commit，按目标仓库规范保留 Git 历史；Application 不据此判断文件归属或交付成败。
 4. Dev 完成后直接推进到独立 Test Agent；这是为了先形成稳定的待测仓库状态，不是把 Dev Result 传给 Test。交付分析只给出必须观察的业务变动范围、保护约束和验证关注点，不预先规定 Test Agent 的执行步骤。
 5. Test Agent 根据冻结交付契约、仓库与环境事实选择真实验证方法，不读取 Dev 自述、自检、开发记录或 Commit message，保存自己的证据并把失败明确分类为实现、规格、环境或无法判断；Application 只执行明确的回退或阻塞路由。
 
@@ -266,6 +266,6 @@ Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。A
 - 软件修复只在独立 worktree 发生，保护边界、变更预算、test/build 或 clean-baseline 任一失败都不得自动落地主仓库。
 - Review 生成报告后释放代码槽并进入 `ready_to_close`；阅读动作不产生 approve/reject。
 - 当前报告有未验证反馈或活动反馈批次时，关闭动作被服务端拒绝。系统对同一需求一次只执行一个冻结反馈批次；直接回复类反馈就地闭环，工程类反馈追加交付单元，报告类反馈生成新版本。反馈在新增工作通过 Test 和 Feedback 独立验证前保持开放，验证未通过会创建新批次而不会回退旧单元。
-- 开发实现有代码变化时由 Dev Agent 按仓库规范创建独立 Git commit；Application 自动核对基线、HEAD、文件集合和工作区快照，代码槽繁忙会自动排队。
+- 开发实现有代码变化时由 Dev Agent 按仓库规范创建独立 Git commit；Application 不使用 Git 历史建立完成门禁，也不推断本轮文件归属，代码槽繁忙会自动排队。
 - 运行面板能观察 Agent、工具调用、辅助 subagent、警告和错误。
 - 任一 UI 命令都不能绕过状态、进度、确认和资源约束。

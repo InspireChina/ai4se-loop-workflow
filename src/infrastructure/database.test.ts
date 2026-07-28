@@ -372,6 +372,115 @@ test('repairs incomplete feedback units by returning them to delivery planning',
   db.close();
 });
 
+test('requeues a feedback delivery plan rejected by the legacy scope-only guard', () => {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE tasks (
+      task_id TEXT PRIMARY KEY,
+      agile_status TEXT NOT NULL,
+      current_subagent TEXT,
+      run_state TEXT NOT NULL,
+      blocked_reason TEXT,
+      resume_status TEXT,
+      resume_pending INTEGER NOT NULL,
+      next_step TEXT,
+      last_actor TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE agent_results (
+      result_id TEXT PRIMARY KEY,
+      execution_id TEXT,
+      task_id TEXT NOT NULL,
+      agent TEXT NOT NULL,
+      pipeline TEXT NOT NULL,
+      application_status TEXT NOT NULL,
+      application_error TEXT,
+      applied_at TEXT,
+      effect_outcome TEXT
+    );
+    CREATE TABLE execution_attempts (
+      execution_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      last_error TEXT,
+      finished_at TEXT,
+      heartbeat_at TEXT
+    );
+    CREATE TABLE task_events (
+      event_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      summary TEXT NOT NULL
+    );
+    INSERT INTO tasks(
+      task_id, agile_status, current_subagent, run_state, blocked_reason,
+      resume_pending, next_step, last_actor
+    ) VALUES(
+      'REQ-legacy-plan', 'blocked', 'story-splitter-agent', 'system_blocked',
+      '应用 Agent 结果失败：反馈新增范围当前不能追加交付单元',
+      0, '系统阻塞', 'system'
+    );
+    INSERT INTO agent_results(
+      result_id, execution_id, task_id, agent, pipeline,
+      application_status, application_error
+    ) VALUES(
+      'RESULT-legacy-plan', 'EXEC-legacy-plan', 'REQ-legacy-plan',
+      'story-splitter-agent', 'feedback-split', 'failed',
+      '反馈新增范围当前不能追加交付单元'
+    );
+    INSERT INTO execution_attempts(
+      execution_id, task_id, status, last_error, finished_at
+    ) VALUES(
+      'EXEC-legacy-plan', 'REQ-legacy-plan', 'system_blocked',
+      '应用 Agent 结果失败：反馈新增范围当前不能追加交付单元',
+      CURRENT_TIMESTAMP
+    );
+  `);
+
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/060_requeue_legacy_feedback_plan_results.sql'), 'utf8'));
+
+  assert.deepEqual(
+    db.prepare(`
+      SELECT application_status, application_error, effect_outcome
+      FROM agent_results WHERE result_id = 'RESULT-legacy-plan'
+    `).get(),
+    {
+      application_status: 'pending',
+      application_error: null,
+      effect_outcome: null,
+    },
+  );
+  assert.deepEqual(
+    db.prepare(`
+      SELECT status, last_error, finished_at
+      FROM execution_attempts WHERE execution_id = 'EXEC-legacy-plan'
+    `).get(),
+    {
+      status: 'output_received',
+      last_error: null,
+      finished_at: null,
+    },
+  );
+  assert.deepEqual(
+    db.prepare(`
+      SELECT agile_status, current_subagent, run_state, blocked_reason
+      FROM tasks WHERE task_id = 'REQ-legacy-plan'
+    `).get(),
+    {
+      agile_status: 'in feedback',
+      current_subagent: 'story-splitter-agent',
+      run_state: 'runnable',
+      blocked_reason: null,
+    },
+  );
+  assert.equal(
+    (db.prepare("SELECT event_type FROM task_events WHERE task_id = 'REQ-legacy-plan'").get() as { event_type: string }).event_type,
+    'LegacyFeedbackPlanResultRequeued',
+  );
+  db.close();
+});
+
 test('removes legacy task-level resume ownership from lane agents', () => {
   const db = new Database(':memory:');
   db.exec(`
@@ -401,8 +510,36 @@ test('migrates role drafts and replaces the obsolete verification data model', (
   const db = new Database(':memory:');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec(`
-    CREATE TABLE tasks (task_id TEXT PRIMARY KEY);
+    CREATE TABLE tasks (
+      task_id TEXT PRIMARY KEY,
+      run_state TEXT NOT NULL DEFAULT 'runnable',
+      current_subagent TEXT,
+      blocked_reason TEXT,
+      resume_pending INTEGER NOT NULL DEFAULT 0,
+      next_step TEXT,
+      last_actor TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
     CREATE TABLE documents (document_id TEXT PRIMARY KEY);
+    CREATE TABLE task_lanes (
+      task_id TEXT NOT NULL REFERENCES tasks(task_id) ON DELETE CASCADE,
+      lane TEXT NOT NULL,
+      status TEXT NOT NULL,
+      current_agent TEXT,
+      current_story_index INTEGER,
+      blocked_reason TEXT,
+      resume_pending INTEGER NOT NULL DEFAULT 0,
+      ready_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(task_id, lane)
+    );
+    CREATE TABLE task_events (
+      event_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(task_id),
+      actor TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      summary TEXT NOT NULL
+    );
     CREATE TABLE execution_attempts (
       execution_id TEXT PRIMARY KEY,
       task_id TEXT NOT NULL REFERENCES tasks(task_id),
@@ -565,6 +702,42 @@ test('migrates role drafts and replaces the obsolete verification data model', (
   `).run();
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/046_internal_agent_drafts.sql'), 'utf8'));
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/051_simplify_development_drafts.sql'), 'utf8'));
+  db.prepare(`
+    INSERT INTO development_runtime_inputs(
+      draft_id, request_key, title, question, why, recommendation, ordinal
+    ) VALUES(
+      'DRAFT-development', 'env=workspace-fingerprint-drift',
+      '工作区基线漂移', '请处理 initial_workspace_fingerprint 漂移',
+      '旧版门禁阻止完成', '确认当前工作区事实', 2
+    )
+  `).run();
+  db.prepare(`
+    INSERT INTO runtime_input_requests(
+      request_id, task_id, story_index, source_agent, title, question,
+      answer, status, request_key
+    ) VALUES(
+      'RI-workspace-drift', 'REQ-existing', 1, 'dev-agent',
+      '工作区基线漂移', '请处理工作区基线漂移', '已经处理', 'answered',
+      'env=workspace-fingerprint-drift'
+    )
+  `).run();
+  db.prepare(`
+    INSERT INTO task_lanes(
+      task_id, lane, status, current_agent, current_story_index,
+      blocked_reason, resume_pending
+    ) VALUES(
+      'REQ-existing', 'delivery', 'system_blocked', 'dev-agent', 1,
+      '旧版工作区基线阻塞', 0
+    )
+  `).run();
+  db.prepare(`
+    UPDATE tasks
+    SET run_state = 'system_blocked', current_subagent = 'dev-agent',
+        blocked_reason = '旧版工作区基线阻塞'
+    WHERE task_id = 'REQ-existing'
+  `).run();
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/061_remove_development_workspace_baseline.sql'), 'utf8'));
+  db.exec(readFileSync(resolve(process.cwd(), 'migrations/062_remove_development_git_gate.sql'), 'utf8'));
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/052_two_phase_verification.sql'), 'utf8'));
   db.exec(readFileSync(resolve(process.cwd(), 'migrations/053_review_reconciliation.sql'), 'utf8'));
 
@@ -633,12 +806,22 @@ test('migrates role drafts and replaces the obsolete verification data model', (
     runtimeInputs: db.prepare(`
       SELECT request_key, title FROM development_runtime_inputs
       WHERE draft_id = 'DRAFT-development'
+      ORDER BY ordinal
     `).all(),
     recovery: db.prepare(`
       SELECT recovery_id, summary FROM development_recovery_resolutions
       WHERE draft_id = 'DRAFT-development'
     `).all(),
   };
+  const recoveredDevelopmentLane = db.prepare(`
+    SELECT status, current_agent, current_story_index, blocked_reason, resume_pending
+    FROM task_lanes
+    WHERE task_id = 'REQ-existing' AND lane = 'delivery'
+  `).get();
+  const recoveredDevelopmentTask = db.prepare(`
+    SELECT run_state, current_subagent, blocked_reason
+    FROM tasks WHERE task_id = 'REQ-existing'
+  `).get();
   const removedVerificationDraft = db.prepare(`
     SELECT phase, spec_revision
     FROM verification_drafts
@@ -729,10 +912,6 @@ test('migrates role drafts and replaces the obsolete verification data model', (
   assert.deepEqual(removedDevelopmentTables, []);
   assert.deepEqual(developmentDraftColumns.map((column) => column.name), [
     'draft_id',
-    'repository_base_commit',
-    'initial_workspace_fingerprint',
-    'initial_workspace_tree',
-    'initial_workspace_changes_json',
   ]);
   assert.deepEqual(
     developmentCriterionColumns.map((column) => column.name),
@@ -748,15 +927,28 @@ test('migrates role drafts and replaces the obsolete verification data model', (
       'summary',
       'source_execution_id',
       'source_receipt_key',
-      'head_commit',
-      'workspace_fingerprint',
       'ordinal',
     ],
   );
   assert.deepEqual(retainedDevelopmentDetails, {
     risks: [{ risk_key: 'known-risk', content: '保留残余风险' }],
-    runtimeInputs: [{ request_key: 'preview-url', title: '预览地址' }],
+    runtimeInputs: [
+      { request_key: 'preview-url', title: '预览地址' },
+      { request_key: 'env=workspace-fingerprint-drift', title: '工作区基线漂移' },
+    ],
     recovery: [{ recovery_id: 'REC-1', summary: '已处理恢复事项' }],
+  });
+  assert.deepEqual(recoveredDevelopmentLane, {
+    status: 'runnable',
+    current_agent: 'dev-agent',
+    current_story_index: 1,
+    blocked_reason: null,
+    resume_pending: 1,
+  });
+  assert.deepEqual(recoveredDevelopmentTask, {
+    run_state: 'runnable',
+    current_subagent: 'dev-agent',
+    blocked_reason: null,
   });
   assert.equal(removedVerificationDraft, undefined);
   assert.equal(removedVerificationWorkDraft, undefined);

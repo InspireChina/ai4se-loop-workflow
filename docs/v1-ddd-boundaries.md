@@ -103,7 +103,7 @@ Application 从 Agent 的结构化结果写入文档，UI 直接读取数据库�
 - 模型：`CodeSlot`、`BrowserReservation`
 - 关键规则：同一时间一个代码槽、一个浏览器独占步骤和最多四个 Analysis Agent
 
-代码槽繁忙不是设计澄清。需要写代码的步骤进入内部等待队列，释放后自动继续。开发实现 Agent 直接使用当前主干工作区：本轮有代码改动时由 Agent 选择性提交相关文件，走查确认现有实现已满足规格时不制造 Commit。Application 在 Dev CLI 获得控制权之前固化开发周期 HEAD 与工作区快照，在恢复轮继续沿用，并在完成时自动核对当前 HEAD、真实 Commit、文件集合和工作区指纹；Runner 不创建 checkpoint，也不代理提交。
+代码槽繁忙不是设计澄清。需要写代码的步骤进入内部等待队列，释放后自动继续。开发实现 Agent 直接使用当前工作区：每次执行都以仓库当下状态重新检查功能完整性；本轮有代码改动时由 Agent 按仓库规范提交相关文件，走查确认现有实现已满足规格时不制造 Commit。Application 不比较 execution Commit 与当前 HEAD，不推断本轮文件归属，也不因换分支、改写历史、其他 Commit 或未提交变化阻塞开发完成。Runner 不创建 checkpoint，也不代理提交。
 
 ### 2.7 Agent 配置与演化（Agent Configuration and Evolution）
 
@@ -228,7 +228,7 @@ classDiagram
 | 工具调用、subagent 使用 | 当前 Agent |
 | 文档、确认事项和结果入库 | Application |
 | 运行信息请求、回答与原阶段恢复 | 当前 Agent 提出；Application 持久化和恢复；用户仅补充事实 |
-| Git 提交 | 开发实现 Agent；有代码改动时提交本轮相关文件，无改动走查不制造 Commit；Runner 只记录执行前后 HEAD |
+| Git 提交 | 开发实现 Agent；有代码改动时按仓库规范提交相关文件，无改动走查不制造 Commit；Runner 不以 Git 历史建立完成门禁 |
 | 项目 Current Prompt、临时 candidate、Memory revisions 与自动演化 | Agent Configuration；Harness 约束 candidate 的验证、替换或丢弃 |
 | Loop Engineering 自身缺陷诊断 | Software Maintenance Agent 提议；Git/Harness 决定候选与落地 |
 
@@ -240,7 +240,7 @@ classDiagram
 
 `DeliveryAnalysisDraft` 属于交付分析 Application 能力，不直接改变 `Task` 聚合。它以 `需求 + 交付单元` 为稳定工作身份，冻结交付单元契约、上游来源和自然依赖，渐进记录分析摘要、实际影响、关键业务或技术决策，以及供 Dev 与 Test 独立消费的交付契约。回答恢复沿用同一工作键并创建可追溯的新草稿版本；已回答问题的 `decision_key` 必须保留并以 `user` 权限关闭，不能删除或改名，相关影响必须更新为最终处理方式。`request-clarification` 只投影超出权限的最少问题，`complete` 在影响与决策闭环校验后投影交付分析、交付文档和内部 `AgentResult`。
 
-`DevelopmentDraft` 属于开发实现 Application 能力，不直接改变 `Task` 聚合。它以 `需求 + 交付单元` 为稳定工作身份，只保存 Dev Agent 对冻结契约的逐项实现证据、从 Runner 事实中选择的关键检查、残余风险、运行信息请求和恢复事项声明，不保存面向 Test 的交接。Application 在草稿中持久化开发周期 Git 基线和 CLI 启动前工作区快照，并从仓库与 execution receipt 自动确定当前 HEAD、是否产生代码变化、Commit、真实文件集合、工作区漂移以及命令执行结果，Agent 不重复记账。关键检查显式绑定实际 Shell/Bash receipt、原始命令哈希与当时仓库状态；后续代码变化或同一命令的新结果会使其失效。运行信息恢复沿用同一工作键与 request key；Test 回流形成新的修正周期时，全部活动恢复事项必须由 Dev 逐项声明处理，并在当前 execution 重新运行关键检查。只有 `implementation complete` 同时通过语义证据和机器事实校验后，Application 才确定性投影开发记录与既有 `AgentResult`；这些事实供用户和 Review 追溯，不进入 Test 的上下文投影。
+`DevelopmentDraft` 属于开发实现 Application 能力，不直接改变 `Task` 聚合。它以 `需求 + 交付单元` 为稳定工作身份，只保存 Dev Agent 对冻结契约的逐项实现证据、从 Runner 事实中选择的关键检查、残余风险、运行信息请求和恢复事项声明，不保存面向 Test 的交接，也不保存 Git 基线。Application 从 execution receipt 确认命令执行事实；关键检查绑定实际 Shell/Bash receipt 与原始命令哈希，同一命令的新结果会取代旧结果。Git 历史、分支、HEAD、Commit 和未提交文件不参与完成校验，Agent 每次执行都应基于当前仓库重新确认功能是否齐全。运行信息恢复沿用同一工作键与 request key；Test 回流形成新的修正周期时，全部活动恢复事项必须由 Dev 逐项声明处理，并在当前 execution 重新运行关键检查。只有 `implementation complete` 同时通过语义证据、关键检查、运行信息与恢复事项校验后，Application 才确定性投影开发记录与既有 `AgentResult`；这些事实供用户和 Review 追溯，不进入 Test 的上下文投影。
 
 `VerificationDraft` 属于验证 Application 能力，不直接改变 `Task` 聚合。它以 `需求 + 交付单元` 为稳定工作身份，只保存当前阶段与冻结契约版本；测试计划场景和逐项执行结果分别由 `VerificationPlanScenario` 与 `VerificationResult` 持久化。Test Agent 先建立并冻结 `frontend` / `api` 黑盒计划，再逐项记录 `passed`、`failed` 或 `blocked` 的独立观察；Application 只校验阶段、契约引用、前端最低覆盖和结果完整性，并根据失败分类确定性投影通过、Dev / Analysis 回流或环境阻塞。验证专属的规格检查、命令检查、风险草稿、运行信息草稿和恢复复验表均已删除；运行信息请求直接进入全局 `RuntimeInputRequest`，回答后以同一 request key 恢复，残余风险只随最终 `complete` 结果进入验证报告。
 

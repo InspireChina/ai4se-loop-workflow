@@ -18,7 +18,6 @@ import {
 } from './delivery-analysis-command-drafts';
 import {
   developmentHelp,
-  prepareDevelopmentRepositorySnapshot,
   runDevelopmentCommand,
 } from './development-command-drafts';
 import {
@@ -634,15 +633,8 @@ function cloneDevelopmentDraft(
   // waiting-for-answers draft is only a continuation of the same correction,
   // so its progressive judgments remain available after the user responds.
   const startsCorrectionCycle = activeRecovery && source.status !== 'waiting_for_answers';
-  db.prepare(`
-    INSERT INTO development_drafts(
-      draft_id, repository_base_commit,
-      initial_workspace_fingerprint, initial_workspace_tree, initial_workspace_changes_json
-    )
-    SELECT ?, repository_base_commit,
-           initial_workspace_fingerprint, initial_workspace_tree, initial_workspace_changes_json
-    FROM development_drafts WHERE draft_id = ?
-  `).run(target.draft_id, source.draft_id);
+  db.prepare('INSERT INTO development_drafts(draft_id) VALUES(?)')
+    .run(target.draft_id);
   for (const table of [
     ['development_criteria', 'criterion_key, evidence, ordinal'],
     ['development_risks', 'risk_key, content, ordinal'],
@@ -656,7 +648,7 @@ function cloneDevelopmentDraft(
   if (!startsCorrectionCycle) {
     for (const table of [
       ['development_checks', `check_key, command, command_hash, summary, source_execution_id,
-        source_receipt_key, head_commit, workspace_fingerprint, ordinal`],
+        source_receipt_key, ordinal`],
       ['development_recovery_resolutions', 'recovery_id, summary, evidence, ordinal'],
     ] as const) {
       db.prepare(`
@@ -836,17 +828,7 @@ function createDraft(
       }
     } else if (profile.draftType === 'development') {
       if (source) cloneDevelopmentDraft(db, source, created);
-      else {
-        db.prepare(`
-          INSERT INTO development_drafts(draft_id, repository_base_commit)
-          VALUES(?, ?)
-        `).run(draftId, execution.base_commit);
-      }
-      db.prepare(`
-        UPDATE development_drafts
-        SET repository_base_commit = COALESCE(repository_base_commit, ?)
-        WHERE draft_id = ?
-      `).run(execution.base_commit, draftId);
+      else db.prepare('INSERT INTO development_drafts(draft_id) VALUES(?)').run(draftId);
     } else if (profile.draftType === 'verification') {
       if (source) cloneVerificationDraft(db, source, created);
       else db.prepare('INSERT INTO verification_drafts(draft_id) VALUES(?)').run(draftId);
@@ -878,26 +860,16 @@ function ensureDraft(
   profile: AgentCommandProfile,
   workKey: string,
 ) {
-  const ensureDevelopmentBaseline = (draft: DraftRow) => {
-    if (profile.draftType === 'development') {
-      db.prepare(`
-        UPDATE development_drafts
-        SET repository_base_commit = COALESCE(repository_base_commit, ?)
-        WHERE draft_id = ?
-      `).run(execution.base_commit, draft.draft_id);
-    }
-    return draft;
-  };
   const latest = latestDraft(db, workKey);
   if (!latest) return createDraft(db, execution, profile, workKey);
-  if (latest.last_execution_id === execution.execution_id) return ensureDevelopmentBaseline(latest);
+  if (latest.last_execution_id === execution.execution_id) return latest;
   if (latest.status === 'editing') {
     db.prepare(`
       UPDATE agent_work_drafts
       SET last_execution_id = ?, updated_at = CURRENT_TIMESTAMP
       WHERE draft_id = ?
     `).run(execution.execution_id, latest.draft_id);
-    return ensureDevelopmentBaseline({ ...latest, last_execution_id: execution.execution_id });
+    return { ...latest, last_execution_id: execution.execution_id };
   }
   return createDraft(db, execution, profile, workKey, latest);
 }
@@ -2541,18 +2513,6 @@ export async function issueAgentCommandToken(executionId: string) {
     ? agentCommandProfile(execution.agent, execution.pipeline)
     : null;
   if (!execution || !profile) return null;
-  if (profile.draftType === 'development') {
-    const workKey = agentCommandWorkKey(
-      execution.agent,
-      execution.pipeline,
-      execution.task_id,
-      execution.story_index,
-      execution.delegation_key,
-    );
-    if (!workKey) return null;
-    const draft = ensureDraft(db, execution, profile, workKey);
-    prepareDevelopmentRepositorySnapshot(db, draft, execution);
-  }
   const token = randomBytes(32).toString('hex');
   db.prepare(`
     UPDATE execution_attempts SET command_token_hash = ?, heartbeat_at = CURRENT_TIMESTAMP

@@ -1,10 +1,5 @@
 import { agentResultSchema, deliverySpecSchema } from '../domain/agent-result';
-import {
-  gitCommitWithTreeBetween,
-  gitChangedFilesBetween,
-  gitIsAncestor,
-  gitWorkingTreeSnapshot,
-} from '../infrastructure/git';
+import { gitHead, gitWorkingTreeChanges } from '../infrastructure/git';
 import { databaseConnection, paths } from '../infrastructure/database';
 
 type Db = Awaited<ReturnType<typeof databaseConnection>>;
@@ -141,118 +136,15 @@ function capturedCommands(db: Db, executionId: string): CapturedCommand[] {
   return commands;
 }
 
-export function prepareDevelopmentRepositorySnapshot(
-  db: Db,
-  draft: DevelopmentDraftRow,
-  execution: DevelopmentExecutionRow,
-) {
-  const header = db.prepare(`
-    SELECT repository_base_commit, initial_workspace_fingerprint
-    FROM development_drafts WHERE draft_id = ?
-  `).get(draft.draft_id) as {
-    repository_base_commit: string | null;
-    initial_workspace_fingerprint: string | null;
-  };
-  if (header.initial_workspace_fingerprint !== null && header.repository_base_commit) return;
-  const snapshot = gitWorkingTreeSnapshot(paths.root);
-  if (!snapshot.readable) {
-    throw new Error('Application 无法读取开发周期启动时的 Git 工作区快照');
-  }
-  db.prepare(`
-    UPDATE development_drafts
-    SET repository_base_commit = COALESCE(repository_base_commit, ?),
-        initial_workspace_fingerprint = COALESCE(initial_workspace_fingerprint, ?),
-        initial_workspace_tree = COALESCE(initial_workspace_tree, ?),
-        initial_workspace_changes_json = COALESCE(initial_workspace_changes_json, ?)
-    WHERE draft_id = ?
-  `).run(
-    execution.base_commit,
-    snapshot.fingerprint,
-    snapshot.tree,
-    JSON.stringify(snapshot.changes),
-    draft.draft_id,
-  );
-}
-
-function repositoryEvidence(header: {
-  repository_base_commit: string | null;
-  initial_workspace_fingerprint: string | null;
-  initial_workspace_tree: string | null;
-  initial_workspace_changes_json: string | null;
-}) {
-  const originalBase = header.repository_base_commit?.trim() || '';
-  const currentWorkspace = gitWorkingTreeSnapshot(paths.root);
-  const head = currentWorkspace.head;
-  const initialFingerprint = header.initial_workspace_fingerprint ?? '';
-  const initialWorkspaceTree = header.initial_workspace_tree || '';
-  let initialWorkspaceChanges: string[] = [];
-  try {
-    initialWorkspaceChanges = JSON.parse(header.initial_workspace_changes_json || '[]') as string[];
-  } catch {
-    initialWorkspaceChanges = [];
-  }
-  const baselineIsAncestor = Boolean(
-    originalBase && head && gitIsAncestor(paths.root, originalBase, head),
-  );
-  const materializedBaselineCommit = initialFingerprint && currentWorkspace.fingerprint === ''
-    ? gitCommitWithTreeBetween(paths.root, originalBase, head, initialWorkspaceTree)
-    : '';
-  const base = materializedBaselineCommit || originalBase;
-  const changedFiles = base && head && base !== head
-    ? gitChangedFilesBetween(paths.root, base, head)
-    : [];
-  const mode = !base || !head
-    ? 'unknown' as const
-    : base === head
-      ? 'existing' as const
-      : 'changed' as const;
-  const errors: string[] = [];
-  if (!originalBase) errors.push('当前开发周期缺少 Git 基线，Application 无法判断本轮代码事实');
-  if (!head) errors.push('当前工作区没有可读取的 Git HEAD');
-  if (!currentWorkspace.readable) errors.push('Application 无法读取当前 Git 工作区快照');
-  if (originalBase && head && !baselineIsAncestor) {
-    errors.push('当前 HEAD 不是 execution Git 基线的后继，不能把换分支或改写历史当作本轮提交');
-  }
-  const preservedInitialWorkspace = currentWorkspace.fingerprint === initialFingerprint;
-  if (!preservedInitialWorkspace && !materializedBaselineCommit) {
-    const currentChanges = currentWorkspace.changes.length
-      ? `；当前未提交项：${currentWorkspace.changes.slice(0, 20).join(', ')}`
-      : '';
-    errors.push(
-      '工作区未提交状态偏离了开发周期启动快照；已有无关改动必须保持原样，'
-      + `若要单独提交它们，提交后的 tree 必须精确等于启动快照${currentChanges}`,
-    );
-  }
-  if (mode === 'changed' && !changedFiles.length) {
-    errors.push('Git HEAD 已变化，但基线到当前 HEAD 没有可识别的文件变更');
-  }
+function repositoryObservation() {
+  const head = gitHead(paths.root);
   return {
-    base,
-    originalBase,
     head,
-    mode,
-    changedFiles,
-    currentWorkspace,
-    initialFingerprint,
-    initialWorkspaceTree,
-    initialWorkspaceChanges,
-    materializedBaselineCommit,
-    baselineIsAncestor,
-    errors,
+    changes: gitWorkingTreeChanges(paths.root),
   };
 }
 
 function state(db: Db, draft: DevelopmentDraftRow, execution: DevelopmentExecutionRow) {
-  const header = db.prepare(`
-    SELECT repository_base_commit, initial_workspace_fingerprint,
-           initial_workspace_tree, initial_workspace_changes_json
-    FROM development_drafts WHERE draft_id = ?
-  `).get(draft.draft_id) as {
-    repository_base_commit: string | null;
-    initial_workspace_fingerprint: string | null;
-    initial_workspace_tree: string | null;
-    initial_workspace_changes_json: string | null;
-  };
   const criteria = db.prepare(`
     SELECT criterion_key, evidence, ordinal
     FROM development_criteria WHERE draft_id = ? ORDER BY ordinal, criterion_key
@@ -263,7 +155,7 @@ function state(db: Db, draft: DevelopmentDraftRow, execution: DevelopmentExecuti
   }[];
   const checks = db.prepare(`
     SELECT check_key, command, command_hash, summary, source_execution_id, source_receipt_key,
-           head_commit, workspace_fingerprint, ordinal
+           ordinal
     FROM development_checks WHERE draft_id = ? ORDER BY ordinal, check_key
   `).all(draft.draft_id) as {
     check_key: string;
@@ -272,8 +164,6 @@ function state(db: Db, draft: DevelopmentDraftRow, execution: DevelopmentExecuti
     summary: string;
     source_execution_id: string;
     source_receipt_key: string;
-    head_commit: string;
-    workspace_fingerprint: string;
     ordinal: number;
   }[];
   const risks = db.prepare(`
@@ -358,7 +248,6 @@ function state(db: Db, draft: DevelopmentDraftRow, execution: DevelopmentExecuti
     // saveDeliverySpec validates JSON before persistence; report the unreadable contract below.
   }
   return {
-    header,
     criteria,
     checks,
     risks,
@@ -373,7 +262,7 @@ function state(db: Db, draft: DevelopmentDraftRow, execution: DevelopmentExecuti
     expectedCriteria,
     deliveryConstraints,
     capturedCommands: capturedCommands(db, execution.execution_id),
-    repository: repositoryEvidence(header),
+    repository: repositoryObservation(),
   };
 }
 
@@ -412,12 +301,6 @@ function validationErrors(
         ? '当前处于恢复修正周期，至少需要在本次 execution 重新执行并记录一条真实成功检查'
         : '至少需要记录一条由 Application 捕获的真实成功检查');
     }
-    const staleChecks = checks.filter((item) =>
-      item.head_commit !== current.repository.head
-      || item.workspace_fingerprint !== current.repository.currentWorkspace.fingerprint);
-    if (staleChecks.length) {
-      errors.push(`以下关键检查早于最终仓库状态，必须重新执行并记录：${staleChecks.map((item) => item.check_key).join(', ')}`);
-    }
     const supersededChecks = checks.filter((item) =>
       current.capturedCommands.some((command) =>
         command.commandHash === item.command_hash
@@ -440,7 +323,6 @@ function validationErrors(
     if (current.runtimeInputs.some((item) => !item.answer)) {
       errors.push('仍有未回答的运行信息请求，不能完成开发');
     }
-    errors.push(...current.repository.errors);
   }
   if (terminal === 'request-input') {
     const unanswered = current.runtimeInputs.filter((item) => !item.answer);
@@ -453,23 +335,12 @@ function renderStatus(draft: DevelopmentDraftRow, current: DevelopmentState) {
   const errors = validationErrors(current);
   const checks = completionChecks(current);
   const recoveryDeclarations = activeRecoveryDeclarations(current);
-  const repositoryMode = current.repository.mode === 'existing'
-    ? 'HEAD 与开发周期基线相同（无需新改动）'
-    : current.repository.mode === 'changed'
-      ? 'HEAD 已变化（Application 自动识别为本轮有改动）'
-      : '暂时无法判断';
   const lines = [
     `开发实现草稿 v${draft.draft_version} · 变更 ${draft.change_seq}`,
     '',
-    `仓库事实：${repositoryMode}`,
-    `开发周期 Git 基线：${current.repository.originalBase ? current.repository.originalBase.slice(0, 12) : '不可读'}`,
-    ...(current.repository.materializedBaselineCommit
-      ? [`已有工作区改动基线 Commit：${current.repository.materializedBaselineCommit.slice(0, 12)}`]
-      : []),
+    '仓库观察（仅供调查，不参与完成校验）：',
     `当前 HEAD：${current.repository.head ? current.repository.head.slice(0, 12) : '不可读'}`,
-    `已提交变更文件：${current.repository.changedFiles.length}`,
-    `启动时已有未提交项：${current.repository.initialWorkspaceChanges.length}`,
-    `当前未提交项：${current.repository.currentWorkspace.changes.length}`,
+    `当前未提交项：${current.repository.changes.length}`,
     `验收证据：${current.criteria.length}/${current.expectedCriteria.length}`,
     `关键检查：${checks.length}${current.activeRecoveries.length ? `（本次 execution；草稿共 ${current.checks.length}）` : ''}`,
     `风险：${current.risks.length}`,
@@ -485,7 +356,7 @@ function renderStatus(draft: DevelopmentDraftRow, current: DevelopmentState) {
   }
   if (checks.length) {
     lines.push('', '本轮有效关键检查：', ...checks.map((item) =>
-      `- ${item.check_key}：${item.command} · ${item.summary}（execution=${item.source_execution_id.slice(0, 8)} receipt=${item.source_receipt_key} HEAD=${item.head_commit.slice(0, 10)}）`));
+      `- ${item.check_key}：${item.command} · ${item.summary}（execution=${item.source_execution_id.slice(0, 8)} receipt=${item.source_receipt_key}）`));
   }
   if (current.capturedCommands.length) {
     lines.push('', 'Application 最近捕获的命令事实：', ...current.capturedCommands.slice(-8).map((item) =>
@@ -532,15 +403,6 @@ function renderArtifact(current: DevelopmentState) {
       return `- **${criterion.id}** ${criterion.description}：${coverage ? `已证明 — ${coverage.evidence}` : '未证明'}`;
     }),
     '',
-    '## Application 确认的仓库事实',
-    '',
-    current.repository.mode === 'changed'
-      ? `- 本轮从基线 \`${current.repository.base}\` 推进到 Commit \`${current.repository.head}\`。`
-      : `- 当前 HEAD \`${current.repository.head}\` 与开发周期基线一致；走查确认现有实现已满足交付承诺。`,
-    ...(current.repository.changedFiles.length
-      ? current.repository.changedFiles.map((path) => `- \`${path}\``)
-      : []),
-    '',
     '## 开发者关键检查',
     '',
     ...(checks.length
@@ -562,13 +424,8 @@ function renderArtifact(current: DevelopmentState) {
 
 function completionSummary(current: DevelopmentState) {
   const checks = completionChecks(current);
-  const repositoryFact = current.repository.mode === 'changed'
-    ? `代码已提交至 ${current.repository.head.slice(0, 12)}，变更 ${current.repository.changedFiles.length} 个文件`
-    : current.repository.mode === 'existing'
-      ? `当前 HEAD ${current.repository.head.slice(0, 12)} 与开发周期基线一致，无需代码变更`
-      : '仓库状态不可判定';
   return `开发实现完成：${current.criteria.length}/${current.expectedCriteria.length} 项验收语义已有实现证据，`
-    + `${checks.length} 项开发检查通过；${repositoryFact}。`;
+    + `${checks.length} 项开发检查通过。`;
 }
 
 function buildResult(
@@ -592,7 +449,6 @@ function buildResult(
         title: '开发实现结果',
         content: renderArtifact(current),
       },
-      changedFiles: current.repository.changedFiles,
       recoveryResolutions: recoveryDeclarations.map((item) => ({
         recoveryId: item.recovery_id,
         summary: item.summary,
@@ -628,20 +484,6 @@ function terminalSubmit(
   const errors = validationErrors(current, action);
   if (errors.length) {
     throw new Error(`开发草稿不能执行 ${action}：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
-  }
-  if (action === 'complete') {
-    const confirmation = repositoryEvidence(current.header);
-    const repositoryChanged = confirmation.head !== current.repository.head
-      || confirmation.currentWorkspace.fingerprint
-        !== current.repository.currentWorkspace.fingerprint
-      || confirmation.currentWorkspace.tree !== current.repository.currentWorkspace.tree;
-    if (confirmation.errors.length || repositoryChanged) {
-      throw new Error(
-        confirmation.errors.length
-          ? `提交前仓库事实复核失败：${confirmation.errors.join('；')}`
-          : '校验完成后仓库状态又发生变化，请重新执行 status、必要检查和 validate',
-      );
-    }
   }
   const result = buildResult(current, action, failureReason);
   const status = action === 'request-input' ? 'waiting_for_answers' : 'submitted';
@@ -705,7 +547,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
       '关键检查：',
       '  implementation check record --key <稳定 key> --receipt <status 中的 receipt> --summary <为什么所选检查能支持交付结论>',
       '  implementation check discard --key <稳定 key>',
-      '  先完成最终代码与提交，再真实执行测试、构建或有意义的检查；随后重新执行 implementation status，从“Application 最近捕获的命令事实”选择明确成功的 receipt。Application 会绑定该 receipt 的原始命令哈希、当前 HEAD 和工作区指纹；HEAD、工作区或同一命令的最新结果变化时必须重跑并重录。不要手抄 command、passed 或 exit code。',
+      '  在确认当前功能完整后，真实执行测试、构建或有意义的检查；随后重新执行 implementation status，从“Application 最近捕获的命令事实”选择明确成功的 receipt。Application 绑定该 receipt 的原始命令哈希；同一命令出现更新结果时必须选择最新结果。Git 历史、分支、HEAD 和未提交文件不使检查失效，也不参与完成校验。不要手抄 command、passed 或 exit code。',
       '',
       '可选披露：',
       '  implementation risk record --key <稳定 key> --content <仍存在但不否定当前交付的风险>',
@@ -740,8 +582,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
       '完成要求：',
       '  1. 每个规格 key 都有实现证据，并至少选择一条 Runner 已捕获的成功关键检查。',
       '  2. 没有未回答的运行信息。',
-      '  3. Application 能读取开发周期 Git 基线与当前 HEAD；启动前已有的无关未提交改动可以保持原样，不能被本轮修改或混入提交。若先把它们独立提交，Application 只在该 Commit 的 tree 精确等于启动快照时自动排除它。',
-      '  4. 有效基线后的 HEAD 未变化时自动判为现有实现满足；HEAD 已变化时自动识别 Commit 并生成真实文件清单。Agent 不声明模式，也不重复记账。',
+      '  3. Agent 已基于当前仓库重新检查功能完整性。Git 历史、分支、HEAD、Commit 和未提交文件只作为调查信息，不形成完成门禁。',
       '',
       '标准路径：status → 调查/必要实现/真实检查 → status 查看 receipt → criterion/check → validate → complete。',
       'request-input 与 fail 各按自己的较小门槛原子提交，不要求先通过 validate。普通最终文本、Markdown 或手写 JSON 都不会结束 execution。',
@@ -752,7 +593,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
   }
   return [
     'Dev Agent 把当前交付单元落实为可由 Test Agent 独立验收的仓库状态。',
-    'Agent 只提交验收证据关系、关键检查选择和异常信息；Application 自动记录 Git、Commit、文件及 Runner 命令事实，并确定性生成完成摘要。',
+    'Agent 只提交验收证据关系、关键检查选择和异常信息；Application 记录 Runner 命令事实并确定性生成完成摘要。',
     '',
     '标准路径：',
     '  status → 调查/必要实现/真实检查 → status 查看 receipt → criterion/check → validate → complete',
@@ -770,7 +611,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
     '  help context   只读上下文工具与使用时机',
     '  help evidence  验收、关键检查、风险与恢复',
     '  help input     运行信息与真实失败',
-    '  help finish    完成门槛、Git 自动判定与终止命令',
+    '  help finish    完成门槛与终止命令',
   ];
 }
 
@@ -783,7 +624,6 @@ export function runDevelopmentCommand(input: {
 }) {
   const { db, execution, draft, command, flags } = input;
   if (command === 'implementation status') {
-    prepareDevelopmentRepositorySnapshot(db, draft, execution);
     db.prepare(`
       UPDATE agent_work_drafts
       SET status_viewed_execution_id = ?, last_execution_id = ?, updated_at = CURRENT_TIMESTAMP
@@ -847,25 +687,18 @@ export function runDevelopmentCommand(input: {
         + `请根据 status 选择 ${latestForCommand?.receiptKey || '最新 receipt'}`,
       );
     }
-    const workspace = gitWorkingTreeSnapshot(paths.root);
-    if (!workspace.readable) {
-      throw new Error('Application 无法读取当前 Git 工作区快照，不能绑定关键检查');
-    }
-    const head = workspace.head;
     const ordinal = nextOrdinal(db, 'development_checks', draft.draft_id);
     db.prepare(`
       INSERT INTO development_checks(
         draft_id, check_key, command, command_hash, summary, source_execution_id,
-        source_receipt_key, head_commit, workspace_fingerprint, ordinal
+        source_receipt_key, ordinal
       )
-      VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES(?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(draft_id, check_key) DO UPDATE SET
         command = excluded.command, command_hash = excluded.command_hash,
         summary = excluded.summary,
         source_execution_id = excluded.source_execution_id,
-        source_receipt_key = excluded.source_receipt_key,
-        head_commit = excluded.head_commit,
-        workspace_fingerprint = excluded.workspace_fingerprint
+        source_receipt_key = excluded.source_receipt_key
     `).run(
       draft.draft_id,
       key,
@@ -874,8 +707,6 @@ export function runDevelopmentCommand(input: {
       bounded(required(flags, 'summary'), '检查结论'),
       execution.execution_id,
       selected.receiptKey,
-      head,
-      workspace.fingerprint,
       ordinal,
     );
     touchDraft(db, draft.draft_id);
