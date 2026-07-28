@@ -19,6 +19,33 @@ test('does not dispatch lane agents from the legacy task-level resume owner', ()
   assert.equal(nextDelegation(resumedDevTask(), true), null);
 });
 
+test('never creates a generic resume pipeline for a non-resumable control Agent', () => {
+  const task = resumedDevTask();
+  task.agile_status = 'in plan';
+  task.current_subagent = 'story-splitter-agent';
+  task.analysis_index = 0;
+  task.dev_index = 0;
+  task.test_index = 0;
+  task.total_stories = 0;
+  task.spec_resolved_index = 0;
+
+  const splitter = nextDelegation(task, true);
+  assert.equal(splitter?.agent, 'story-splitter-agent');
+  assert.equal(splitter?.pipeline, 'split');
+
+  task.agile_status = 'in review';
+  task.current_subagent = 'review-agent';
+  task.analysis_index = 1;
+  task.dev_index = 1;
+  task.test_index = 1;
+  task.total_stories = 1;
+  task.spec_resolved_index = 1;
+
+  const review = nextDelegation(task, true);
+  assert.equal(review?.agent, 'review-agent');
+  assert.equal(review?.pipeline, 'review');
+});
+
 test('Agents cannot create system blocks, while the Harness can record one', () => {
   const state = resumedDevTask();
   assert.throws(() => assertUpdate(state, 'dev-agent', { agile_status: 'blocked' }, ['agile_status']), /无权设置状态 blocked/);

@@ -90,7 +90,9 @@ test('ships rigorous V1 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /每项交付单元验收语义至少要有一个从真实前端覆盖的场景/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /API 场景.*不能脱离业务期望只验证接口实现细节/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /API 场景.*可以独立形成实现失败、规格问题或环境阻塞的有效反例/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /浏览器、账号、设备条件或测试数据等执行资源不可获得时.*环境阻塞/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /浏览器、账号、设备条件或测试数据等执行资源不可获得时.*验证协助/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /用户可以补充缺失条件，也可以代为执行并提供实际观察/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /系统阻塞只用于 Runner、CLI、浏览器控制或 Application 自身故障/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /凡用于判定.*都必须由.*前端/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /在执行待测业务行为之前，先冻结由 Oracle 推导的业务主张与预期/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /每个活动场景最终都必须有通过、失败或阻塞结论/);

@@ -180,7 +180,13 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
   if (task.resume_pending) {
     const agent = task.current_subagent!;
     if (['analyst-agent', 'dev-agent', 'test-agent'].includes(agent)) return null;
-    return line('resume', agent, null, '读取人工输入，并安全恢复任务级流程');
+    if (['backlog-agent', 'repro-agent'].includes(agent)) {
+      return line('resume', agent, null, '读取人工输入，并安全恢复任务级流程');
+    }
+    // Delivery planning, feedback and review recover through their original
+    // domain pipeline. They do not expose a generic `resume` command protocol.
+    // Falling through also makes malformed legacy state self-healing at
+    // dispatch time instead of producing an impossible agent/pipeline pair.
   }
   // A task-level rewind can preserve `in dev` temporarily to retain the code
   // slot. In that state the Harness-selected control Agent is authoritative;

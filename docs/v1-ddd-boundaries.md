@@ -196,14 +196,14 @@ classDiagram
 2. 等待单元推进时必须至少存在一个交付单元。
 3. 进入整体验收前，所有交付单元必须完成交付分析、开发实现和验证。
 4. `waiting_for_answers` 必须关联交付分析 Agent 问题和待回答规格，且不能改变 Agile 状态。
-5. `waiting_for_runtime_input` 必须关联当前 Agent 的待回答运行信息；提交后第一次执行必须交回同一 Agent 和交付单元。
+5. `waiting_for_runtime_input` 必须关联当前 Agent 的待回答运行信息或 Test Agent 的验证协助；提交后第一次执行必须交回同一 Agent 和交付单元。验证协助可以补充环境，也可以提供人工执行的实际观察与证据，但最终判定仍由 Test Agent 依据原 Oracle 作出。
 6. 交付分析进度只能指向实际影响均有处理方式、关键决策均已关闭且冻结交付契约完整的交付规格。
 7. 进入 `ready_to_close` 必须存在当前 Review 报告版本，且 Review Agent 已释放。
 8. 需求完成前必须存在当前报告版本的阅读记录，且当前报告不能有开放评论。
 9. 逆向流程只能通过统一回退命令，不能直接减少进度值。
 10. 提交关键决策回答后，第一次执行必须交回问题来源 Agent：需求级交回需求梳理 Agent，交付级交回交付分析 Agent。
 11. 代码槽繁忙时自动排队，不能生成人工问题；等待运行信息的 Dev 继续占用代码槽。
-12. 同一任务最多同时运行一个 Analysis Agent 和一个 Delivery Agent；Delivery 严格执行 `Dev(N) → Test(N)`，且 `dev_index <= analysis_index`。该顺序只约束仓库状态形成的先后，不授权 Test 读取 Dev 的结果叙事。
+12. 同一任务最多同时运行一个 Analysis Agent 和一个 Delivery Agent；Delivery 严格执行 `Dev(N) → Test(N)`，且 `dev_index <= analysis_index`。该顺序只约束仓库状态形成的先后，不授权 Test 读取 Dev 的结果叙事。Test 场景受阻属于可协作补齐的验证事实，不是系统阻塞；系统阻塞只用于 Runner、CLI、浏览器控制或 Application 自身异常。
 13. 全局最多派发四个 Analysis Agent、一个 Dev Agent 和一个需要独占浏览器的 Agent；同优先级 Analysis 按 Lane 等待时间调度。
 14. 同一个 execution attempt 的 Agent Commit（如有）、验证和 Agent Result 必须幂等记录。
 15. execution attempt 必须记录实际发送给模型的完整 Prompt snapshot、execution input hash、项目 Prompt revision、初始模板 version、Prompt hash 和 Memory revision/hash；配置变化不得改写审计快照。

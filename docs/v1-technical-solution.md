@@ -225,7 +225,7 @@ Agent
 2. 执行当前交付单元。
 3. 若 Agent 创建了 commit，按目标仓库规范保留 Git 历史；Application 不据此判断文件归属或交付成败。
 4. Dev 完成后直接推进到独立 Test Agent；这是为了先形成稳定的待测仓库状态，不是把 Dev Result 传给 Test。交付分析只给出必须观察的业务变动范围、保护约束和验证关注点，不预先规定 Test Agent 的执行步骤。
-5. Test Agent 根据冻结交付契约、仓库与环境事实选择真实验证方法，不读取 Dev 自述、自检、开发记录或 Commit message，保存自己的证据并把失败明确分类为实现、规格、环境或无法判断；Application 只执行明确的回退或阻塞路由。
+5. Test Agent 根据冻结交付契约、仓库与环境事实选择真实验证方法，不读取 Dev 自述、自检、开发记录或 Commit message，保存自己的证据并把失败明确分类为实现问题、规格问题或当前验证受阻。实现与规格问题由 Application 回流；受阻场景由 Application 创建验证协助，用户补充条件或代为执行后恢复同一测试计划，最终结论仍由 Test Agent 独立形成。
 
 Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。Agent 不得绕过仓库规则；若失败只缺少无法推导的非敏感元数据，则通过 `runtimeInputs` 请求补充并从 Dev 阶段恢复，否则按普通执行失败处理。Runner 不提供 Git 专项恢复状态。
 
@@ -235,9 +235,9 @@ Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。A
 
 | 页面 | 核心内容与操作 |
 |---|---|
-| 工作台 | 需求概览、待设计澄清、待补充运行信息、待读结卡、近期活动、Loop 状态。 |
+| 工作台 | 需求概览、待设计澄清、待补充运行信息、待验证协助、待读结卡、近期活动、Loop 状态。 |
 | 需求列表 | 状态、优先级、进度、当前 Agent；右上角浮窗创建需求。 |
-| 需求详情 | 顶部 Steps、交付单元、交付规格、关键决策、运行信息、Test 文档、execution attempts、结卡报告和事件；右侧上下文 Chat 只读事实，同一 turn 可提交任意多个稳定 key 变更请求，进入 Feedback 闭环并按实际边界向前追加任意多个交付单元。 |
+| 需求详情 | 顶部 Steps、交付单元、交付规格、关键决策、运行信息与验证协助、Test 文档、execution attempts、结卡报告和事件；右侧上下文 Chat 只读事实，同一 turn 可提交任意多个稳定 key 变更请求，进入 Feedback 闭环并按实际边界向前追加任意多个交付单元。 |
 | 运行面板 | 开始/停止 Loop，查看占满工作区的流式分层日志。 |
 | 项目设置 | 工作区根目录、执行器；Codex 显示模型和思考强度，Claude 显示可选模型。 |
 | Agent 配置 | 各角色按项目独立的完整 Prompt 编辑、Memory 编辑、Effective Prompt 预览、临时 Prompt Canary 状态、Memory revision 历史、daily memory、观察与自动演化状态；不展示 Prompt 历史或恢复入口。 |

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { agentResultSchema, deliverySpecSchema } from '../domain/agent-result';
 import { databaseConnection } from '../infrastructure/database';
 
@@ -309,6 +310,47 @@ function deriveConclusion(current: VerificationState): DerivedConclusion {
   return { action: 'pass' };
 }
 
+function verificationAssistanceKeyPrefix(scenarioKey: string) {
+  const digest = createHash('sha256').update(scenarioKey).digest('hex').slice(0, 16);
+  return `verification-assistance:${digest}:`;
+}
+
+function verificationAssistanceKey(current: VerificationState, scenarioKey: string) {
+  const prefix = verificationAssistanceKeyPrefix(scenarioKey);
+  const sequence = current.runtimeInputs.filter((input) =>
+    input.request_key.startsWith(prefix)).length + 1;
+  return `${prefix}${sequence}`;
+}
+
+function verificationAssistanceRequests(current: VerificationState) {
+  return current.results
+    .filter((result) => result.status === 'blocked')
+    .filter((result) => !current.runtimeInputs.some((input) =>
+      input.request_key.startsWith(verificationAssistanceKeyPrefix(result.scenario_key))
+      && (input.status === 'pending' || input.status === 'answered')))
+    .map((result): RuntimeInputSubmission => {
+      const scenario = current.scenarios.find((item) =>
+        item.scenario_key === result.scenario_key)!;
+      return {
+        key: verificationAssistanceKey(current, scenario.scenario_key),
+        title: `需要协助验证：${scenario.title}`,
+        question: [
+          'Test Agent 当前无法独立完成这个场景。',
+          `场景：${scenario.title}`,
+          `准备：${scenario.setup}`,
+          `步骤：${scenario.steps}`,
+          `期望：${scenario.expected}`,
+          '请补充继续验证所需的依赖、环境或操作条件；你也可以代为执行，并填写通过/失败、实际观察和可定位证据。',
+        ].join('\n'),
+        why: [
+          `受阻状态：${result.actual_behavior || '尚未取得可判定结果'}`,
+          `已有观察：${result.evidence}`,
+        ].join('\n'),
+        recommendation: '提供缺少的测试条件后由 Test Agent 继续；或回复“人工验证：通过/失败；实际观察：…；证据：…”。',
+      };
+    });
+}
+
 function renderStatus(draft: VerificationDraftRow, current: VerificationState) {
   const covered = coveredRefs(current);
   const lines = [
@@ -318,7 +360,7 @@ function renderStatus(draft: VerificationDraftRow, current: VerificationState) {
     '',
     `计划场景：${current.scenarios.length}（前端 ${current.scenarios.filter((item) => item.channel === 'frontend').length} / API ${current.scenarios.filter((item) => item.channel === 'api').length}）`,
     `执行结果：${current.results.length}/${current.scenarios.length}（通过 ${current.results.filter((item) => item.status === 'passed').length} / 失败 ${current.results.filter((item) => item.status === 'failed').length} / 阻塞 ${current.results.filter((item) => item.status === 'blocked').length}）`,
-    `运行信息：${current.runtimeInputs.length}（已回答 ${current.runtimeInputs.filter((item) => item.answer).length}）`,
+    `运行信息与验证协助：${current.runtimeInputs.length}（已回答 ${current.runtimeInputs.filter((item) => item.answer).length}）`,
   ];
   if (current.requiredRefs.length) {
     lines.push('', '必测引用（plan --covers 使用下列稳定 ref）：');
@@ -334,7 +376,7 @@ function renderStatus(draft: VerificationDraftRow, current: VerificationState) {
     }
   }
   if (current.runtimeInputs.length) {
-    lines.push('', '运行信息（request key 跨轮次不可改名）：');
+    lines.push('', '运行信息与验证协助（request key 跨轮次不可改名）：');
     for (const input of current.runtimeInputs) {
       lines.push(`- ${input.request_key}：${input.title} · ${input.answer ? `已回答=${input.answer}` : '待回答'}`);
     }
@@ -363,7 +405,7 @@ function renderArtifact(
     : conclusion?.action === 'fail'
       ? '失败并回流'
       : conclusion?.action === 'block'
-        ? '验证阻塞'
+        ? '等待验证协助'
         : '等待运行信息';
   const lines = [
     '# 独立验证报告',
@@ -405,21 +447,24 @@ function buildCompleteResult(
   const passed = current.results.filter((item) => item.status === 'passed').length;
   const failed = current.results.filter((item) => item.status === 'failed').length;
   const blocked = current.results.filter((item) => item.status === 'blocked').length;
+  const assistanceRequests = verificationAssistanceRequests(current);
   const summary = conclusion.action === 'pass'
     ? `独立验证通过：${current.results.length} 个计划场景全部符合冻结交付契约`
     : conclusion.action === 'fail'
       ? `独立验证失败：${failed} 个场景发现产品行为偏差（通过 ${passed}，阻塞 ${blocked}）`
-      : `独立验证受阻：${blocked} 个场景缺少可用资源或无法形成可靠判定（通过 ${passed}）`;
+      : `独立验证需要协助：${blocked} 个场景暂时无法形成可靠判定（通过 ${passed}）`;
   return agentResultSchema.parse({
-    outcome: conclusion.action === 'block' ? 'failed' : 'completed',
+    outcome: conclusion.action === 'block' ? 'needs_input' : 'completed',
     summary,
     artifact: {
       title: '独立验证报告',
       content: renderArtifact(current, conclusion, residualRisk),
     },
-    verdict: conclusion.action === 'pass' ? 'passed' : 'failed',
+    ...(conclusion.action === 'block'
+      ? { runtimeInputs: assistanceRequests }
+      : { verdict: conclusion.action === 'pass' ? 'passed' : 'failed' }),
     ...(conclusion.failureKind
-      ? {
+      && conclusion.action !== 'block' ? {
         failureKind: conclusion.failureKind,
         ...(conclusion.action === 'fail'
           ? {
@@ -476,7 +521,13 @@ function terminalSubmit(
   const result = action === 'complete'
     ? buildCompleteResult(current, draft, options?.completionRisk)
     : buildInputResult(current, runtimeInput!);
-  const status = action === 'complete' ? 'submitted' : 'waiting_for_answers';
+  if (result.outcome === 'needs_input' && !result.runtimeInputs.length) {
+    throw new Error(
+      '验证协助已经有待处理或已回答记录。请根据 status 中的回答重新执行场景并更新结果；'
+      + '仍需其他协助时使用新的 request key。',
+    );
+  }
+  const status = result.outcome === 'needs_input' ? 'waiting_for_answers' : 'submitted';
   db.transaction(() => {
     db.prepare(`
       UPDATE agent_work_drafts
@@ -496,7 +547,7 @@ function terminalSubmit(
     ? '独立验证通过结果已提交。'
     : conclusion === 'fail'
       ? '独立验证失败与责任边界已提交。'
-      : '独立验证阻塞证据已提交。';
+      : '独立验证协助请求已提交，等待用户补充条件或代为验证。';
 }
 
 export function verificationHelp(
@@ -521,6 +572,7 @@ export function verificationHelp(
       '测试执行阶段：',
       '  verification result record --key <场景 key> --status <passed|failed|blocked> --evidence <独立证据> [--kind <implementation|specification|environment|inconclusive>] [--actual <实际行为或阻塞状态>]',
       '    按计划记录实际观察。failed 使用 implementation/specification；blocked 使用 environment/inconclusive。',
+      '    blocked 只报告当前无法完成的验证事实；Application 会自动请求用户补充条件或代为验证，不会把它当作系统故障。',
     ];
   }
   if (topic === 'input') {
@@ -534,7 +586,7 @@ export function verificationHelp(
     return [
       '完成验证：',
       '  verification complete [--risk <不影响本次交付成立的残余风险>]',
-      '    所有活动场景有结果后，由 Application 根据结果状态和失败分类确定通过、回流或阻塞。',
+      '    所有活动场景有结果后，由 Application 根据结果状态确定通过、回流或请求验证协助。',
       '    Harness 只校验阶段、前端最低覆盖和结果完整性，不替 Test Agent 判断证据质量。',
     ];
   }

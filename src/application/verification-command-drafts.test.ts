@@ -274,8 +274,16 @@ test('verification permits an API supplement but derives implementation failure 
   assert.equal((await pipelineForTask(taskId))[0]?.agent, 'dev-agent');
 });
 
-test('verification derives a block when required frontend resources are unavailable', async () => {
+test('blocked verification becomes human assistance and resumes the same plan', async () => {
+  const { applyAgentResult } = await import('./agent-results');
+  const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+  const {
+    answerRuntimeInput,
+    getTask,
+    pipelineForTask,
+    submitRuntimeInputs,
+  } = await import('./tasks');
   const { taskId, delegation } = await verificationDelegation('验证环境资源阻塞');
   const started = await begin(delegation, `${taskId}-block`);
   await command(started.executionId, started.token!, ['verification', 'status']);
@@ -289,10 +297,65 @@ test('verification derives a block when required frontend resources are unavaila
   });
   await command(started.executionId, started.token!, ['verification', 'complete']);
   const result = await readAgentCommandSubmission(started.executionId);
-  assert.equal(result?.outcome, 'failed');
-  assert.equal(result?.verdict, 'failed');
-  assert.equal(result?.failureKind, 'environment');
+  assert.equal(result?.outcome, 'needs_input');
+  assert.equal(result?.verdict, undefined);
+  assert.equal(result?.failureKind, undefined);
   assert.equal(result?.rewindTo, undefined);
+  assert.equal(result?.runtimeInputs.length, 1);
+  assert.match(result?.runtimeInputs[0]?.key || '', /^verification-assistance:/);
+  assert.match(result?.runtimeInputs[0]?.title || '', /需要协助验证/);
+  assert.match(result?.runtimeInputs[0]?.question || '', /代为执行/);
+
+  await applyAgentResult(`RUN-verification-block-${taskId}`, delegation, result!, {
+    executionId: started.executionId,
+  });
+  await completeExecution(started.executionId);
+
+  let detail = await getTask(taskId);
+  assert.equal(detail?.task.run_state, 'waiting_for_runtime_input');
+  assert.equal(detail?.lanes.find((lane) => lane.lane === 'delivery')?.status, 'waiting_for_runtime_input');
+  assert.equal(detail?.lanes.find((lane) => lane.lane === 'delivery')?.current_agent, 'test-agent');
+  assert.equal(detail?.lanes.some((lane) => lane.status === 'system_blocked'), false);
+  const assistance = detail?.runtimeInputs.find((input) =>
+    input.request_key.startsWith('verification-assistance:'));
+  assert.ok(assistance);
+
+  await answerRuntimeInput({
+    taskId,
+    requestId: assistance!.request_id,
+    answer: '人工验证：通过；实际观察：完成结果展示完成状态，未完成结果仍可识别；证据：云桌面截图 TEST-42。',
+  });
+  await submitRuntimeInputs(taskId, 'delivery');
+  const resumedDelegation = (await pipelineForTask(taskId)).find((item) =>
+    item.agent === 'test-agent' && item.pipeline === 'resume')! as DelegationEnvelope;
+  assert.ok(resumedDelegation);
+
+  const resumed = await begin(resumedDelegation, `${taskId}-assistance-resume`);
+  const restored = await command(resumed.executionId, resumed.token!, ['verification', 'status']);
+  assert.match(restored, /阶段：逐项执行测试/);
+  assert.match(restored, /执行结果：1\/1/);
+  assert.match(restored, /人工验证：通过/);
+  await assert.rejects(
+    command(resumed.executionId, resumed.token!, ['verification', 'complete']),
+    /验证协助已经有待处理或已回答记录/,
+  );
+  await recordResult(resumed.executionId, resumed.token!, {
+    status: 'passed',
+    evidence: '用户在云桌面代为执行；实际观察与冻结 Oracle 一致；证据为截图 TEST-42',
+  });
+  await command(resumed.executionId, resumed.token!, ['verification', 'complete']);
+  const completed = await readAgentCommandSubmission(resumed.executionId);
+  assert.equal(completed?.verdict, 'passed');
+  await applyAgentResult(`RUN-verification-assisted-${taskId}`, resumedDelegation, completed!, {
+    executionId: resumed.executionId,
+  });
+  await completeExecution(resumed.executionId);
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.test_index, 1);
+  assert.equal(
+    detail?.runtimeInputs.find((input) => input.request_id === assistance!.request_id)?.status,
+    'resolved',
+  );
 });
 
 test('verification runtime input resumes the same frozen plan and partial results', async () => {

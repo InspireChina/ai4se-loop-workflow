@@ -223,9 +223,9 @@ LoopWork 中，每次 Agent 调用都对应一个持久化的 `execution_attempt
 
 - Agent 尚未返回结果就中断：在预算内重新执行当前 attempt。
 - Agent Result 已经保存但应用前中断：直接从已保存 Result 继续，不重复调用模型。
-- Test Agent 判断为实现问题或规格问题：分别回到 Dev 或 Analysis；环境问题和无法判断保持阻塞，不默认回退。
+- Test Agent 判断为实现问题或规格问题：分别回到 Dev 或 Analysis；当前无法验证的场景转为验证协助，不默认回退，也不进入系统阻塞。
 - 发现交付级关键决策：进入 `waiting_for_answers`，回答后回到交付分析 Agent 在原 key 上继续收敛规格。
-- 缺少测试地址、账号配置或测试数据等运行信息：进入 `waiting_for_runtime_input`，补充后恢复原 Agent。
+- 缺少测试地址、账号配置、测试数据或其他必要验证条件：进入 `waiting_for_runtime_input`。用户可以补充条件，也可以代为执行并提供实际观察与证据；之后恢复同一 Test Agent、冻结计划和已完成结果，由 Test Agent 依据原 Oracle 形成结论。
 - 执行环境、工具协议或恢复机制异常：进入 `system_blocked`，保留完整诊断信息。
 
 应用启动新一轮前会收尾已经失去 Runner 的旧 Run：`planned/running` 且没有持久化结果的 attempt 转为 `retryable_failed`；存在待消费结果或处于 `output_received/verifying/applying` 的 attempt 保持原检查点，由新的 `agent-runner` 优先恢复。主动停止使用同一套收尾规则，因此不会留下长期占用 Lane 的运行记录。

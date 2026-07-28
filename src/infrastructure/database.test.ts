@@ -566,6 +566,108 @@ test('recovers system blocks caused by dispatching resume to non-resumable agent
   db.close();
 });
 
+test('recovers legacy Test environment blocks into verification assistance resume', () => {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE tasks (
+      task_id TEXT PRIMARY KEY,
+      run_state TEXT NOT NULL,
+      current_subagent TEXT,
+      blocked_reason TEXT,
+      next_step TEXT,
+      last_actor TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE task_lanes (
+      task_id TEXT NOT NULL,
+      lane TEXT NOT NULL,
+      status TEXT NOT NULL,
+      current_agent TEXT,
+      current_story_index INTEGER,
+      blocked_reason TEXT,
+      resume_pending INTEGER NOT NULL DEFAULT 0,
+      ready_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY(task_id, lane)
+    );
+    CREATE TABLE agent_work_drafts (
+      draft_id TEXT PRIMARY KEY,
+      work_key TEXT NOT NULL,
+      draft_version INTEGER NOT NULL,
+      task_id TEXT NOT NULL,
+      story_index INTEGER,
+      agent TEXT NOT NULL,
+      status TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE task_events (
+      event_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(task_id),
+      actor TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      summary TEXT NOT NULL
+    );
+    INSERT INTO tasks(
+      task_id, run_state, current_subagent, blocked_reason, next_step, last_actor
+    ) VALUES(
+      'REQ-test-block', 'runnable', 'test-agent',
+      '验证环境异常：独立验证受阻', 'delivery Lane 系统阻塞', 'system'
+    );
+    INSERT INTO task_lanes(
+      task_id, lane, status, current_agent, current_story_index,
+      blocked_reason, resume_pending
+    ) VALUES(
+      'REQ-test-block', 'delivery', 'system_blocked', 'test-agent', 2,
+      '验证环境异常：独立验证受阻', 0
+    );
+    INSERT INTO agent_work_drafts(
+      draft_id, work_key, draft_version, task_id, story_index, agent, status
+    ) VALUES(
+      'DRAFT-test-block', 'verification:REQ-test-block:2', 1,
+      'REQ-test-block', 2, 'test-agent', 'submitted'
+    );
+  `);
+
+  db.exec(readFileSync(resolve(
+    process.cwd(),
+    'migrations/064_recover_test_verification_blocks.sql',
+  ), 'utf8'));
+
+  assert.deepEqual(db.prepare(`
+    SELECT run_state, current_subagent, blocked_reason, next_step, last_actor
+    FROM tasks WHERE task_id = 'REQ-test-block'
+  `).get(), {
+    run_state: 'runnable',
+    current_subagent: 'test-agent',
+    blocked_reason: null,
+    next_step: '旧版验证受阻已转为验证协助，等待 Test Agent 恢复原测试计划',
+    last_actor: 'system',
+  });
+  assert.deepEqual(db.prepare(`
+    SELECT status, current_agent, current_story_index, blocked_reason,
+           resume_pending, ready_at IS NOT NULL AS has_ready_at
+    FROM task_lanes WHERE task_id = 'REQ-test-block' AND lane = 'delivery'
+  `).get(), {
+    status: 'runnable',
+    current_agent: 'test-agent',
+    current_story_index: 2,
+    blocked_reason: null,
+    resume_pending: 1,
+    has_ready_at: 1,
+  });
+  assert.deepEqual(db.prepare(`
+    SELECT status FROM agent_work_drafts WHERE draft_id = 'DRAFT-test-block'
+  `).get(), {
+    status: 'waiting_for_answers',
+  });
+  assert.deepEqual(db.prepare(`
+    SELECT event_type FROM task_events WHERE task_id = 'REQ-test-block'
+  `).get(), {
+    event_type: 'TestVerificationBlockRecovered',
+  });
+  db.close();
+});
+
 test('migrates role drafts and replaces the obsolete verification data model', () => {
   const db = new Database(':memory:');
   db.exec('PRAGMA foreign_keys = ON');

@@ -50,7 +50,11 @@ function stepDetail(task: { agile_status: string; run_state: string; current_sub
   const laneAttention = lanes.filter((lane) => ['waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked'].includes(lane.status));
   if (laneAttention.length) return laneAttention.map((lane) => {
     const laneName = lane.lane === 'analysis' ? '交付分析' : '开发验证';
-    const state = lane.status === 'waiting_for_answers' ? '等待澄清' : lane.status === 'waiting_for_runtime_input' ? '等待运行信息' : '系统阻塞';
+    const state = lane.status === 'waiting_for_answers'
+      ? '等待澄清'
+      : lane.status === 'waiting_for_runtime_input'
+        ? lane.current_agent === 'test-agent' ? '等待验证协助' : '等待运行信息'
+        : '系统阻塞';
     return `${laneName} ${state} · ${agentLabel(lane.current_agent)}`;
   }).join('；');
   if (task.run_state === 'waiting_for_answers') return `等待需求级澄清 · ${agentLabel(task.current_subagent)}`;
@@ -74,6 +78,13 @@ function laneStatusLabel(status: string) {
     waiting_for_answers: '等待澄清', waiting_for_runtime_input: '等待运行信息',
     system_blocked: '系统阻塞', completed: '已完成',
   } as Record<string, string>)[status] || status;
+}
+
+function laneStatusText(lane: { status: string; current_agent: string | null }) {
+  if (lane.status === 'waiting_for_runtime_input' && lane.current_agent === 'test-agent') {
+    return '等待验证协助';
+  }
+  return laneStatusLabel(lane.status);
 }
 
 function feedbackGroupStatusLabel(group: { status: string; work_type: string; delivery_unit_indexes?: number[] }) {
@@ -116,6 +127,8 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const unansweredRuntimeInputs = runtimeInputs.filter((input) => input.status === 'pending');
   const waitingRuntimeLanes = lanes.filter((lane) => lane.status === 'waiting_for_runtime_input');
   const waitingForRuntimeInput = waitingRuntimeLanes.length > 0;
+  const waitingForVerificationAssistance = waitingRuntimeLanes.some((lane) =>
+    lane.current_agent === 'test-agent');
   const blockedLanes = lanes.filter((lane) => lane.status === 'system_blocked');
   const reviewDocument = task.review_document_id ? documents.find((document) => document.document_id === task.review_document_id) : null;
   const blockingFeedback = documentComments.filter((comment) => comment.feedback_status !== 'resolved');
@@ -133,7 +146,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           <p className="eyebrow">{task.task_id}</p>
           <h1>{task.title}</h1>
         </div>
-        <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : statusLabel(task.agile_status)}</span>
+        <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : statusLabel(task.agile_status)}</span>
       </div>
       <div className="chips">
         <TaskAutoRefresh/>
@@ -176,7 +189,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       <div><small>实现</small><b>{task.dev_index} / {task.total_stories}</b></div>
       <div><small>验证</small><b>{task.test_index} / {task.total_stories}</b></div>
       <div><small>待回答决策</small><b>{unansweredQuestions.length}</b></div>
-      <div><small>待补充运行信息</small><b>{unansweredRuntimeInputs.length}</b></div>
+      <div><small>待补充信息或验证协助</small><b>{unansweredRuntimeInputs.length}</b></div>
       <div className="summary-wide"><small>下一步</small><p>{nextStepText}</p></div>
       <div className="summary-wide"><small>文档</small><p>{documents.length} 个数据库文档</p></div>
     </section>
@@ -188,7 +201,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             <p className="eyebrow">{lane.lane === 'analysis' ? '交付分析通道' : '开发验证通道'}</p>
             <h2>{lane.lane === 'analysis' ? '交付分析流水线' : '开发验证流水线'}</h2>
           </div>
-          <span className={`badge ${lane.status === 'completed' ? 'green' : lane.status.includes('waiting') || lane.status === 'system_blocked' ? 'amber' : 'blue'}`}>{laneStatusLabel(lane.status)}</span>
+          <span className={`badge ${lane.status === 'completed' ? 'green' : lane.status.includes('waiting') || lane.status === 'system_blocked' ? 'amber' : 'blue'}`}>{laneStatusText(lane)}</span>
         </div>
         <div className="lane-progress">
           {lane.lane === 'analysis'
@@ -325,15 +338,17 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
 
         <section className="task-section">
           <div className="section-head">
-            <h2>运行信息</h2>
+            <h2>运行信息与验证协助</h2>
             <small>{runtimeInputs.length} 个请求</small>
           </div>
           <div className="question-list">
-            {runtimeInputs.length === 0 ? <div className="card empty">当前没有 Agent 等待补充运行信息。</div> : runtimeInputs.map((input) => <article className="question card" key={input.request_id}>
+            {runtimeInputs.length === 0 ? <div className="card empty">当前没有 Agent 等待补充信息或验证协助。</div> : runtimeInputs.map((input) => {
+              const verificationAssistance = input.source_agent === 'test-agent';
+              return <article className="question card" key={input.request_id}>
               <div className="question-title">
                 <AlertTriangle size={18}/>
                 <div>
-                  <p className="eyebrow">运行信息 · {deliveryUnitLabel(input.story_index)}</p>
+                  <p className="eyebrow">{verificationAssistance ? '验证协助' : '运行信息'} · {deliveryUnitLabel(input.story_index)}</p>
                   <h3>{terminologyText(input.title)}</h3>
                   <small>来源：{agentLabel(input.source_agent)}</small>
                 </div>
@@ -345,10 +360,11 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               {input.answer ? <p className="answer"><b>你的答复：</b>{input.answer}</p> : input.status === 'pending' && <form action={answerRuntimeInputAction}>
                 <input type="hidden" name="taskId" value={task.task_id}/>
                 <input type="hidden" name="requestId" value={input.request_id}/>
-                <textarea name="answer" required placeholder="填写继续当前执行所需的非敏感运行信息…"/>
-                <button className="button" type="submit">保存答复</button>
+                <textarea name="answer" required placeholder={verificationAssistance ? '补充依赖或环境；也可以填写你的手测结果、实际观察和证据…' : '填写继续当前执行所需的非敏感运行信息…'}/>
+                <button className="button" type="submit">{verificationAssistance ? '保存验证协助' : '保存答复'}</button>
               </form>}
-            </article>)}
+            </article>;
+            })}
           </div>
           {waitingRuntimeLanes.map((lane) => {
             const agents = lane.lane === 'analysis' ? ['analyst-agent'] : ['dev-agent', 'test-agent'];
@@ -356,7 +372,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             return pending.length === 0 && <form action={submitRuntimeInputsAction} className="release-block" key={lane.lane}>
               <input type="hidden" name="taskId" value={task.task_id}/>
               <input type="hidden" name="lane" value={lane.lane}/>
-              <button className="button success">提交{lane.lane === 'analysis' ? '交付分析' : '开发验证'}运行信息并交回 {agentLabel(lane.current_agent)}</button>
+              <button className="button success">提交{lane.current_agent === 'test-agent' ? '验证协助' : `${lane.lane === 'analysis' ? '交付分析' : '开发验证'}运行信息`}并交回 {agentLabel(lane.current_agent)}</button>
             </form>;
           })}
         </section>
