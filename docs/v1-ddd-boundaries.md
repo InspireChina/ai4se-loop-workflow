@@ -22,7 +22,7 @@
 | 等待回答 | 需求在原 Agile 状态等待设计决策，`run_state=waiting_for_answers`。 |
 | 运行信息请求 | 当前 Agent 为继续执行所需、无法从现有上下文推导的非敏感信息；不是设计决策或 Approval。 |
 | 等待运行信息 | 需求在原 Agile 状态等待运行信息，`run_state=waiting_for_runtime_input`；回答后恢复原 Agent 和交付单元。 |
-| 系统阻塞 | 自动恢复耗尽或执行环境异常，`run_state=system_blocked`；不伪装成人工决策。 |
+| 系统阻塞 | 自动恢复耗尽或执行环境异常，`run_state=system_blocked`；不伪装成人工决策。解除后，支持 `resume` 的角色恢复原草稿，其他角色由调度器按原业务步骤和原作用域重新派发。 |
 | 代码槽 | 本地单工作区中开发实现写代码时的串行保护。 |
 | Agent Profile | 某个项目中一个流程 Agent 的完整 Current Prompt、至多一个临时 Prompt candidate、带 revision 历史的 Memory 与演化策略；系统模板只负责首次初始化。 |
 | 演化观察 | 从真实 execution 证据提取的可复用候选经验；它不是事实，必须经累计和验证后才能提升。 |

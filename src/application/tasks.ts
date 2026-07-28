@@ -3,6 +3,7 @@ import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { deliveryUnitContractSchema } from '../domain/delivery-unit';
 import { AgentResultContractError, assertDeliverySpecDecisionCoverage, deliverySpecSchema } from '../domain/agent-result';
+import { agentCommandProfile } from '../domain/agent-command-profile';
 import { databaseConnection, paths } from '../infrastructure/database';
 import { isProcessAlive, readRunPid } from '../infrastructure/run-process';
 import { toUtcIsoString } from './event-time';
@@ -1309,6 +1310,7 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
   const resumeStatus = task.resume_status;
   if (!resumeStatus || resumeStatus === 'blocked') throw new Error('系统阻塞缺少可恢复状态');
   if (!task.current_subagent) throw new Error('系统阻塞缺少负责 Agent');
+  const resumesSameDraft = Boolean(agentCommandProfile(task.current_subagent, 'resume'));
 
   const prospective = { ...task, agile_status: resumeStatus, run_state: 'runnable' as const };
   assertState(prospective);
@@ -1330,12 +1332,27 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
   try {
     db.prepare(`
       UPDATE tasks
-      SET agile_status = ?, run_state = 'runnable', resume_status = NULL, resume_pending = 1, blocked_reason = NULL,
+      SET agile_status = ?, run_state = 'runnable', resume_status = NULL, resume_pending = ?, blocked_reason = NULL,
           next_step = ?,
           last_actor = 'system', updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
-    `).run(resumeStatus, `系统阻塞已解除，交回 ${task.current_subagent} 继续处理`, taskId);
-    addEvent(db, taskId, 'system', 'SystemBlockRecovered', `恢复系统阻塞，交回 ${task.current_subagent}。`);
+    `).run(
+      resumeStatus,
+      resumesSameDraft ? 1 : 0,
+      resumesSameDraft
+        ? `系统阻塞已解除，交回 ${task.current_subagent} 继续处理`
+        : `系统阻塞已解除，重新派发 ${task.current_subagent} 负责的当前步骤`,
+      taskId,
+    );
+    addEvent(
+      db,
+      taskId,
+      'system',
+      'SystemBlockRecovered',
+      resumesSameDraft
+        ? `恢复系统阻塞，交回 ${task.current_subagent}。`
+        : `恢复系统阻塞，重新派发 ${task.current_subagent} 负责的当前步骤。`,
+    );
     db.exec('COMMIT');
     await syncTaskFiles(db, taskId, { createClearedBlock: true });
   } catch (error) {

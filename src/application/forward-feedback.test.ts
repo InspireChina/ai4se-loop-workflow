@@ -10,10 +10,11 @@ import {
   createTask,
   getTask,
   pipelineForTask,
+  releaseBlock,
   upsertDocument,
   type DelegationEnvelope,
 } from './tasks';
-import { applyAgentResult, applyNextQueuedAgentResult } from './agent-results';
+import { applyAgentResult, applyNextQueuedAgentResult, blockDelegation } from './agent-results';
 import { beginExecutionAttempt } from './executions';
 import { applyFeedbackSplitResult } from './feedback';
 
@@ -269,6 +270,41 @@ test('行为修订只追加新交付单元，并经过 Analysis、Dev、Test 和
   assert.equal(detail?.documentComments[0].status, 'resolved');
   assert.equal(detail?.feedbackGroups[0].status, 'completed');
   assert.equal(detail?.task.agile_status, 'in review');
+});
+
+test('反馈交付规划解除系统阻塞后重新派发 feedback-split 而不是 resume', async () => {
+  const { taskId, documentId } = await completedRequirement('反馈规划系统阻塞恢复');
+  const commentId = await comment(taskId, documentId, '增加批量归档能力。');
+  const triage = await delegation(taskId, 'feedback-triage');
+  await applyAgentResult(`run-${randomUUID()}`, triage, result({
+    outcome: 'completed',
+    summary: '形成范围新增工作组。',
+    feedback: {
+      mode: 'triage',
+      groups: [{
+        groupKey: 'archive-selection',
+        commentIds: [commentId],
+        workType: 'scope_addition',
+        title: '增加批量归档',
+        affectedDeliveryUnits: [1],
+        reason: '新增一个可独立验收的业务能力。',
+        acceptance: ['选中记录可以被批量归档'],
+      }],
+    },
+  }));
+  const original = await delegation(taskId, 'feedback-split');
+
+  await blockDelegation(
+    original,
+    '任务级 Agent 执行异常：story-splitter-agent/resume 没有配置渐进式命令协议',
+  );
+  assert.equal((await getTask(taskId))?.task.agile_status, 'blocked');
+
+  await releaseBlock(taskId);
+  const recovered = await delegation(taskId, 'feedback-split');
+  assert.equal(recovered.agent, 'story-splitter-agent');
+  assert.equal(recovered.feedbackGroupId, original.feedbackGroupId);
+  assert.equal((await getTask(taskId))?.task.resume_pending, 0);
 });
 
 test('新版本会重新应用被旧版范围守卫误拒绝的反馈交付规划结果', async () => {

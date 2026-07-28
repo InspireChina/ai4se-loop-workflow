@@ -506,6 +506,66 @@ test('removes legacy task-level resume ownership from lane agents', () => {
   db.close();
 });
 
+test('recovers system blocks caused by dispatching resume to non-resumable agents', () => {
+  const db = new Database(':memory:');
+  db.exec(`
+    CREATE TABLE tasks (
+      task_id TEXT PRIMARY KEY,
+      agile_status TEXT NOT NULL,
+      run_state TEXT NOT NULL,
+      current_subagent TEXT,
+      blocked_reason TEXT,
+      resume_status TEXT,
+      resume_pending INTEGER NOT NULL DEFAULT 0,
+      next_step TEXT,
+      last_actor TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE TABLE task_events (
+      event_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES tasks(task_id),
+      actor TEXT NOT NULL,
+      event_type TEXT NOT NULL,
+      summary TEXT NOT NULL
+    );
+    INSERT INTO tasks(
+      task_id, agile_status, run_state, current_subagent,
+      blocked_reason, resume_status, resume_pending
+    ) VALUES(
+      'REQ-feedback-plan', 'blocked', 'system_blocked', 'story-splitter-agent',
+      '任务级 Agent 执行异常：story-splitter-agent/resume 没有配置渐进式命令协议',
+      'in feedback', 0
+    );
+  `);
+
+  db.exec(readFileSync(resolve(
+    process.cwd(),
+    'migrations/063_recover_non_resumable_agent_blocks.sql',
+  ), 'utf8'));
+
+  const task = db.prepare(`
+    SELECT agile_status, run_state, current_subagent, blocked_reason,
+           resume_status, resume_pending, next_step
+    FROM tasks WHERE task_id = 'REQ-feedback-plan'
+  `).get();
+  const event = db.prepare(`
+    SELECT event_type FROM task_events WHERE task_id = 'REQ-feedback-plan'
+  `).get();
+  assert.deepEqual(task, {
+    agile_status: 'in feedback',
+    run_state: 'runnable',
+    current_subagent: 'story-splitter-agent',
+    blocked_reason: null,
+    resume_status: null,
+    resume_pending: 0,
+    next_step: '已修复错误的 resume 派发，等待重新派发当前步骤',
+  });
+  assert.deepEqual(event, {
+    event_type: 'NonResumableAgentBlockRecovered',
+  });
+  db.close();
+});
+
 test('migrates role drafts and replaces the obsolete verification data model', () => {
   const db = new Database(':memory:');
   db.exec('PRAGMA foreign_keys = ON');
