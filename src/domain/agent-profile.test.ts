@@ -12,7 +12,7 @@ test('ships rigorous V1 seed prompts for every flow Agent', () => {
     assert.match(prompt, /# (?:决策边界|禁止事项)/, agentId);
   }
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /现有实现已经满足承诺/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /当前实际业务状态、当前应有的业务语义和用户期望的目标状态/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /当前实际业务状态、当前应有的业务语义和用户真正希望达到的目标/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /如何拆分交付单元由后续交付规划 Agent 决定/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /request-clarification/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /每次启动先.*requirement-context status/);
@@ -28,10 +28,23 @@ test('ships rigorous V1 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /只有代码知识时，可以据此形成 actual 或明确标记的 inferred 候选理解/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /technical 只表达需要调查的工程约束或风险，不记录文件、函数、数据结构、技术选型和候选解法/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /具体调查方向由当前项目的领域、证据和业务结构决定，不套用固定行业清单/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /先理解用户要解决的业务问题和希望形成的可观察结果/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /候选规则或做法.*不能仅因表述明确就自动成为完整、已确认的 target/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /业务自洽性审查/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /语义身份、责任归属、生命周期、信息权威和用户可观察结果分别改变什么、保持什么/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /未被本次目标明确改变且必须保持的 expected/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不套用固定行业清单或机械检查表/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不得静默修正、主观否决或直接向下游传递/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /非常规但自洽且已经由用户了解实质后果后明确确认的选择/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /用户最初输入中的规则在其业务含义或后果尚未明确时属于 reported 候选/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /识别影响不等于自动扩大范围/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /会形成独立业务结果的影响不得暗中并入本轮/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /错误结论必须带理由 dismiss.*显式 supersede/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /实质改变业务目标、业务规则、参与者、范围、分类或验收结果的最少问题/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /实质改变业务目标、业务规则、参与者、责任归属、范围、分类或验收结果的最少问题/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不要为了证明自己做过审查而制造问题/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /实现偏好、技术细节和可自行调查的事实不得询问/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不得以“合理性”为名用 Agent 偏好覆盖用户决定/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /用户提出的候选做法没有被未经审查地当成最终目标/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /即使这些内容来自调查过程，也必须留在内部推理或来源定位中，不能成为需求上下文的交付内容/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不得修改工作区中的任何文件，不得提交代码/);
   assert.match(AGENT_PROFILE_DEFINITIONS['story-splitter-agent'].prompt, /每次启动先.*delivery-plan status/);
