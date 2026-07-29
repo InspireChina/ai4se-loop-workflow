@@ -211,6 +211,7 @@ test('development agent proves an existing implementation without declaring a mo
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+  const { databaseConnection } = await import('../infrastructure/database');
   const { getTask, pipelineForTask } = await import('./tasks');
   const { taskId, delegation } = await developmentDelegation('精简后的开发走查');
   const started = await begin(delegation, `${taskId}-existing`);
@@ -233,6 +234,23 @@ test('development agent proves an existing implementation without declaring a mo
   assert.match(initial, /仓库观察（仅供调查，不参与完成校验）/);
   assert.match(initial, /unit-acceptance.*尚未证明/);
   assert.match(initial, /AC-status.*尚未证明/);
+  await assert.rejects(
+    command(started.executionId, started.token!, [
+      'implementation', 'criterion', 'satisfy',
+      '--key', 'ac-description-label',
+      '--evidence', '自由文本中的标签不能成为规格 key。',
+    ]),
+    /验收标准 key ac-description-label 不属于当前冻结交付规格。允许使用的 key：unit-acceptance, AC-status/,
+  );
+  const db = await databaseConnection();
+  assert.equal(
+    (db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM development_criteria
+      WHERE criterion_key = 'ac-description-label'
+    `).get() as { count: number }).count,
+    0,
+  );
   await assert.rejects(
     command(started.executionId, started.token!, [
       'implementation', 'handoff', 'set', '--text', '该命令已经删除',

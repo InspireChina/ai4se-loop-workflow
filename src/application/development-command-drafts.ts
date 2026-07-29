@@ -645,6 +645,14 @@ export function runDevelopmentCommand(input: {
 
   if (command === 'implementation criterion satisfy') {
     const key = bounded(required(flags, 'key'), '验收标准 key', 120);
+    const current = state(db, draft, execution);
+    const allowedKeys = current.expectedCriteria.map((criterion) => criterion.id);
+    if (!allowedKeys.includes(key)) {
+      throw new Error(
+        `验收标准 key ${key} 不属于当前冻结交付规格。`
+        + `允许使用的 key：${allowedKeys.length ? allowedKeys.join(', ') : '当前没有可用 key'}`,
+      );
+    }
     const evidence = bounded(required(flags, 'evidence'), '实现证据');
     const ordinal = nextOrdinal(db, 'development_criteria', draft.draft_id);
     db.prepare(`
