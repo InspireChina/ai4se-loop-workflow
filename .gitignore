@@ -10,6 +10,7 @@ node_modules/
 .project/_loop/runs/
 data/
 .ai/runs/
+tmp/
 __pycache__/
 *.pyc
 
