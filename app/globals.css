@@ -328,6 +328,13 @@ main{padding:28px 20px}
 .task-title-row h1{margin-bottom:0}
 .task-title-row>.badge{margin-top:6px;flex:none}
 .chips a{color:var(--blue);overflow-wrap:anywhere}
+.task-original-input{margin-bottom:14px;padding:18px 22px}
+.task-original-input-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;padding-bottom:13px;border-bottom:1px solid var(--line)}
+.task-original-input-head .eyebrow{margin:0 0 4px}
+.task-original-input-head h2{display:flex;align-items:center;gap:7px;margin:0;font-size:17px}
+.task-original-input-head small{margin:3px 0 0;text-align:right}
+.task-original-input-content{margin:14px 0 0;color:#354056;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}
+.task-original-input-empty{margin:14px 0 0;color:var(--muted);font-size:13px}
 .task-steps{margin-bottom:14px;padding:16px 22px 14px;overflow:hidden}
 .task-steps-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:17px;color:#354056}
 .task-steps-head>strong{font-size:13px}
@@ -431,6 +438,8 @@ main{padding:28px 20px}
 @media(max-width:1100px){.task-summary,.task-action-column,.two-card-grid,.inline-create,.lane-grid{grid-template-columns:1fr}
 .executor-options{grid-template-columns:1fr}
 .workspace-switch{grid-template-columns:1fr}
+.task-original-input-head{display:block}
+.task-original-input-head small{display:block;margin-top:7px;text-align:left}
 .task-steps{padding:14px}
 .task-steps-head{margin-bottom:14px}
 .step-copy strong{font-size:11px;white-space:normal}

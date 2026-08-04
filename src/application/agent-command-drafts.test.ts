@@ -164,14 +164,6 @@ test('requires status first, accepts progressive edits, and submits a determinis
   ]);
   await command(active.executionId, active.token!, [
     'requirement-context', 'assertion', 'upsert',
-    '--key', 'current-business-rule',
-    '--perspective', 'expected',
-    '--statement', '现行业务规则只承诺全量导出，不承诺筛选继承',
-    '--evidence', 'reported',
-    '--source', '当前需求描述与既有产品行为',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'upsert',
     '--key', 'filtered-export-target',
     '--perspective', 'target',
     '--statement', '下载文件与当前筛选列表一致',
@@ -235,13 +227,23 @@ test('requires status first, accepts progressive edits, and submits a determinis
   const result = await readAgentCommandSubmission(active.executionId);
   assert.equal(result?.classification, 'feature');
   assert.equal(result?.route, 'plan');
-  assert.match(result?.artifact?.content || '', /## 需求类型\s+feature/);
-  assert.match(result?.artifact?.content || '', /## AS-IS Actual/);
+  assert.match(result?.artifact?.content || '', /状态：Aligned/);
+  assert.match(result?.artifact?.content || '', /版本：v1/);
+  assert.match(result?.artifact?.content || '', /需求类型：feature/);
+  assert.match(result?.artifact?.content || '', /## BUSINESS INTENT/);
+  assert.match(result?.artifact?.content || '', /## AS-IS\s+### Actual/);
   assert.match(result?.artifact?.content || '', /当前导出不继承筛选结果/);
-  assert.match(result?.artifact?.content || '', /## AS-IS Expected/);
+  assert.match(result?.artifact?.content || '', /### Expected/);
+  assert.match(result?.artifact?.content || '', /未识别到独立于本次 TO-BE 的既有 Expected/);
   assert.match(result?.artifact?.content || '', /## TO-BE/);
-  assert.match(result?.artifact?.content || '', /必须保持不变/);
+  assert.match(result?.artifact?.content || '', /## CHANGE/);
+  assert.match(result?.artifact?.content || '', /## IMPACTS/);
+  assert.match(result?.artifact?.content || '', /### Preserve/);
+  assert.match(result?.artifact?.content || '', /## SCOPE/);
   assert.match(result?.artifact?.content || '', /导出当前筛选条件命中的数据/);
+  assert.match(result?.artifact?.content || '', /## CONSTRAINTS/);
+  assert.match(result?.artifact?.content || '', /## ACCEPTANCE/);
+  assert.doesNotMatch(result?.artifact?.content || '', /## OPEN QUESTIONS/);
   assert.doesNotMatch(result?.artifact?.content || '', /证据状态：|来源：|依据：|decision：/);
   assert.doesNotMatch(result?.artifact?.content || '', /仓库列表导出入口与筛选查询实现|filtered-export-target/);
 
@@ -281,14 +283,6 @@ test('routes an evidence-backed Actual versus Expected deviation to reproduction
   ]);
   await command(active.executionId, active.token!, [
     'requirement-context', 'assertion', 'upsert',
-    '--key', 'expected-filtered-export',
-    '--perspective', 'expected',
-    '--statement', '现行业务规则要求导出继承当前筛选条件',
-    '--evidence', 'decided',
-    '--source', '用户明确描述的既有期望',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'upsert',
     '--key', 'target-restore-rule',
     '--perspective', 'target',
     '--statement', '导出结果恢复为当前筛选命中的记录',
@@ -315,6 +309,18 @@ test('routes an evidence-backed Actual versus Expected deviation to reproduction
   ]);
   await command(active.executionId, active.token!, [
     'requirement-context', 'classification', 'set', 'bug',
+  ]);
+  await assert.rejects(
+    command(active.executionId, active.token!, ['requirement-context', 'complete']),
+    /缺少可靠的 AS-IS Expected 陈述/,
+  );
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'assertion', 'upsert',
+    '--key', 'expected-filtered-export',
+    '--perspective', 'expected',
+    '--statement', '既有需求规格要求导出继承当前筛选条件',
+    '--evidence', 'decided',
+    '--source', '变更前已经确认的需求规格',
   ]);
   await command(active.executionId, active.token!, ['requirement-context', 'complete']);
   const result = await readAgentCommandSubmission(active.executionId);
@@ -414,7 +420,10 @@ test('inherits a persisted clarification draft after resume and forces status ag
   assert.equal(questionResult?.classification, undefined);
   assert.equal(questionResult?.route, undefined);
   assert.equal(questionResult?.questions[0]?.decisionKey, 'export-audience');
-  assert.match(questionResult?.artifact?.content || '', /## 需求类型\s+待确认/);
+  assert.match(questionResult?.artifact?.content || '', /状态：Needs Clarification/);
+  assert.match(questionResult?.artifact?.content || '', /需求类型：待确认/);
+  assert.match(questionResult?.artifact?.content || '', /## OPEN QUESTIONS/);
+  assert.match(questionResult?.artifact?.content || '', /决策影响：/);
   await applyAgentResult('RUN-command-question', first.delegation, questionResult!, {
     executionId: first.executionId,
   });
@@ -501,8 +510,11 @@ test('inherits a persisted clarification draft after resume and forces status ag
 
   const completedResult = await readAgentCommandSubmission(resumed.executionId);
   assert.equal(completedResult?.outcome, 'completed');
-  assert.match(completedResult?.artifact?.content || '', /## 需求类型\s+feature/);
+  assert.match(completedResult?.artifact?.content || '', /状态：Aligned/);
+  assert.match(completedResult?.artifact?.content || '', /需求类型：feature/);
+  assert.match(completedResult?.artifact?.content || '', /## DECISIONS/);
   assert.match(completedResult?.artifact?.content || '', /本轮只面向管理员/);
+  assert.doesNotMatch(completedResult?.artifact?.content || '', /## OPEN QUESTIONS/);
   await applyAgentResult('RUN-command-resume', resumed.delegation, completedResult!, {
     executionId: resumed.executionId,
   });
@@ -598,6 +610,9 @@ test('exposes only the new business-context protocol and rejects every legacy co
   assert.match(help, /requirement-context assertion upsert/);
   assert.match(help, /requirement-context impact upsert/);
   assert.match(help, /正常完成：status → intent\/assertions\/change\/impacts\/acceptance\/classification/);
+  assert.match(help, /assertion target → TO-BE/);
+  assert.match(help, /impact change\/preserve\/technical → IMPACTS \/ Change、Preserve、Analysis Obligations/);
+  assert.match(help, /已回答 question → DECISIONS.*未回答 question.*OPEN QUESTIONS/s);
   assert.match(help, /help assertion/);
   assert.match(help, /help question/);
   assert.doesNotMatch(help, /requirement-context goal set/);
@@ -605,14 +620,18 @@ test('exposes only the new business-context protocol and rejects every legacy co
   assert.doesNotMatch(help, /requirement-context fact /);
 
   const assertionHelp = await command(active.executionId, active.token!, ['help', 'assertion']);
-  assert.match(assertionHelp, /Actual、Expected、Target 各至少需要一条/);
+  assert.match(assertionHelp, /Actual 和 Target 各至少需要一条.*Bug 还必须具备可靠 Expected/);
+  assert.match(assertionHelp, /既有需求规格.*代码或运行证据显示不同的 Actual.*必须同时记录 Expected 与 Actual/s);
+  assert.match(assertionHelp, /本次新增或改变后的结果.*属于 Target/s);
+  assert.match(assertionHelp, /不写测试命令、测试步骤、技术验证形式或实现细节/);
   assert.match(assertionHelp, /observed\s+通过运行/);
   assert.match(assertionHelp, /dismiss.*supersede/s);
   assert.match(assertionHelp, /使用 supersede 前.*先创建同类型、不同 key 的 active 新结论/s);
 
   const impactHelp = await command(active.executionId, active.token!, ['help', 'impact']);
   assert.match(impactHelp, /needs_decision\s+是否改变属于新的业务选择/);
-  assert.match(impactHelp, /technical\s+已识别的技术后果/);
+  assert.match(impactHelp, /technical\s+Analysis Obligation/);
+  assert.match(impactHelp, /只定义 Analysis 必须回答什么/);
 
   const questionHelp = await command(active.executionId, active.token!, ['help', 'question']);
   assert.match(questionHelp, /至少两次 option-add/);
@@ -622,9 +641,11 @@ test('exposes only the new business-context protocol and rejects every legacy co
   const scopeHelp = await command(active.executionId, active.token!, ['help', 'scope']);
   assert.match(scopeHelp, /bug\s+Actual 偏离已有明确 Expected/);
   assert.match(scopeHelp, /约束与范围.*可选边界/s);
+  assert.match(scopeHelp, /约束不用于提前记录技术设计/);
 
   const finishHelp = await command(active.executionId, active.token!, ['help', 'finish']);
-  assert.match(finishHelp, /可靠的 Actual\/Expected\/Target/);
+  assert.match(finishHelp, /可靠的 Actual 和 Target/);
+  assert.match(finishHelp, /Bug 额外必须具备可靠 Expected/);
   assert.match(finishHelp, /requirement-context request-clarification/);
   assert.match(finishHelp, /澄清最低必填/);
   assert.match(finishHelp, /只有 complete 执行包含分类在内的最终完成校验/);

@@ -60,6 +60,7 @@ type DraftRow = {
   status_viewed_execution_id: string | null;
   terminal_execution_id: string | null;
   terminal_action: string | null;
+  updated_at: string;
 };
 
 type ContextDraft = {
@@ -1013,7 +1014,12 @@ function validationErrors(
       errors.push('请求澄清前至少需要记录一条带来源的业务语义陈述');
     }
   } else {
-    for (const perspective of ['actual', 'expected', 'target'] as const) {
+    const requiredPerspectives = [
+      'actual',
+      ...(state.context.classification === 'bug' ? ['expected' as const] : []),
+      'target',
+    ] as const;
+    for (const perspective of requiredPerspectives) {
       if (!reliableAssertions.some((item) => item.perspective === perspective)) {
         const label = perspective === 'actual'
           ? 'AS-IS Actual'
@@ -1170,7 +1176,11 @@ function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
   return lines.join('\n');
 }
 
-function renderArtifact(state: ReturnType<typeof draftState>) {
+function renderArtifact(
+  draft: DraftRow,
+  state: ReturnType<typeof draftState>,
+  action: 'complete' | 'request-clarification',
+) {
   const included = state.scope.filter((item) => item.direction === 'included');
   const excluded = state.scope.filter((item) => item.direction === 'excluded');
   const assertionSection = (
@@ -1183,59 +1193,71 @@ function renderArtifact(state: ReturnType<typeof draftState>) {
       ? assertions.map((item) => `- ${item.statement}`)
       : [`- ${fallback}`];
   };
-  const impactSection = (disposition: ContextImpact['disposition'], fallback: string) => {
-    const impacts = state.impacts.filter((item) =>
-      item.disposition === disposition && item.lifecycle_status === 'active');
+  const activeImpacts = state.impacts.filter((item) => item.lifecycle_status === 'active');
+  const impactSection = (
+    heading: string,
+    disposition: ContextImpact['disposition'],
+  ) => {
+    const impacts = activeImpacts.filter((item) => item.disposition === disposition);
     return impacts.length
-      ? impacts.map((item) => `- ${item.statement}`)
-      : [`- ${fallback}`];
+      ? ['', `### ${heading}`, '', ...impacts.map((item) => `- ${item.statement}`)]
+      : [];
   };
   const lines = [
     '# 业务变化上下文',
     '',
-    '## 需求类型',
+    `状态：${action === 'complete' ? 'Aligned' : 'Needs Clarification'}`,
+    `版本：v${draft.draft_version}`,
+    `需求类型：${state.context.classification || '待确认'}`,
+    `更新时间：${draft.updated_at}`,
     '',
-    state.context.classification || '待确认',
-    '',
-    '## 业务意图',
+    '## BUSINESS INTENT',
     '',
     state.context.intent || '',
     '',
-    '## AS-IS Actual',
+    '## AS-IS',
+    '',
+    '### Actual',
     '',
     ...assertionSection('actual', '尚未形成可靠结论'),
     '',
-    '## AS-IS Expected',
+    '### Expected',
     '',
-    ...assertionSection('expected', '尚未形成可靠结论'),
+    ...assertionSection(
+      'expected',
+      action === 'complete' && state.context.classification !== 'bug'
+        ? '本需求未识别到独立于本次 TO-BE 的既有 Expected；变化按 Actual → TO-BE 表达'
+        : '尚未形成可靠结论',
+    ),
     '',
     '## TO-BE',
     '',
     ...assertionSection('target', '尚未形成可靠结论'),
     '',
-    '## 业务变化',
+    '## CHANGE',
     '',
     state.context.change_summary || '尚未形成完整变化摘要',
     '',
-    '## 业务影响',
+    '## IMPACTS',
+    ...impactSection('Change', 'change'),
+    ...impactSection('Preserve', 'preserve'),
+    ...impactSection('Analysis Obligations', 'technical'),
     '',
-    '### 必须同步改变',
+    '## SCOPE',
     '',
-    ...impactSection('change', '暂无已确认项'),
+    '### In Scope',
     '',
-    '### 必须保持不变',
+    ...(included.length ? included.map((item) => `- ${item.content}`) : ['- 未单独声明']),
     '',
-    ...impactSection('preserve', '暂无已确认项'),
+    '### Out of Scope',
     '',
-    '### 待业务决策',
+    ...(excluded.length ? excluded.map((item) => `- ${item.content}`) : ['- 未单独声明']),
     '',
-    ...impactSection('needs_decision', '暂无待决项'),
+    '## CONSTRAINTS',
     '',
-    '### 交给后续技术分析',
+    ...(state.constraints.length ? state.constraints.map((item) => `- ${item.content}`) : ['- 无已确认的额外业务约束']),
     '',
-    ...impactSection('technical', '暂无已识别项'),
-    '',
-    '## 需求级验收语义',
+    '## ACCEPTANCE',
     '',
     ...(
       state.acceptance.filter((item) => item.lifecycle_status === 'active').length
@@ -1244,35 +1266,43 @@ function renderArtifact(state: ReturnType<typeof draftState>) {
           .map((item) => `- ${item.content}`)
         : ['- 尚未明确']
     ),
-    '',
-    '## 约束',
-    '',
-    ...(state.constraints.length ? state.constraints.map((item) => `- ${item.content}`) : ['- 暂无明确约束']),
-    '',
-    '## 范围边界',
-    '',
-    '### 包含',
-    '',
-    ...(included.length ? included.map((item) => `- ${item.content}`) : ['- 尚未明确']),
-    '',
-    '### 不包含',
-    '',
-    ...(excluded.length ? excluded.map((item) => `- ${item.content}`) : ['- 尚未明确']),
   ];
   const answered = state.questions.filter((question) => question.answer);
   if (answered.length) {
-    lines.push('', '## 用户确认决策', '');
-    for (const question of answered) lines.push(`- **${question.title}**：${question.answer}`);
+    lines.push('', '## DECISIONS', '');
+    for (const question of answered) {
+      const outcomes = state.assertions
+        .filter((item) =>
+          item.lifecycle_status === 'active'
+          && item.perspective === 'target'
+          && item.decision_key === question.decision_key)
+        .map((item) => item.statement);
+      const impacts = activeImpacts
+        .filter((item) => item.decision_key === question.decision_key)
+        .map((item) => item.statement);
+      lines.push(`### ${question.title}`, '', `- 决定：${question.answer}`);
+      if (outcomes.length) lines.push(`- 形成的业务结果：${outcomes.join('；')}`);
+      if (impacts.length) lines.push(`- 业务影响：${impacts.join('；')}`);
+      lines.push('');
+    }
   }
   const unanswered = state.questions.filter((question) => !question.answer);
-  if (unanswered.length) {
-    lines.push('', '## 待确认边界', '');
-    for (const question of unanswered) lines.push(`- **${question.title}**：${question.question}`);
+  if (action === 'request-clarification' && unanswered.length) {
+    lines.push('', '## OPEN QUESTIONS', '');
+    for (const question of unanswered) {
+      const pendingImpacts = activeImpacts
+        .filter((item) => item.decision_key === question.decision_key)
+        .map((item) => item.statement);
+      lines.push(`### ${question.title}`, '', `- 问题：${question.question}`, `- 决策影响：${question.impact}`);
+      if (pendingImpacts.length) lines.push(`- 待收敛影响：${pendingImpacts.join('；')}`);
+      lines.push('');
+    }
   }
-  return lines.join('\n');
+  return lines.join('\n').trimEnd();
 }
 
 function buildResult(
+  draft: DraftRow,
   state: ReturnType<typeof draftState>,
   action: 'complete' | 'request-clarification',
 ) {
@@ -1301,7 +1331,7 @@ function buildResult(
       : `业务变化上下文存在 ${questions.length} 个需要用户确认的边界`,
     artifact: {
       title: '业务变化上下文',
-      content: renderArtifact(state),
+      content: renderArtifact(draft, state, action),
     },
     questions,
     ...(complete ? {
@@ -1323,7 +1353,7 @@ function terminalSubmit(
   if (errors.length) {
     throw new Error(`草稿不能执行 ${action}：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
   }
-  const result = buildResult(state, action);
+  const result = buildResult(draft, state, action);
   const status = action === 'complete' ? 'submitted' : 'waiting_for_answers';
   db.transaction(() => {
     db.prepare(`
@@ -1676,7 +1706,7 @@ function submitDeliveryPlan(
 
 const requirementContextCommandIndex = [
   '  requirement-context intent set --text <业务意图>',
-  '  requirement-context change set --text <Actual、Expected 与 TO-BE 的变化摘要>',
+  '  requirement-context change set --text <Actual 与 TO-BE，以及适用的 Expected 的变化摘要>',
   '  requirement-context assertion upsert --key <key> --perspective <actual|expected|target> --statement <陈述> --evidence <observed|reported|inferred|decided|conflicted> --source <来源> [--decision <问题key>]',
   '  requirement-context assertion dismiss --key <key> --reason <理由>',
   '  requirement-context assertion supersede --key <旧key> --by <新key> --reason <理由>',
@@ -1701,16 +1731,20 @@ const requirementContextCommandIndex = [
 function requirementContextHelp(terminalActions: string[], topic?: string | null) {
   if (topic === 'assertion') {
     return [
-      '业务语义陈述用于区分当前实际发生的 Actual、当前本来要求的 Expected 和本次完成后的 Target。',
+      '业务语义陈述用于区分当前实际发生的 Actual、变更前已有依据要求成立的 Expected 和本次完成后的 Target。',
       '',
       '  requirement-context intent set --text <业务意图>',
-      '  requirement-context change set --text <Actual、Expected 与 TO-BE 的变化摘要>',
+      '  requirement-context change set --text <Actual 与 TO-BE，以及适用的 Expected 的变化摘要>',
       '  requirement-context assertion upsert --key <稳定key> --perspective <actual|expected|target> --statement <陈述> --evidence <observed|reported|inferred|decided|conflicted> --source <来源> [--decision <问题key>]',
       '',
       'perspective：',
       '  actual    当前真实发生或存在的业务行为。',
-      '  expected  当前业务原本应满足的语义，用于区分 Bug 与主动变化。',
+      '  expected  变更前已有需求规格、已确认业务规则或其他权威依据要求成立的规范基线。',
       '  target    本次交付完成后希望成立的业务语义。',
+      '',
+      'Expected 判定：',
+      '  当既有需求规格或权威业务输入描述的是变更前本应成立的行为，而代码或运行证据显示不同的 Actual，必须同时记录 Expected 与 Actual。',
+      '  当输入描述的是本次新增或改变后的结果，它属于 Target；不能仅因它与当前代码不同就写成 Expected。',
       '',
       'evidence：',
       '  observed    通过运行、数据或可重复检查直接观察。',
@@ -1719,7 +1753,7 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
       '  decided     用户或权威上游已经明确决定。',
       '  conflicted  证据相互冲突，必须关联待回答的 decision key 后请求澄清。',
       '',
-      '完成需求上下文时，Actual、Expected、Target 各至少需要一条非 inferred、非 conflicted 的可靠陈述。',
+      '完成需求上下文时，Actual 和 Target 各至少需要一条非 inferred、非 conflicted 的可靠陈述；Bug 还必须具备可靠 Expected。其他类型仅在确有既有规范基线时记录 Expected，不得为了通过校验制造内容。',
       '',
       '修订：',
       '  requirement-context assertion dismiss --key <key> --reason <理由>',
@@ -1730,6 +1764,7 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
       '  requirement-context acceptance upsert --key <稳定key> --text <验收语义> --source <来源>',
       '  requirement-context acceptance dismiss --key <key> --reason <理由>',
       '  requirement-context acceptance supersede --key <旧key> --by <新key> --reason <理由>',
+      '  只记录需求级、业务可观察的验收结果，不写测试命令、测试步骤、技术验证形式或实现细节。',
       '  正常完成时至少需要一条 active 验收语义；supersede 同样要求先创建同类型、不同 key 的 active 新条目。',
     ];
   }
@@ -1743,7 +1778,7 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
       '  change          为使目标业务语义成立，本轮必须同步改变。',
       '  preserve        与本次变化相关，但必须维持原有业务行为。',
       '  needs_decision  是否改变属于新的业务选择，必须关联待回答的 decision key。',
-      '  technical       已识别的技术后果，不在需求梳理阶段决定，由后续交付分析承接。',
+      '  technical       Analysis Obligation：后续交付分析必须查明或收敛的工程事实、约束或风险。只定义 Analysis 必须回答什么，不记录技术选型、候选方案、文件或实现步骤。',
       '',
       '  requirement-context impact dismiss --key <key> --reason <理由>',
       '  requirement-context impact supersede --key <旧key> --by <新key> --reason <理由>',
@@ -1774,8 +1809,9 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
       '约束与范围是按当前需求确有必要时才填写的可选边界，不应为了表单完整制造条目。',
       '',
       '约束：',
-      '  requirement-context constraint add --key <稳定key> --text <必须遵守的业务或交付约束>',
+      '  requirement-context constraint add --key <稳定key> --text <已经确认、后续不得自行改写的业务或交付约束>',
       '  requirement-context constraint remove --key <key>',
+      '  约束不用于提前记录技术设计、候选解法或仍应由 Analysis 判断的工程选择。',
       '',
       '范围：',
       '  requirement-context scope include --key <稳定key> --text <明确属于本轮的业务范围>',
@@ -1798,9 +1834,10 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
       '  requirement-context validate',
       '',
       '正常完成路径：',
-      '  status → intent → Actual/Expected/Target assertions → change → impacts → acceptance → classification → validate → complete',
+      '  status → intent → Actual/Target 与适用的 Expected assertions → change → impacts → acceptance → classification → validate → complete',
       `  ${terminalActions.find((action) => action.endsWith(' complete')) || 'requirement-context complete'}`,
-      '  必填：业务意图、可靠的 Actual/Expected/Target、变化摘要、至少一条有效影响、至少一条需求级验收语义和需求分类。',
+      '  必填：业务意图、可靠的 Actual 和 Target、变化摘要、至少一条有效影响、至少一条需求级验收语义和需求分类；Bug 额外必须具备可靠 Expected。',
+      '  若存在变更前的权威需求规格或业务规则，即使不是 Bug，也必须记录适用的 Expected；不得把本次新增目标误写成 Expected。',
       '  可选：约束、显式范围和问题；只有业务上真实存在时才创建。',
       '',
       '澄清路径：',
@@ -1820,8 +1857,17 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
     throw new Error(`需求上下文 help 不支持主题：${topic}。可用主题：context、assertion、impact、question、scope、finish`);
   }
   return [
-    '完成需求上下文必须建立可靠的 Actual、Expected、Target，说明业务变化及影响，并形成需求级验收语义和分类。',
+    '完成需求上下文必须建立可靠的 Actual 和 Target、适用时的 Expected，说明业务变化及影响，并形成需求级验收语义和分类。Bug 必须具备 Expected。',
     '约束、显式范围和问题是可选项；只有真实存在时才创建。',
+    '',
+    '模板映射：',
+    '  intent → BUSINESS INTENT',
+    '  assertion actual/expected → AS-IS / Actual、Expected',
+    '  assertion target → TO-BE',
+    '  change → CHANGE',
+    '  impact change/preserve/technical → IMPACTS / Change、Preserve、Analysis Obligations',
+    '  scope、constraint、acceptance → SCOPE、CONSTRAINTS、ACCEPTANCE',
+    '  已回答 question → DECISIONS；未回答 question 只在澄清态进入 OPEN QUESTIONS',
     '',
     '标准路径：',
     '  正常完成：status → intent/assertions/change/impacts/acceptance/classification → validate → complete',

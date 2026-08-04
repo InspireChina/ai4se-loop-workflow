@@ -84,13 +84,13 @@ export function TaskContextChat({
         <h2><Bot size={16}/>上下文对话</h2>
         <small>当前需求唯一会话{executor ? ` · ${executor}` : ''}</small>
       </div>
-      <span className="read-only-chip"><WandSparkles size={13}/>向前追加</span>
+      <span className="read-only-chip"><WandSparkles size={13}/>轻改直达 · 业务变更追加</span>
     </div>
     <div className="context-chat-messages" aria-live="polite">
       {messages.length === 0 && <div className="context-chat-empty">
         <Bot size={22}/>
         <strong>查询上下文，或提出新的修改</strong>
-        <p>Chat 不直接修改代码。需要实施的变化会进入与文档评论相同的 Feedback 闭环，并可按实际边界追加任意多个交付单元，再重新经过分析、开发和验证。</p>
+        <p>不影响业务验收的局部 UI、排版和措辞调整可在安全窗口直接修改并验证；业务行为、范围或验收变化仍进入 Feedback 闭环。</p>
       </div>}
       {messages.map((message) => <article className={`context-chat-message ${message.role}`} key={message.messageId}>
         <small>{message.role === 'user' ? '你' : '上下文 Agent'}</small>
@@ -98,7 +98,7 @@ export function TaskContextChat({
           ? <div className="markdown-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
           : <p>{message.content}</p>}
       </article>)}
-      {busy && <div className="context-chat-thinking"><LoaderCircle size={14}/>Agent 正在读取最新上下文并处理…</div>}
+      {busy && <div className="context-chat-thinking"><LoaderCircle size={14}/>Agent 正在读取最新上下文并判断处理路径…</div>}
       <div ref={endRef}/>
     </div>
     {error && <p className="context-chat-error">{error}</p>}
@@ -114,13 +114,13 @@ export function TaskContextChat({
         }}
         disabled={busy}
         maxLength={20_000}
-        placeholder="例如：这个按钮文案需要更清楚，请作为后续修改处理"
+        placeholder="例如：把这个按钮文案改得更清楚"
         aria-label="向上下文 Agent 提问"
       />
       <button className="button" type="submit" disabled={busy || !draft.trim()} aria-label="发送">
         <Send size={15}/>
       </button>
     </form>
-    <small className="context-chat-note">Enter 发送 · Shift + Enter 换行 · 修改请求只向前追加，不改写既有交付事实</small>
+    <small className="context-chat-note">Enter 发送 · Shift + Enter 换行 · 轻微调整直接完成，业务变化向前追加</small>
   </section>;
 }

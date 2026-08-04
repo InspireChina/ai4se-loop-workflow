@@ -26,7 +26,10 @@ test('ships rigorous V1 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /代码是获取知识的手段，不是本阶段的表达语言/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /代码、测试和运行结果通常只能证明当前实现或当前可观察行为，不能单独证明业务本来应该如此/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /只有代码知识时，可以据此形成 actual 或明确标记的 inferred 候选理解/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /technical 只表达需要调查的工程约束或风险，不记录文件、函数、数据结构、技术选型和候选解法/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /需求规格.*变更前本应成立的行为.*代码或运行证据呈现不同的 Actual.*必须同时记录两者/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /输入描述的是本次新增或改变后的结果.*属于 Target/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /technical.*作为 Analysis Obligations/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /technical 只定义 Analysis 必须回答什么/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /具体调查方向由当前项目的领域、证据和业务结构决定，不套用固定行业清单/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /先理解用户要解决的业务问题和希望形成的可观察结果/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /候选规则或做法.*不能仅因表述明确就自动成为完整、已确认的 target/);

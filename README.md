@@ -73,7 +73,7 @@ LoopWork 只在以下情况请求人介入：
 - 结构化 Agent Result、Test Evidence 和 Trace。
 - execution attempt、Receipt、中断恢复、重试和 rewind。
 - Feedback Agent 的批次分组、前向追加工作和独立处理验证。
-- 每个需求一个持久化 Chat 会话；Agent 重新读取交付文档、活动和代码，也可在安全窗口直接完成不改变需求语义的 UI / wording 小改动，验证后只提交自己的代码，始终不修改 Loop 状态。
+- 每个需求一个持久化 Chat 会话；Agent 每轮重新读取交付文档、活动和代码。Runner 空闲、相关文件归属清楚且调整不改变业务语义、范围、可观察结果或验收标准时，可直接完成局部 UI、排版和 wording 小改动，验证后只提交自己的代码且不创建交付单元；其他变化统一进入 Feedback 闭环，始终不由 Chat 修改 Loop 状态。
 - 权限边界、人工介入和可插拔执行器。
 - 受限的 Prompt 演化和 LoopWork 自维护闭环。
 

@@ -158,6 +158,19 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       </div>
     </header>
 
+    <section className="card task-original-input" aria-labelledby="task-original-input-title">
+      <div className="task-original-input-head">
+        <div>
+          <p className="eyebrow">创建时输入</p>
+          <h2 id="task-original-input-title"><FileText size={17}/>原始需求</h2>
+        </div>
+        <small>后续工作流不会改写此内容</small>
+      </div>
+      {task.description
+        ? <p className="task-original-input-content">{task.description}</p>
+        : <p className="task-original-input-empty">创建时未填写补充描述，原始需求仅包含标题。</p>}
+    </section>
+
     <section className={`card task-steps ${task.agile_status === 'blocked' ? 'blocked' : task.agile_status === 'done' ? 'done' : ''}`} aria-label="需求当前进度">
       <div className="task-steps-head">
         <strong>推进进度</strong>
