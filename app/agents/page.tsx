@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { Bot, BrainCircuit, Database, GitBranch } from 'lucide-react';
 import { listAgentProfiles } from '../../src/application/agent-profiles';
-import { AGENT_EXECUTOR_OPTIONS, listAgentRuntimeSettings } from '../../src/application/project-settings';
+import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, listAgentRuntimeSettings } from '../../src/application/project-settings';
 import { AGENT_PROFILE_DEFINITIONS, type FlowAgentId } from '../../src/domain/agent-profile';
 
 export const dynamic = 'force-dynamic';
@@ -15,7 +15,13 @@ export default async function AgentsPage() {
       {profiles.map((profile) => {
         const definition = AGENT_PROFILE_DEFINITIONS[profile.agent_id as FlowAgentId];
         const runtime = runtimeByAgent.get(profile.agent_id);
-        const runtimeLabel = AGENT_EXECUTOR_OPTIONS.find((option) => option.id === runtime?.executorId)?.label || runtime?.executorId;
+        const executorLabel = AGENT_EXECUTOR_OPTIONS.find((option) => option.id === runtime?.executorId)?.label || runtime?.executorId;
+        const modelLabel = runtime?.executorId === 'codex'
+          ? CODEX_MODEL_OPTIONS.find((option) => option.id === runtime.codexModel)?.label || runtime.codexModel
+          : runtime?.executorId === 'claude'
+            ? runtime.claudeModel || 'CLI 默认'
+            : 'CLI 默认';
+        const runtimeLabel = `${executorLabel} · ${modelLabel}`;
         return <Link href={`/agents/${profile.agent_id}`} className="card agent-card" key={profile.agent_id}>
           <div className="agent-card-head"><span className="executor-icon"><Bot size={18}/></span><span className="agent-card-badges"><span className="badge">{runtimeLabel}</span><span className={`badge ${profile.candidate_prompt_version ? 'amber' : profile.auto_evolve ? 'green' : 'blue'}`}>{profile.candidate_prompt_version ? `Canary · ${profile.canary_remaining}` : profile.auto_evolve ? '自动演化' : '仅手工'}</span></span></div>
           <div><h2>{definition.label}</h2><p className="muted">{definition.description}</p></div>
