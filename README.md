@@ -99,7 +99,7 @@ npm run db:migrate
 npm run dev
 ```
 
-打开 `http://localhost:3000`，在项目设置中选择目标仓库和 Agent 执行器，然后在运行页面启动 Loop。
+打开 `http://localhost:3000`，在项目设置中选择目标仓库，再到 Agent 配置页为各流程 Agent 分别选择执行器、模型和思考强度，然后在运行页面启动 Loop。
 
 常用命令：
 

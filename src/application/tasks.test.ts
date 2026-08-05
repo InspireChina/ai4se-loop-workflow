@@ -884,9 +884,13 @@ test('persists execution input before work and recovers output without rerunning
   const delegation = (await pipelineAllEnvelopes()).find((item) => item.taskId === taskId);
   assert.ok(delegation);
 
-  const started = await beginExecutionAttempt({ runId: 'run-durable-test', delegation, prompt: 'stable prompt' });
+  const runtime = { executorId: 'codex', configuredModel: 'gpt-5.6-terra', reasoningEffort: 'high' };
+  const started = await beginExecutionAttempt({ runId: 'run-durable-test', delegation, prompt: 'stable prompt', ...runtime });
   assert.equal(started.recovered, false);
   assert.equal(started.attempt.status, 'running');
+  assert.equal(started.attempt.executor_id, 'codex');
+  assert.equal(started.attempt.configured_model, 'gpt-5.6-terra');
+  assert.equal(started.attempt.reasoning_effort, 'high');
   await markExecutionOutput(started.attempt.execution_id, { outcome: 'completed', summary: 'captured output' });
   const recoverable = await recoverNextExecutionAttempt();
   assert.equal(recoverable?.execution_id, started.attempt.execution_id);
@@ -894,11 +898,12 @@ test('persists execution input before work and recovers output without rerunning
 
   await recordExecutionReceipt(started.attempt.execution_id, 'code_commit', 'abc123', { committed: true });
   await completeExecution(started.attempt.execution_id);
-  const repeated = await beginExecutionAttempt({ runId: 'run-durable-test-2', delegation, prompt: 'stable prompt' });
+  const repeated = await beginExecutionAttempt({ runId: 'run-durable-test-2', delegation, prompt: 'stable prompt', ...runtime });
   assert.equal(repeated.recovered, true);
   assert.equal(repeated.attempt.status, 'applied');
-  const row = db.prepare('SELECT code_commit FROM execution_attempts WHERE execution_id = ?').get(started.attempt.execution_id) as { code_commit: string };
+  const row = db.prepare('SELECT code_commit, executor_id FROM execution_attempts WHERE execution_id = ?').get(started.attempt.execution_id) as { code_commit: string; executor_id: string };
   assert.equal(row.code_commit, 'abc123');
+  assert.equal(row.executor_id, 'codex');
 });
 
 test('keeps retry attempts in one logical generation even when the rebuilt prompt changes', async () => {

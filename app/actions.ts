@@ -1,7 +1,7 @@
 'use server';
 
 import { redirect } from 'next/navigation';
-import { normalizeWorkspaceRoot, setAgentExecutorSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
+import { normalizeWorkspaceRoot, setAgentExecutorSettings, setAgentRuntimeSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
 import { resetAgentPromptToSystemTemplate, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
 import { setSoftwareMaintenanceSettings } from '../src/application/software-maintenance';
 import {
@@ -109,6 +109,17 @@ export async function saveAgentExecutorAction(formData: FormData) {
     claudeModel: formData.get('claudeModel'),
   });
   redirect('/settings');
+}
+
+export async function saveAgentRuntimeAction(formData: FormData) {
+  const agentId = String(formData.get('agentId'));
+  await setAgentRuntimeSettings(agentId, {
+    executorId: formData.get('agentExecutor'),
+    codexModel: formData.get('codexModel'),
+    codexReasoningEffort: formData.get('codexReasoningEffort'),
+    claudeModel: formData.get('claudeModel'),
+  });
+  redirect(`/agents/${agentId}`);
 }
 
 export async function saveLangfuseSettingsAction(formData: FormData) {

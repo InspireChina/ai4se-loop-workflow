@@ -205,7 +205,7 @@ codex exec --json -C <workspace-root> <prompt>
 claude --print --output-format stream-json [--model <model>] <prompt>
 ```
 
-选择 Codex 时显示模型和思考强度设置；选择 Claude 时显示可选模型输入，支持 CLI 别名或完整模型 ID，留空跟随 Claude 默认值；选择 Cursor 时隐藏模型参数。Runner 直接解析各 CLI 的 stdout、stderr、工具事件和子过程，统一写入 `run_logs`，运行面板按层级显示：
+每个流程 Agent 独立选择执行器和模型参数：选择 Codex 时显示模型和思考强度设置；选择 Claude 时显示可选模型输入，支持 CLI 别名或完整模型 ID，留空跟随 Claude 默认值；选择 Cursor 时隐藏模型参数。Runner 在每次派发时按 Agent 解析 Runtime，同一轮中的不同 Lane 可以使用不同 CLI。上下文对话和软件自维护等没有独立 Profile 的系统辅助 Agent 使用项目级系统 Runtime。Runner 直接解析各 CLI 的 stdout、stderr、工具事件和子过程，统一写入 `run_logs`，运行面板按层级显示：
 
 ```text
 Agent

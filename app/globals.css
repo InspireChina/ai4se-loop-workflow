@@ -266,6 +266,7 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .agent-card{display:grid;gap:16px;padding:18px;text-decoration:none;color:inherit;transition:border-color .15s,transform .15s}
 .agent-card:hover{border-color:#9db9eb;transform:translateY(-1px)}
 .agent-card-head{display:flex;justify-content:space-between;align-items:center}
+.agent-card-badges{display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:wrap}
 .agent-card h2{margin:0 0 6px;font-size:16px}
 .agent-card small{color:var(--muted)}
 .agent-stats{display:flex;flex-wrap:wrap;gap:8px}

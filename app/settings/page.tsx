@@ -1,5 +1,6 @@
+import Link from 'next/link';
 import { paths } from '../../src/infrastructure/database';
-import { Activity, Bot, Check } from 'lucide-react';
+import { Activity, ArrowRight, Bot, Check } from 'lucide-react';
 import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, getAgentExecutorSettings, getLangfuseSettings } from '../../src/application/project-settings';
 import { changeWorkspaceRootAction, saveAgentExecutorAction, saveLangfuseSettingsAction } from '../actions';
 
@@ -9,16 +10,20 @@ export default async function SettingsPage() {
   const settings = await getAgentExecutorSettings();
   const langfuse = await getLangfuseSettings();
   return <>
-    <header><p className="eyebrow">PROJECT SETTINGS</p><h1>项目设置</h1><p className="muted">设置当前项目与执行推进流程的 Agent CLI。</p></header>
+    <header><p className="eyebrow">PROJECT SETTINGS</p><h1>项目设置</h1><p className="muted">设置当前项目、系统辅助 Agent 和可观测性。流程 Agent 的 Runtime 在各自配置页独立管理。</p></header>
     <section className="settings-stack">
     <form action={changeWorkspaceRootAction} className="card settings">
       <div><strong>当前项目</strong><p className="muted settings-description">切换后，需求、运行记录和项目设置会自动使用该代码库对应的独立数据库。</p></div>
       <div className="workspace-switch"><label>工作区根目录<input name="workspaceRoot" required defaultValue={paths.root} spellCheck={false}/></label><button className="button" type="submit">切换项目</button></div>
     </form>
+    <section className="card settings">
+      <div className="settings-section-head"><span className="executor-icon"><Bot size={18}/></span><div><strong>流程 Agent Runtime</strong><p className="muted settings-description">需求梳理、分析、开发、测试等流程 Agent 已改为逐个配置 CLI、模型和思考强度。</p></div></div>
+      <Link className="button secondary" href="/agents">前往 Agent 配置 <ArrowRight size={14}/></Link>
+    </section>
     <form action={saveAgentExecutorAction} className="card settings">
       <fieldset className="executor-settings">
-        <legend>Agent 执行器</legend>
-        <p className="muted">每次 Agent 执行仍然逐个进行，这里只切换底层使用的 CLI。所选 CLI 需要已在本机登录。</p>
+        <legend>系统辅助 Agent Runtime</legend>
+        <p className="muted">用于上下文对话和软件自维护等没有独立 Agent Profile 的能力，不会覆盖流程 Agent 的独立 Runtime。所选 CLI 需要已在本机登录。</p>
         <div className="executor-options">
           {AGENT_EXECUTOR_OPTIONS.map((option) => <label className="executor-option" key={option.id}>
             <input type="radio" name="agentExecutor" value={option.id} defaultChecked={settings.executorId === option.id}/>
@@ -56,7 +61,7 @@ export default async function SettingsPage() {
           </label>
         </div>
       </fieldset>
-      <button className="button" type="submit">保存设置</button>
+      <button className="button" type="submit">保存系统 Runtime</button>
     </form>
     <form action={saveLangfuseSettingsAction} className="card settings">
       <div className="settings-section-head">

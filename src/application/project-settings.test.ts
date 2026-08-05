@@ -1,6 +1,44 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+test('stores runtime settings independently for each flow agent', async () => {
+  const {
+    agentExecutionOptions,
+    getAgentRuntimeSettings,
+    listAgentRuntimeSettings,
+    setAgentRuntimeSettings,
+  } = await import('./project-settings');
+  const backlogBefore = await getAgentRuntimeSettings('backlog-agent');
+  const devBefore = await getAgentRuntimeSettings('dev-agent');
+
+  try {
+    await setAgentRuntimeSettings('backlog-agent', {
+      executorId: 'codex',
+      codexModel: 'gpt-5.6-terra',
+      codexReasoningEffort: 'high',
+      claudeModel: '',
+    });
+    await setAgentRuntimeSettings('dev-agent', {
+      executorId: 'claude',
+      codexModel: 'gpt-5.6-sol',
+      codexReasoningEffort: 'default',
+      claudeModel: 'claude-sonnet-4-6',
+    });
+
+    const backlog = await getAgentRuntimeSettings('backlog-agent');
+    const dev = await getAgentRuntimeSettings('dev-agent');
+    assert.equal(backlog.executorId, 'codex');
+    assert.deepEqual(agentExecutionOptions(backlog), { model: 'gpt-5.6-terra', reasoningEffort: 'high' });
+    assert.equal(dev.executorId, 'claude');
+    assert.deepEqual(agentExecutionOptions(dev), { model: 'claude-sonnet-4-6' });
+    assert.equal((await listAgentRuntimeSettings()).length, 8);
+    await assert.rejects(() => getAgentRuntimeSettings('unknown-agent'), /未知 Agent/);
+  } finally {
+    await setAgentRuntimeSettings('backlog-agent', backlogBefore);
+    await setAgentRuntimeSettings('dev-agent', devBefore);
+  }
+});
+
 test('persists an optional Claude model and maps it to execution options', async () => {
   const { agentExecutionOptions, getAgentExecutorSettings, setAgentExecutorSettings } = await import('./project-settings');
   const { databaseConnection } = await import('../infrastructure/database');

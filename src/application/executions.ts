@@ -42,6 +42,9 @@ export type ExecutionAttempt = {
   memory_revision: number | null;
   memory_hash: string | null;
   evolution_candidate_id: string | null;
+  executor_id: string | null;
+  configured_model: string | null;
+  reasoning_effort: string | null;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -191,6 +194,9 @@ export async function beginExecutionAttempt(input: {
   memoryRevision?: number;
   memoryHash?: string;
   evolutionCandidateId?: string | null;
+  executorId?: string;
+  configuredModel?: string;
+  reasoningEffort?: string;
   contextSnapshot?: AgentContextSnapshot;
 }) {
   const db = await databaseConnection();
@@ -198,6 +204,11 @@ export async function beginExecutionAttempt(input: {
     delegation: input.delegation,
     prompt: input.prompt,
     contextSnapshot: input.contextSnapshot,
+    runtime: {
+      executorId: input.executorId,
+      configuredModel: input.configuredModel,
+      reasoningEffort: input.reasoningEffort,
+    },
   });
   const inputHash = hash(inputJson);
   return db.transaction(() => {
@@ -259,8 +270,9 @@ export async function beginExecutionAttempt(input: {
         execution_id, run_id, task_id, story_index, agent, pipeline, lane,
         delegation_key, attempt, status, input_hash, input_json, base_commit,
         prompt_version, prompt_template_version, prompt_hash, memory_revision, memory_hash, evolution_candidate_id,
+        executor_id, configured_model, reasoning_effort,
         heartbeat_at, started_at
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `).run(
       executionId,
       input.runId,
@@ -280,6 +292,9 @@ export async function beginExecutionAttempt(input: {
       input.memoryRevision || null,
       input.memoryHash || null,
       input.evolutionCandidateId || null,
+      input.executorId || null,
+      input.configuredModel || null,
+      input.reasoningEffort || null,
     );
     const attempt = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(executionId) as ExecutionAttempt;
     return { attempt, recovered: false };

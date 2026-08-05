@@ -60,3 +60,11 @@ test('runner records the current HEAD without inferring a Dev commit from base_c
   assert.match(source, /const currentHead = gitHead\(paths\.root\)/);
   assert.doesNotMatch(source, /currentHead\s*!==\s*attempt\.base_commit/);
 });
+
+test('runner resolves runtime settings for each delegated agent instead of once per run', () => {
+  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+
+  assert.match(source, /getAgentRuntimeSettings\(delegation\.agent\)/);
+  assert.match(source, /executeDelegationStep\(delegation\)/);
+  assert.doesNotMatch(source, /const settings = await getAgentExecutorSettings\(\)/);
+});

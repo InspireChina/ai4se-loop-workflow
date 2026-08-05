@@ -200,7 +200,7 @@ export type RuntimeInputRequest = {
   resolved_at: string | null;
 };
 export type ClosureAcknowledgement = { acknowledgement_id: string; task_id: string; review_document_id: string; review_revision: number; acknowledged_by: string; acknowledged_at: string };
-export type ExecutionAttemptView = { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; lane: string | null; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_template_version: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; result_outcome: string | null; result_verdict: string | null; result_summary: string | null; last_error: string | null; created_at: string; started_at: string | null; finished_at: string | null };
+export type ExecutionAttemptView = { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; lane: string | null; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_template_version: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; executor_id: string | null; configured_model: string | null; reasoning_effort: string | null; result_outcome: string | null; result_verdict: string | null; result_summary: string | null; last_error: string | null; created_at: string; started_at: string | null; finished_at: string | null };
 export type Event = { event_id: string; actor: string; event_type: string; summary: string; created_at: string };
 export type RunStatus = {
   runId: string;
@@ -427,7 +427,8 @@ export async function getTask(taskId: string) {
   const executionAttempts = db.prepare(`
     SELECT execution_id, run_id, task_id, story_index, agent, pipeline, lane, attempt, status,
            input_hash, base_commit, code_commit, verification_id,
-           prompt_version, prompt_template_version, prompt_hash, memory_revision, memory_hash, evolution_candidate_id, last_error,
+           prompt_version, prompt_template_version, prompt_hash, memory_revision, memory_hash, evolution_candidate_id,
+           executor_id, configured_model, reasoning_effort, last_error,
            json_extract(result_json, '$.outcome') AS result_outcome,
            json_extract(result_json, '$.verdict') AS result_verdict,
            json_extract(result_json, '$.summary') AS result_summary,

@@ -1,19 +1,23 @@
 import Link from 'next/link';
 import { Bot, BrainCircuit, Database, GitBranch } from 'lucide-react';
 import { listAgentProfiles } from '../../src/application/agent-profiles';
+import { AGENT_EXECUTOR_OPTIONS, listAgentRuntimeSettings } from '../../src/application/project-settings';
 import { AGENT_PROFILE_DEFINITIONS, type FlowAgentId } from '../../src/domain/agent-profile';
 
 export const dynamic = 'force-dynamic';
 
 export default async function AgentsPage() {
-  const profiles = await listAgentProfiles();
+  const [profiles, runtimes] = await Promise.all([listAgentProfiles(), listAgentRuntimeSettings()]);
+  const runtimeByAgent = new Map(runtimes.map((runtime) => [runtime.agentId, runtime]));
   return <>
-    <header><p className="eyebrow">AGENT RUNTIME</p><h1>Agent 配置</h1><p className="muted">管理当前项目各 Agent 的完整 Prompt、长期记忆和自动演化状态。每个项目独立保存自己的配置，不进入目标仓库 Git。</p></header>
+    <header><p className="eyebrow">AGENT RUNTIME</p><h1>Agent 配置</h1><p className="muted">管理当前项目各 Agent 的 Runtime、完整 Prompt、长期记忆和自动演化状态。每个项目独立保存自己的配置，不进入目标仓库 Git。</p></header>
     <section className="agent-grid">
       {profiles.map((profile) => {
         const definition = AGENT_PROFILE_DEFINITIONS[profile.agent_id as FlowAgentId];
+        const runtime = runtimeByAgent.get(profile.agent_id);
+        const runtimeLabel = AGENT_EXECUTOR_OPTIONS.find((option) => option.id === runtime?.executorId)?.label || runtime?.executorId;
         return <Link href={`/agents/${profile.agent_id}`} className="card agent-card" key={profile.agent_id}>
-          <div className="agent-card-head"><span className="executor-icon"><Bot size={18}/></span><span className={`badge ${profile.candidate_prompt_version ? 'amber' : profile.auto_evolve ? 'green' : 'blue'}`}>{profile.candidate_prompt_version ? `Canary · ${profile.canary_remaining}` : profile.auto_evolve ? '自动演化' : '仅手工'}</span></div>
+          <div className="agent-card-head"><span className="executor-icon"><Bot size={18}/></span><span className="agent-card-badges"><span className="badge">{runtimeLabel}</span><span className={`badge ${profile.candidate_prompt_version ? 'amber' : profile.auto_evolve ? 'green' : 'blue'}`}>{profile.candidate_prompt_version ? `Canary · ${profile.canary_remaining}` : profile.auto_evolve ? '自动演化' : '仅手工'}</span></span></div>
           <div><h2>{definition.label}</h2><p className="muted">{definition.description}</p></div>
           <div className="agent-stats">
             <span><GitBranch size={14}/>Prompt r{profile.current_prompt_version}</span>

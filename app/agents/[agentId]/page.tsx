@@ -1,16 +1,20 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { BrainCircuit, MemoryStick, RotateCcw, Sparkles } from 'lucide-react';
+import { Bot, BrainCircuit, Check, MemoryStick, RotateCcw, Sparkles } from 'lucide-react';
 import { getAgentProfile } from '../../../src/application/agent-profiles';
+import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, getAgentRuntimeSettings } from '../../../src/application/project-settings';
 import { AGENT_PROMPT_SEED_REVISION, isFlowAgentId } from '../../../src/domain/agent-profile';
-import { resetAgentPromptAction, saveAgentMemoryAction, saveAgentPromptAction, setAgentAutoEvolutionAction } from '../../actions';
+import { resetAgentPromptAction, saveAgentMemoryAction, saveAgentPromptAction, saveAgentRuntimeAction, setAgentAutoEvolutionAction } from '../../actions';
 
 export const dynamic = 'force-dynamic';
 
 export default async function AgentDetailPage({ params }: { params: Promise<{ agentId: string }> }) {
   const { agentId } = await params;
   if (!isFlowAgentId(agentId)) notFound();
-  const detail = await getAgentProfile(agentId);
+  const [detail, runtimeSettings] = await Promise.all([
+    getAgentProfile(agentId),
+    getAgentRuntimeSettings(agentId),
+  ]);
   const usesLatestSystemTemplate = detail.currentPrompt.content.trim() === detail.definition.prompt.trim()
     && detail.currentPrompt.template_version === AGENT_PROMPT_SEED_REVISION
     && !detail.candidatePrompt;
@@ -31,6 +35,48 @@ export default async function AgentDetailPage({ params }: { params: Promise<{ ag
 
     <div className="agent-detail-grid">
       <div className="agent-editor-column">
+        <form action={saveAgentRuntimeAction} className="card settings">
+          <input type="hidden" name="agentId" value={agentId}/>
+          <div className="settings-section-head"><span className="executor-icon"><Bot size={18}/></span><div><strong>Agent Runtime</strong><p className="muted settings-description">只控制当前 Agent 的执行 CLI 和模型参数。该 Agent 产生的 Prompt 演化评估也沿用这组配置。</p></div><span className="badge">{runtimeSettings.executorId}</span></div>
+          <fieldset className="executor-settings">
+            <legend>执行器</legend>
+            <p className="muted">所选 CLI 需要已在本机登录；修改只影响此后新启动的执行。</p>
+            <div className="executor-options">
+              {AGENT_EXECUTOR_OPTIONS.map((option) => <label className="executor-option" key={option.id}>
+                <input type="radio" name="agentExecutor" value={option.id} defaultChecked={runtimeSettings.executorId === option.id}/>
+                <span className="executor-icon"><Bot size={18}/></span>
+                <span><strong>{option.label}</strong><small>{option.description}</small></span>
+                <Check className="executor-check" size={17}/>
+              </label>)}
+            </div>
+          </fieldset>
+          <fieldset className="codex-settings">
+            <legend>Codex 执行参数</legend>
+            <div className="fields">
+              <label>模型
+                <select name="codexModel" defaultValue={runtimeSettings.codexModel}>
+                  {CODEX_MODEL_OPTIONS.map((model) => <option value={model.id} key={model.id}>{model.label}</option>)}
+                </select>
+              </label>
+              <label>思考强度
+                <select name="codexReasoningEffort" defaultValue={runtimeSettings.codexReasoningEffort}>
+                  {CODEX_REASONING_EFFORTS.map((effort) => <option value={effort} key={effort}>{effort === 'default' ? '跟随 Codex 默认值' : effort}</option>)}
+                </select>
+              </label>
+            </div>
+          </fieldset>
+          <fieldset className="claude-settings">
+            <legend>Claude 执行参数</legend>
+            <div className="fields">
+              <label>模型
+                <input name="claudeModel" defaultValue={runtimeSettings.claudeModel} placeholder="例如 sonnet、opus 或完整模型 ID" spellCheck={false}/>
+                <small className="muted">留空时跟随 Claude CLI 默认模型。</small>
+              </label>
+            </div>
+          </fieldset>
+          <button className="button" type="submit">保存 Agent Runtime</button>
+        </form>
+
         <form action={saveAgentPromptAction} className="card settings agent-editor">
           <input type="hidden" name="agentId" value={agentId}/>
           <div className="settings-section-head"><span className="executor-icon"><BrainCircuit size={18}/></span><div><strong>Project Agent Prompt</strong><p className="muted settings-description">当前项目独立持有的完整 Prompt。首次由系统模板初始化，之后完全由当前项目管理，应用升级不会覆盖。</p></div><span className="badge">r{detail.currentPrompt.version}</span></div>

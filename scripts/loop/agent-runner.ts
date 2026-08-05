@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
 import { createHash } from 'node:crypto';
-import { agentExecutionOptions, getAgentExecutorSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
+import { agentExecutionOptions, getAgentRuntimeSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
 import { enqueueSoftwareMaintenance } from '../../src/application/software-maintenance';
 import { buildAgentContextSnapshot } from '../../src/application/agent-context';
 import { recordRuntimeEvent, recordRuntimeException } from '../../src/application/runtime-events';
@@ -438,8 +438,6 @@ async function handleExecutionFailure(attempt: ExecutionAttempt, delegation: Del
 
 async function executeDelegationStep(
   delegation: DelegationEnvelope,
-  executor: AgentExecutor,
-  executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' },
 ) {
   if (!(await isRunActive())) return;
   const task = await getTask(delegation.taskId);
@@ -453,6 +451,10 @@ async function executeDelegationStep(
   let maintenance: { executionId: string; eventFromId: number | null } | null = null;
   let unexpectedFailure: unknown;
   try {
+    const runtimeSettings = await getAgentRuntimeSettings(delegation.agent);
+    const executor = getAgentExecutor(runtimeSettings.executorId);
+    const executionOptions = agentExecutionOptions(runtimeSettings);
+    await appendLoopRunLog(runId, `[Runtime] requirement=${delegation.taskId} agent=${delegation.agent} executor=${executor.id} model=${executionOptions.model || 'default'} reasoning=${executionOptions.reasoningEffort || 'default'}`);
     const headBefore = gitHead(paths.root);
     const builtPrompt = await buildPrompt(delegation, headBefore || null);
     const durable = await beginExecutionAttempt({
@@ -466,6 +468,9 @@ async function executeDelegationStep(
       memoryRevision: builtPrompt.runtime.memoryRevision,
       memoryHash: builtPrompt.runtime.memoryHash,
       evolutionCandidateId: builtPrompt.runtime.evolutionCandidateId,
+      executorId: runtimeSettings.executorId,
+      configuredModel: executionOptions.model,
+      reasoningEffort: executionOptions.reasoningEffort,
       contextSnapshot: builtPrompt.contextSnapshot,
     });
     attempt = durable.attempt;
@@ -608,9 +613,6 @@ async function drainQueuedAgentResults() {
 }
 
 async function main() {
-  const settings = await getAgentExecutorSettings();
-  const executor = getAgentExecutor(settings.executorId);
-  const executionOptions = agentExecutionOptions(settings);
   const staleLanes = await reconcileStaleTaskLanes();
   if (staleLanes) await appendLoopRunLog(runId, `[恢复] 已恢复 ${staleLanes} 条失去活跃 execution 的 Lane`);
   let recoverable = await recoverNextExecutionAttempt();
@@ -619,6 +621,9 @@ async function main() {
     const delegation = normalizeDelegation(snapshot.delegation);
     const maintenance = await activateMaintenanceContext(recoverable, delegation);
     try {
+      const runtimeSettings = await getAgentRuntimeSettings(delegation.agent);
+      const executor = getAgentExecutor(runtimeSettings.executorId);
+      const executionOptions = agentExecutionOptions(runtimeSettings);
       await appendLoopRunLog(runId, `[恢复] 继续 execution attempt ${recoverable.execution_id}，不重复调用 Agent`);
       const result = parseAgentResult(recoverable.result_json || '');
       const applied = await processDurableResult(recoverable, delegation, result);
@@ -656,7 +661,7 @@ async function main() {
       const delegation = normalizeDelegation(rawDelegation);
       const key = `${delegation.taskId}:${delegation.lane}`;
       if (active.has(key)) continue;
-      const execution = executeDelegationStep(delegation, executor, executionOptions)
+      const execution = executeDelegationStep(delegation)
         .catch(async (error) => {
           await appendLoopRunLog(runId, `[错误] requirement=${delegation.taskId} lane=${delegation.lane} agent=${delegation.agent} 执行器退出：${error instanceof Error ? error.message : String(error)}`);
         })
@@ -664,7 +669,7 @@ async function main() {
       active.set(key, execution);
       started += 1;
     }
-    if (started) await appendLoopRunLog(runId, `[运行] 使用 ${executor.label} CLI，新启动 ${started} 个 Lane Agent；已有 ${active.size - started} 个继续运行`);
+    if (started) await appendLoopRunLog(runId, `[运行] 新启动 ${started} 个 Lane Agent；各 Agent 使用独立 Runtime 配置，已有 ${active.size - started} 个继续运行`);
     if (active.size) {
       await Promise.race(active.values());
       continue;

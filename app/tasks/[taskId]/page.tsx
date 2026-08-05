@@ -517,6 +517,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             <pre>{[
               `execution: ${attempt.execution_id}`,
               `input hash: ${attempt.input_hash}`,
+              attempt.executor_id ? `runtime: ${attempt.executor_id} · model ${attempt.configured_model || 'default'} · reasoning ${attempt.reasoning_effort || 'default'}` : '',
               attempt.base_commit ? `base commit: ${attempt.base_commit}` : '',
               attempt.code_commit ? `code commit: ${attempt.code_commit}` : '',
               attempt.verification_id ? `verification: ${attempt.verification_id}` : '',

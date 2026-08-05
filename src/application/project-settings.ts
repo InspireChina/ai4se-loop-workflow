@@ -3,6 +3,7 @@ import { realpathSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { AGENT_EXECUTORS, type AgentExecutorId } from '../domain/agent-executor';
+import { FLOW_AGENT_IDS, isFlowAgentId, type FlowAgentId } from '../domain/agent-profile';
 import type { AgentExecutionOptions } from '../infrastructure/agent-executor';
 import { databaseConnection, setConfiguredWorkspaceRoot } from '../infrastructure/database';
 
@@ -47,6 +48,18 @@ export type AgentExecutorSettings = {
   codexModel: CodexModel;
   codexReasoningEffort: CodexReasoningEffort;
   claudeModel: string;
+};
+
+export type AgentRuntimeSettings = AgentExecutorSettings & {
+  agentId: FlowAgentId;
+};
+
+type AgentRuntimeSettingsRow = {
+  agent_id: string;
+  executor_id: string;
+  codex_model: string;
+  codex_reasoning_effort: string;
+  claude_model: string;
 };
 
 export type LangfuseSettings = {
@@ -125,6 +138,59 @@ export async function getAgentExecutorSettings(): Promise<AgentExecutorSettings>
     codexReasoningEffort: effort.success ? effort.data : 'default',
     claudeModel: claudeModel.success ? claudeModel.data : DEFAULT_CLAUDE_MODEL,
   };
+}
+
+function parseAgentRuntimeSettings(row: AgentRuntimeSettingsRow | undefined, agentId: FlowAgentId, fallback: AgentExecutorSettings): AgentRuntimeSettings {
+  const executor = executorSchema.safeParse(row?.executor_id);
+  const model = codexModelSchema.safeParse(row?.codex_model);
+  const effort = codexReasoningEffortSchema.safeParse(row?.codex_reasoning_effort);
+  const claudeModel = claudeModelSchema.safeParse(row?.claude_model ?? fallback.claudeModel);
+  return {
+    agentId,
+    executorId: executor.success ? executor.data : fallback.executorId,
+    codexModel: model.success ? model.data : fallback.codexModel,
+    codexReasoningEffort: effort.success ? effort.data : fallback.codexReasoningEffort,
+    claudeModel: claudeModel.success ? claudeModel.data : fallback.claudeModel,
+  };
+}
+
+export async function getAgentRuntimeSettings(agentIdInput: string): Promise<AgentRuntimeSettings> {
+  if (!isFlowAgentId(agentIdInput)) throw new Error(`未知 Agent：${agentIdInput}`);
+  const [db, fallback] = await Promise.all([databaseConnection(), getAgentExecutorSettings()]);
+  const row = db.prepare('SELECT * FROM agent_runtime_settings WHERE agent_id = ?').get(agentIdInput) as AgentRuntimeSettingsRow | undefined;
+  return parseAgentRuntimeSettings(row, agentIdInput, fallback);
+}
+
+export async function listAgentRuntimeSettings(): Promise<AgentRuntimeSettings[]> {
+  const [db, fallback] = await Promise.all([databaseConnection(), getAgentExecutorSettings()]);
+  const rows = db.prepare('SELECT * FROM agent_runtime_settings').all() as AgentRuntimeSettingsRow[];
+  const byAgent = new Map(rows.map((row) => [row.agent_id, row]));
+  return FLOW_AGENT_IDS.map((agentId) => parseAgentRuntimeSettings(byAgent.get(agentId), agentId, fallback));
+}
+
+export async function setAgentRuntimeSettings(agentIdInput: string, input: { executorId: unknown; codexModel?: unknown; codexReasoningEffort?: unknown; claudeModel?: unknown }) {
+  if (!isFlowAgentId(agentIdInput)) throw new Error(`未知 Agent：${agentIdInput}`);
+  const executorId = executorSchema.parse(input.executorId);
+  const codexModel = codexModelSchema.parse(input.codexModel ?? DEFAULT_CODEX_MODEL);
+  const codexReasoningEffort = codexReasoningEffortSchema.parse(input.codexReasoningEffort ?? 'default');
+  const claudeModel = claudeModelSchema.parse(input.claudeModel ?? DEFAULT_CLAUDE_MODEL);
+  const db = await databaseConnection();
+  db.prepare(`
+    INSERT INTO agent_runtime_settings(
+      agent_id, executor_id, codex_model, codex_reasoning_effort, claude_model
+    ) VALUES(?, ?, ?, ?, ?)
+    ON CONFLICT(agent_id) DO UPDATE SET
+      executor_id = excluded.executor_id,
+      codex_model = excluded.codex_model,
+      codex_reasoning_effort = excluded.codex_reasoning_effort,
+      claude_model = excluded.claude_model,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(agentIdInput, executorId, codexModel, codexReasoningEffort, claudeModel);
+  try {
+    revalidatePath('/agents');
+    revalidatePath(`/agents/${agentIdInput}`);
+  } catch { /* CLI usage has no request context. */ }
+  return { agentId: agentIdInput, executorId, codexModel, codexReasoningEffort, claudeModel } satisfies AgentRuntimeSettings;
 }
 
 export async function setAgentExecutorSettings(input: { executorId: unknown; codexModel?: unknown; codexReasoningEffort?: unknown; claudeModel?: unknown }) {
