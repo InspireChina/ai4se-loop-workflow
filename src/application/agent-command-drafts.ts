@@ -20,6 +20,7 @@ import {
   developmentHelp,
   runDevelopmentCommand,
 } from './development-command-drafts';
+import { recomputeBacklogQuestionApplicabilityInDb } from './tasks';
 import {
   runVerificationCommand,
   verificationHelp,
@@ -68,7 +69,10 @@ type ContextDraft = {
   intent: string | null;
   change_summary: string | null;
   classification: 'feature' | 'bug' | 'tech' | 'other' | null;
+  workflow_phase: RequirementContextPhase;
 };
+
+type RequirementContextPhase = 'as_is' | 'decision_tree' | 'to_be' | 'impact_scan' | 'scope' | 'acceptance' | 'finalize';
 
 type ContextAssertion = {
   assertion_key: string;
@@ -99,6 +103,28 @@ type ContextAcceptance = {
   content: string;
   source: string;
   lifecycle_status: 'active' | 'dismissed' | 'superseded';
+  lifecycle_reason: string | null;
+  superseded_by: string | null;
+};
+
+type ContextQuestionDependency = {
+  decision_key: string;
+  parent_decision_key: string;
+  parent_option_id: string;
+};
+
+type ContextQuestion = {
+  decision_key: string;
+  title: string;
+  question: string;
+  impact: string;
+  recommendation_option_id: string | null;
+  recommendation_reason: string | null;
+  authority: 'human' | 'agent';
+  selected_option_id: string | null;
+  decision_text: string | null;
+  decision_reason: string | null;
+  lifecycle_status: 'active' | 'not_applicable' | 'superseded';
   lifecycle_reason: string | null;
   superseded_by: string | null;
 };
@@ -249,15 +275,20 @@ function cloneRequirementContextDraft(
 ) {
   db.prepare(`
     INSERT INTO requirement_context_drafts(
-      draft_id, intent, change_summary, classification
+      draft_id, intent, change_summary, classification, workflow_phase
     )
-    SELECT ?, intent, change_summary, classification
+    SELECT ?, intent, change_summary, classification, workflow_phase
     FROM requirement_context_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   for (const table of [
     ['requirement_context_constraints', 'constraint_key, content, ordinal'],
     ['requirement_context_scope_items', 'scope_key, direction, content, ordinal'],
-    ['requirement_context_questions', 'decision_key, title, question, impact, recommendation_option_id, recommendation_reason, ordinal'],
+    [
+      'requirement_context_questions',
+      `decision_key, title, question, impact, recommendation_option_id, recommendation_reason,
+       authority, selected_option_id, decision_text, decision_reason,
+       lifecycle_status, lifecycle_reason, superseded_by, ordinal`,
+    ],
     [
       'requirement_context_assertions',
       'assertion_key, perspective, statement, evidence_status, source, decision_key, lifecycle_status, lifecycle_reason, superseded_by, ordinal',
@@ -286,6 +317,13 @@ function cloneRequirementContextDraft(
     )
     SELECT ?, decision_key, option_id, label, consequence, ordinal
     FROM requirement_context_question_options WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
+  db.prepare(`
+    INSERT INTO requirement_context_question_dependencies(
+      draft_id, decision_key, parent_decision_key, parent_option_id, ordinal
+    )
+    SELECT ?, decision_key, parent_decision_key, parent_option_id, ordinal
+    FROM requirement_context_question_dependencies WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
 }
 
@@ -913,12 +951,20 @@ function answeredDecisions(
   taskId: string,
 ) {
   const rows = db.prepare(`
-    SELECT decision_key, title, question, answer
+    SELECT decision_key, title, question, answer, selected_option_id, status
     FROM questions
     WHERE task_id = ? AND source_agent = 'backlog-agent'
       AND decision_key IS NOT NULL AND answer IS NOT NULL
+      AND status IN ('answered', 'resolved')
     ORDER BY created_at, question_id
-  `).all(taskId) as { decision_key: string; title: string; question: string; answer: string }[];
+  `).all(taskId) as {
+    decision_key: string;
+    title: string;
+    question: string;
+    answer: string;
+    selected_option_id: string | null;
+    status: string;
+  }[];
   return new Map(rows.map((row) => [row.decision_key, row]));
 }
 
@@ -958,17 +1004,12 @@ function draftState(
     WHERE draft_id = ? ORDER BY ordinal, scope_key
   `).all(draft.draft_id) as { scope_key: string; direction: 'included' | 'excluded'; content: string }[];
   const questions = db.prepare(`
-    SELECT decision_key, title, question, impact, recommendation_option_id, recommendation_reason
+    SELECT decision_key, title, question, impact, recommendation_option_id, recommendation_reason,
+           authority, selected_option_id, decision_text, decision_reason,
+           lifecycle_status, lifecycle_reason, superseded_by
     FROM requirement_context_questions
     WHERE draft_id = ? ORDER BY ordinal, decision_key
-  `).all(draft.draft_id) as {
-    decision_key: string;
-    title: string;
-    question: string;
-    impact: string;
-    recommendation_option_id: string | null;
-    recommendation_reason: string | null;
-  }[];
+  `).all(draft.draft_id) as ContextQuestion[];
   const options = db.prepare(`
     SELECT decision_key, option_id, label, consequence
     FROM requirement_context_question_options
@@ -980,6 +1021,47 @@ function draftState(
     consequence: string;
   }[];
   const answers = answeredDecisions(db, draft.task_id);
+  const dependencies = db.prepare(`
+    SELECT decision_key, parent_decision_key, parent_option_id
+    FROM requirement_context_question_dependencies
+    WHERE draft_id = ? ORDER BY ordinal, decision_key, parent_decision_key
+  `).all(draft.draft_id) as ContextQuestionDependency[];
+  const resolvedSelections = new Map(questions.map((question) => {
+    const humanAnswer = answers.get(question.decision_key);
+    return [
+      question.decision_key,
+      question.authority === 'agent' ? question.selected_option_id : humanAnswer?.selected_option_id || null,
+    ];
+  }));
+  const projectionMemo = new Map<string, 'active' | 'conditional' | 'not_applicable' | 'superseded'>();
+  const projectionVisiting = new Set<string>();
+  const projectionStatus = (question: ContextQuestion): 'active' | 'conditional' | 'not_applicable' | 'superseded' => {
+    const cached = projectionMemo.get(question.decision_key);
+    if (cached) return cached;
+    if (question.lifecycle_status !== 'active') return question.lifecycle_status;
+    if (projectionVisiting.has(question.decision_key)) return 'conditional';
+    projectionVisiting.add(question.decision_key);
+    const gates = dependencies.filter((dependency) => dependency.decision_key === question.decision_key);
+    let status: 'active' | 'conditional' | 'not_applicable' = 'active';
+    const parentStates = gates.map((gate) => {
+      const parent = questions.find((candidate) => candidate.decision_key === gate.parent_decision_key);
+      return { gate, parent, status: parent ? projectionStatus(parent) : 'not_applicable' as const };
+    });
+    if (parentStates.some((parent) => ['not_applicable', 'superseded'].includes(parent.status))) {
+      status = 'not_applicable';
+    } else if (gates.some((gate) => {
+      const selected = resolvedSelections.get(gate.parent_decision_key);
+      return selected && selected !== gate.parent_option_id;
+    })) {
+      status = 'not_applicable';
+    } else if (parentStates.some((parent) => parent.status === 'conditional')
+      || gates.some((gate) => !resolvedSelections.get(gate.parent_decision_key))) {
+      status = 'conditional';
+    }
+    projectionVisiting.delete(question.decision_key);
+    projectionMemo.set(question.decision_key, status);
+    return status;
+  };
   return {
     context,
     assertions,
@@ -988,11 +1070,21 @@ function draftState(
     revisionCount,
     constraints,
     scope,
-    questions: questions.map((question) => ({
-      ...question,
-      options: options.filter((option) => option.decision_key === question.decision_key),
-      answer: answers.get(question.decision_key)?.answer || null,
-    })),
+    questions: questions.map((question) => {
+      const humanAnswer = answers.get(question.decision_key);
+      const selectedOptionId = question.authority === 'agent'
+        ? question.selected_option_id
+        : humanAnswer?.selected_option_id || null;
+      return {
+        ...question,
+        dependencies: dependencies.filter((dependency) => dependency.decision_key === question.decision_key),
+        options: options.filter((option) => option.decision_key === question.decision_key),
+        selected_option_id: selectedOptionId,
+        answer: question.authority === 'agent' ? question.decision_text : humanAnswer?.answer || null,
+        decision_reason: question.authority === 'agent' ? question.decision_reason : null,
+        projection_status: projectionStatus(question),
+      };
+    }),
   };
 }
 
@@ -1001,10 +1093,16 @@ function validationErrors(
   terminal: 'complete' | 'request-clarification' | null = null,
 ) {
   const errors: string[] = [];
-  const activeAssertions = state.assertions.filter((item) => item.lifecycle_status === 'active');
+  const projectedDecisionKeys = new Set(state.questions
+    .filter((question) => question.projection_status === 'active')
+    .map((question) => question.decision_key));
+  const visibleForDecision = (decisionKey: string | null) => !decisionKey || projectedDecisionKeys.has(decisionKey);
+  const activeAssertions = state.assertions.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
   const reliableAssertions = activeAssertions.filter((item) =>
     item.evidence_status !== 'inferred' && item.evidence_status !== 'conflicted');
-  const activeImpacts = state.impacts.filter((item) => item.lifecycle_status === 'active');
+  const activeImpacts = state.impacts.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
   const activeAcceptance = state.acceptance.filter((item) => item.lifecycle_status === 'active');
   if (!state.context.intent?.trim()) {
     errors.push('缺少业务意图：使用 requirement-context intent set --text <内容>');
@@ -1042,16 +1140,9 @@ function validationErrors(
   if (terminal === 'complete' && !state.context.classification) {
     errors.push('缺少需求分类：使用 requirement-context classification set <feature|bug|tech|other>');
   }
-  for (const question of state.questions) {
-    if (question.answer) continue;
-    if (question.options.length < 2) errors.push(`问题 ${question.decision_key} 至少需要两个互斥选项`);
-    if (!question.recommendation_option_id) errors.push(`问题 ${question.decision_key} 缺少推荐选项`);
-    else if (!question.options.some((option) => option.option_id === question.recommendation_option_id)) {
-      errors.push(`问题 ${question.decision_key} 的推荐选项不存在`);
-    }
-    if (!question.recommendation_reason?.trim()) errors.push(`问题 ${question.decision_key} 缺少推荐理由`);
-  }
-  const unanswered = state.questions.filter((question) => !question.answer);
+  errors.push(...questionStructureErrors(state));
+  const unanswered = state.questions.filter((question) =>
+    question.projection_status === 'active' && question.authority === 'human' && !question.answer);
   for (const assertion of activeAssertions.filter((item) => item.evidence_status === 'conflicted')) {
     if (!assertion.decision_key) {
       errors.push(`冲突陈述 ${assertion.assertion_key} 缺少关联 decision key`);
@@ -1081,12 +1172,322 @@ function validationErrors(
   return errors;
 }
 
-function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
-  const missing = validationErrors(state);
-  const activeAssertions = state.assertions.filter((item) => item.lifecycle_status === 'active');
-  const activeImpacts = state.impacts.filter((item) => item.lifecycle_status === 'active');
+function questionStructureErrors(state: ReturnType<typeof draftState>) {
+  const errors: string[] = [];
+  const knownKeys = new Set(state.questions.map((question) => question.decision_key));
+  const activeQuestions = state.questions.filter((item) => item.lifecycle_status === 'active');
+  for (const question of state.questions.filter((item) => item.lifecycle_status === 'active')) {
+    for (const dependency of question.dependencies) {
+      if (!knownKeys.has(dependency.parent_decision_key)) {
+        errors.push(`问题 ${question.decision_key} 的父决策 ${dependency.parent_decision_key} 不存在`);
+      }
+      if (dependency.parent_decision_key === question.decision_key) {
+        errors.push(`问题 ${question.decision_key} 不能依赖自身`);
+      }
+    }
+    if (question.options.length < 2) errors.push(`问题 ${question.decision_key} 至少需要两个互斥选项`);
+    if (question.authority === 'human') {
+      if (!question.recommendation_option_id) errors.push(`问题 ${question.decision_key} 缺少推荐选项`);
+      else if (!question.options.some((option) => option.option_id === question.recommendation_option_id)) {
+        errors.push(`问题 ${question.decision_key} 的推荐选项不存在`);
+      }
+      if (!question.recommendation_reason?.trim()) errors.push(`问题 ${question.decision_key} 缺少推荐理由`);
+    } else if (question.projection_status === 'active' && !question.answer) {
+      errors.push(`Agent 决策 ${question.decision_key} 尚未使用 question decide 关闭`);
+    }
+  }
+  const parentsByChild = new Map(activeQuestions.map((question) => [
+    question.decision_key,
+    question.dependencies.map((dependency) => dependency.parent_decision_key),
+  ]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (key: string): boolean => {
+    if (visiting.has(key)) return true;
+    if (visited.has(key)) return false;
+    visiting.add(key);
+    for (const parent of parentsByChild.get(key) || []) {
+      if (visit(parent)) return true;
+    }
+    visiting.delete(key);
+    visited.add(key);
+    return false;
+  };
+  if (activeQuestions.some((question) => visit(question.decision_key))) {
+    errors.push('决策树存在循环依赖，必须移除至少一条条件边');
+  }
+  return errors;
+}
+
+const requirementContextPhaseOrder: RequirementContextPhase[] = [
+  'as_is',
+  'decision_tree',
+  'to_be',
+  'impact_scan',
+  'scope',
+  'acceptance',
+  'finalize',
+];
+
+function phaseValidationErrors(
+  state: ReturnType<typeof draftState>,
+  phase: RequirementContextPhase,
+) {
+  const errors: string[] = [];
+  const projectedDecisionKeys = new Set(state.questions
+    .filter((question) => question.projection_status === 'active')
+    .map((question) => question.decision_key));
+  const visibleForDecision = (decisionKey: string | null) => !decisionKey || projectedDecisionKeys.has(decisionKey);
+  const activeAssertions = state.assertions.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
+  const reliableAssertions = activeAssertions.filter((item) =>
+    item.evidence_status !== 'inferred' && item.evidence_status !== 'conflicted');
+  const activeImpacts = state.impacts.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
   const activeAcceptance = state.acceptance.filter((item) => item.lifecycle_status === 'active');
+  const reliable = (perspective: ContextAssertion['perspective']) =>
+    reliableAssertions.some((item) => item.perspective === perspective);
+
+  if (phase === 'as_is') {
+    if (!state.context.intent?.trim()) {
+      errors.push('缺少 Reported Intent：使用 requirement-context intent set --text <内容>');
+    }
+    if (!reliable('actual')) {
+      errors.push('AS-IS 至少需要一条可靠 Actual；inferred 或 conflicted 陈述不能单独完成本阶段');
+    }
+    return errors;
+  }
+
+  if (phase === 'decision_tree') {
+    errors.push(...questionStructureErrors(state));
+    const unanswered = state.questions.filter((question) =>
+      question.projection_status === 'active' && question.authority === 'human' && !question.answer);
+    if (unanswered.length) {
+      errors.push(`仍有 ${unanswered.length} 个 HUMAN · PENDING 节点；应提交 request-clarification，而不是完成决策树`);
+    }
+    if (activeAssertions.some((item) => item.evidence_status === 'conflicted')) {
+      errors.push('仍有 conflicted 业务语义；应根据决定权关闭或关联待用户决策');
+    }
+    if (activeImpacts.some((item) => item.disposition === 'needs_decision')) {
+      errors.push('仍有 needs_decision 业务影响；应根据决定权关闭或关联待用户决策');
+    }
+    return errors;
+  }
+
+  if (phase === 'to_be') {
+    if (!reliable('target')) errors.push('缺少由已关闭决策派生的可靠 TO-BE 陈述');
+    if (state.questions.some((question) =>
+      question.projection_status === 'active' && question.authority === 'human' && !question.answer)) {
+      errors.push('仍有未回答的活动决策，不能冻结 TO-BE');
+    }
+    if (activeAssertions.some((item) => item.evidence_status === 'conflicted')) {
+      errors.push('TO-BE 中仍有 conflicted 陈述，必须重新打开决策树');
+    }
+    return errors;
+  }
+
+  if (phase === 'impact_scan') {
+    if (!state.context.change_summary?.trim()) {
+      errors.push('缺少 AS-IS → TO-BE 的变化摘要：使用 requirement-context change set --text <内容>');
+    }
+    if (!activeImpacts.length) errors.push('至少需要一条有效业务影响');
+    if (activeImpacts.some((item) => item.disposition === 'needs_decision')) {
+      errors.push('影响扫描发现尚未关闭的业务分叉；应重新打开决策树');
+    }
+    return errors;
+  }
+
+  if (phase === 'scope') {
+    if (!state.scope.some((item) => item.direction === 'included')) {
+      errors.push('SCOPE 至少需要一个由 TO-BE 和影响处置派生的 In Scope 条目');
+    }
+    return errors;
+  }
+
+  if (phase === 'acceptance') {
+    if (!activeAcceptance.length) errors.push('至少需要一条需求级验收语义');
+    if (!state.context.classification) errors.push('缺少最终需求分类');
+    if (state.context.classification === 'bug' && !reliable('expected')) {
+      errors.push('Bug 必须具备可靠 Existing Expected');
+    }
+    return errors;
+  }
+
+  return validationErrors(state, 'complete');
+}
+
+function renderRequirementContextWorkPacket(
+  phase: RequirementContextPhase,
+  state: ReturnType<typeof draftState>,
+) {
+  const activeQuestions = state.questions.filter((question) => question.projection_status === 'active');
+  const answered = activeQuestions.filter((question) => question.answer).length;
+  const unanswered = activeQuestions.filter((question) =>
+    question.authority === 'human' && !question.answer).length;
+  const packets: Record<RequirementContextPhase, string[]> = {
+    as_is: [
+      'OBJECTIVE：建立足以讨论本次变化的 AS-IS 事实基线。',
+      'REQUIRED：Reported Intent、可靠 Actual、适用时的 Existing Expected，以及证据冲突和证明边界。',
+      'DO NOT：不要写 TO-BE、SCOPE 或用户决策问题；用户提出的做法此时仍是 reported 候选。',
+      'COMMANDS：intent set；assertion upsert/dismiss/supersede；help assertion；as-is complete。',
+      'SUBMIT：requirement-context as-is complete',
+    ],
+    decision_tree: [
+      'OBJECTIVE：依据 Reported Intent 与已接受的 AS-IS，覆盖所有会改变需求语义或交付规划的实质分叉。',
+      `CURRENT：活动决策 ${activeQuestions.length} 个，已关闭 ${answered} 个，待人工回答 ${unanswered} 个。`,
+      'REQUIRED：稳定 decision key、互斥选项及后果、推荐与理由；事实可关闭的节点不得询问用户。',
+      'BATCH：一次建立当前已知的全部根节点与条件子节点，以最少交互轮次充分覆盖，不按单问题拆轮次。',
+      'DO NOT：不要写最终 TO-BE 或 SCOPE；只问无法从证据确定且会形成不同业务结果的选择。',
+      'COMMANDS：question add/option-add/recommend/depends-on/decide/supersede/remove；assertion/impact 关联 decision key；help question。',
+      unanswered
+        ? 'SUBMIT：当前有待回答节点，执行 requirement-context request-clarification'
+        : 'SUBMIT：requirement-context decision-tree complete',
+    ],
+    to_be: [
+      'OBJECTIVE：把 Reported Intent、Active Decision Path 和必须保持的 Existing Expected 投影成 TO-BE。',
+      'REQUIRED：每条 Target 都能追溯到已关闭决定、权威输入或明确约束，并共同形成自洽业务结果。',
+      'DO NOT：TO-BE 不得创造未经记录的新选择；发现新业务分叉时重新打开决策树。',
+      'COMMANDS：assertion upsert --perspective target；assertion dismiss/supersede；help assertion。',
+      'SUBMIT：requirement-context to-be complete',
+    ],
+    impact_scan: [
+      'OBJECTIVE：对比 AS-IS 与 TO-BE，识别必须改变、必须保持和交付分析必须收敛的影响。',
+      'REQUIRED：Change Summary；每项影响明确为 change、preserve 或 technical。',
+      'DO NOT：识别影响不等于扩大范围；新业务结果或新业务分叉必须回到决策树。',
+      'COMMANDS：change set；impact upsert/dismiss/supersede；help impact；impact-scan reopen-decisions。',
+      'SUBMIT：requirement-context impact-scan complete',
+    ],
+    scope: [
+      'OBJECTIVE：根据冻结 TO-BE、选中分支和影响处置派生本轮业务边界。',
+      'REQUIRED：至少一个 In Scope；明确相关但未选择、独立扩展或推迟的 Out of Scope。',
+      'DO NOT：SCOPE 不得创造新的业务规则，也不得把 preserve 简化成无关事项。',
+      'COMMANDS：scope include/exclude/remove；constraint add/remove；help scope。',
+      'SUBMIT：requirement-context scope complete',
+    ],
+    acceptance: [
+      'OBJECTIVE：根据最终 TO-BE 与 SCOPE 形成需求级验收语义，并最后确定需求分类。',
+      'REQUIRED：可观察 Acceptance；feature、bug、tech 或 other 分类；Bug 必须有可靠 Existing Expected。',
+      'DO NOT：不要写测试步骤、技术验证方式或实现方案。',
+      'COMMANDS：acceptance upsert/dismiss/supersede；classification set；help assertion/scope。',
+      'SUBMIT：requirement-context acceptance complete',
+    ],
+    finalize: [
+      'OBJECTIVE：对完整业务变化上下文做最终一致性校验并提交。',
+      'CHECK：AS-IS 不由业务选择改写；DECISIONS 已关闭；TO-BE 不含隐含选择；SCOPE 不创造新语义。',
+      'COMMANDS：requirement-context validate；根据缺口修正；requirement-context complete。',
+      'SUBMIT：requirement-context complete',
+    ],
+  };
+  return [
+    '# CURRENT WORK PACKET',
+    '',
+    `PHASE：${phase}`,
+    ...packets[phase],
+  ].join('\n');
+}
+
+function activeDecisionProjection(state: ReturnType<typeof draftState>) {
+  return state.questions.filter((question) => question.projection_status === 'active');
+}
+
+function activeDecisionKeys(state: ReturnType<typeof draftState>) {
+  return new Set(activeDecisionProjection(state).map((question) => question.decision_key));
+}
+
+function renderActiveDecisionTree(state: ReturnType<typeof draftState>) {
+  const active = activeDecisionProjection(state);
+  const resolved = active.filter((question) => Boolean(question.answer));
+  const pending = active.filter((question) => question.authority === 'human' && !question.answer);
+  const lines = ['# ACTIVE DECISION TREE', ''];
+  if (!resolved.length) lines.push('尚无已关闭的活动决策。');
+  for (const question of resolved) {
+    const selected = question.options.find((option) => option.option_id === question.selected_option_id);
+    const parent = question.dependencies
+      .map((dependency) => `${dependency.parent_decision_key}=${dependency.parent_option_id}`)
+      .join(' AND ');
+    lines.push(
+      `## ${question.title} · ${question.decision_key}`,
+      '',
+      `- Question：${question.question}`,
+      `- Decision：${selected?.label || question.answer}`,
+      `- Decided By：${question.authority === 'human' ? 'HUMAN' : 'AGENT'}`,
+    );
+    if (question.authority === 'human' && selected && question.answer !== selected.label) {
+      lines.push(`- User Note：${question.answer}`);
+    }
+    if (question.authority === 'agent' && question.decision_reason) {
+      lines.push(`- Reason：${question.decision_reason}`);
+    }
+    if (selected?.consequence) lines.push(`- Consequence：${selected.consequence}`);
+    if (parent) lines.push(`- Activated By：${parent}`);
+    lines.push('');
+  }
+  lines.push('# ACTIVE PENDING', '');
+  if (!pending.length) lines.push('none');
+  for (const question of pending) {
+    lines.push(`## ${question.title} · ${question.decision_key}`, '', `- Question：${question.question}`);
+    if (question.impact) lines.push(`- Impact：${question.impact}`);
+    if (question.recommendation_option_id) {
+      const recommended = question.options.find((option) => option.option_id === question.recommendation_option_id);
+      if (recommended) lines.push(`- Recommendation：${recommended.label}`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n').trimEnd();
+}
+
+function transitionRequirementContextPhase(input: {
+  db: Awaited<ReturnType<typeof databaseConnection>>;
+  draft: DraftRow;
+  execution: ExecutionRow;
+  state: ReturnType<typeof draftState>;
+  from: RequirementContextPhase;
+  to: RequirementContextPhase;
+  reason: string;
+}) {
+  const { db, draft, execution, state, from, to, reason } = input;
+  if (state.context.workflow_phase !== from) {
+    throw new Error(`当前阶段是 ${state.context.workflow_phase}，不能提交 ${from}`);
+  }
+  const errors = phaseValidationErrors(state, from);
+  if (errors.length) {
+    throw new Error(`${from} 阶段不能完成：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+  }
+  db.transaction(() => {
+    db.prepare('UPDATE requirement_context_drafts SET workflow_phase = ? WHERE draft_id = ?')
+      .run(to, draft.draft_id);
+    db.prepare(`
+      INSERT INTO requirement_context_phase_transitions(
+        draft_id, from_phase, to_phase, reason, execution_id
+      ) VALUES(?, ?, ?, ?, ?)
+    `).run(draft.draft_id, from, to, reason, execution.execution_id);
+    touchDraft(db, draft.draft_id);
+  })();
+  const nextState = draftState(db, draft);
+  return [
+    `${from} 阶段已接受，进入 ${to}。`,
+    '',
+    renderRequirementContextWorkPacket(to, nextState),
+  ].join('\n');
+}
+
+function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
+  const missing = phaseValidationErrors(state, state.context.workflow_phase);
+  const decisionKeys = activeDecisionKeys(state);
+  const visibleForDecision = (decisionKey: string | null) => !decisionKey || decisionKeys.has(decisionKey);
+  const visibleAssertions = state.assertions.filter((item) => visibleForDecision(item.decision_key));
+  const visibleImpacts = state.impacts.filter((item) => visibleForDecision(item.decision_key));
+  const activeAssertions = state.assertions.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
+  const activeImpacts = state.impacts.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
+  const activeAcceptance = state.acceptance.filter((item) => item.lifecycle_status === 'active');
+  const projectedQuestions = activeDecisionProjection(state);
   const lines = [
+    renderRequirementContextWorkPacket(state.context.workflow_phase, state),
+    '',
+    '# CURRENT DRAFT',
+    '',
     `需求上下文草稿 v${draft.draft_version} · 变更 ${draft.change_seq}`,
     '',
     `业务意图：${state.context.intent || '未填写'}`,
@@ -1096,16 +1497,16 @@ function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
     `业务语义：Actual ${activeAssertions.filter((item) => item.perspective === 'actual').length}`
       + ` / Expected ${activeAssertions.filter((item) => item.perspective === 'expected').length}`
       + ` / TO-BE ${activeAssertions.filter((item) => item.perspective === 'target').length}`,
-    `业务影响：${activeImpacts.length}（历史 ${state.impacts.length - activeImpacts.length}）`,
+    `业务影响：${activeImpacts.length}`,
     `验收语义：${activeAcceptance.length}`,
     `语义修订记录：${state.revisionCount}`,
     `约束：${state.constraints.length}`,
     `范围：包含 ${state.scope.filter((item) => item.direction === 'included').length} / 排除 ${state.scope.filter((item) => item.direction === 'excluded').length}`,
-    `问题：${state.questions.length}（已回答 ${state.questions.filter((item) => item.answer).length}）`,
+    `活动决策：${projectedQuestions.length}（已关闭 ${projectedQuestions.filter((item) => item.answer).length}）`,
   ];
-  if (state.assertions.length) {
+  if (visibleAssertions.length) {
     lines.push('', '业务语义索引（跨轮次复用稳定 key）：');
-    for (const assertion of state.assertions) {
+    for (const assertion of visibleAssertions) {
       lines.push(
         `- ${assertion.assertion_key} · ${assertion.perspective}`
         + ` · ${assertion.evidence_status} · ${assertion.lifecycle_status}：${assertion.statement}`
@@ -1115,9 +1516,9 @@ function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
       );
     }
   }
-  if (state.impacts.length) {
+  if (visibleImpacts.length) {
     lines.push('', '业务影响索引（识别影响不等于自动纳入范围）：');
-    for (const impact of state.impacts) {
+    for (const impact of visibleImpacts) {
       lines.push(
         `- ${impact.impact_key} · ${impact.disposition} · ${impact.lifecycle_status}：${impact.statement}`
         + `（依据：${impact.rationale}；来源：${impact.source}）`
@@ -1148,30 +1549,13 @@ function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
       lines.push(`- ${item.scope_key} · ${item.direction === 'included' ? '包含' : '排除'}：${item.content}`);
     }
   }
-  if (state.questions.length) {
-    lines.push('', '问题索引（decision key 跨轮次不可改名）：');
-    for (const question of state.questions) {
-      const options = question.options.map((option) =>
-        `${option.option_id}=${option.label}${option.option_id === question.recommendation_option_id ? '（推荐）' : ''}`,
-      ).join('；');
-      lines.push(
-        `- ${question.decision_key}：${question.title} · ${question.answer ? `已回答：${question.answer}` : '待回答'}`
-        + (options ? ` · 选项：${options}` : ''),
-      );
-    }
-  }
+  if (projectedQuestions.length) lines.push('', renderActiveDecisionTree(state));
   if (missing.length) {
     lines.push('', '当前校验提示：', ...missing.map((item, index) => `${index + 1}. ${item}`));
-  } else if (!state.context.classification) {
-    lines.push(
-      '',
-      '草稿基础结构完整，但 complete 前仍需确定需求分类。',
-      state.questions.some((question) => !question.answer)
-        ? '若分类取决于待回答问题，可以先提交 request-clarification；不要猜测临时分类。'
-        : '当前没有待回答问题，请设置 classification 后再 complete。',
-    );
+  } else if (state.context.workflow_phase !== 'finalize') {
+    lines.push('', `当前 ${state.context.workflow_phase} 阶段结构完整，可以执行工作包中的 SUBMIT 命令。`);
   } else {
-    lines.push('', '草稿结构完整。请根据是否仍有未回答问题选择终止命令。');
+    lines.push('', '全部阶段结构完整，可以执行 requirement-context complete。');
   }
   return lines.join('\n');
 }
@@ -1181,6 +1565,8 @@ function renderArtifact(
   state: ReturnType<typeof draftState>,
   action: 'complete' | 'request-clarification',
 ) {
+  const decisionKeys = activeDecisionKeys(state);
+  const visibleForDecision = (decisionKey: string | null) => !decisionKey || decisionKeys.has(decisionKey);
   const included = state.scope.filter((item) => item.direction === 'included');
   const excluded = state.scope.filter((item) => item.direction === 'excluded');
   const assertionSection = (
@@ -1188,12 +1574,15 @@ function renderArtifact(
     fallback: string,
   ) => {
     const assertions = state.assertions.filter((item) =>
-      item.perspective === perspective && item.lifecycle_status === 'active');
+      item.perspective === perspective
+      && item.lifecycle_status === 'active'
+      && visibleForDecision(item.decision_key));
     return assertions.length
       ? assertions.map((item) => `- ${item.statement}`)
       : [`- ${fallback}`];
   };
-  const activeImpacts = state.impacts.filter((item) => item.lifecycle_status === 'active');
+  const activeImpacts = state.impacts.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
   const impactSection = (
     heading: string,
     disposition: ContextImpact['disposition'],
@@ -1229,6 +1618,47 @@ function renderArtifact(
         ? '本需求未识别到独立于本次 TO-BE 的既有 Expected；变化按 Actual → TO-BE 表达'
         : '尚未形成可靠结论',
     ),
+  ];
+  const answered = activeDecisionProjection(state).filter((question) => question.answer);
+  if (answered.length) {
+    lines.push('', '## DECISIONS', '');
+    for (const question of answered) {
+      const outcomes = state.assertions
+        .filter((item) =>
+          item.lifecycle_status === 'active'
+          && item.perspective === 'target'
+          && item.decision_key === question.decision_key)
+        .map((item) => item.statement);
+      const impacts = activeImpacts
+        .filter((item) => item.decision_key === question.decision_key)
+        .map((item) => item.statement);
+      const selected = question.options.find((option) => option.option_id === question.selected_option_id);
+      lines.push(
+        `### ${question.title}`,
+        '',
+        `- 决定：${selected?.label || question.answer}`,
+        `- 决定者：${question.authority === 'human' ? '用户' : 'Agent'}`,
+      );
+      if (selected?.consequence) lines.push(`- 业务后果：${selected.consequence}`);
+      if (outcomes.length) lines.push(`- 形成的业务结果：${outcomes.join('；')}`);
+      if (impacts.length) lines.push(`- 业务影响：${impacts.join('；')}`);
+      lines.push('');
+    }
+  }
+  const unanswered = activeDecisionProjection(state).filter((question) =>
+    question.authority === 'human' && !question.answer);
+  if (action === 'request-clarification' && unanswered.length) {
+    lines.push('', '## OPEN QUESTIONS', '');
+    for (const question of unanswered) {
+      const pendingImpacts = activeImpacts
+        .filter((item) => item.decision_key === question.decision_key)
+        .map((item) => item.statement);
+      lines.push(`### ${question.title}`, '', `- 问题：${question.question}`, `- 决策影响：${question.impact}`);
+      if (pendingImpacts.length) lines.push(`- 待收敛影响：${pendingImpacts.join('；')}`);
+      lines.push('');
+    }
+  }
+  lines.push(
     '',
     '## TO-BE',
     '',
@@ -1266,38 +1696,7 @@ function renderArtifact(
           .map((item) => `- ${item.content}`)
         : ['- 尚未明确']
     ),
-  ];
-  const answered = state.questions.filter((question) => question.answer);
-  if (answered.length) {
-    lines.push('', '## DECISIONS', '');
-    for (const question of answered) {
-      const outcomes = state.assertions
-        .filter((item) =>
-          item.lifecycle_status === 'active'
-          && item.perspective === 'target'
-          && item.decision_key === question.decision_key)
-        .map((item) => item.statement);
-      const impacts = activeImpacts
-        .filter((item) => item.decision_key === question.decision_key)
-        .map((item) => item.statement);
-      lines.push(`### ${question.title}`, '', `- 决定：${question.answer}`);
-      if (outcomes.length) lines.push(`- 形成的业务结果：${outcomes.join('；')}`);
-      if (impacts.length) lines.push(`- 业务影响：${impacts.join('；')}`);
-      lines.push('');
-    }
-  }
-  const unanswered = state.questions.filter((question) => !question.answer);
-  if (action === 'request-clarification' && unanswered.length) {
-    lines.push('', '## OPEN QUESTIONS', '');
-    for (const question of unanswered) {
-      const pendingImpacts = activeImpacts
-        .filter((item) => item.decision_key === question.decision_key)
-        .map((item) => item.statement);
-      lines.push(`### ${question.title}`, '', `- 问题：${question.question}`, `- 决策影响：${question.impact}`);
-      if (pendingImpacts.length) lines.push(`- 待收敛影响：${pendingImpacts.join('；')}`);
-      lines.push('');
-    }
-  }
+  );
   return lines.join('\n').trimEnd();
 }
 
@@ -1306,7 +1705,11 @@ function buildResult(
   state: ReturnType<typeof draftState>,
   action: 'complete' | 'request-clarification',
 ) {
-  const questions = state.questions.filter((question) => !question.answer).map((question) => {
+  const questions = state.questions.filter((question) =>
+    question.authority === 'human'
+    && question.lifecycle_status === 'active'
+    && !question.answer
+    && (action === 'request-clarification' || question.projection_status === 'active')).map((question) => {
     const recommended = question.options.find((option) => option.option_id === question.recommendation_option_id)!;
     return {
       decisionKey: question.decision_key,
@@ -1320,7 +1723,16 @@ function buildResult(
         label: option.label,
         consequences: [option.consequence],
       })),
-      dependsOn: [],
+      dependsOn: question.dependencies.map((dependency) => dependency.parent_decision_key),
+      activation: question.dependencies.map((dependency) => ({
+        decisionKey: dependency.parent_decision_key,
+        optionId: dependency.parent_option_id,
+      })),
+      initialStatus: question.projection_status === 'active'
+        ? 'pending' as const
+        : question.projection_status === 'conditional'
+          ? 'conditional' as const
+          : 'not_applicable' as const,
     };
   });
   const complete = action === 'complete';
@@ -1349,6 +1761,12 @@ function terminalSubmit(
 ) {
   assertViewed(draft, execution.execution_id);
   const state = draftState(db, draft);
+  if (action === 'request-clarification' && state.context.workflow_phase !== 'decision_tree') {
+    throw new Error(`只有 decision_tree 阶段可以请求用户澄清；当前阶段是 ${state.context.workflow_phase}`);
+  }
+  if (action === 'complete' && state.context.workflow_phase !== 'finalize') {
+    throw new Error(`需求上下文尚未走完阶段调用链；当前阶段是 ${state.context.workflow_phase}`);
+  }
   const errors = validationErrors(state, action);
   if (errors.length) {
     throw new Error(`草稿不能执行 ${action}：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
@@ -1705,6 +2123,13 @@ function submitDeliveryPlan(
 }
 
 const requirementContextCommandIndex = [
+  '  requirement-context as-is complete',
+  '  requirement-context decision-tree complete',
+  '  requirement-context to-be complete',
+  '  requirement-context impact-scan complete',
+  '  requirement-context impact-scan reopen-decisions --reason <新发现的业务分叉>',
+  '  requirement-context scope complete',
+  '  requirement-context acceptance complete',
   '  requirement-context intent set --text <业务意图>',
   '  requirement-context change set --text <Actual 与 TO-BE，以及适用的 Expected 的变化摘要>',
   '  requirement-context assertion upsert --key <key> --perspective <actual|expected|target> --statement <陈述> --evidence <observed|reported|inferred|decided|conflicted> --source <来源> [--decision <问题key>]',
@@ -1721,9 +2146,13 @@ const requirementContextCommandIndex = [
   '  requirement-context constraint remove --key <key>',
   '  requirement-context scope include|exclude --key <key> --text <内容>',
   '  requirement-context scope remove --key <key>',
-  '  requirement-context question add --key <key> --title <标题> --question <问题> --impact <影响>',
+  '  requirement-context question add --key <key> --title <标题> --question <问题> --impact <影响> [--authority human|agent]',
   '  requirement-context question option-add --key <问题key> --id <选项id> --label <名称> --consequence <后果>',
   '  requirement-context question recommend --key <问题key> --option <选项id> --reason <理由>',
+  '  requirement-context question depends-on --key <子节点key> --parent <父节点key> --option <激活选项id>',
+  '  requirement-context question dependency-remove --key <子节点key> --parent <父节点key> --option <激活选项id>',
+  '  requirement-context question decide --key <Agent决策key> --option <选项id> --reason <职责内依据>',
+  '  requirement-context question supersede --key <旧key> --by <新key> --reason <理由>',
   '  requirement-context question remove --key <key>',
   '  requirement-context validate',
 ];
@@ -1787,21 +2216,29 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
   }
   if (topic === 'question') {
     return [
-      '只有无法从现有上下文和证据推导、并且会实质改变业务目标、规则、参与者、范围、分类或验收结果的问题才提交给用户。',
+      'Decision Tree 的目标是在 Backlog 职责内充分覆盖需求级实质分叉，并以最少交互轮次批量对齐；不是把问题数量压到最低。',
+      '能够从上下文或项目证据确定的事实不得询问；不会改变需求上下文或交付规划的单元级选择应形成 Analysis Obligation。',
       '',
       '提问路径：',
-      '  question add → 至少两次 option-add → question recommend → validate → request-clarification',
+      '  完成 AS-IS → 扫描完整决策树 → 为全部当前已知 HUMAN · PENDING 节点执行 question add/option-add/recommend → request-clarification',
       '',
-      '  requirement-context question add --key <稳定decision key> --title <标题> --question <问题> --impact <不同回答的业务影响>',
+      '  requirement-context question add --key <稳定decision key> --title <标题> --question <问题> --impact <不同回答的业务影响> [--authority human|agent]',
       '  requirement-context question option-add --key <问题key> --id <选项id> --label <名称> --consequence <后果>',
       '  requirement-context question recommend --key <问题key> --option <推荐选项id> --reason <推荐理由>',
+      '  requirement-context question depends-on --key <子节点key> --parent <父节点key> --option <激活选项id>',
+      '  requirement-context question decide --key <Agent决策key> --option <选项id> --reason <职责内依据>',
+      '  requirement-context question supersede --key <旧key> --by <新key> --reason <理由>',
       '  requirement-context question remove --key <key>',
       '',
-      '每个未回答问题至少需要两个真实互斥选项、一个推荐选项和推荐理由。question remove 只用于尚未提交给用户的错误候选。',
+      '每个人工决策至少需要两个真实互斥选项、各自业务后果、一个推荐选项和推荐理由。Agent 职责内决策使用 --authority agent 建立并以 decide 关闭，不提交给用户。',
+      '条件子节点必须用 depends-on 明确父 decision key 和激活 option id。未命中的子树保留给 UI 与审计，但不会进入 Agent status、Context Snapshot 或最终需求文档。',
+      'question remove 只用于尚未提交给用户的错误候选；已形成审计身份的错误或重复节点使用 supersede。',
+      '一次 request-clarification 应包含全部当前已知独立根节点和条件子节点；不要为了维持单问题交互而拆成多轮。用户自定义答案产生此前未知分支时，再追加增量批次。',
       '若问题源于 conflicted assertion 或 needs_decision impact，必须用同一 decision key 关联；普通问题本身不要求 assertion 或 impact 反向引用。',
       '',
       '恢复轮：',
-      '  先执行 status，逐字复用原 decision key 和用户答案；将关联的 conflicted assertion 更新为可靠结论，将 needs_decision impact 更新为 change、preserve 或 technical，再完成其余上下文。不得换 key 或重复询问。',
+      '  Prompt 的 Working Context Pack 与 status 都会直接给出 AS-IS 和完整 Active Decision Tree，包括问题、选中答案、后果、决定权与条件边；逐字复用原 decision key 进行稳定关联，但不要求逐项查询。',
+      '  只消费 Active Decision Tree；not_applicable 与 superseded 分支不会投影到运行上下文。将活动路径关联的 conflicted assertion 更新为可靠结论，将 needs_decision impact 更新为 change、preserve 或 technical，再继续阶段调用链。不得换 key 或重复询问。',
     ];
   }
   if (topic === 'scope') {
@@ -1829,26 +2266,21 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
   }
   if (topic === 'finish') {
     return [
-      '校验不会推进流程；可以反复执行并根据错误继续修改草稿。',
+      '需求上下文采用阶段调用链。每个阶段完成命令会校验当前产物、保存阶段转换，并直接返回下一阶段工作包；阶段命令不会结束 execution。',
       '',
+      '阶段路径：',
+      '  status → as-is complete → decision-tree complete → to-be complete → impact-scan complete → scope complete → acceptance complete → validate → complete',
+      '  若影响扫描发现新的需求级业务分叉，使用 impact-scan reopen-decisions 返回决策树；这会形成可审计的阶段转换。',
+      '  若决策树存在 HUMAN · PENDING 节点，批量建立全部当前已知问题后直接提交 request-clarification，不执行 decision-tree complete。',
+      '',
+      '最终校验与提交：',
       '  requirement-context validate',
-      '',
-      '正常完成路径：',
-      '  status → intent → Actual/Target 与适用的 Expected assertions → change → impacts → acceptance → classification → validate → complete',
       `  ${terminalActions.find((action) => action.endsWith(' complete')) || 'requirement-context complete'}`,
-      '  必填：业务意图、可靠的 Actual 和 Target、变化摘要、至少一条有效影响、至少一条需求级验收语义和需求分类；Bug 额外必须具备可靠 Expected。',
-      '  若存在变更前的权威需求规格或业务规则，即使不是 Bug，也必须记录适用的 Expected；不得把本次新增目标误写成 Expected。',
-      '  可选：约束、显式范围和问题；只有业务上真实存在时才创建。',
       '',
       '澄清路径：',
-      '  完成必要调查并记录至少一条带来源陈述 → 建立有效问题与选项 → validate → request-clarification',
+      '  完成 AS-IS → 进入 decision_tree → 批量建立决策树与推荐 → request-clarification',
       `  ${terminalActions.find((action) => action.endsWith(' request-clarification')) || 'requirement-context request-clarification'}`,
-      '  澄清最低必填：业务意图、至少一条 active 且带来源的业务语义陈述，以及至少一个结构完整的未回答问题。',
-      '  澄清阶段不要求猜测尚未确定的完整 Target 或需求分类；用户回答后由新的 resume execution 在原 key 上继续。',
-      '',
-      'validate 的含义：',
-      '  存在未回答问题时，validate 自动按 request-clarification 的最低结构校验。',
-      '  没有未回答问题时，validate 检查完整上下文结构，但仍不校验 classification；只有 complete 执行包含分类在内的最终完成校验。',
+      '  用户回答后由新的 resume execution 恢复 decision_tree，逐字复用原 decision key，关闭适用分支后继续阶段调用链。',
       '',
       '普通最终文本、Markdown 或手写 JSON 都不会结束 execution。',
     ];
@@ -1857,8 +2289,8 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
     throw new Error(`需求上下文 help 不支持主题：${topic}。可用主题：context、assertion、impact、question、scope、finish`);
   }
   return [
-    '完成需求上下文必须建立可靠的 Actual 和 Target、适用时的 Expected，说明业务变化及影响，并形成需求级验收语义和分类。Bug 必须具备 Expected。',
-    '约束、显式范围和问题是可选项；只有真实存在时才创建。',
+    '需求上下文通过内层阶段调用链完成。每次 status 会恢复当前阶段并返回这一阶段的目标、必需产物、禁止事项、可用命令和提交命令。',
+    '阶段顺序由 Backlog Agent Prompt 引导；编辑命令不做阶段白名单限制，但每个阶段提交都会按阶段产物校验。',
     '',
     '模板映射：',
     '  intent → BUSINESS INTENT',
@@ -1870,9 +2302,9 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
     '  已回答 question → DECISIONS；未回答 question 只在澄清态进入 OPEN QUESTIONS',
     '',
     '标准路径：',
-    '  正常完成：status → intent/assertions/change/impacts/acceptance/classification → validate → complete',
-    '  用户澄清：question + options + recommendation；若源于冲突或待决影响则关联同一 decision key → validate → request-clarification',
-    '  恢复处理：status → 复用原 decision key 消费回答 → 更新关联语义与影响 → complete',
+    '  正常完成：status → AS-IS → Decision Tree → TO-BE → Impact Scan → SCOPE → Acceptance → complete',
+    '  用户澄清：Decision Tree 中批量建立 question + options + recommendation → request-clarification',
+    '  恢复处理：status → 复用原 decision key 消费回答 → 继续当前 Decision Tree 工作包',
     '',
     '命令索引：',
     ...requirementContextCommandIndex,
@@ -2645,6 +3077,55 @@ export async function runAgentCommand(input: {
   }
   assertViewed(draft, execution.execution_id);
 
+  const phaseCompletion = new Map<string, RequirementContextPhase>([
+    ['requirement-context as-is complete', 'as_is'],
+    ['requirement-context decision-tree complete', 'decision_tree'],
+    ['requirement-context to-be complete', 'to_be'],
+    ['requirement-context impact-scan complete', 'impact_scan'],
+    ['requirement-context scope complete', 'scope'],
+    ['requirement-context acceptance complete', 'acceptance'],
+  ]);
+  const completedPhase = phaseCompletion.get(command);
+  if (completedPhase) {
+    const current = draftState(db, draft);
+    const phaseIndex = requirementContextPhaseOrder.indexOf(completedPhase);
+    const next = requirementContextPhaseOrder[phaseIndex + 1];
+    if (!next) throw new Error(`${completedPhase} 没有可用的下一阶段`);
+    return transitionRequirementContextPhase({
+      db,
+      draft,
+      execution,
+      state: current,
+      from: completedPhase,
+      to: next,
+      reason: `${completedPhase} 阶段产物校验通过`,
+    });
+  }
+
+  if (command === 'requirement-context impact-scan reopen-decisions') {
+    const current = draftState(db, draft);
+    if (current.context.workflow_phase !== 'impact_scan') {
+      throw new Error(`只有 impact_scan 阶段可以重新打开决策树；当前阶段是 ${current.context.workflow_phase}`);
+    }
+    const reason = bounded(required(flags, 'reason'), '重新打开决策树的理由');
+    db.transaction(() => {
+      db.prepare('UPDATE requirement_context_drafts SET workflow_phase = ? WHERE draft_id = ?')
+        .run('decision_tree', draft.draft_id);
+      db.prepare(`
+        INSERT INTO requirement_context_phase_transitions(
+          draft_id, from_phase, to_phase, reason, execution_id
+        ) VALUES(?, 'impact_scan', 'decision_tree', ?, ?)
+      `).run(draft.draft_id, reason, execution.execution_id);
+      touchDraft(db, draft.draft_id);
+    })();
+    return [
+      '影响扫描已创建新的决策树修订。',
+      `原因：${reason}`,
+      '',
+      renderRequirementContextWorkPacket('decision_tree', draftState(db, draft)),
+    ].join('\n');
+  }
+
   if (
     command === 'requirement-context intent set'
     || command === 'requirement-context change set'
@@ -2912,19 +3393,23 @@ export async function runAgentCommand(input: {
   }
   if (command === 'requirement-context question add') {
     const key = bounded(required(flags, 'key'), '问题 key', 120);
+    const authority = optionalBounded(flags, 'authority', '决定权', 20) || 'human';
+    if (!['human', 'agent'].includes(authority)) throw new Error('--authority 必须是 human 或 agent');
     const ordinal = nextOrdinal(db, 'requirement_context_questions', draft.draft_id);
     db.prepare(`
       INSERT INTO requirement_context_questions(
-        draft_id, decision_key, title, question, impact, ordinal
-      ) VALUES(?, ?, ?, ?, ?, ?)
+        draft_id, decision_key, title, question, impact, authority, ordinal
+      ) VALUES(?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(draft_id, decision_key) DO UPDATE SET
-        title = excluded.title, question = excluded.question, impact = excluded.impact
+        title = excluded.title, question = excluded.question, impact = excluded.impact,
+        authority = excluded.authority
     `).run(
       draft.draft_id,
       key,
       bounded(required(flags, 'title'), '问题标题', 500),
       bounded(required(flags, 'question'), '问题内容'),
       bounded(required(flags, 'impact'), '问题影响'),
+      authority,
       ordinal,
     );
     touchDraft(db, draft.draft_id);
@@ -2969,6 +3454,153 @@ export async function runAgentCommand(input: {
     `).run(option, bounded(required(flags, 'reason'), '推荐理由'), draft.draft_id, key);
     touchDraft(db, draft.draft_id);
     return `问题 ${key} 的推荐答案已保存。`;
+  }
+  if (command === 'requirement-context question depends-on') {
+    const key = bounded(required(flags, 'key'), '问题 key', 120);
+    const parent = bounded(required(flags, 'parent'), '父决策 key', 120);
+    const option = bounded(required(flags, 'option'), '父决策选项', 120);
+    if (key === parent) throw new Error('问题不能依赖自身');
+    const childExists = db.prepare(`
+      SELECT 1 FROM requirement_context_questions WHERE draft_id = ? AND decision_key = ?
+    `).get(draft.draft_id, key);
+    if (!childExists) throw new Error(`问题 ${key} 不存在`);
+    const parentOptionExists = db.prepare(`
+      SELECT 1 FROM requirement_context_question_options
+      WHERE draft_id = ? AND decision_key = ? AND option_id = ?
+    `).get(draft.draft_id, parent, option);
+    if (!parentOptionExists) throw new Error(`父决策 ${parent} 不存在选项 ${option}`);
+    const ordinal = nextOrdinal(db, 'requirement_context_question_dependencies', draft.draft_id);
+    db.prepare(`
+      INSERT INTO requirement_context_question_dependencies(
+        draft_id, decision_key, parent_decision_key, parent_option_id, ordinal
+      ) VALUES(?, ?, ?, ?, ?)
+      ON CONFLICT(draft_id, decision_key, parent_decision_key, parent_option_id) DO NOTHING
+    `).run(draft.draft_id, key, parent, option, ordinal);
+    touchDraft(db, draft.draft_id);
+    return `问题 ${key} 已设置为仅在 ${parent}=${option} 时生效。`;
+  }
+  if (command === 'requirement-context question dependency-remove') {
+    db.prepare(`
+      DELETE FROM requirement_context_question_dependencies
+      WHERE draft_id = ? AND decision_key = ? AND parent_decision_key = ? AND parent_option_id = ?
+    `).run(
+      draft.draft_id,
+      required(flags, 'key'),
+      required(flags, 'parent'),
+      required(flags, 'option'),
+    );
+    touchDraft(db, draft.draft_id);
+    return '决策条件边已删除。';
+  }
+  if (command === 'requirement-context question decide') {
+    const key = bounded(required(flags, 'key'), '问题 key', 120);
+    const option = bounded(required(flags, 'option'), '选中选项', 120);
+    const decisionState = draftState(db, draft).questions.find((question) => question.decision_key === key);
+    if (!decisionState || decisionState.authority !== 'agent' || decisionState.projection_status !== 'active') {
+      throw new Error(`Agent 决策 ${key} 当前不在 Active Decision Tree 中`);
+    }
+    const selected = db.prepare(`
+      SELECT option.label, option.consequence, question.title, question.question, question.impact
+      FROM requirement_context_question_options option
+      JOIN requirement_context_questions question
+        ON question.draft_id = option.draft_id AND question.decision_key = option.decision_key
+      WHERE option.draft_id = ? AND option.decision_key = ? AND option.option_id = ?
+        AND question.authority = 'agent' AND question.lifecycle_status = 'active'
+    `).get(draft.draft_id, key, option) as {
+      label: string;
+      consequence: string;
+      title: string;
+      question: string;
+      impact: string;
+    } | undefined;
+    if (!selected) throw new Error(`Agent 决策 ${key} 不存在活动选项 ${option}；先用 question add --authority agent 建立`);
+    const reason = bounded(required(flags, 'reason'), 'Agent 决策依据');
+    db.prepare(`
+      UPDATE requirement_context_questions
+      SET selected_option_id = ?, decision_text = ?, decision_reason = ?
+      WHERE draft_id = ? AND decision_key = ?
+    `).run(
+      option,
+      selected.label,
+      reason,
+      draft.draft_id,
+      key,
+    );
+    const decisionOptions = db.prepare(`
+      SELECT option_id, label, consequence
+      FROM requirement_context_question_options
+      WHERE draft_id = ? AND decision_key = ? ORDER BY ordinal, option_id
+    `).all(draft.draft_id, key) as { option_id: string; label: string; consequence: string }[];
+    const activation = db.prepare(`
+      SELECT parent_decision_key, parent_option_id
+      FROM requirement_context_question_dependencies
+      WHERE draft_id = ? AND decision_key = ? ORDER BY ordinal
+    `).all(draft.draft_id, key) as { parent_decision_key: string; parent_option_id: string }[];
+    const published = db.prepare(`
+      SELECT question_id FROM questions
+      WHERE task_id = ? AND story_index IS NULL AND source_agent = 'backlog-agent' AND decision_key = ?
+      ORDER BY created_at DESC LIMIT 1
+    `).get(draft.task_id, key) as { question_id: string } | undefined;
+    const alternativesJson = JSON.stringify(decisionOptions.map((candidate) => ({
+      id: candidate.option_id,
+      label: candidate.label,
+      consequences: [candidate.consequence],
+    })));
+    const activationJson = activation.length ? JSON.stringify(activation.map((gate) => ({
+      decisionKey: gate.parent_decision_key,
+      optionId: gate.parent_option_id,
+    }))) : null;
+    if (published) {
+      db.prepare(`
+        UPDATE questions
+        SET title = ?, question = ?, why = ?, answer = ?, status = 'answered',
+            selected_option_id = ?, alternatives_json = ?, activation_json = ?,
+            decision_authority = 'agent', recommendation_reason = ?, status_reason = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE question_id = ?
+      `).run(
+        selected.title, selected.question, selected.impact, selected.label, option,
+        alternativesJson, activationJson, reason, published.question_id,
+      );
+    } else {
+      db.prepare(`
+        INSERT INTO questions(
+          question_id, task_id, story_index, kind, title, question, why, answer, status,
+          relative_path, source_agent, decision_key, alternatives_json,
+          recommendation_reason, activation_json, selected_option_id, decision_authority
+        ) VALUES(?, ?, NULL, 'local', ?, ?, ?, ?, 'answered', NULL, 'backlog-agent', ?, ?, ?, ?, ?, 'agent')
+      `).run(
+        `Q-${randomUUID().slice(0, 8)}`, draft.task_id, selected.title, selected.question,
+        selected.impact, selected.label, key, alternativesJson, reason, activationJson, option,
+      );
+    }
+    recomputeBacklogQuestionApplicabilityInDb(db, draft.task_id);
+    touchDraft(db, draft.draft_id);
+    return `Agent 决策 ${key} 已关闭。`;
+  }
+  if (command === 'requirement-context question supersede') {
+    const key = bounded(required(flags, 'key'), '问题 key', 120);
+    const by = bounded(required(flags, 'by'), '取代问题 key', 120);
+    if (key === by) throw new Error('问题不能取代自身');
+    const replacement = db.prepare(`
+      SELECT 1 FROM requirement_context_questions
+      WHERE draft_id = ? AND decision_key = ? AND lifecycle_status = 'active'
+    `).get(draft.draft_id, by);
+    if (!replacement) throw new Error(`取代问题 ${by} 不存在或不是 active`);
+    db.prepare(`
+      UPDATE requirement_context_questions
+      SET lifecycle_status = 'superseded', lifecycle_reason = ?, superseded_by = ?
+      WHERE draft_id = ? AND decision_key = ? AND lifecycle_status = 'active'
+    `).run(bounded(required(flags, 'reason'), '废弃原因'), by, draft.draft_id, key);
+    db.prepare(`
+      UPDATE questions
+      SET status = 'superseded', status_reason = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ? AND source_agent = 'backlog-agent' AND decision_key = ?
+        AND status != 'superseded'
+    `).run(`由 ${by} 取代`, draft.task_id, key);
+    recomputeBacklogQuestionApplicabilityInDb(db, draft.task_id);
+    touchDraft(db, draft.draft_id);
+    return `问题 ${key} 已由 ${by} 取代。`;
   }
   if (command === 'requirement-context question remove') {
     db.prepare('DELETE FROM requirement_context_questions WHERE draft_id = ? AND decision_key = ?')

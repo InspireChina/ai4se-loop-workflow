@@ -70,6 +70,7 @@ export type AgentContextSnapshot = {
     currentDeliverySpec: unknown | null;
     answeredDecisionKeys: string[];
     userDecisions: unknown[];
+    requirementContextResume: unknown | null;
   };
   activeObligations: {
     questions: unknown[];
@@ -99,6 +100,14 @@ function plainText(value: unknown) {
 function compact(value: unknown, limit = 240) {
   const text = plainText(value).replace(/\s+/g, ' ').trim();
   return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
+}
+
+function requirementBaseline(content: string | null | undefined) {
+  if (!content) return null;
+  const boundaries = ['\n## DECISIONS', '\n## OPEN QUESTIONS', '\n## TO-BE']
+    .map((heading) => content.indexOf(heading))
+    .filter((index) => index >= 0);
+  return content.slice(0, boundaries.length ? Math.min(...boundaries) : content.length).trimEnd();
 }
 
 function scope(storyIndex: number | null): AgentContextResource['scope'] {
@@ -284,13 +293,24 @@ export function buildAgentContextSnapshot(input: {
   ) || (delegation.agent === 'test-agent'
     ? null
     : latestBy(currentSpecs, (spec) => spec.revision));
-  const userDecisions = full.questions
-    .filter((question) => relevantToExecution(delegation.storyIndex, question.story_index) && Boolean(question.answer))
+  const projectedQuestions = full.questions.filter((question) =>
+    ['pending', 'answered', 'resolved'].includes(question.status));
+  const userDecisions = projectedQuestions
+    .filter((question) =>
+      relevantToExecution(delegation.storyIndex, question.story_index)
+      && ['answered', 'resolved'].includes(question.status)
+      && Boolean(question.answer))
     .map((question) => ({
       decisionKey: question.decision_key,
       title: question.title,
       question: question.question,
       answer: question.answer,
+      selectedOptionId: question.selected_option_id,
+      selectedOption: (parseJson(question.alternatives_json, []) as { id?: string; label?: string; consequences?: string[] }[])
+        .find((option) => option.id === question.selected_option_id) || null,
+      activatedBy: parseJson(question.activation_json, []),
+      decidedBy: question.decision_authority === 'agent' ? 'AGENT' : 'HUMAN',
+      sourceAgent: question.source_agent,
       deliveryUnit: question.story_index,
       specRevision: question.spec_revision,
       resolvedAt: question.resolved_at,
@@ -299,13 +319,18 @@ export function buildAgentContextSnapshot(input: {
     .map((decision) => decision.decisionKey)
     .filter((key): key is string => Boolean(key)))];
   const activeQuestions = full.questions
-    .filter((question) => relevantToExecution(delegation.storyIndex, question.story_index) && !question.answer && question.status !== 'superseded')
+    .filter((question) => relevantToExecution(delegation.storyIndex, question.story_index) && question.status === 'pending')
     .map((question) => ({
       questionId: question.question_id,
       title: question.title,
       question: question.question,
       why: question.why,
       recommendation: question.recommendation,
+      recommendationReason: question.recommendation_reason,
+      alternatives: parseJson(question.alternatives_json, []),
+      activation: parseJson(question.activation_json, []),
+      decidedBy: question.decision_authority === 'agent' ? 'AGENT' : 'HUMAN',
+      sourceAgent: question.source_agent,
       deliveryUnit: question.story_index,
       status: question.status,
     }));
@@ -373,19 +398,22 @@ export function buildAgentContextSnapshot(input: {
       content: deliverySpecValue(spec, delegation.agent),
     });
   }
-  for (const question of full.questions) {
+  for (const question of projectedQuestions) {
+    const hasActiveAnswer = ['answered', 'resolved'].includes(question.status) && Boolean(question.answer);
     const value = {
       questionId: question.question_id,
       decisionKey: question.decision_key,
       title: question.title,
       question: question.question,
-      answer: question.answer,
+      answer: hasActiveAnswer ? question.answer : null,
       why: question.why,
       recommendation: question.recommendation,
       alternatives: parseJson(question.alternatives_json, []),
       deliveryUnit: question.story_index,
       status: question.status,
       specRevision: question.spec_revision,
+      selectedOptionId: hasActiveAnswer ? question.selected_option_id : null,
+      activation: parseJson(question.activation_json, []),
     };
     allResources.push({
       ref: `DECISION:${question.question_id}`,
@@ -395,9 +423,9 @@ export function buildAgentContextSnapshot(input: {
       deliveryUnit: question.story_index,
       revision: question.spec_revision,
       status: question.status,
-      authority: question.answer ? 'authoritative' : 'supporting',
+      authority: hasActiveAnswer ? 'authoritative' : 'supporting',
       updatedAt: question.updated_at,
-      summary: compact(question.answer ? `${question.question} 答复：${question.answer}` : question.question),
+      summary: compact(hasActiveAnswer ? `${question.question} 答复：${question.answer}` : question.question),
       content: value,
     });
   }
@@ -562,6 +590,24 @@ export function buildAgentContextSnapshot(input: {
       currentDeliverySpec: currentSpec ? deliverySpecValue(currentSpec, delegation.agent) : null,
       answeredDecisionKeys,
       userDecisions,
+      requirementContextResume: delegation.agent === 'backlog-agent' && delegation.pipeline === 'resume'
+        ? {
+          phase: 'decision_tree',
+          objective: '消费当前有效决策树，在不读取废弃分支的前提下完成决策收敛并进入 TO-BE。',
+          businessContext: requirementBaseline(latestBy(
+            full.documents.filter((document) => document.kind === 'context' && document.source_agent === 'backlog-agent'),
+            (document) => document.revision,
+          )?.content),
+          activeDecisionTree: userDecisions.filter((decision) =>
+            decision.deliveryUnit == null && decision.sourceAgent === 'backlog-agent'),
+          activePending: activeQuestions.filter((question) =>
+            question.deliveryUnit == null && question.sourceAgent === 'backlog-agent'),
+          next: activeQuestions.some((question) =>
+            question.deliveryUnit == null && question.sourceAgent === 'backlog-agent')
+            ? '继续收敛当前活动决策'
+            : 'requirement-context decision-tree complete',
+        }
+        : null,
     },
     activeObligations: {
       questions: activeQuestions,

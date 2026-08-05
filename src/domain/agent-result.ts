@@ -20,6 +20,11 @@ const questionSchema = z.object({
     consequences: z.array(z.string().max(1000)).max(20).optional().default([]),
   })).max(20).optional().default([]),
   dependsOn: z.array(z.string().min(1).max(240)).max(50).optional().default([]),
+  activation: z.array(z.object({
+    decisionKey: z.string().min(1).max(240),
+    optionId: z.string().min(1).max(100),
+  })).max(50).optional().default([]),
+  initialStatus: z.enum(['pending', 'conditional', 'not_applicable']).optional().default('pending'),
 });
 
 const runtimeInputSchema = z.object({

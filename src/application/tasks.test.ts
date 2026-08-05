@@ -1379,9 +1379,9 @@ test('initializes one project-owned Prompt from the system template without over
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 1);
+  assert.equal(original.profile.prompt_seed_revision, 2);
   assert.equal(original.currentPrompt.version, 1);
-  assert.equal(original.currentPrompt.template_version, 1);
+  assert.equal(original.currentPrompt.template_version, 2);
   assert.equal(original.currentPrompt.source, 'system');
   assert.equal(original.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
   assert.equal('promptHistory' in original, false);
@@ -1392,6 +1392,23 @@ test('initializes one project-owned Prompt from the system template without over
   assert.match(original.currentPrompt.content, /# 完成条件/);
 
   const db = await databaseConnection();
+  db.prepare(`
+    UPDATE agent_prompts
+    SET version = 1, template_version = 1, content = '旧系统模板', content_hash = ?, source = 'system'
+    WHERE agent_id = 'review-agent'
+  `).run(hash('旧系统模板'));
+  db.prepare(`
+    UPDATE agent_profiles
+    SET current_prompt_version = 1, prompt_seed_revision = 1, candidate_prompt_version = NULL
+    WHERE agent_id = 'review-agent'
+  `).run();
+  await ensureAgentRuntimeWorkspace();
+  const upgradedSystemSeed = await getAgentProfile('review-agent');
+  assert.equal(upgradedSystemSeed.profile.prompt_seed_revision, 2);
+  assert.equal(upgradedSystemSeed.currentPrompt.version, 2);
+  assert.equal(upgradedSystemSeed.currentPrompt.template_version, 2);
+  assert.equal(upgradedSystemSeed.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['review-agent'].prompt);
+
   const legacyPrompt = '判断需求类型并整理上下文，完成时提供分类、流程方向和需求文档。';
   db.prepare(`
     UPDATE agent_prompts SET content = ?, content_hash = ?
@@ -1417,7 +1434,7 @@ test('initializes one project-owned Prompt from the system template without over
   await ensureAgentRuntimeWorkspace();
   const resetBaseline = await getAgentProfile('backlog-agent');
   assert.equal(resetBaseline.currentPrompt.version, 1);
-  assert.equal(resetBaseline.currentPrompt.template_version, 1);
+  assert.equal(resetBaseline.currentPrompt.template_version, 2);
   assert.match(resetBaseline.currentPrompt.content, /# 工作原则/);
   assert.doesNotMatch(resetBaseline.currentPrompt.content, /完成时提供分类、流程方向/);
   assert.match(
@@ -1425,7 +1442,7 @@ test('initializes one project-owned Prompt from the system template without over
     /# 工作原则/,
   );
   const resumedBacklog = await loadAgentRuntime('backlog-agent', 'resume');
-  assert.match(resumedBacklog.prompt, /用户已经确认的决策/);
+  assert.match(resumedBacklog.prompt, /已有用户决定必须按原 key 继承/);
   const resumedAnalyst = await loadAgentRuntime('analyst-agent', 'resume');
   assert.match(resumedAnalyst.prompt, /decision key 是跨轮次不可变的系统标识/);
   assert.match(resumedAnalyst.prompt, /逐字复用/);
@@ -1472,7 +1489,7 @@ test('initializes one project-owned Prompt from the system template without over
   );
   const runtime = await loadAgentRuntime('dev-agent', 'plan');
   assert.equal(runtime.promptVersion, reconciled.currentPrompt.version);
-  assert.equal(runtime.promptTemplateVersion, 1);
+  assert.equal(runtime.promptTemplateVersion, 2);
   assert.equal(runtime.promptHash, hash(projectPrompt));
   assert.equal(runtime.promptStatus, 'active');
   assert.equal(runtime.evolutionCandidateId, null);
@@ -1484,9 +1501,9 @@ test('initializes one project-owned Prompt from the system template without over
   const reset = await getAgentProfile('dev-agent');
   assert.equal(resetRevision, promptRevision + 1);
   assert.equal(reset.currentPrompt.version, resetRevision);
-  assert.equal(reset.currentPrompt.template_version, 1);
+  assert.equal(reset.currentPrompt.template_version, 2);
   assert.equal(reset.currentPrompt.source, 'system');
-  assert.equal(reset.currentPrompt.reason, '用户重置为系统模板 V1');
+  assert.equal(reset.currentPrompt.reason, '用户重置为系统模板 V2');
   assert.equal(reset.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
   assert.equal(reset.currentMemory.revision, memoryRevision);
   assert.equal(reset.candidatePrompt, null);

@@ -134,6 +134,7 @@ test('requires status first, accepts progressive edits, and submits a determinis
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+  const { databaseConnection } = await import('../infrastructure/database');
   const taskId = await createTask({
     title: '渐进式需求上下文',
     description: '支持将筛选结果导出。',
@@ -149,7 +150,8 @@ test('requires status first, accepts progressive edits, and submits a determinis
 
   const initial = await command(active.executionId, active.token!, ['requirement-context', 'status']);
   assert.match(initial, /草稿 v1/);
-  assert.match(initial, /缺少业务意图/);
+  assert.match(initial, /PHASE：as_is/);
+  assert.match(initial, /缺少 Reported Intent/);
 
   await command(active.executionId, active.token!, [
     'requirement-context', 'intent', 'set', '--text', '支持用户导出当前筛选结果',
@@ -210,6 +212,46 @@ test('requires status first, accepts progressive edits, and submits a determinis
   assert.match(populatedStatus, /来源：仓库列表导出入口与筛选查询实现/);
   assert.match(populatedStatus, /filtered-export-data · change · active/);
   assert.match(populatedStatus, /依据：否则目标业务行为无法成立；来源：filtered-export-target/);
+
+  assert.match(
+    await command(active.executionId, active.token!, ['requirement-context', 'as-is', 'complete']),
+    /as_is 阶段已接受.*PHASE：decision_tree/s,
+  );
+  await command(active.executionId, active.token!, ['requirement-context', 'decision-tree', 'complete']);
+  await command(active.executionId, active.token!, ['requirement-context', 'to-be', 'complete']);
+  assert.match(
+    await command(active.executionId, active.token!, [
+      'requirement-context', 'impact-scan', 'reopen-decisions',
+      '--reason', '影响扫描要求重新确认已有决策覆盖',
+    ]),
+    /新的决策树修订.*PHASE：decision_tree/s,
+  );
+  await command(active.executionId, active.token!, ['requirement-context', 'decision-tree', 'complete']);
+  await command(active.executionId, active.token!, ['requirement-context', 'to-be', 'complete']);
+  await command(active.executionId, active.token!, ['requirement-context', 'impact-scan', 'complete']);
+  await command(active.executionId, active.token!, ['requirement-context', 'scope', 'complete']);
+  await command(active.executionId, active.token!, ['requirement-context', 'acceptance', 'complete']);
+  const db = await databaseConnection();
+  assert.deepEqual(
+    (db.prepare(`
+      SELECT from_phase, to_phase
+      FROM requirement_context_phase_transitions transition_item
+      JOIN agent_work_drafts draft ON draft.draft_id = transition_item.draft_id
+      WHERE draft.task_id = ?
+      ORDER BY transition_id
+    `).all(taskId) as { from_phase: string; to_phase: string }[]),
+    [
+      { from_phase: 'as_is', to_phase: 'decision_tree' },
+      { from_phase: 'decision_tree', to_phase: 'to_be' },
+      { from_phase: 'to_be', to_phase: 'impact_scan' },
+      { from_phase: 'impact_scan', to_phase: 'decision_tree' },
+      { from_phase: 'decision_tree', to_phase: 'to_be' },
+      { from_phase: 'to_be', to_phase: 'impact_scan' },
+      { from_phase: 'impact_scan', to_phase: 'scope' },
+      { from_phase: 'scope', to_phase: 'acceptance' },
+      { from_phase: 'acceptance', to_phase: 'finalize' },
+    ],
+  );
 
   assert.equal(
     await command(active.executionId, active.token!, ['requirement-context', 'validate']),
@@ -310,9 +352,19 @@ test('routes an evidence-backed Actual versus Expected deviation to reproduction
   await command(active.executionId, active.token!, [
     'requirement-context', 'classification', 'set', 'bug',
   ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'scope', 'include',
+    '--key', 'restore-filtered-export',
+    '--text', '恢复筛选结果导出行为',
+  ]);
+  await command(active.executionId, active.token!, ['requirement-context', 'as-is', 'complete']);
+  await command(active.executionId, active.token!, ['requirement-context', 'decision-tree', 'complete']);
+  await command(active.executionId, active.token!, ['requirement-context', 'to-be', 'complete']);
+  await command(active.executionId, active.token!, ['requirement-context', 'impact-scan', 'complete']);
+  await command(active.executionId, active.token!, ['requirement-context', 'scope', 'complete']);
   await assert.rejects(
-    command(active.executionId, active.token!, ['requirement-context', 'complete']),
-    /缺少可靠的 AS-IS Expected 陈述/,
+    command(active.executionId, active.token!, ['requirement-context', 'acceptance', 'complete']),
+    /Bug 必须具备可靠 Existing Expected/,
   );
   await command(active.executionId, active.token!, [
     'requirement-context', 'assertion', 'upsert',
@@ -322,6 +374,7 @@ test('routes an evidence-backed Actual versus Expected deviation to reproduction
     '--evidence', 'decided',
     '--source', '变更前已经确认的需求规格',
   ]);
+  await command(active.executionId, active.token!, ['requirement-context', 'acceptance', 'complete']);
   await command(active.executionId, active.token!, ['requirement-context', 'complete']);
   const result = await readAgentCommandSubmission(active.executionId);
   assert.equal(result?.classification, 'bug');
@@ -357,6 +410,7 @@ test('inherits a persisted clarification draft after resume and forces status ag
     '--evidence', 'reported',
     '--source', '需求描述',
   ]);
+  await command(first.executionId, first.token!, ['requirement-context', 'as-is', 'complete']);
   await command(first.executionId, first.token!, [
     'requirement-context', 'assertion', 'upsert',
     '--key', 'target-export-audience',
@@ -407,6 +461,56 @@ test('inherits a persisted clarification draft after resume and forces status ag
     '--option', 'admin',
     '--reason', '这是满足当前目标的最小范围',
   ]);
+  for (const child of [
+    {
+      key: 'admin-export-mode', title: '管理员导出方式', parentOption: 'admin',
+      question: '管理员导出采用同步还是异步？', recommendation: 'async',
+    },
+    {
+      key: 'member-permission-mode', title: '普通成员权限方式', parentOption: 'all-members',
+      question: '普通成员导出权限如何开放？', recommendation: 'request',
+    },
+  ]) {
+    await command(first.executionId, first.token!, [
+      'requirement-context', 'question', 'add',
+      '--key', child.key, '--title', child.title, '--question', child.question,
+      '--impact', '不同选择会改变后续业务结果',
+    ]);
+    const options = child.key === 'admin-export-mode'
+      ? [['sync', '同步生成'], ['async', '异步生成']]
+      : [['automatic', '自动开放'], ['request', '申请后开放']];
+    for (const [id, label] of options) {
+      await command(first.executionId, first.token!, [
+        'requirement-context', 'question', 'option-add',
+        '--key', child.key, '--id', id, '--label', label,
+        '--consequence', `${label}对应不同的业务流程`,
+      ]);
+    }
+    await command(first.executionId, first.token!, [
+      'requirement-context', 'question', 'recommend',
+      '--key', child.key, '--option', child.recommendation, '--reason', '优先保持风险可控',
+    ]);
+    await command(first.executionId, first.token!, [
+      'requirement-context', 'question', 'depends-on',
+      '--key', child.key, '--parent', 'export-audience', '--option', child.parentOption,
+    ]);
+  }
+  await command(first.executionId, first.token!, [
+    'requirement-context', 'question', 'add',
+    '--key', 'audit-boundary', '--title', '审计边界表达',
+    '--question', '是否把既有普通成员无权限规则作为 preserve？',
+    '--impact', '决定影响扫描中的保持项表达', '--authority', 'agent',
+  ]);
+  for (const [id, label] of [['preserve', '记录为保持项'], ['ignore', '不记录']]) {
+    await command(first.executionId, first.token!, [
+      'requirement-context', 'question', 'option-add', '--key', 'audit-boundary',
+      '--id', id, '--label', label, '--consequence', `${label}会改变后续影响表达`,
+    ]);
+  }
+  await command(first.executionId, first.token!, [
+    'requirement-context', 'question', 'decide', '--key', 'audit-boundary',
+    '--option', 'preserve', '--reason', 'Backlog 负责表达必须保持的既有业务边界',
+  ]);
   assert.match(
     await command(first.executionId, first.token!, ['requirement-context', 'validate']),
     /澄清草稿校验通过/,
@@ -420,6 +524,11 @@ test('inherits a persisted clarification draft after resume and forces status ag
   assert.equal(questionResult?.classification, undefined);
   assert.equal(questionResult?.route, undefined);
   assert.equal(questionResult?.questions[0]?.decisionKey, 'export-audience');
+  assert.equal(questionResult?.questions.length, 3);
+  assert.deepEqual(questionResult?.questions.find((item) => item.decisionKey === 'admin-export-mode')?.activation, [
+    { decisionKey: 'export-audience', optionId: 'admin' },
+  ]);
+  assert.equal(questionResult?.questions.find((item) => item.decisionKey === 'admin-export-mode')?.initialStatus, 'conditional');
   assert.match(questionResult?.artifact?.content || '', /状态：Needs Clarification/);
   assert.match(questionResult?.artifact?.content || '', /需求类型：待确认/);
   assert.match(questionResult?.artifact?.content || '', /## OPEN QUESTIONS/);
@@ -437,6 +546,17 @@ test('inherits a persisted clarification draft after resume and forces status ag
     taskId,
     questionId: question!.question_id,
     answer: '本轮只面向管理员。',
+    selectedOptionId: 'admin',
+  });
+  detail = await getTask(taskId);
+  const activeChild = detail?.questions.find((item) => item.decision_key === 'admin-export-mode');
+  const prunedChild = detail?.questions.find((item) => item.decision_key === 'member-permission-mode');
+  assert.equal(activeChild?.status, 'pending');
+  assert.equal(prunedChild?.status, 'not_applicable');
+  await answerQuestion({
+    taskId,
+    questionId: activeChild!.question_id,
+    selectedOptionId: 'async',
   });
   await submitClarificationAnswers(taskId);
 
@@ -452,7 +572,14 @@ test('inherits a persisted clarification draft after resume and forces status ag
   ]);
   assert.match(inherited, /草稿 v2/);
   assert.match(inherited, /分类：未填写/);
-  assert.match(inherited, /export-audience：确认导出能力的目标用户 · 已回答：本轮只面向管理员/);
+  assert.match(inherited, /## 确认导出能力的目标用户 · export-audience/);
+  assert.match(inherited, /- Decision：仅管理员/);
+  assert.match(inherited, /- Decided By：HUMAN/);
+  assert.match(inherited, /## 管理员导出方式 · admin-export-mode/);
+  assert.match(inherited, /- Decision：异步生成/);
+  assert.match(inherited, /## 审计边界表达 · audit-boundary/);
+  assert.match(inherited, /- Decided By：AGENT/);
+  assert.doesNotMatch(inherited, /普通成员权限方式/);
   assert.match(inherited, /current-export-audience · actual · reported · active/);
   assert.match(inherited, /audience-must-be-confirmed：目标用户必须由用户确认/);
   await command(resumed.executionId, resumed.token!, [
@@ -496,16 +623,26 @@ test('inherits a persisted clarification draft after resume and forces status ag
     '--key', 'audience-must-be-confirmed',
     '--text', '本轮导出能力只面向管理员',
   ]);
+  await command(resumed.executionId, resumed.token!, [
+    'requirement-context', 'scope', 'include',
+    '--key', 'admin-export',
+    '--text', '管理员使用列表导出入口',
+  ]);
   const revised = await command(resumed.executionId, resumed.token!, ['requirement-context', 'status']);
   assert.match(revised, /约束：1/);
   assert.match(revised, /audience-must-be-confirmed：本轮导出能力只面向管理员/);
+  await command(resumed.executionId, resumed.token!, ['requirement-context', 'decision-tree', 'complete']);
+  await command(resumed.executionId, resumed.token!, ['requirement-context', 'to-be', 'complete']);
+  await command(resumed.executionId, resumed.token!, ['requirement-context', 'impact-scan', 'complete']);
+  await command(resumed.executionId, resumed.token!, ['requirement-context', 'scope', 'complete']);
   await assert.rejects(
-    command(resumed.executionId, resumed.token!, ['requirement-context', 'complete']),
-    /缺少需求分类/,
+    command(resumed.executionId, resumed.token!, ['requirement-context', 'acceptance', 'complete']),
+    /缺少最终需求分类/,
   );
   await command(resumed.executionId, resumed.token!, [
     'requirement-context', 'classification', 'set', 'feature',
   ]);
+  await command(resumed.executionId, resumed.token!, ['requirement-context', 'acceptance', 'complete']);
   await command(resumed.executionId, resumed.token!, ['requirement-context', 'complete']);
 
   const completedResult = await readAgentCommandSubmission(resumed.executionId);
@@ -513,7 +650,7 @@ test('inherits a persisted clarification draft after resume and forces status ag
   assert.match(completedResult?.artifact?.content || '', /状态：Aligned/);
   assert.match(completedResult?.artifact?.content || '', /需求类型：feature/);
   assert.match(completedResult?.artifact?.content || '', /## DECISIONS/);
-  assert.match(completedResult?.artifact?.content || '', /本轮只面向管理员/);
+  assert.match(completedResult?.artifact?.content || '', /决定：仅管理员/);
   assert.doesNotMatch(completedResult?.artifact?.content || '', /## OPEN QUESTIONS/);
   await applyAgentResult('RUN-command-resume', resumed.delegation, completedResult!, {
     executionId: resumed.executionId,
@@ -524,7 +661,7 @@ test('inherits a persisted clarification draft after resume and forces status ag
   assert.equal(detail?.task.agile_status, 'in plan');
   assert.equal(detail?.questions.find((item) => item.question_id === question?.question_id)?.status, 'resolved');
   assert.ok(detail?.documents.some((document) =>
-    document.kind === 'context' && document.content.includes('本轮只面向管理员')));
+    document.kind === 'context' && document.content.includes('决定：仅管理员')));
 });
 
 test('keeps corrected business conclusions traceable instead of deleting or silently reactivating them', async () => {
@@ -609,7 +746,7 @@ test('exposes only the new business-context protocol and rejects every legacy co
   assert.match(help, /requirement-context intent set/);
   assert.match(help, /requirement-context assertion upsert/);
   assert.match(help, /requirement-context impact upsert/);
-  assert.match(help, /正常完成：status → intent\/assertions\/change\/impacts\/acceptance\/classification/);
+  assert.match(help, /正常完成：status → AS-IS → Decision Tree → TO-BE → Impact Scan → SCOPE → Acceptance → complete/);
   assert.match(help, /assertion target → TO-BE/);
   assert.match(help, /impact change\/preserve\/technical → IMPACTS \/ Change、Preserve、Analysis Obligations/);
   assert.match(help, /已回答 question → DECISIONS.*未回答 question.*OPEN QUESTIONS/s);
@@ -634,7 +771,8 @@ test('exposes only the new business-context protocol and rejects every legacy co
   assert.match(impactHelp, /只定义 Analysis 必须回答什么/);
 
   const questionHelp = await command(active.executionId, active.token!, ['help', 'question']);
-  assert.match(questionHelp, /至少两次 option-add/);
+  assert.match(questionHelp, /全部当前已知 HUMAN · PENDING 节点/);
+  assert.match(questionHelp, /最少交互轮次/);
   assert.match(questionHelp, /普通问题本身不要求 assertion 或 impact 反向引用/);
   assert.match(questionHelp, /逐字复用原 decision key/);
 
@@ -644,11 +782,10 @@ test('exposes only the new business-context protocol and rejects every legacy co
   assert.match(scopeHelp, /约束不用于提前记录技术设计/);
 
   const finishHelp = await command(active.executionId, active.token!, ['help', 'finish']);
-  assert.match(finishHelp, /可靠的 Actual 和 Target/);
-  assert.match(finishHelp, /Bug 额外必须具备可靠 Expected/);
+  assert.match(finishHelp, /as-is complete → decision-tree complete → to-be complete/);
+  assert.match(finishHelp, /影响扫描发现新的需求级业务分叉/);
   assert.match(finishHelp, /requirement-context request-clarification/);
-  assert.match(finishHelp, /澄清最低必填/);
-  assert.match(finishHelp, /只有 complete 执行包含分类在内的最终完成校验/);
+  assert.match(finishHelp, /新的 resume execution 恢复 decision_tree/);
 
   await assert.rejects(
     command(active.executionId, active.token!, ['help', 'unknown']),
@@ -701,7 +838,8 @@ test('exposes the same execution-scoped protocol through the cross-platform Node
   );
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /需求上下文草稿 v1/);
-  assert.match(result.stdout, /缺少业务意图/);
+  assert.match(result.stdout, /PHASE：as_is/);
+  assert.match(result.stdout, /缺少 Reported Intent/);
 
   const directory = mkdtempSync(join(tmpdir(), 'loop-agent-command-'));
   try {

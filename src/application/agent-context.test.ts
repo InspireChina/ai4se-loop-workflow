@@ -156,6 +156,84 @@ test('builds a compact execution snapshot while preserving full context for just
   assert.match(renderAgentContextResource(stored, `DOC:${currentDocumentId}`), /FULL-CONTEXT-TAIL/);
 });
 
+test('injects a semantic backlog resume packet while excluding pruned decision branches', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { addQuestion, answerQuestion, createTask, getTaskContext, upsertDocument } = await import('./tasks');
+  const { buildAgentContextSnapshot } = await import('./agent-context');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Conditional export', description: 'Align the export decision tree.' });
+  await upsertDocument({
+    taskId,
+    kind: 'context',
+    title: '业务变化上下文',
+    actor: 'backlog-agent',
+    content: [
+      '# 业务变化上下文',
+      '## BUSINESS INTENT',
+      '管理员需要导出审计结果。',
+      '## AS-IS',
+      '- 当前只能在线查看。',
+      '## OPEN QUESTIONS',
+      '- 旧的待答展示不应进入恢复基线。',
+      '## TO-BE',
+      '- 尚未形成。',
+    ].join('\n'),
+  });
+  const rootId = await addQuestion({
+    taskId,
+    actor: 'backlog-agent',
+    title: '导出受众',
+    question: '导出面向谁？',
+    decisionKey: 'audience',
+    alternatives: [
+      { id: 'admin', label: '仅管理员', consequences: ['普通成员没有导出入口'] },
+      { id: 'all', label: '所有成员', consequences: ['需要成员权限设计'] },
+    ],
+  });
+  await answerQuestion({ taskId, questionId: rootId, selectedOptionId: 'admin' });
+  const prunedId = await addQuestion({
+    taskId,
+    actor: 'backlog-agent',
+    title: '普通成员权限',
+    question: '普通成员如何获得权限？',
+    decisionKey: 'member-permission',
+    alternatives: [
+      { id: 'auto', label: '自动开放', consequences: ['所有成员可用'] },
+      { id: 'request', label: '申请开放', consequences: ['增加申请流程'] },
+    ],
+    activation: [{ decisionKey: 'audience', optionId: 'all' }],
+    dependsOn: ['audience'],
+    initialStatus: 'not_applicable',
+  });
+  db.prepare(`
+    UPDATE questions
+    SET answer = '这个废弃答案不能进入 Agent', selected_option_id = 'auto', status = 'not_applicable'
+    WHERE question_id = ?
+  `).run(prunedId);
+
+  const full = await getTaskContext(taskId);
+  const snapshot = buildAgentContextSnapshot({
+    delegation: delegation(taskId, {
+      agent: 'backlog-agent', lane: 'control', pipeline: 'resume', storyIndex: null,
+    }),
+    full,
+    activeFeedback: [],
+    activeRecovery: [],
+  });
+  const serialized = JSON.stringify(snapshot);
+  const resume = snapshot.authoritativeFacts.requirementContextResume as {
+    businessContext: string;
+    activeDecisionTree: { decisionKey: string; selectedOption: { label: string; consequences: string[] } }[];
+  };
+  assert.match(resume.businessContext, /当前只能在线查看/);
+  assert.doesNotMatch(resume.businessContext, /旧的待答展示/);
+  assert.equal(resume.activeDecisionTree[0]?.decisionKey, 'audience');
+  assert.equal(resume.activeDecisionTree[0]?.selectedOption.label, '仅管理员');
+  assert.deepEqual(resume.activeDecisionTree[0]?.selectedOption.consequences, ['普通成员没有导出入口']);
+  assert.doesNotMatch(serialized, /这个废弃答案不能进入 Agent/);
+  assert.doesNotMatch(serialized, /普通成员权限/);
+});
+
 test('hard-isolates Test context from Dev narratives while preserving the frozen verification contract', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { beginExecutionAttempt } = await import('./executions');
