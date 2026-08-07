@@ -49,9 +49,12 @@ test('advertises a role-specific command guide for every progressive flow Agent'
   assert.match(backlog || '', /help <context\|assertion\|impact\|question\|scope\|finish>/);
   assert.match(splitter || '', /help <context\|unit\|source\|dependency\|revision\|finish>/);
   assert.match(analyst || '', /help <context\|impact\|decision\|contract\|finish>/);
-  assert.match(development || '', /help <context\|evidence\|input\|finish>/);
-  assert.match(verification || '', /help <context\|plan\|execute\|input\|finish>/);
-  assert.match(review || '', /help <context\|reconciliation\|gap\|report\|finish>/);
+  assert.match(development || '', /help <context\|evidence\|review\|input\|finish>/);
+  assert.match(development || '', /implementation 命令统一返回 `COMMAND RESULT`/);
+  assert.match(verification || '', /help <context\|plan\|execute\|evidence\|input\|finish>/);
+  assert.match(verification || '', /verification 命令统一返回 `COMMAND RESULT`/);
+  assert.match(review || '', /help <context\|reconciliation\|gap\|assessment\|report\|forward\|finish>/);
+  assert.match(review || '', /review 命令统一返回 `COMMAND RESULT`/);
   assert.match(review || '', /Review 不创建问题或运行信息请求/);
   assert.match(review || '', /review complete/);
   assert.doesNotMatch(review || '', /review request-input/);

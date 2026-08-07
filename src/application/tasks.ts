@@ -905,25 +905,42 @@ function parseQuestionActivations(value: string | null): QuestionActivation[] {
   }
 }
 
-export function recomputeBacklogQuestionApplicabilityInDb(
+function recomputeQuestionApplicabilityInDb(
   db: Awaited<ReturnType<typeof databaseConnection>>,
   taskId: string,
+  sourceAgent: 'backlog-agent' | 'analyst-agent',
+  storyIndex: number | null,
 ) {
   const rows = db.prepare(`
-    SELECT question_id, decision_key, answer, selected_option_id, activation_json, status
+    SELECT question_id, decision_key, title, answer, selected_option_id,
+           alternatives_json, activation_json, status
     FROM questions
-    WHERE task_id = ? AND story_index IS NULL AND source_agent = 'backlog-agent'
+    WHERE task_id = ? AND story_index IS ? AND source_agent = ?
       AND decision_key IS NOT NULL
     ORDER BY created_at, question_id
-  `).all(taskId) as {
+  `).all(taskId, storyIndex, sourceAgent) as {
     question_id: string;
     decision_key: string;
+    title: string;
     answer: string | null;
     selected_option_id: string | null;
+    alternatives_json: string | null;
     activation_json: string | null;
     status: string;
   }[];
   const byKey = new Map(rows.map((row) => [row.decision_key, row]));
+  const optionLabel = (row: typeof rows[number] | undefined, optionId: string) => {
+    if (!row?.alternatives_json) return '指定选项';
+    try {
+      const options = JSON.parse(row.alternatives_json) as { id?: unknown; label?: unknown }[];
+      const option = Array.isArray(options)
+        ? options.find((item) => item?.id === optionId)
+        : null;
+      return typeof option?.label === 'string' ? option.label : '指定选项';
+    } catch {
+      return '指定选项';
+    }
+  };
   for (let pass = 0; pass < rows.length + 1; pass += 1) {
     let changed = false;
     for (const row of rows) {
@@ -948,11 +965,11 @@ export function recomputeBacklogQuestionApplicabilityInDb(
           nextStatus = 'not_applicable';
           const cause = inactive || mismatch;
           reason = cause
-            ? `${cause.gate.decisionKey} 未选择 ${cause.gate.optionId}`
+            ? `「${cause.parent?.title || '上游决策'}」未选择「${optionLabel(cause.parent, cause.gate.optionId)}」`
             : '上游决策路径未命中';
         } else if (unresolved) {
           nextStatus = 'conditional';
-          reason = `等待上游决策 ${unresolved.gate.decisionKey}`;
+          reason = `等待「${unresolved.parent?.title || '上游决策'}」完成`;
         } else {
           nextStatus = row.status === 'not_applicable' && row.answer ? 'pending' : row.answer ? 'answered' : 'pending';
         }
@@ -968,6 +985,13 @@ export function recomputeBacklogQuestionApplicabilityInDb(
     }
     if (!changed) break;
   }
+}
+
+export function recomputeBacklogQuestionApplicabilityInDb(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  taskId: string,
+) {
+  recomputeQuestionApplicabilityInDb(db, taskId, 'backlog-agent', null);
 }
 
 export async function answerQuestion(input: unknown) {
@@ -994,6 +1018,8 @@ export async function answerQuestion(input: unknown) {
     `).run(normalizedAnswer, selectedOptionId || null, questionId);
     if (question.source_agent === 'backlog-agent') {
       recomputeBacklogQuestionApplicabilityInDb(db, taskId);
+    } else if (question.source_agent === 'analyst-agent') {
+      recomputeQuestionApplicabilityInDb(db, taskId, 'analyst-agent', question.story_index);
     }
     addEvent(db, taskId, 'human', 'QuestionAnswered', `回答了「${question.title}」。`);
     db.exec('COMMIT');
@@ -1926,7 +1952,7 @@ function laneLine(task: Task, lane: TaskLane, codeSlotAvailable: boolean, delive
       'analyst-agent',
       task.analysis_index + 1,
       'none',
-      `分析交付单元 ${task.analysis_index + 1} 的需求和方案`,
+      `收敛交付单元 ${task.analysis_index + 1} 的实际影响、关键决策与冻结交付契约`,
     );
   }
   if (!deliveryTaskAvailable) return null;

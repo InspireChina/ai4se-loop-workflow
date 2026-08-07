@@ -93,7 +93,15 @@ function orderDecisionTree(questions: Question[]) {
   return ordered;
 }
 
-function DecisionCard({ question, taskId }: { question: Question; taskId: string }) {
+function DecisionCard({
+  question,
+  taskId,
+  questionByKey,
+}: {
+  question: Question;
+  taskId: string;
+  questionByKey: Map<string, Question>;
+}) {
   const options = parseJsonArray<DecisionOption>(question.alternatives_json);
   const activations = parseJsonArray<Activation>(question.activation_json);
   const dependencies = parseJsonArray<string>(question.depends_on_json);
@@ -101,8 +109,15 @@ function DecisionCard({ question, taskId }: { question: Question; taskId: string
   const canAnswer = question.decision_authority === 'human' && question.status === 'pending';
   const nested = activations.length > 0 || dependencies.length > 0;
   const branchText = activations.length
-    ? activations.map((activation) => `${activation.decisionKey} = ${activation.optionId}`).join(' 且 ')
-    : dependencies.length ? `依赖 ${dependencies.join('、')}` : null;
+    ? activations.map((activation) => {
+        const parent = questionByKey.get(activation.decisionKey);
+        const parentOptions = parseJsonArray<DecisionOption>(parent?.alternatives_json || null);
+        const option = parentOptions.find((item) => item.id === activation.optionId);
+        return `「${terminologyText(parent?.title || '上游决策')}」选择「${terminologyText(option?.label || '指定选项')}」`;
+      }).join(' 且 ')
+    : dependencies.length
+      ? `依赖${dependencies.map((key) => `「${terminologyText(questionByKey.get(key)?.title || '上游决策')}」`).join('、')}`
+      : null;
 
   return <>
     {branchText && <div className="decision-demo-branch">
@@ -115,7 +130,6 @@ function DecisionCard({ question, taskId }: { question: Question; taskId: string
           <b>{question.decision_authority === 'agent' ? 'AGENT' : 'HUMAN'}</b>
           <span>{questionStatus(question)}</span>
         </div>
-        <span className="decision-demo-key">{question.decision_key || question.question_id}</span>
       </div>
       <div className="decision-demo-card-body">
         <p className="eyebrow">{terminologyText(question.title)} · {deliveryUnitLabel(question.story_index)}</p>
@@ -189,6 +203,11 @@ export default async function DecisionsPage({
     : 'all';
   const { task, questions, events, lanes } = detail;
   const orderedQuestions = orderDecisionTree(questions);
+  const questionByKey = new Map(
+    questions
+      .filter((question) => question.decision_key)
+      .map((question) => [question.decision_key!, question]),
+  );
   const humanPending = questions.filter((question) => question.decision_authority === 'human' && question.status === 'pending');
   const agentResolved = questions.filter((question) => question.decision_authority === 'agent' && ['answered', 'resolved'].includes(question.status));
   const humanResolved = questions.filter((question) => question.decision_authority === 'human' && ['answered', 'resolved'].includes(question.status));
@@ -244,7 +263,12 @@ export default async function DecisionsPage({
         </section>
         {visibleQuestions.length === 0
           ? <div className="card empty">当前筛选下没有决策节点。</div>
-          : visibleQuestions.map((question) => <DecisionCard question={question} taskId={taskId} key={question.question_id}/>)}
+          : visibleQuestions.map((question) => <DecisionCard
+            question={question}
+            taskId={taskId}
+            questionByKey={questionByKey}
+            key={question.question_id}
+          />)}
 
         {waitingForAnswers && <div className="decision-demo-submit card">
           <div>

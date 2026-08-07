@@ -84,9 +84,10 @@ test('ships rigorous V2 seed prompts for every flow Agent', () => {
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /implementation (?:status|complete)/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /每次启动先|每完成一个文件|每个真实命令执行后|当前 HEAD|原 request key/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /独立验证负责人/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /严格分为两个阶段/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /第一阶段只建立测试计划/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /第二阶段按冻结计划逐项执行真实黑盒测试/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /PLAN → EXECUTE → EVIDENCE REVIEW → FINALIZE/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /PLAN 只从冻结契约/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /EXECUTE 按冻结计划逐项执行真实黑盒测试/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /EVIDENCE REVIEW 独立复核证据/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /每项交付单元验收语义至少要有一个从真实前端覆盖的场景/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /API 场景.*不能脱离业务期望只验证接口实现细节/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /API 场景.*可以独立形成实现失败、规格问题或环境阻塞的有效反例/);
@@ -103,6 +104,9 @@ test('ships rigorous V2 seed prompts for every flow Agent', () => {
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /verification (?:status|pass|fail|block|request-input)/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /复用原稳定身份/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /最终事实对账与结卡报告负责人/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /FACT RECONCILIATION → CLOSURE ASSESSMENT/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /FORWARD DELIVERY UNITS → FINALIZE/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /不再经过 Story Splitter/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /原始业务目标和验收语义.*最终用户可观察结果/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /检查多个交付单元组合后的最终事实/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /不重新执行测试.*结卡缺口/);

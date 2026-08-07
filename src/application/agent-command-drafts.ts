@@ -640,10 +640,10 @@ function cloneDeliveryAnalysisContract(
   db.prepare(`
     INSERT INTO delivery_analysis_drafts(
       draft_id, unit_key, title, actor, trigger_condition, observable_outcome,
-      acceptance, summary, implementation_guidance
+      acceptance, summary, implementation_guidance, workflow_phase
     )
     SELECT ?, unit_key, title, actor, trigger_condition, observable_outcome,
-           acceptance, summary, implementation_guidance
+           acceptance, summary, implementation_guidance, workflow_phase
     FROM delivery_analysis_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   for (const table of [
@@ -668,6 +668,13 @@ function cloneDeliveryAnalysisContract(
     SELECT ?, decision_key, option_id, label, consequence, ordinal
     FROM delivery_analysis_decision_options WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
+  db.prepare(`
+    INSERT INTO delivery_analysis_decision_dependencies(
+      draft_id, decision_key, parent_decision_key, parent_option_id
+    )
+    SELECT ?, decision_key, parent_decision_key, parent_option_id
+    FROM delivery_analysis_decision_dependencies WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
 }
 
 function cloneDevelopmentDraft(
@@ -686,8 +693,25 @@ function cloneDevelopmentDraft(
   // waiting-for-answers draft is only a continuation of the same correction,
   // so its progressive judgments remain available after the user responds.
   const startsCorrectionCycle = activeRecovery && source.status !== 'waiting_for_answers';
-  db.prepare('INSERT INTO development_drafts(draft_id) VALUES(?)')
-    .run(target.draft_id);
+  const preservesWorkflow = source.status === 'waiting_for_answers';
+  db.prepare(`
+    INSERT INTO development_drafts(
+      draft_id, workflow_phase, review_result, review_summary, review_evidence
+    )
+    SELECT ?,
+           CASE WHEN ? THEN workflow_phase ELSE 'implement' END,
+           CASE WHEN ? THEN review_result ELSE NULL END,
+           CASE WHEN ? THEN review_summary ELSE NULL END,
+           CASE WHEN ? THEN review_evidence ELSE NULL END
+    FROM development_drafts WHERE draft_id = ?
+  `).run(
+    target.draft_id,
+    preservesWorkflow ? 1 : 0,
+    preservesWorkflow ? 1 : 0,
+    preservesWorkflow ? 1 : 0,
+    preservesWorkflow ? 1 : 0,
+    source.draft_id,
+  );
   for (const table of [
     ['development_criteria', 'criterion_key, evidence, ordinal'],
     ['development_risks', 'risk_key, content, ordinal'],
@@ -718,10 +742,11 @@ function cloneVerificationDraft(
   target: DraftRow,
 ) {
   const sourceHeader = db.prepare(`
-    SELECT phase, spec_revision
+    SELECT phase, workflow_phase, spec_revision
     FROM verification_drafts WHERE draft_id = ?
   `).get(source.draft_id) as {
     phase: 'planning' | 'executing';
+    workflow_phase: 'plan' | 'execute' | 'evidence_review' | 'finalize';
     spec_revision: number | null;
   };
   const currentSpec = db.prepare(`
@@ -731,23 +756,25 @@ function cloneVerificationDraft(
     ORDER BY revision DESC LIMIT 1
   `).get(target.task_id, target.story_index) as { revision: number } | undefined;
   const continuesAfterInput = source.status === 'waiting_for_answers';
-  const frozenPlanMatchesCurrentSpec = sourceHeader.phase === 'executing'
+  const frozenPlanMatchesCurrentSpec = sourceHeader.workflow_phase !== 'plan'
     && sourceHeader.spec_revision !== null
     && sourceHeader.spec_revision === currentSpec?.revision;
-  const canReuseFrozenPlan = sourceHeader.phase === 'executing'
-    && frozenPlanMatchesCurrentSpec;
-  const targetPhase = sourceHeader.phase === 'planning'
-    ? 'planning'
-    : (continuesAfterInput && frozenPlanMatchesCurrentSpec) || canReuseFrozenPlan
-      ? 'executing'
-      : 'planning';
-  const targetSpecRevision = targetPhase === 'executing'
+  const resumesBlockedCompletion = continuesAfterInput && source.terminal_action === 'complete';
+  const targetWorkflowPhase = !frozenPlanMatchesCurrentSpec
+    ? 'plan'
+    : resumesBlockedCompletion
+      ? 'execute'
+      : continuesAfterInput
+        ? sourceHeader.workflow_phase
+        : 'execute';
+  const targetLegacyPhase = targetWorkflowPhase === 'plan' ? 'planning' : 'executing';
+  const targetSpecRevision = targetWorkflowPhase !== 'plan'
     ? sourceHeader.spec_revision
     : null;
   db.prepare(`
-    INSERT INTO verification_drafts(draft_id, phase, spec_revision)
-    VALUES(?, ?, ?)
-  `).run(target.draft_id, targetPhase, targetSpecRevision);
+    INSERT INTO verification_drafts(draft_id, phase, workflow_phase, spec_revision)
+    VALUES(?, ?, ?, ?)
+  `).run(target.draft_id, targetLegacyPhase, targetWorkflowPhase, targetSpecRevision);
   for (const table of [
     ['verification_plan_scenarios', `scenario_key, channel, title, setup, steps,
       expected, coverage_refs_json, ordinal`],
@@ -760,7 +787,7 @@ function cloneVerificationDraft(
   // Waiting for user-provided runtime information is a continuation of the
   // same Test attempt. The shared runtime_input_requests table owns the
   // request and answer; this draft only restores already executed scenarios.
-  if (continuesAfterInput && targetPhase === 'executing') {
+  if (continuesAfterInput && targetWorkflowPhase === 'execute') {
     db.prepare(`
       INSERT INTO verification_results(
         draft_id, scenario_key, status, failure_kind, evidence,
@@ -813,9 +840,11 @@ function cloneReviewDraft(
 ) {
   db.prepare(`
     INSERT INTO review_drafts(
-      draft_id, mode, baseline_review_document_id, baseline_review_revision
+      draft_id, mode, baseline_review_document_id, baseline_review_revision,
+      workflow_phase
     )
-    SELECT ?, mode, baseline_review_document_id, baseline_review_revision
+    SELECT ?, mode, baseline_review_document_id, baseline_review_revision,
+           'fact_reconciliation'
     FROM review_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   for (const table of [
@@ -2928,7 +2957,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         '长文本参数：',
         '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
-        `  返回完整索引：${command} help`,
+        `  其他主题：${command} help <context|impact|decision|contract|finish>`,
       ].join('\n');
     }
     if (profile.draftType === 'development') {
@@ -2940,7 +2969,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         '长文本参数：',
         '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
-        `  返回完整索引：${command} help`,
+        `  其他主题：${command} help <context|evidence|review|input|finish>`,
       ].join('\n');
     }
     if (profile.draftType === 'verification') {
@@ -2952,7 +2981,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         '长文本参数：',
         '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
-        `  返回完整索引：${command} help`,
+        `  其他主题：${command} help <context|plan|execute|evidence|input|finish>`,
       ].join('\n');
     }
     if (profile.draftType === 'review') {
@@ -2964,7 +2993,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         '长文本参数：',
         '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
-        `  返回完整索引：${command} help`,
+        `  其他主题：${command} help <context|reconciliation|gap|assessment|report|forward|finish>`,
       ].join('\n');
     }
     throw new Error(`当前角色 help 不支持主题：${topic}。可用主题：context`);
@@ -3539,10 +3568,18 @@ export async function runAgentCommand(input: {
 
   if (positionals[0] === 'help') {
     if (positionals.length > 2) throw new Error('help 最多接受一个主题');
-    if ((profile.draftType === 'requirement_context' || profile.draftType === 'delivery_plan') && !positionals[1]) {
+    if (['requirement_context', 'delivery_plan', 'analysis', 'development', 'verification', 'review'].includes(profile.draftType) && !positionals[1]) {
       const topics = profile.draftType === 'requirement_context'
         ? 'context|assertion|impact|question|scope|finish'
-        : 'context|unit|source|dependency|revision|finish';
+        : profile.draftType === 'delivery_plan'
+          ? 'context|unit|source|dependency|revision|finish'
+          : profile.draftType === 'analysis'
+            ? 'context|impact|decision|contract|finish'
+            : profile.draftType === 'development'
+              ? 'context|evidence|review|input|finish'
+              : profile.draftType === 'verification'
+                ? 'context|plan|execute|evidence|input|finish'
+                : 'context|reconciliation|gap|assessment|report|forward|finish';
       throw new Error(
         `${profile.namespace} help 必须指定一个主题：help <${topics}>。`
         + `当前阶段可执行命令请查看 ${profile.namespace} status 返回的 AVAILABLE COMMANDS。`,

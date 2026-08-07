@@ -507,6 +507,18 @@ export function buildAgentContextSnapshot(input: {
 
   const required = new Set<string>();
   if (currentSpec) required.add(`SPEC:${currentSpec.spec_id}:r${currentSpec.revision}`);
+  if (delegation.agent === 'analyst-agent' && currentStory) {
+    for (const dependencyIndex of currentStory.depends_on_story_indexes) {
+      const dependencySpec = latestBy(
+        full.deliverySpecs.filter((spec) =>
+          spec.story_index === dependencyIndex && spec.status === 'resolved'),
+        (spec) => spec.revision,
+      );
+      if (dependencySpec) {
+        required.add(`SPEC:${dependencySpec.spec_id}:r${dependencySpec.revision}`);
+      }
+    }
+  }
   if (delegation.agent === 'review-agent') {
     for (const story of full.stories) {
       const latest = latestBy(

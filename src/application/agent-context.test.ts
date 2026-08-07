@@ -188,6 +188,24 @@ test('builds a compact execution snapshot while preserving full context for just
   assert.equal(reviewSnapshot.requiredContextRefs.some((ref) => ref.startsWith('SPEC:SPEC-context-unit-1')), true);
   assert.equal(reviewSnapshot.requiredContextRefs.some((ref) => ref.startsWith('SPEC:SPEC-context-unit-2')), true);
 
+  const analystSnapshot = buildAgentContextSnapshot({
+    delegation: delegation(taskId, {
+      agent: 'analyst-agent',
+      lane: 'analysis',
+      pipeline: 'analysis',
+      storyIndex: 2,
+      description: '收敛第二个交付单元的实际影响、关键决策与冻结交付契约',
+    }),
+    full,
+    activeFeedback: [],
+    activeRecovery: [],
+    repositoryBaseCommit: 'abc123',
+  });
+  assert.equal(
+    analystSnapshot.requiredContextRefs.includes('SPEC:SPEC-context-unit-1:r1'),
+    true,
+  );
+
   const started = await beginExecutionAttempt({
     runId: 'RUN-agent-context', delegation: delegation(taskId), prompt: 'compact prompt', contextSnapshot: snapshot,
   });

@@ -174,7 +174,7 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
     '# Required Context Refs',
     `优先检查的 Context refs（${contextSnapshot.requiredContextRefs.length}）：${contextSnapshot.requiredContextRefs.length ? contextSnapshot.requiredContextRefs.slice(0, 48).join(', ') : '无；根据当前任务按需搜索'}${contextSnapshot.requiredContextRefs.length > 48 ? '；其余请通过 list 按需发现' : ''}`,
     '按照前面的 Agent Tool Contract 按需读取，不要一次性展开全部索引。',
-    '发生冲突时，优先级依次为：当前 Active Obligations 和明确用户答复、当前未被替代的交付规格、当前需求描述、supporting 文档、historical 记录。代码与测试结果用于判断实现现状，不能自行覆盖产品需求。',
+    '发生冲突时，优先级依次为：当前 Active Obligations 和明确用户答复、当前未被替代的交付规格、当前交付单元及其冻结来源、已完成的业务变化上下文与交付计划、当前需求描述、supporting 文档、historical 记录。代码与测试结果用于判断实现现状，不能自行覆盖产品需求。',
     ...(activeFeedback.length ? [
       '',
       '# Active Feedback Contract',

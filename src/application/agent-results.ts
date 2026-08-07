@@ -326,10 +326,12 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       if (delegation.pipeline === 'feedback-report') throw new Error('反馈报告修订只能返回 verdict=report_ready');
       if (delegation.pipeline !== 'review') throw new Error(`Review closure gap 不支持 pipeline=${delegation.pipeline}`);
       if (!result.closureGaps?.length) throw new Error('closure_gap 必须包含至少一个事实缺口');
+      if (!result.closureGapUnits?.length) throw new Error('closure_gap 必须包含至少一个完整前向交付单元');
       if (result.artifact) throw new Error('closure_gap 不得生成结卡报告 artifact');
     } else if (result.verdict === 'report_ready') {
       if (!result.artifact) throw new Error('review-agent 结果缺少 artifact');
       if (result.closureGaps?.length) throw new Error('report_ready 不能同时包含 closure gaps');
+      if (result.closureGapUnits?.length) throw new Error('report_ready 不能同时包含 closure gap units');
     } else {
       throw new Error('Review Agent 只能返回 verdict=report_ready 或 closure_gap');
     }
@@ -484,22 +486,26 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     case 'analyst-agent': {
       requireArtifact(result, delegation.agent);
       if (!delegation.storyIndex) throw new Error('交付分析 Agent 缺少交付单元序号');
-      if (!result.spec) throw new Error('交付分析 Agent 结果缺少结构化交付规格');
       if (result.questions.length) {
-        if (!result.spec.decisions.some((decision) => decision.status === 'needs_user_input')) {
-          throw new Error('交付分析 Agent 提问时必须在交付规格中列出对应待确认决策');
+        if (result.spec) {
+          if (!result.spec.decisions.some((decision) => decision.status === 'needs_user_input')) {
+            throw new Error('交付分析 Agent 提问时必须在交付规格中列出对应待确认决策');
+          }
+          const saved = await saveDeliverySpec({
+            taskId: delegation.taskId,
+            storyIndex: delegation.storyIndex,
+            status: 'waiting_for_answers',
+            spec: result.spec,
+            sourceResultId,
+          });
+          await saveQuestions(delegation, result, saved.revision);
+        } else {
+          await saveQuestions(delegation, result);
         }
-        const saved = await saveDeliverySpec({
-          taskId: delegation.taskId,
-          storyIndex: delegation.storyIndex,
-          status: 'waiting_for_answers',
-          spec: result.spec,
-          sourceResultId,
-        });
-        await saveQuestions(delegation, result, saved.revision);
         return 'blocked' as const;
       }
       if (result.outcome !== 'completed') throw new Error('没有待澄清问题时，交付分析 Agent 必须完成当前规格');
+      if (!result.spec) throw new Error('交付分析 Agent 完成结果缺少结构化交付规格');
       await saveDeliverySpec({
         taskId: delegation.taskId,
         storyIndex: delegation.storyIndex,
@@ -644,6 +650,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
           taskId: delegation.taskId,
           sourceResultId,
           gaps: result.closureGaps || [],
+          units: result.closureGapUnits || [],
           expected: {
             totalStories: delegation.totalStories,
             reviewRevision: delegation.reviewRevision,

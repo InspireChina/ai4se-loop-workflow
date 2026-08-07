@@ -69,7 +69,7 @@ try {
   process.stdout.write(`${output}\n`);
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
-  if (rawArgs[0] === 'requirement-context' || rawArgs[0] === 'delivery-plan') {
+  if (['requirement-context', 'delivery-plan', 'delivery-analysis', 'implementation', 'verification', 'review'].includes(rawArgs[0])) {
     const namespace = rawArgs[0];
     const firstFlag = rawArgs.findIndex((argument) => argument.startsWith('--'));
     const command = rawArgs.slice(0, firstFlag < 0 ? rawArgs.length : firstFlag).join(' ');

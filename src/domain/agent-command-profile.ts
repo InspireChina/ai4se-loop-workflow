@@ -198,11 +198,11 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
       : profile.draftType === 'analysis'
         ? 'context|impact|decision|contract|finish'
         : profile.draftType === 'development'
-          ? 'context|evidence|input|finish'
+          ? 'context|evidence|review|input|finish'
           : profile.draftType === 'verification'
-            ? 'context|plan|execute|input|finish'
+            ? 'context|plan|execute|evidence|input|finish'
             : profile.draftType === 'review'
-              ? 'context|reconciliation|gap|report|finish'
+              ? 'context|reconciliation|gap|assessment|report|forward|finish'
             : 'context';
   return [
     '# Agent Tool Contract',
@@ -226,15 +226,15 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
     '```bash',
     `${command} help <${helpTopics}>`,
     '```',
-    ...(['requirement_context', 'delivery_plan'].includes(profile.draftType)
+    ...(['requirement_context', 'delivery_plan', 'analysis', 'development', 'verification', 'review'].includes(profile.draftType)
       ? ['', `\`${profile.namespace}\` 的 help 必须指定一个主题；当前阶段可执行命令以 \`status\` 返回的工作包为准。`]
       : []),
     '',
     '**编辑与提交规则：**',
     '',
     '- 命令失败时，根据 Application 返回的错误修正后自行重试；不要因为一次校验失败就结束工作。',
-    ...(profile.namespace === 'requirement-context'
-      ? ['- requirement-context 命令统一返回 `COMMAND RESULT`；继续当前阶段时读取 `NEXT`，阶段切换时读取 `NEXT WORK PACKET`。']
+    ...(['requirement-context', 'delivery-plan', 'delivery-analysis', 'implementation', 'verification', 'review'].includes(profile.namespace)
+      ? [`- ${profile.namespace} 命令统一返回 \`COMMAND RESULT\`；继续当前阶段时读取 \`NEXT\`，阶段切换时读取 \`NEXT WORK PACKET\`。`]
       : []),
     '- 草稿命令可以反复增加、修改或删除内容，不会推进业务状态。',
     '- 长文本参数可从 `--text <内容>` 改为 `--text-file <UTF-8 文件路径>`；其他长文本参数同样支持对应的 `-file` 形式，Windows 上应优先使用。',

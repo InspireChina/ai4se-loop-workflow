@@ -1,5 +1,11 @@
 import { createHash } from 'node:crypto';
 import { agentResultSchema } from '../domain/agent-result';
+import {
+  REVIEW_GAP_PATH,
+  REVIEW_HAPPY_PATH,
+  REVIEW_WORKFLOW,
+  type ReviewPhase,
+} from '../domain/review-workflow';
 import { databaseConnection } from '../infrastructure/database';
 
 type Db = Awaited<ReturnType<typeof databaseConnection>>;
@@ -110,6 +116,18 @@ type Gap = {
   ordinal: number;
 };
 
+type ForwardUnit = {
+  unit_key: string;
+  title: string;
+  actor: string;
+  trigger_condition: string;
+  observable_outcome: string;
+  acceptance: string;
+  ordinal: number;
+  gapKeys: string[];
+  dependsOn: string[];
+};
+
 function required(flags: FlagMap, name: string) {
   const value = flags.get(name)?.trim();
   if (!value) throw new Error(`缺少 --${name}`);
@@ -121,6 +139,17 @@ function bounded(value: string, label: string, max = 4000) {
   if (!normalized) throw new Error(`${label}不能为空`);
   if (normalized.length > max) throw new Error(`${label}不能超过 ${max} 个字符`);
   return normalized;
+}
+
+function optionalBounded(flags: FlagMap, name: string, label: string, max = 4000) {
+  const value = flags.get(name)?.trim();
+  return value ? bounded(value, label, max) : null;
+}
+
+function commaSeparated(flags: FlagMap, name: string, label: string) {
+  const values = [...new Set(required(flags, name).split(',').map((item) => item.trim()).filter(Boolean))];
+  if (!values.length) throw new Error(`${label}至少需要一项`);
+  return values;
 }
 
 function sectionKind(flags: FlagMap) {
@@ -191,6 +220,12 @@ function touchDraft(db: Db, draftId: string) {
     SET change_seq = change_seq + 1, updated_at = CURRENT_TIMESTAMP
     WHERE draft_id = ?
   `).run(draftId);
+}
+
+function invalidateValidation(db: Db, draftId: string) {
+  db.prepare('UPDATE review_drafts SET validated_change_seq = NULL WHERE draft_id = ?')
+    .run(draftId);
+  touchDraft(db, draftId);
 }
 
 function assertViewed(draft: ReviewDraftRow, executionId: string) {
@@ -610,12 +645,19 @@ function synchronizeRequiredSubjects(
   execution: ReviewExecutionRow,
 ) {
   const header = db.prepare(`
-    SELECT mode, baseline_review_document_id, baseline_review_revision
+    SELECT mode, baseline_review_document_id, baseline_review_revision,
+           workflow_phase, validated_change_seq, assessment_summary,
+           assessment_evidence_boundary, assessment_residual_risk
     FROM review_drafts WHERE draft_id = ?
   `).get(draft.draft_id) as {
     mode: ReviewMode;
     baseline_review_document_id: string | null;
     baseline_review_revision: number | null;
+    workflow_phase: ReviewPhase;
+    validated_change_seq: number | null;
+    assessment_summary: string | null;
+    assessment_evidence_boundary: string | null;
+    assessment_residual_risk: string | null;
   };
   const task = assertExecutionStillCurrent(db, draft, execution, header);
   if (header.mode === 'report_correction') {
@@ -709,12 +751,19 @@ function synchronizeRequiredSubjects(
 
 function state(db: Db, draft: ReviewDraftRow) {
   const header = db.prepare(`
-    SELECT mode, baseline_review_document_id, baseline_review_revision
+    SELECT mode, baseline_review_document_id, baseline_review_revision,
+           workflow_phase, validated_change_seq, assessment_summary,
+           assessment_evidence_boundary, assessment_residual_risk
     FROM review_drafts WHERE draft_id = ?
   `).get(draft.draft_id) as {
     mode: ReviewMode;
     baseline_review_document_id: string | null;
     baseline_review_revision: number | null;
+    workflow_phase: ReviewPhase;
+    validated_change_seq: number | null;
+    assessment_summary: string | null;
+    assessment_evidence_boundary: string | null;
+    assessment_residual_risk: string | null;
   };
   const subjects = db.prepare(`
     SELECT subject_ref, subject_kind, content, source_ref, contract_ref,
@@ -769,15 +818,33 @@ function state(db: Db, draft: ReviewDraftRow) {
     section_kind: SectionKind;
     content: string;
   }[];
-  return { header, subjects, reconciliations, gaps, sections };
+  const rawUnits = db.prepare(`
+    SELECT unit_key, title, actor, trigger_condition, observable_outcome,
+           acceptance, ordinal
+    FROM review_forward_units WHERE draft_id = ?
+    ORDER BY ordinal, unit_key
+  `).all(draft.draft_id) as Omit<ForwardUnit, 'gapKeys' | 'dependsOn'>[];
+  const unitGaps = db.prepare(`
+    SELECT unit_key, gap_key FROM review_forward_unit_gaps
+    WHERE draft_id = ? ORDER BY ordinal, gap_key
+  `).all(draft.draft_id) as { unit_key: string; gap_key: string }[];
+  const dependencies = db.prepare(`
+    SELECT unit_key, depends_on_unit_key FROM review_forward_unit_dependencies
+    WHERE draft_id = ? ORDER BY unit_key, depends_on_unit_key
+  `).all(draft.draft_id) as { unit_key: string; depends_on_unit_key: string }[];
+  const forwardUnits = rawUnits.map((unit): ForwardUnit => ({
+    ...unit,
+    gapKeys: unitGaps.filter((item) => item.unit_key === unit.unit_key).map((item) => item.gap_key),
+    dependsOn: dependencies.filter((item) => item.unit_key === unit.unit_key).map((item) => item.depends_on_unit_key),
+  }));
+  return { header, subjects, reconciliations, gaps, sections, forwardUnits };
 }
 
 type ReviewState = ReturnType<typeof state>;
 
-function validationErrors(
+function reconciliationErrors(
   current: ReviewState,
   resources: ContextResource[],
-  terminal = false,
 ) {
   const errors: string[] = [];
   const activeGaps = current.gaps.filter((item) => item.status === 'active');
@@ -819,22 +886,127 @@ function validationErrors(
     }
   }
   if (!current.subjects.length) errors.push('没有可对账的最终事实对象');
-  if (terminal && current.header.mode === 'report_correction' && activeGaps.length) {
+  return [...new Set(errors)];
+}
+
+function assessmentErrors(current: ReviewState, resources: ContextResource[]) {
+  const errors = reconciliationErrors(current, resources);
+  if (!current.header.assessment_summary?.trim()) errors.push('尚未记录需求级结卡评估摘要');
+  if (!current.header.assessment_evidence_boundary?.trim()) errors.push('尚未记录结卡评估的证据边界');
+  if (current.header.mode === 'report_correction'
+    && current.gaps.some((item) => item.status === 'active')) {
     errors.push('报告表达更正不能声明结卡缺口；该反馈必须重新分流');
   }
-  if (terminal && !activeGaps.length) {
-    const sectionKinds = new Set(current.sections.map((item) => item.section_kind));
-    const missing = REQUIRED_REPORT_SECTIONS.filter((kind) => !sectionKinds.has(kind));
-    if (missing.length) {
-      errors.push(`缺少结卡报告核心章节：${missing.join(', ')}`);
-    }
-  }
   return [...new Set(errors)];
+}
+
+function reportErrors(current: ReviewState, resources: ContextResource[]) {
+  const errors = assessmentErrors(current, resources);
+  if (current.gaps.some((item) => item.status === 'active')) errors.push('存在活动结卡缺口，不能生成结卡报告');
+  const sectionKinds = new Set(current.sections.map((item) => item.section_kind));
+  const missing = REQUIRED_REPORT_SECTIONS.filter((kind) => !sectionKinds.has(kind));
+  if (missing.length) errors.push(`缺少结卡报告核心章节：${missing.join(', ')}`);
+  return [...new Set(errors)];
+}
+
+function dependencyCycle(units: ForwardUnit[]) {
+  const byKey = new Map(units.map((unit) => [unit.unit_key, unit]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (key: string): boolean => {
+    if (visiting.has(key)) return true;
+    if (visited.has(key)) return false;
+    visiting.add(key);
+    for (const dependency of byKey.get(key)?.dependsOn || []) {
+      if (visit(dependency)) return true;
+    }
+    visiting.delete(key);
+    visited.add(key);
+    return false;
+  };
+  return units.some((unit) => visit(unit.unit_key));
+}
+
+function forwardUnitErrors(current: ReviewState, resources: ContextResource[]) {
+  const errors = assessmentErrors(current, resources);
+  const activeGaps = current.gaps.filter((item) => item.status === 'active');
+  if (!activeGaps.length) errors.push('没有活动结卡缺口，不能创建前向交付单元');
+  if (!current.forwardUnits.length) errors.push('至少需要一个完整前向交付单元');
+  const activeKeys = new Set(activeGaps.map((gap) => gap.gap_key));
+  const covered = current.forwardUnits.flatMap((unit) => unit.gapKeys);
+  const missing = [...activeKeys].filter((key) => !covered.includes(key));
+  if (missing.length) errors.push(`以下活动缺口尚未被交付单元覆盖：${missing.join(', ')}`);
+  const unknown = covered.filter((key) => !activeKeys.has(key));
+  if (unknown.length) errors.push(`前向交付单元覆盖了非活动缺口：${[...new Set(unknown)].join(', ')}`);
+  const duplicates = covered.filter((key, index) => covered.indexOf(key) !== index);
+  if (duplicates.length) errors.push(`活动缺口只能由一个单元覆盖：${[...new Set(duplicates)].join(', ')}`);
+  const unitKeys = new Set(current.forwardUnits.map((unit) => unit.unit_key));
+  for (const unit of current.forwardUnits) {
+    const unknownDependencies = unit.dependsOn.filter((key) => !unitKeys.has(key));
+    if (unknownDependencies.length) errors.push(`单元 ${unit.unit_key} 引用了未知依赖：${unknownDependencies.join(', ')}`);
+  }
+  if (dependencyCycle(current.forwardUnits)) errors.push('前向交付单元依赖不能形成环');
+  return [...new Set(errors)];
+}
+
+function terminalErrors(current: ReviewState, resources: ContextResource[], draft: ReviewDraftRow) {
+  const activeGaps = current.gaps.some((item) => item.status === 'active');
+  const errors = activeGaps
+    ? forwardUnitErrors(current, resources)
+    : reportErrors(current, resources);
+  if (current.header.workflow_phase !== 'finalize') errors.push('尚未进入 FINALIZE 阶段');
+  if (current.header.validated_change_seq !== draft.change_seq) errors.push('当前草稿版本尚未通过 validate，或校验后发生了变化');
+  return [...new Set(errors)];
+}
+
+function phaseErrors(current: ReviewState, resources: ContextResource[], phase: ReviewPhase) {
+  if (phase === 'fact_reconciliation') return reconciliationErrors(current, resources);
+  if (phase === 'closure_assessment') return assessmentErrors(current, resources);
+  if (phase === 'report') return reportErrors(current, resources);
+  if (phase === 'forward_units') return forwardUnitErrors(current, resources);
+  return current.gaps.some((item) => item.status === 'active')
+    ? forwardUnitErrors(current, resources)
+    : reportErrors(current, resources);
+}
+
+function renderCommandResult(command: string, outcome: string, details: string[] = []) {
+  return ['# COMMAND RESULT', '', `- Command: \`${command}\``, `- Outcome: ${outcome}`, ...details.map((item) => `- ${item}`)].join('\n');
+}
+
+function renderWorkPacket(current: ReviewState, resources: ContextResource[], draft: ReviewDraftRow, phase = current.header.workflow_phase) {
+  const definition = REVIEW_WORKFLOW[phase];
+  const errors = phaseErrors(current, resources, phase);
+  const nextCommand = phase === 'finalize' && current.header.validated_change_seq !== draft.change_seq
+    ? 'review validate'
+    : definition.submit;
+  const readiness = errors.length
+    ? ['## READINESS', '', '- Status: not_ready', '- Remaining:', ...errors.map((item) => `  - ${item}`), '- Action: continue_current_work_packet', '- Refresh: `review status`']
+    : ['## READINESS', '', '- Status: ready', '', '## REVIEW BEFORE SUBMIT', '', ...definition.reviewBeforeSubmit.map((item) => `- ${item}`), '', phase === 'finalize' ? '## VALIDATE OR SUBMIT' : '## SUBMIT', '', `\`${nextCommand}\``];
+  return [
+    '# NEXT WORK PACKET', '', '## PHASE', '', `${definition.title} · ${phase}`, '',
+    '## OBJECTIVE', '', definition.objective, '', '## REQUIRED', '', definition.required, '',
+    '## DO NOT', '', definition.prohibited, '', '## AVAILABLE COMMANDS', '',
+    ...definition.commands.map((item) => `- \`${item}\``), '', ...readiness,
+  ].join('\n');
+}
+
+function renderContinue(command: string, changed: string, current: ReviewState, resources: ContextResource[], draft: ReviewDraftRow) {
+  const errors = phaseErrors(current, resources, current.header.workflow_phase);
+  const definition = REVIEW_WORKFLOW[current.header.workflow_phase];
+  return [
+    renderCommandResult(command, 'accepted', [`Changed: ${changed}`]), '', '# NEXT', '',
+    `- Phase: ${current.header.workflow_phase}`,
+    `- Readiness: ${errors.length ? 'not_ready' : 'ready'}`,
+    ...(errors.length
+      ? ['- Action: continue_current_work_packet', '- Remaining:', ...errors.map((item) => `  - ${item}`), '- Refresh: `review status`']
+      : ['- Action: review_before_submit', '- Review:', ...definition.reviewBeforeSubmit.map((item) => `  - ${item}`), `- Submit: \`${definition.submit}\``]),
+  ].join('\n');
 }
 
 function renderStatus(draft: ReviewDraftRow, current: ReviewState, resources: ContextResource[]) {
   const activeGaps = current.gaps.filter((item) => item.status === 'active');
   const lines = [
+    renderCommandResult('review status', 'state_restored'), '', '# CURRENT DRAFT', '',
     `最终事实对账草稿 v${draft.draft_version} · 变更 ${draft.change_seq}`,
     `模式：${current.header.mode === 'closure' ? '普通结卡' : '报告表达更正'}`,
     current.header.baseline_review_revision
@@ -845,6 +1017,9 @@ function renderStatus(draft: ReviewDraftRow, current: ReviewState, resources: Co
     `已对账：${current.reconciliations.length}`,
     `活动缺口：${activeGaps.length}`,
     `报告章节：${current.sections.length}/${SECTION_KINDS.length}`,
+    `当前阶段：${REVIEW_WORKFLOW[current.header.workflow_phase].title}`,
+    `无缺口路径：${REVIEW_HAPPY_PATH}`,
+    `缺口路径：${REVIEW_GAP_PATH}`,
     '',
     '必需对账对象（--subject 必须逐字使用以下 ref）：',
   ];
@@ -893,15 +1068,17 @@ function renderStatus(draft: ReviewDraftRow, current: ReviewState, resources: Co
     lines.push(`- ${kind} · ${DEFAULT_HEADINGS[kind]}：${section ? '已填写' : '未填写'}`);
     if (section) lines.push(`  ${section.content.replace(/\n/g, '\n  ')}`);
   }
-  const errors = validationErrors(current, resources);
-  if (errors.length) {
-    lines.push('', '当前待完成：', ...errors.map((item, index) => `${index + 1}. ${item}`));
-  } else if (activeGaps.length) {
-    lines.push('', '全部对象已有结论；complete 将提交 closure_gap，由 Application 前向追加补齐工作。');
-  } else {
-    lines.push('', '全部对象已有独立证据支持的最终结论；补齐核心报告章节后可以 complete。');
+  if (current.header.assessment_summary) {
+    lines.push('', '需求级结卡评估：', `- 摘要：${current.header.assessment_summary}`, `- 证据边界：${current.header.assessment_evidence_boundary}`);
+    if (current.header.assessment_residual_risk) lines.push(`- 残余风险：${current.header.assessment_residual_risk}`);
   }
-  return lines.join('\n');
+  if (current.forwardUnits.length) {
+    lines.push('', '前向交付单元：');
+    for (const unit of current.forwardUnits) {
+      lines.push(`- ${unit.unit_key}：${unit.title} · 覆盖 ${unit.gapKeys.join(', ') || '无'} · 依赖 ${unit.dependsOn.join(', ') || '无'}`);
+    }
+  }
+  return [lines.join('\n'), '', renderWorkPacket(current, resources, draft)].join('\n');
 }
 
 function renderArtifact(db: Db, draft: ReviewDraftRow, current: ReviewState) {
@@ -913,16 +1090,19 @@ function renderArtifact(db: Db, draft: ReviewDraftRow, current: ReviewState) {
     lines.push('', `## ${DEFAULT_HEADINGS[section.section_kind]}`, '', section.content);
   }
   lines.push('', '## 最终事实对账', '');
+  const subjectLabels: Record<SubjectKind, string> = {
+    intent: '业务目标', target: '目标状态', impact: '业务影响', acceptance: '验收结果', delivery_unit: '交付结果', feedback_acceptance: '反馈修订结果',
+  };
   for (const subject of current.subjects) {
     const reconciliation = current.reconciliations.find((item) =>
       item.subject_ref === subject.subject_ref);
     if (!reconciliation) continue;
     lines.push(
-      `### ${subject.subject_ref}`,
+      `### ${subjectLabels[subject.subject_kind]}`,
       '',
       reconciliation.result,
       '',
-      `证据：${reconciliation.evidence.map((entry) => `\`${entry.ref}\``).join('、')}`,
+      `证据边界：已绑定 ${reconciliation.evidence.length} 项冻结证据。`,
       '',
     );
   }
@@ -938,7 +1118,7 @@ function terminalSubmit(
   const current = state(db, draft);
   assertExecutionStillCurrent(db, draft, execution, current.header);
   const resources = visibleResources(execution);
-  const errors = validationErrors(current, resources, true);
+  const errors = terminalErrors(current, resources, draft);
   if (errors.length) {
     throw new Error(`最终事实对账不能完成：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
   }
@@ -956,6 +1136,16 @@ function terminalSubmit(
           kind: item.gap_kind,
           reason: item.reason,
           boundary: item.boundary,
+        })),
+        closureGapUnits: current.forwardUnits.map((unit) => ({
+          key: unit.unit_key,
+          title: unit.title,
+          actor: unit.actor,
+          trigger: unit.trigger_condition,
+          observableOutcome: unit.observable_outcome,
+          acceptance: unit.acceptance,
+          gapKeys: unit.gapKeys,
+          dependsOn: unit.dependsOn,
         })),
       })
     : agentResultSchema.parse({
@@ -981,9 +1171,10 @@ function terminalSubmit(
       WHERE execution_id = ?
     `).run(JSON.stringify(result), execution.execution_id);
   })();
-  return activeGaps.length
-    ? `已提交 ${activeGaps.length} 个结卡缺口；Application 将前向追加补齐工作。`
-    : '最终事实对账与结卡报告已提交。';
+  return [
+    renderCommandResult('review complete', activeGaps.length ? 'forward_work_submitted' : 'completed'),
+    '', '# NEXT', '', '- Owner: Application', '- Agent Action: end_execution',
+  ].join('\n');
 }
 
 export function reviewHelp(terminalActions: string[], topic: string | null = null) {
@@ -993,6 +1184,8 @@ export function reviewHelp(terminalActions: string[], topic: string | null = nul
     '    保存一个对象的最终结论。普通结卡的 evidence 至少包含一条 verdict=passed 的独立 Test Agent 执行记录；文档和规格可以作为补充证据。',
     '  review reconciliation dismiss --key <稳定 key>',
     '    删除一条错误的草稿对账；随后仍必须重新对账或为该 subject 声明缺口。',
+    '  review reconciliation complete',
+    '    每个冻结 subject 恰好已对账或存在活动缺口后，进入需求级结卡评估。',
   ];
   const gaps = [
     '结卡缺口（仅普通结卡）：',
@@ -1005,18 +1198,43 @@ export function reviewHelp(terminalActions: string[], topic: string | null = nul
     '结卡报告：',
     `  review report section-upsert --kind <${SECTION_KINDS.join('|')}> --content <Markdown 正文>`,
     '    渐进保存有事实内容的章节。标题由 Application 生成；至少需要 outcome、scope、implementation、verification、risks。',
+    '  review report section-remove --kind <章节类型>',
+    '  review report reopen-assessment --reason <原因>',
+    '  review report complete',
+  ];
+  const assessment = [
+    '需求级结卡评估：',
+    '  review assessment record --summary <组合后的最终事实判断> --evidence-boundary <证据已经证明和没有声称证明的边界> [--risk <不阻止结卡的残余风险>]',
+    '  review assessment reopen-reconciliation --reason <原因>',
+    '  review assessment complete',
+    '    无活动缺口时进入 REPORT；存在活动缺口时进入 FORWARD DELIVERY UNITS。',
+  ];
+  const forward = [
+    '前向交付单元（仅存在结卡缺口时）：',
+    '  review forward-unit upsert --key <稳定 key> --title <标题> --actor <参与者> --trigger <业务触发> --outcome <可观察结果> --acceptance <验收语义> --gaps <缺口 key[,缺口 key...]>',
+    '  review forward-unit remove --key <稳定 key>',
+    '  review forward-unit depends-on --key <单元 key> --unit <前置单元 key>',
+    '  review forward-unit dependency-remove --key <单元 key> --unit <前置单元 key>',
+    '  review forward-units reopen-assessment --reason <原因>',
+    '  review forward-units complete',
+    '    每个活动缺口必须恰好覆盖一次；Application 直接创建这些单元并派发 Analysis，不经过 Story Splitter。',
   ];
   const finish = [
-    '终止命令：',
+    '最终提交：',
+    '  review validate',
+    '  review finalize reopen-report --reason <原因>',
+    '  review finalize reopen-forward-units --reason <原因>',
     ...terminalActions.map((action) => `  ${action}`),
     '    无活动缺口时生成结卡报告；有活动缺口时提交 closure_gap。报告表达更正只允许生成候选新报告。',
   ];
   if (topic === 'reconciliation') return reconciliation;
   if (topic === 'gap') return gaps;
+  if (topic === 'assessment') return assessment;
   if (topic === 'report') return report;
+  if (topic === 'forward') return forward;
   if (topic === 'finish') return finish;
   if (topic) {
-    throw new Error(`结卡报告 help 不支持主题：${topic}。可用主题：context、reconciliation、gap、report、finish`);
+    throw new Error(`结卡报告 help 不支持主题：${topic}。可用主题：context、reconciliation、gap、assessment、report、forward、finish`);
   }
   return [
     '结卡报告 Agent 只消费已经存在的需求、交付与独立验证事实；它不重新测试、不修改代码，也不创建人工问题。',
@@ -1029,7 +1247,11 @@ export function reviewHelp(terminalActions: string[], topic: string | null = nul
     '',
     ...gaps,
     '',
+    ...assessment,
+    '',
     ...report,
+    '',
+    ...forward,
     '',
     ...finish,
     '',
@@ -1037,9 +1259,77 @@ export function reviewHelp(terminalActions: string[], topic: string | null = nul
     '  help context         冻结上下文读取工具',
     '  help reconciliation  对账对象、最终结果与证据',
     '  help gap             缺口分类与前向处理',
+    '  help assessment      需求级组合与证据边界评估',
     '  help report          报告章节',
+    '  help forward         直接追加的完整交付单元',
     '  help finish          完成条件与两种结果',
   ];
+}
+
+function transitionReviewPhase(input: {
+  db: Db;
+  draft: ReviewDraftRow;
+  execution: ReviewExecutionRow;
+  from: ReviewPhase;
+  to: ReviewPhase;
+}) {
+  const { db, draft, execution, from, to } = input;
+  const current = state(db, draft);
+  if (current.header.workflow_phase !== from) throw new Error(`当前阶段是 ${current.header.workflow_phase}，不能提交 ${from}`);
+  const resources = visibleResources(execution);
+  const errors = phaseErrors(current, resources, from);
+  if (errors.length) throw new Error(`${from} 阶段不能完成：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+  db.transaction(() => {
+    db.prepare('UPDATE review_drafts SET workflow_phase = ?, validated_change_seq = NULL WHERE draft_id = ?')
+      .run(to, draft.draft_id);
+    db.prepare(`
+      INSERT INTO review_phase_transitions(draft_id, from_phase, to_phase, reason, execution_id)
+      VALUES(?, ?, ?, ?, ?)
+    `).run(draft.draft_id, from, to, `${from} 阶段产物校验通过`, execution.execution_id);
+    touchDraft(db, draft.draft_id);
+  })();
+  const nextDraft = { ...draft, change_seq: draft.change_seq + 1 };
+  return [
+    renderCommandResult(REVIEW_WORKFLOW[from].submit, 'phase_completed', [`From: ${from}`, `To: ${to}`]), '',
+    renderWorkPacket(state(db, draft), resources, nextDraft, to),
+  ].join('\n');
+}
+
+function reopenReviewPhase(input: {
+  db: Db;
+  draft: ReviewDraftRow;
+  execution: ReviewExecutionRow;
+  command: string;
+  from: ReviewPhase;
+  to: ReviewPhase;
+  reason: string;
+}) {
+  const { db, draft, execution, command, from, to, reason } = input;
+  const current = state(db, draft);
+  if (current.header.workflow_phase !== from) throw new Error(`只有 ${from} 阶段可以执行该回流；当前阶段是 ${current.header.workflow_phase}`);
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE review_drafts
+      SET workflow_phase = ?, validated_change_seq = NULL,
+          assessment_summary = CASE WHEN ? = 'fact_reconciliation' THEN NULL ELSE assessment_summary END,
+          assessment_evidence_boundary = CASE WHEN ? = 'fact_reconciliation' THEN NULL ELSE assessment_evidence_boundary END,
+          assessment_residual_risk = CASE WHEN ? = 'fact_reconciliation' THEN NULL ELSE assessment_residual_risk END
+      WHERE draft_id = ?
+    `).run(to, to, to, to, draft.draft_id);
+    if (to === 'fact_reconciliation') {
+      db.prepare('DELETE FROM review_forward_units WHERE draft_id = ?').run(draft.draft_id);
+    }
+    db.prepare(`
+      INSERT INTO review_phase_transitions(draft_id, from_phase, to_phase, reason, execution_id)
+      VALUES(?, ?, ?, ?, ?)
+    `).run(draft.draft_id, from, to, reason, execution.execution_id);
+    touchDraft(db, draft.draft_id);
+  })();
+  const nextDraft = { ...draft, change_seq: draft.change_seq + 1 };
+  return [
+    renderCommandResult(command, 'phase_completed', [`From: ${from}`, `To: ${to}`, `Reason: ${reason}`]), '',
+    renderWorkPacket(state(db, draft), visibleResources(execution), nextDraft, to),
+  ].join('\n');
 }
 
 export function runReviewCommand(input: {
@@ -1074,12 +1364,13 @@ export function runReviewCommand(input: {
     && draft.terminal_execution_id === execution.execution_id
     && draft.terminal_action === 'complete'
   ) {
-    return '该终止命令已经提交成功，无需重复提交，可以结束本轮。';
+    return renderCommandResult(command, 'already_submitted');
   }
   assertViewed(draft, execution.execution_id);
   const current = state(db, draft);
 
   if (command === 'review reconciliation upsert') {
+    if (current.header.workflow_phase !== 'fact_reconciliation') throw new Error('只有 FACT RECONCILIATION 阶段可以维护事实对账');
     const key = bounded(required(flags, 'key'), '对账 key', 120);
     const subject = bounded(required(flags, 'subject'), '对账对象', 500);
     if (!current.subjects.some((item) => item.subject_ref === subject)) {
@@ -1149,12 +1440,13 @@ export function runReviewCommand(input: {
           index + 1,
         );
       });
-      touchDraft(db, draft.draft_id);
+      invalidateValidation(db, draft.draft_id);
     })();
-    return `最终事实对账 ${key} 已保存。`;
+    return renderContinue(command, `最终事实对账 ${key}`, state(db, draft), visibleResources(execution), { ...draft, change_seq: draft.change_seq + 1 });
   }
 
   if (command === 'review reconciliation dismiss') {
+    if (current.header.workflow_phase !== 'fact_reconciliation') throw new Error('只有 FACT RECONCILIATION 阶段可以维护事实对账');
     const key = required(flags, 'key');
     const existing = current.reconciliations.find((item) =>
       item.reconciliation_key === key);
@@ -1163,11 +1455,12 @@ export function runReviewCommand(input: {
       DELETE FROM review_reconciliations
       WHERE draft_id = ? AND reconciliation_key = ?
     `).run(draft.draft_id, key);
-    touchDraft(db, draft.draft_id);
-    return `最终事实对账 ${key} 已移除。`;
+    invalidateValidation(db, draft.draft_id);
+    return renderContinue(command, `移除最终事实对账 ${key}`, state(db, draft), visibleResources(execution), { ...draft, change_seq: draft.change_seq + 1 });
   }
 
   if (command === 'review gap upsert') {
+    if (current.header.workflow_phase !== 'fact_reconciliation') throw new Error('只有 FACT RECONCILIATION 阶段可以维护结卡缺口');
     if (current.header.mode === 'report_correction') {
       throw new Error('报告表达更正不能创建结卡缺口；请由 Feedback Agent 重新分流');
     }
@@ -1218,11 +1511,12 @@ export function runReviewCommand(input: {
       bounded(required(flags, 'boundary'), '事实边界', 4000),
       ordinal,
     );
-    touchDraft(db, draft.draft_id);
-    return `结卡缺口 ${key} 已保存。`;
+    invalidateValidation(db, draft.draft_id);
+    return renderContinue(command, `结卡缺口 ${key}`, state(db, draft), visibleResources(execution), { ...draft, change_seq: draft.change_seq + 1 });
   }
 
   if (command === 'review gap resolve') {
+    if (current.header.workflow_phase !== 'fact_reconciliation') throw new Error('只有 FACT RECONCILIATION 阶段可以维护结卡缺口');
     const key = required(flags, 'key');
     const existing = current.gaps.find((item) =>
       item.gap_key === key && item.status === 'active');
@@ -1236,11 +1530,42 @@ export function runReviewCommand(input: {
       draft.draft_id,
       key,
     );
+    invalidateValidation(db, draft.draft_id);
+    return renderContinue(command, `解决结卡缺口 ${key}`, state(db, draft), visibleResources(execution), { ...draft, change_seq: draft.change_seq + 1 });
+  }
+
+  if (command === 'review reconciliation complete') {
+    return transitionReviewPhase({ db, draft, execution, from: 'fact_reconciliation', to: 'closure_assessment' });
+  }
+
+  if (command === 'review assessment record') {
+    if (current.header.workflow_phase !== 'closure_assessment') throw new Error('只有 CLOSURE ASSESSMENT 阶段可以记录需求级结卡评估');
+    db.prepare(`
+      UPDATE review_drafts
+      SET assessment_summary = ?, assessment_evidence_boundary = ?,
+          assessment_residual_risk = ?, validated_change_seq = NULL
+      WHERE draft_id = ?
+    `).run(
+      bounded(required(flags, 'summary'), '结卡评估摘要', 10000),
+      bounded(required(flags, 'evidence-boundary'), '证据边界', 10000),
+      optionalBounded(flags, 'risk', '残余风险', 10000),
+      draft.draft_id,
+    );
     touchDraft(db, draft.draft_id);
-    return `结卡缺口 ${key} 已解决；请为对应对象保存最终对账。`;
+    return renderContinue(command, '需求级结卡评估', state(db, draft), visibleResources(execution), { ...draft, change_seq: draft.change_seq + 1 });
+  }
+
+  if (command === 'review assessment reopen-reconciliation') {
+    return reopenReviewPhase({ db, draft, execution, command, from: 'closure_assessment', to: 'fact_reconciliation', reason: bounded(required(flags, 'reason'), '回流原因', 4000) });
+  }
+
+  if (command === 'review assessment complete') {
+    const target = current.gaps.some((item) => item.status === 'active') ? 'forward_units' : 'report';
+    return transitionReviewPhase({ db, draft, execution, from: 'closure_assessment', to: target });
   }
 
   if (command === 'review report section-upsert') {
+    if (current.header.workflow_phase !== 'report') throw new Error('只有 REPORT 阶段可以维护报告章节');
     const kind = sectionKind(flags);
     db.prepare(`
       INSERT INTO review_sections(draft_id, section_kind, content)
@@ -1252,8 +1577,132 @@ export function runReviewCommand(input: {
       kind,
       bounded(required(flags, 'content'), '章节正文', 30000),
     );
-    touchDraft(db, draft.draft_id);
-    return `结卡报告章节 ${kind} 已保存。`;
+    invalidateValidation(db, draft.draft_id);
+    return renderContinue(command, `结卡报告章节 ${kind}`, state(db, draft), visibleResources(execution), { ...draft, change_seq: draft.change_seq + 1 });
+  }
+
+  if (command === 'review report section-remove') {
+    if (current.header.workflow_phase !== 'report') throw new Error('只有 REPORT 阶段可以维护报告章节');
+    const kind = sectionKind(flags);
+    const removed = db.prepare('DELETE FROM review_sections WHERE draft_id = ? AND section_kind = ?').run(draft.draft_id, kind);
+    if (!removed.changes) throw new Error(`结卡报告章节不存在：${kind}`);
+    invalidateValidation(db, draft.draft_id);
+    return renderContinue(command, `移除结卡报告章节 ${kind}`, state(db, draft), visibleResources(execution), { ...draft, change_seq: draft.change_seq + 1 });
+  }
+
+  if (command === 'review report reopen-assessment') {
+    return reopenReviewPhase({ db, draft, execution, command, from: 'report', to: 'closure_assessment', reason: bounded(required(flags, 'reason'), '回流原因', 4000) });
+  }
+
+  if (command === 'review report complete') {
+    return transitionReviewPhase({ db, draft, execution, from: 'report', to: 'finalize' });
+  }
+
+  if (command === 'review forward-unit upsert') {
+    if (current.header.workflow_phase !== 'forward_units') throw new Error('只有 FORWARD DELIVERY UNITS 阶段可以维护前向交付单元');
+    const key = bounded(required(flags, 'key'), '交付单元 key', 120);
+    const gapKeys = commaSeparated(flags, 'gaps', '覆盖缺口');
+    const activeKeys = new Set(current.gaps.filter((item) => item.status === 'active').map((item) => item.gap_key));
+    const unknown = gapKeys.filter((item) => !activeKeys.has(item));
+    if (unknown.length) throw new Error(`--gaps 引用了非活动缺口：${unknown.join(', ')}`);
+    const conflicts = current.forwardUnits.flatMap((unit) => unit.unit_key === key ? [] : unit.gapKeys).filter((item) => gapKeys.includes(item));
+    if (conflicts.length) throw new Error(`活动缺口已经被其他单元覆盖：${[...new Set(conflicts)].join(', ')}`);
+    const existing = current.forwardUnits.find((unit) => unit.unit_key === key);
+    const ordinal = existing?.ordinal || nextOrdinal(db, 'review_forward_units', draft.draft_id);
+    db.transaction(() => {
+      db.prepare(`
+        INSERT INTO review_forward_units(
+          draft_id, unit_key, title, actor, trigger_condition,
+          observable_outcome, acceptance, ordinal
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(draft_id, unit_key) DO UPDATE SET
+          title = excluded.title, actor = excluded.actor,
+          trigger_condition = excluded.trigger_condition,
+          observable_outcome = excluded.observable_outcome,
+          acceptance = excluded.acceptance
+      `).run(
+        draft.draft_id, key,
+        bounded(required(flags, 'title'), '单元标题', 200),
+        bounded(required(flags, 'actor'), '参与者', 500),
+        bounded(required(flags, 'trigger'), '触发条件'),
+        bounded(required(flags, 'outcome'), '可观察结果'),
+        bounded(required(flags, 'acceptance'), '验收语义'), ordinal,
+      );
+      db.prepare('DELETE FROM review_forward_unit_gaps WHERE draft_id = ? AND unit_key = ?').run(draft.draft_id, key);
+      gapKeys.forEach((gapKey, index) => db.prepare(`
+        INSERT INTO review_forward_unit_gaps(draft_id, unit_key, gap_key, ordinal)
+        VALUES(?, ?, ?, ?)
+      `).run(draft.draft_id, key, gapKey, index + 1));
+      invalidateValidation(db, draft.draft_id);
+    })();
+    return renderContinue(command, `前向交付单元 ${key}`, state(db, draft), visibleResources(execution), { ...draft, change_seq: draft.change_seq + 1 });
+  }
+
+  if (command === 'review forward-unit remove') {
+    if (current.header.workflow_phase !== 'forward_units') throw new Error('只有 FORWARD DELIVERY UNITS 阶段可以维护前向交付单元');
+    const key = required(flags, 'key');
+    const removed = db.prepare('DELETE FROM review_forward_units WHERE draft_id = ? AND unit_key = ?').run(draft.draft_id, key);
+    if (!removed.changes) throw new Error(`前向交付单元不存在：${key}`);
+    invalidateValidation(db, draft.draft_id);
+    return renderContinue(command, `移除前向交付单元 ${key}`, state(db, draft), visibleResources(execution), { ...draft, change_seq: draft.change_seq + 1 });
+  }
+
+  if (command === 'review forward-unit depends-on') {
+    if (current.header.workflow_phase !== 'forward_units') throw new Error('只有 FORWARD DELIVERY UNITS 阶段可以维护单元依赖');
+    const key = required(flags, 'key');
+    const dependency = required(flags, 'unit');
+    const keys = new Set(current.forwardUnits.map((unit) => unit.unit_key));
+    if (!keys.has(key) || !keys.has(dependency)) throw new Error('依赖双方必须是当前草稿中的前向交付单元');
+    if (key === dependency) throw new Error('交付单元不能依赖自身');
+    db.prepare(`INSERT OR IGNORE INTO review_forward_unit_dependencies(draft_id, unit_key, depends_on_unit_key) VALUES(?, ?, ?)`)
+      .run(draft.draft_id, key, dependency);
+    const next = state(db, draft);
+    if (dependencyCycle(next.forwardUnits)) {
+      db.prepare('DELETE FROM review_forward_unit_dependencies WHERE draft_id = ? AND unit_key = ? AND depends_on_unit_key = ?').run(draft.draft_id, key, dependency);
+      throw new Error('该依赖会形成环，已拒绝保存');
+    }
+    invalidateValidation(db, draft.draft_id);
+    return renderContinue(command, `${key} 依赖 ${dependency}`, next, visibleResources(execution), { ...draft, change_seq: draft.change_seq + 1 });
+  }
+
+  if (command === 'review forward-unit dependency-remove') {
+    if (current.header.workflow_phase !== 'forward_units') throw new Error('只有 FORWARD DELIVERY UNITS 阶段可以维护单元依赖');
+    const key = required(flags, 'key');
+    const dependency = required(flags, 'unit');
+    const removed = db.prepare('DELETE FROM review_forward_unit_dependencies WHERE draft_id = ? AND unit_key = ? AND depends_on_unit_key = ?').run(draft.draft_id, key, dependency);
+    if (!removed.changes) throw new Error('前向交付单元依赖不存在');
+    invalidateValidation(db, draft.draft_id);
+    return renderContinue(command, `移除 ${key} 对 ${dependency} 的依赖`, state(db, draft), visibleResources(execution), { ...draft, change_seq: draft.change_seq + 1 });
+  }
+
+  if (command === 'review forward-units reopen-assessment') {
+    return reopenReviewPhase({ db, draft, execution, command, from: 'forward_units', to: 'closure_assessment', reason: bounded(required(flags, 'reason'), '回流原因', 4000) });
+  }
+
+  if (command === 'review forward-units complete') {
+    return transitionReviewPhase({ db, draft, execution, from: 'forward_units', to: 'finalize' });
+  }
+
+  if (command === 'review finalize reopen-report') {
+    if (current.gaps.some((item) => item.status === 'active')) {
+      throw new Error('当前存在活动结卡缺口，FINALIZE 只能回流 FORWARD DELIVERY UNITS');
+    }
+    return reopenReviewPhase({ db, draft, execution, command, from: 'finalize', to: 'report', reason: bounded(required(flags, 'reason'), '回流原因', 4000) });
+  }
+
+  if (command === 'review finalize reopen-forward-units') {
+    if (!current.gaps.some((item) => item.status === 'active')) {
+      throw new Error('当前没有活动结卡缺口，FINALIZE 只能回流 REPORT');
+    }
+    return reopenReviewPhase({ db, draft, execution, command, from: 'finalize', to: 'forward_units', reason: bounded(required(flags, 'reason'), '回流原因', 4000) });
+  }
+
+  if (command === 'review validate') {
+    if (current.header.workflow_phase !== 'finalize') throw new Error('只有 FINALIZE 阶段可以执行 validate');
+    const errors = phaseErrors(current, visibleResources(execution), 'finalize');
+    if (errors.length) throw new Error(`Review 草稿校验失败：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+    db.prepare('UPDATE review_drafts SET validated_change_seq = ? WHERE draft_id = ?').run(draft.change_seq, draft.draft_id);
+    return [renderCommandResult(command, 'validation_passed', [`Validated Change: ${draft.change_seq}`]), '', '# NEXT', '', '- Phase: finalize', '- Readiness: ready', '- Submit: `review complete`'].join('\n');
   }
 
   if (command === 'review complete') {

@@ -209,6 +209,20 @@ async function reconcileAll(
 }
 
 async function writeCoreReport(executionId: string, token: string) {
+  const status = await command(executionId, token, ['review', 'status']);
+  if (/FACT RECONCILIATION/.test(status)) {
+    await command(executionId, token, ['review', 'reconciliation', 'complete']);
+  }
+  const afterReconciliation = await command(executionId, token, ['review', 'status']);
+  if (/CLOSURE ASSESSMENT/.test(afterReconciliation)) {
+    await command(executionId, token, [
+      'review', 'assessment', 'record',
+      '--summary', '全部逐项事实组合后支持原始需求目标，跨单元结果与历史修订一致。',
+      '--evidence-boundary', '结论仅覆盖冻结规格、当前最终实现事实和独立 Test Agent 已通过的业务证据。',
+      '--risk', '没有影响本次结卡成立的已知风险。',
+    ]);
+    await command(executionId, token, ['review', 'assessment', 'complete']);
+  }
   const sections = [
     ['outcome', '原始业务目标已经实现，用户可观察状态与需求一致。'],
     ['scope', '实际交付包含状态映射走查和独立黑盒验证，不包含新增 API。'],
@@ -223,6 +237,12 @@ async function writeCoreReport(executionId: string, token: string) {
       '--content', content,
     ]);
   }
+}
+
+async function finishReport(executionId: string, token: string) {
+  await command(executionId, token, ['review', 'report', 'complete']);
+  await command(executionId, token, ['review', 'validate']);
+  return command(executionId, token, ['review', 'complete']);
 }
 
 test('Review Agent progressively reconciles every required fact and publishes one report', async () => {
@@ -294,16 +314,22 @@ test('Review Agent progressively reconciles every required fact and publishes on
     /不能改绑/,
   );
   await writeCoreReport(started.executionId, started.token);
+  await command(started.executionId, started.token, ['review', 'report', 'complete']);
+  await assert.rejects(
+    command(started.executionId, started.token, [
+      'review', 'finalize', 'reopen-forward-units', '--reason', '错误回到缺口分支',
+    ]),
+    /只能回流 REPORT/,
+  );
+  await command(started.executionId, started.token, ['review', 'validate']);
   await command(started.executionId, started.token, ['review', 'complete']);
   const result = await readAgentCommandSubmission(started.executionId);
   assert.equal(result?.outcome, 'completed');
   assert.equal(result?.verdict, 'report_ready');
   assert.equal(result?.closureGaps?.length || 0, 0);
   assert.match(result?.artifact?.content || '', /## 最终事实对账/);
-  assert.match(
-    result?.artifact?.content || '',
-    new RegExp(fixture.passedTestExecutionRef),
-  );
+  assert.doesNotMatch(result?.artifact?.content || '', /EXEC:|SPEC:|DELIVERY_UNIT:|REQUIREMENT:/);
+  assert.match(result?.artifact?.content || '', /证据边界：已绑定 2 项冻结证据/);
 
   await applyAgentResult(
     `RUN-review-complete-${fixture.taskId}`,
@@ -355,7 +381,7 @@ test('Review binds reconciliations to the exact evidence revision and content', 
   `).run(JSON.stringify(input), started.executionId);
 
   await assert.rejects(
-    command(started.executionId, started.token, ['review', 'complete']),
+    command(started.executionId, started.token, ['review', 'report', 'complete']),
     /证据版本或内容已变化/,
   );
 });
@@ -407,18 +433,45 @@ test('Review closure gap is submitted as forward work instead of a block or ques
     '--reason', '当前验证只覆盖交付单元，没有覆盖需求级端到端目标。',
     '--boundary', '从用户入口完成完整流程，并由 Test Agent 保存独立证据。',
   ]);
+  await command(started.executionId, started.token, ['review', 'reconciliation', 'complete']);
+  await command(started.executionId, started.token, [
+    'review', 'assessment', 'record',
+    '--summary', '需求级目标仍缺少端到端闭环证据，不能生成结卡报告。',
+    '--evidence-boundary', '现有证据只覆盖单个交付单元，没有证明需求级完整流程。',
+  ]);
+  const forwardPacket = await command(started.executionId, started.token, ['review', 'assessment', 'complete']);
+  assert.match(forwardPacket, /FORWARD DELIVERY UNITS/);
+  await command(started.executionId, started.token, [
+    'review', 'forward-unit', 'upsert',
+    '--key', 'prove-end-to-end-result',
+    '--title', '补齐需求级端到端结果证据',
+    '--actor', '用户',
+    '--trigger', '用户从真实入口完成完整业务流程',
+    '--outcome', '用户能够观察到符合原始需求的最终结果',
+    '--acceptance', 'Test Agent 从真实用户入口取得完整流程的独立通过证据',
+    '--gaps', 'missing-end-to-end-proof',
+  ]);
+  await command(started.executionId, started.token, ['review', 'forward-units', 'complete']);
+  await assert.rejects(
+    command(started.executionId, started.token, [
+      'review', 'finalize', 'reopen-report', '--reason', '错误回到无缺口分支',
+    ]),
+    /只能回流 FORWARD DELIVERY UNITS/,
+  );
+  await command(started.executionId, started.token, ['review', 'validate']);
   const output = await command(
     started.executionId,
     started.token,
     ['review', 'complete'],
   );
-  assert.match(output, /Application 将前向追加/);
+  assert.match(output, /forward_work_submitted/);
   const result = await readAgentCommandSubmission(started.executionId);
   assert.equal(result?.verdict, 'closure_gap');
   assert.equal(result?.artifact, undefined);
   assert.equal(result?.questions.length, 0);
   assert.equal(result?.runtimeInputs.length, 0);
   assert.equal(result?.closureGaps?.[0]?.key, 'missing-end-to-end-proof');
+  assert.equal(result?.closureGapUnits?.[0]?.key, 'prove-end-to-end-result');
 
   const applied = await applyAgentResult(
     `RUN-review-gap-${fixture.taskId}`,
@@ -517,19 +570,19 @@ test('Review help exposes only the new minimal command protocol', async () => {
     `${fixture.taskId}-help`,
     fixture.resources,
   );
-  const help = await command(started.executionId, started.token, ['help']);
-  assert.match(help, /review reconciliation upsert/);
-  assert.match(help, /review gap upsert/);
-  assert.match(help, /review report section-upsert/);
-  assert.doesNotMatch(help, /review title set/);
-  assert.doesNotMatch(help, /review runtime-input/);
-  assert.doesNotMatch(help, /review request-input/);
+  await assert.rejects(command(started.executionId, started.token, ['help']), /help 必须指定一个主题/);
+  const reconciliationHelp = await command(started.executionId, started.token, ['help', 'reconciliation']);
+  assert.match(reconciliationHelp, /review reconciliation complete/);
   const gapHelp = await command(
     started.executionId,
     started.token,
     ['help', 'gap'],
   );
   assert.match(gapHelp, /Application 会把缺口前向追加为新交付单元/);
+  const assessmentHelp = await command(started.executionId, started.token, ['help', 'assessment']);
+  assert.match(assessmentHelp, /review assessment complete/);
+  const forwardHelp = await command(started.executionId, started.token, ['help', 'forward']);
+  assert.match(forwardHelp, /不经过 Story Splitter/);
 });
 
 test('feedback report correction inherits the current structured report and cannot route closure gaps', async () => {
@@ -551,7 +604,7 @@ test('feedback report correction inherits the current structured report and cann
     fixture.specRef,
   );
   await writeCoreReport(closure.executionId, closure.token);
-  await command(closure.executionId, closure.token, ['review', 'complete']);
+  await finishReport(closure.executionId, closure.token);
   const baseline = await readAgentCommandSubmission(closure.executionId);
   await applyAgentResult(
     `RUN-review-baseline-${fixture.taskId}`,
@@ -639,11 +692,20 @@ test('feedback report correction inherits the current structured report and cann
     '--result', '候选报告已把验证环境准确修订为本地测试环境。',
     '--evidence', reportRef,
   ]);
+  await command(correction.executionId, correction.token, ['review', 'reconciliation', 'complete']);
+  await command(correction.executionId, correction.token, [
+    'review', 'assessment', 'record',
+    '--summary', '候选报告只修正验证环境表述，既有交付事实保持不变。',
+    '--evidence-boundary', '仅以当前报告基线和冻结的表达更正要求为依据。',
+  ]);
+  await command(correction.executionId, correction.token, ['review', 'assessment', 'complete']);
   await command(correction.executionId, correction.token, [
     'review', 'report', 'section-upsert',
     '--kind', 'verification',
     '--content', 'Test Agent 已在本地测试环境从用户入口完成独立验证。',
   ]);
+  await command(correction.executionId, correction.token, ['review', 'report', 'complete']);
+  await command(correction.executionId, correction.token, ['review', 'validate']);
   db.prepare(`
     UPDATE tasks SET review_revision = 2 WHERE task_id = ?
   `).run(fixture.taskId);

@@ -350,9 +350,9 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                   <div className="answer"><b>{parsed.unit.title}</b><br/>{parsed.unit.actor} 在 {parsed.unit.trigger} 时，{parsed.unit.observableOutcome}<br/><small>验收语义：{parsed.unit.acceptance}</small></div>
                   <div className="answer"><b>分析结论：</b>{parsed.summary}</div>
                   <pre>{parsed.impacts.map((item) =>
-                    `${item.key} · ${item.disposition} · ${item.area}\n${item.finding}\n证据：${item.evidence}${item.decisionKey ? `\n关联决策：${item.decisionKey}` : ''}`).join('\n\n')}</pre>
+                    `${item.disposition} · ${item.area}\n${item.finding}\n证据：${item.evidence}`).join('\n\n')}</pre>
                   {!!parsed.decisions.length && <pre>{parsed.decisions.map((item) => [
-                    `${item.key} · ${item.type} · ${item.title}`,
+                    `${item.type === 'business' ? '业务决策' : '技术决策'} · ${item.title}`,
                     item.status === 'resolved'
                       ? `已确定：${item.decision} · 权限 ${item.authority}${item.evidence ? `\n证据：${item.evidence}` : ''}`
                       : `等待用户决策：${item.question}`,
@@ -360,9 +360,9 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                   <div className="answer"><b>交付契约 · 实现方向：</b>{parsed.handoff.implementationGuidance}</div>
                   {!!parsed.handoff.guardrails.length && <small>保护约束：{parsed.handoff.guardrails.map((item) => item.content).join('；')}</small>}
                   <pre>{[
-                    `unit-acceptance · ${parsed.unit.acceptance}\nOracle: ${parsed.unit.observableOutcome}`,
+                    `${parsed.unit.acceptance}\nOracle: ${parsed.unit.observableOutcome}`,
                     ...parsed.handoff.verificationFocus.map((item) =>
-                      `${item.key} · ${item.expected}\nOracle: ${item.oracle}`),
+                      `${item.expected}\nOracle: ${item.oracle}`),
                   ].join('\n\n')}</pre>
                 </details>;
               })}

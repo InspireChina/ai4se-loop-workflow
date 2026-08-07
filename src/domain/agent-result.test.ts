@@ -403,9 +403,20 @@ test('accepts Review closure gaps as a forward result without a report artifact'
       reason: 'The implementation and Test report describe different terminal states.',
       boundary: 'One observable terminal-state contract is implemented and independently verified.',
     }],
+    closureGapUnits: [{
+      key: 'close-final-facts',
+      title: 'Close final observable facts',
+      actor: 'User',
+      trigger: 'The user completes the workflow',
+      observableOutcome: 'The final visible path and terminal state agree',
+      acceptance: 'Independent black-box evidence proves both final facts',
+      gapKeys: ['missing-visible-proof', 'conflicting-status-fact'],
+      dependsOn: [],
+    }],
   }));
 
   assert.equal(result.closureGaps?.length, 2);
+  assert.equal(result.closureGapUnits?.length, 1);
   assert.doesNotThrow(() => assertAgentResultRoleContract(result, 'review-agent'));
   assert.throws(
     () => assertAgentResultRoleContract({ ...result, closureGaps: [] }, 'review-agent'),
@@ -417,6 +428,23 @@ test('accepts Review closure gaps as a forward result without a report artifact'
       artifact: { title: 'Premature report', content: 'This report must not be published.' },
     }, 'review-agent'),
     /不得生成结卡报告/,
+  );
+  assert.throws(
+    () => assertAgentResultRoleContract({
+      ...result,
+      closureGapUnits: [{
+        ...result.closureGapUnits![0],
+        key: 'unit-a',
+        gapKeys: ['missing-visible-proof'],
+        dependsOn: ['unit-b'],
+      }, {
+        ...result.closureGapUnits![0],
+        key: 'unit-b',
+        gapKeys: ['conflicting-status-fact'],
+        dependsOn: ['unit-a'],
+      }],
+    }, 'review-agent'),
+    /依赖不能形成环/,
   );
 });
 
@@ -452,6 +480,16 @@ test('requires a clean Review report result and keeps closure gaps role-scoped',
       kind: 'unresolved_obligation',
       reason: 'One obligation remains.',
       boundary: 'The obligation is delivered.',
+    }],
+    closureGapUnits: [{
+      key: 'close-obligation',
+      title: 'Close obligation',
+      actor: 'User',
+      trigger: 'The obligation is exercised',
+      observableOutcome: 'The obligation is visibly delivered',
+      acceptance: 'Independent evidence proves delivery',
+      gapKeys: ['review-only'],
+      dependsOn: [],
     }],
   }));
   assert.throws(() => assertAgentResultRoleContract(gap, 'dev-agent'), /只有 Review Agent/);
