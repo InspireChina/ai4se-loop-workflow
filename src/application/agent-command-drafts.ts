@@ -13,6 +13,13 @@ import {
   requirementContextNormalCommandPath,
   type RequirementContextPhase,
 } from '../domain/requirement-context-workflow';
+import {
+  DELIVERY_PLAN_PHASE_ORDER,
+  DELIVERY_PLAN_PHASE_SEQUENCE,
+  DELIVERY_PLAN_WORKFLOW,
+  deliveryPlanNormalCommandPath,
+  type DeliveryPlanPhase,
+} from '../domain/delivery-plan-workflow';
 import { databaseConnection, hash } from '../infrastructure/database';
 import {
   reproductionHelp,
@@ -139,6 +146,8 @@ type DeliveryPlanDraft = {
   rationale: string | null;
   coverage: string | null;
   ordering_notes: string | null;
+  workflow_phase: DeliveryPlanPhase;
+  validated_change_seq: number | null;
 };
 
 type DeliveryPlanUnit = {
@@ -338,8 +347,8 @@ function cloneDeliveryPlanDraft(
   target: DraftRow,
 ) {
   db.prepare(`
-    INSERT INTO delivery_plan_drafts(draft_id, rationale, coverage, ordering_notes)
-    SELECT ?, rationale, coverage, ordering_notes
+    INSERT INTO delivery_plan_drafts(draft_id, rationale, coverage, ordering_notes, workflow_phase)
+    SELECT ?, rationale, coverage, ordering_notes, workflow_phase
     FROM delivery_plan_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   db.prepare(`
@@ -1971,7 +1980,7 @@ function deliveryPlanState(
   draft: DraftRow,
 ) {
   const plan = db.prepare(`
-    SELECT draft_id, rationale, coverage, ordering_notes
+    SELECT draft_id, rationale, coverage, ordering_notes, workflow_phase, validated_change_seq
     FROM delivery_plan_drafts WHERE draft_id = ?
   `).get(draft.draft_id) as DeliveryPlanDraft;
   const units = db.prepare(`
@@ -2013,32 +2022,29 @@ function deliveryPlanState(
   return { plan, units, sources, sourceLinks, dependencies, revisionCount, existingUnits };
 }
 
-function deliveryPlanValidationErrors(state: ReturnType<typeof deliveryPlanState>) {
+function deliveryPlanBasisErrors(state: ReturnType<typeof deliveryPlanState>) {
   const errors: string[] = [];
-  const activeUnits = state.units.filter((unit) => unit.lifecycle_status === 'active');
-  const activeKeys = new Set(activeUnits.map((unit) => unit.unit_key));
-  const existingKeys = new Set(state.existingUnits
-    .map((unit) => unit.unit_key)
-    .filter((key): key is string => Boolean(key)));
   if (!state.plan.rationale?.trim()) {
     errors.push('缺少拆分依据：使用 delivery-plan rationale set --text <内容>');
-  }
-  if (!state.plan.coverage?.trim()) {
-    errors.push('缺少整体覆盖说明：使用 delivery-plan coverage set --text <内容>');
   }
   if (!state.sources.length) {
     errors.push('交付计划缺少冻结的上游规划输入，不能完成');
   }
+  return errors;
+}
+
+function deliveryPlanUnitErrors(state: ReturnType<typeof deliveryPlanState>) {
+  const errors: string[] = [];
+  const activeUnits = state.units.filter((unit) => unit.lifecycle_status === 'active');
+  const existingKeys = new Set(state.existingUnits
+    .map((unit) => unit.unit_key)
+    .filter((key): key is string => Boolean(key)));
   if (!activeUnits.length) {
     errors.push('至少需要一个可独立交付的交付单元');
   }
   if (activeUnits.length > 50) {
     errors.push('单次交付计划最多包含 50 个有效交付单元');
   }
-  if (activeUnits.length > 1 && !state.plan.ordering_notes?.trim()) {
-    errors.push('存在多个交付单元时必须说明推荐顺序与依赖依据');
-  }
-
   const duplicateTitles = activeUnits
     .filter((unit, index) =>
       activeUnits.findIndex((candidate) => candidate.title.trim() === unit.title.trim()) !== index)
@@ -2051,6 +2057,19 @@ function deliveryPlanValidationErrors(state: ReturnType<typeof deliveryPlanState
     .filter((key) => existingKeys.has(key));
   if (conflictingKeys.length) {
     errors.push(`交付单元 key 已被当前需求中的既有单元使用：${conflictingKeys.join(', ')}`);
+  }
+  return errors;
+}
+
+function deliveryPlanCoverageErrors(state: ReturnType<typeof deliveryPlanState>) {
+  const errors: string[] = [];
+  const activeUnits = state.units.filter((unit) => unit.lifecycle_status === 'active');
+  const activeKeys = new Set(activeUnits.map((unit) => unit.unit_key));
+  if (!state.plan.coverage?.trim()) {
+    errors.push('缺少整体覆盖说明：使用 delivery-plan coverage set --text <内容>');
+  }
+  if (activeUnits.length > 1 && !state.plan.ordering_notes?.trim()) {
+    errors.push('存在多个交付单元时必须说明推荐顺序与依赖依据');
   }
 
   for (const unit of activeUnits) {
@@ -2123,12 +2142,184 @@ function deliveryPlanValidationErrors(state: ReturnType<typeof deliveryPlanState
   return errors;
 }
 
+function deliveryPlanValidationErrors(state: ReturnType<typeof deliveryPlanState>) {
+  return [
+    ...deliveryPlanBasisErrors(state),
+    ...deliveryPlanUnitErrors(state),
+    ...deliveryPlanCoverageErrors(state),
+  ];
+}
+
+function deliveryPlanPhaseValidationErrors(
+  state: ReturnType<typeof deliveryPlanState>,
+  phase: DeliveryPlanPhase,
+) {
+  if (phase === 'planning_basis') return deliveryPlanBasisErrors(state);
+  if (phase === 'delivery_units') return [
+    ...deliveryPlanBasisErrors(state),
+    ...deliveryPlanUnitErrors(state),
+  ];
+  if (phase === 'coverage_order') return deliveryPlanValidationErrors(state);
+  return deliveryPlanValidationErrors(state);
+}
+
+type DeliveryPlanReadiness = {
+  status: 'not_ready' | 'structurally_ready';
+  remaining: string[];
+  nextCommand: string | null;
+};
+
+function deliveryPlanReadiness(
+  state: ReturnType<typeof deliveryPlanState>,
+  phase: DeliveryPlanPhase,
+): DeliveryPlanReadiness {
+  const remaining = deliveryPlanPhaseValidationErrors(state, phase);
+  if (remaining.length) return { status: 'not_ready', remaining, nextCommand: null };
+  return {
+    status: 'structurally_ready',
+    remaining: [],
+    nextCommand: phase === 'finalize'
+      ? 'delivery-plan validate'
+      : DELIVERY_PLAN_WORKFLOW[phase].submit,
+  };
+}
+
+function renderDeliveryPlanReadiness(
+  phase: DeliveryPlanPhase,
+  state: ReturnType<typeof deliveryPlanState>,
+) {
+  const readiness = deliveryPlanReadiness(state, phase);
+  const definition = DELIVERY_PLAN_WORKFLOW[phase];
+  const lines = ['## READINESS', '', `- Status: ${readiness.status}`];
+  if (readiness.status === 'not_ready') {
+    lines.push(
+      '',
+      '## REMAINING REQUIREMENTS',
+      '',
+      ...readiness.remaining.map((item, index) => `${index + 1}. ${item}`),
+      '',
+      '继续当前工作包；补齐以上缺口后再查看 `delivery-plan status`。',
+    );
+    return lines;
+  }
+  lines.push(
+    '',
+    '## REVIEW BEFORE SUBMIT',
+    '',
+    ...definition.reviewBeforeSubmit.map((item) => `- ${item}`),
+    '',
+    phase === 'finalize' ? '## VALIDATE' : '## SUBMIT',
+    '',
+    `\`${readiness.nextCommand}\``,
+  );
+  return lines;
+}
+
+function renderDeliveryPlanWorkPacket(
+  phase: DeliveryPlanPhase,
+  state: ReturnType<typeof deliveryPlanState>,
+) {
+  const definition = DELIVERY_PLAN_WORKFLOW[phase];
+  return [
+    '# NEXT WORK PACKET',
+    '',
+    '## PHASE',
+    '',
+    `${definition.title} · ${phase}`,
+    '',
+    '## OBJECTIVE',
+    '',
+    definition.objective,
+    '',
+    '## REQUIRED',
+    '',
+    definition.required,
+    '',
+    '## DO NOT',
+    '',
+    definition.prohibited,
+    '',
+    '## AVAILABLE COMMANDS',
+    '',
+    ...definition.commands.map((item) => `- \`${item}\``),
+    '',
+    ...renderDeliveryPlanReadiness(phase, state),
+  ].join('\n');
+}
+
+type DeliveryPlanCommandOutcome =
+  | 'state_restored'
+  | 'accepted'
+  | 'phase_completed'
+  | 'validation_passed'
+  | 'completed'
+  | 'already_submitted';
+
+function renderDeliveryPlanCommandResult(input: {
+  command: string;
+  outcome: DeliveryPlanCommandOutcome;
+  details?: string[];
+}) {
+  return [
+    '# COMMAND RESULT',
+    '',
+    `- Command: \`${input.command}\``,
+    `- Outcome: ${input.outcome}`,
+    ...(input.details || []).map((detail) => `- ${detail}`),
+  ].join('\n');
+}
+
+function renderDeliveryPlanContinue(
+  command: string,
+  changed: string,
+  state: ReturnType<typeof deliveryPlanState>,
+) {
+  const phase = state.plan.workflow_phase;
+  const readiness = deliveryPlanReadiness(state, phase);
+  const definition = DELIVERY_PLAN_WORKFLOW[phase];
+  const next = [
+    '# NEXT',
+    '',
+    `- Phase: ${phase}`,
+    `- Readiness: ${readiness.status}`,
+  ];
+  if (readiness.status === 'not_ready') {
+    next.push(
+      '- Action: continue_current_work_packet',
+      '- Remaining:',
+      ...readiness.remaining.map((item) => `  - ${item}`),
+      '- Refresh: `delivery-plan status`',
+    );
+  } else {
+    next.push(
+      '- Action: review_before_submit',
+      '- Review:',
+      ...definition.reviewBeforeSubmit.map((item) => `  - ${item}`),
+      `- ${phase === 'finalize' ? 'Validate' : 'Submit'}: \`${readiness.nextCommand}\``,
+    );
+  }
+  return [
+    renderDeliveryPlanCommandResult({ command, outcome: 'accepted', details: [`Changed: ${changed}`] }),
+    '',
+    ...next,
+  ].join('\n');
+}
+
 function renderDeliveryPlanStatus(
   draft: DraftRow,
   state: ReturnType<typeof deliveryPlanState>,
 ) {
-  const errors = deliveryPlanValidationErrors(state);
   const lines = [
+    renderDeliveryPlanCommandResult({
+      command: 'delivery-plan status',
+      outcome: 'state_restored',
+      details: [`Phase: ${state.plan.workflow_phase}`],
+    }),
+    '',
+    renderDeliveryPlanWorkPacket(state.plan.workflow_phase, state),
+    '',
+    '# CURRENT DRAFT',
+    '',
     `交付计划草稿 v${draft.draft_version} · 变更 ${draft.change_seq}`,
     '',
     `拆分依据：${state.plan.rationale || '未填写'}`,
@@ -2172,16 +2363,58 @@ function renderDeliveryPlanStatus(
       );
     }
   }
-  if (errors.length) {
-    lines.push('', '当前校验提示：', ...errors.map((item, index) => `${index + 1}. ${item}`));
-  } else {
-    lines.push('', '交付计划草稿结构完整，可以校验并提交。');
-  }
   return lines.join('\n');
+}
+
+function transitionDeliveryPlanPhase(input: {
+  db: Awaited<ReturnType<typeof databaseConnection>>;
+  draft: DraftRow;
+  execution: ExecutionRow;
+  state: ReturnType<typeof deliveryPlanState>;
+  from: DeliveryPlanPhase;
+  to: DeliveryPlanPhase;
+  reason: string;
+}) {
+  const { db, draft, execution, state, from, to, reason } = input;
+  if (state.plan.workflow_phase !== from) {
+    throw new Error(`当前阶段是 ${state.plan.workflow_phase}，不能提交 ${from}`);
+  }
+  const errors = deliveryPlanPhaseValidationErrors(state, from);
+  if (errors.length) {
+    throw new Error(`${from} 阶段不能完成：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+  }
+  db.transaction(() => {
+    db.prepare('UPDATE delivery_plan_drafts SET workflow_phase = ?, validated_change_seq = NULL WHERE draft_id = ?')
+      .run(to, draft.draft_id);
+    db.prepare(`
+      INSERT INTO delivery_plan_phase_transitions(
+        draft_id, from_phase, to_phase, reason, execution_id
+      ) VALUES(?, ?, ?, ?, ?)
+    `).run(draft.draft_id, from, to, reason, execution.execution_id);
+    touchDraft(db, draft.draft_id);
+  })();
+  const nextState = deliveryPlanState(db, draft);
+  return [
+    renderDeliveryPlanCommandResult({
+      command: DELIVERY_PLAN_WORKFLOW[from].submit,
+      outcome: 'phase_completed',
+      details: [`From: ${from}`, `To: ${to}`],
+    }),
+    '',
+    renderDeliveryPlanWorkPacket(to, nextState),
+  ].join('\n');
 }
 
 function renderDeliveryPlanArtifact(state: ReturnType<typeof deliveryPlanState>) {
   const activeUnits = state.units.filter((unit) => unit.lifecycle_status === 'active');
+  const unitTitle = (key: string) =>
+    state.units.find((candidate) => candidate.unit_key === key)?.title || '未命名交付单元';
+  const sourceKindLabel: Record<DeliveryPlanSourceItem['source_kind'], string> = {
+    change: '业务变化',
+    preserve: '保持项',
+    technical: '分析义务',
+    acceptance: '验收语义',
+  };
   const lines = [
     '# 交付计划',
     '',
@@ -2208,15 +2441,14 @@ function renderDeliveryPlanArtifact(state: ReturnType<typeof deliveryPlanState>)
     lines.push(
       `### ${index + 1}. ${unit.title}`,
       '',
-      `- 稳定标识：\`${unit.unit_key}\``,
       `- 参与者：${unit.actor}`,
       `- 触发条件：${unit.trigger_condition}`,
       `- 用户可观察结果：${unit.observable_outcome}`,
       `- 验收标准：${unit.acceptance}`,
-      `- 前置单元：${dependencies.length ? dependencies.map((key) => `\`${key}\``).join('、') : '无'}`,
+      `- 前置单元：${dependencies.length ? dependencies.map(unitTitle).join('、') : '无'}`,
       '- 承接的规划输入：',
       ...linkedSources.map((source) =>
-        `  - \`${source.source_key}\` · ${source.source_kind}：${source.content}`),
+        `  - ${sourceKindLabel[source.source_kind]}：${source.content}`),
       '',
     );
   }
@@ -2224,9 +2456,10 @@ function renderDeliveryPlanArtifact(state: ReturnType<typeof deliveryPlanState>)
   if (historicalUnits.length) {
     lines.push('', '## 已修正的候选单元', '');
     for (const unit of historicalUnits) {
+      const lifecycle = unit.lifecycle_status === 'dismissed' ? '已排除' : '已取代';
       lines.push(
-        `- \`${unit.unit_key}\`：${unit.lifecycle_status}；${unit.lifecycle_reason || '未记录原因'}`
-        + `${unit.superseded_by ? `；由 \`${unit.superseded_by}\` 取代` : ''}`,
+        `- ${unit.title}：${lifecycle}；${unit.lifecycle_reason || '未记录原因'}`
+        + `${unit.superseded_by ? `；由「${unitTitle(unit.superseded_by)}」取代` : ''}`,
       );
     }
   }
@@ -2276,6 +2509,12 @@ function submitDeliveryPlan(
 ) {
   assertViewed(draft, execution.execution_id, 'delivery-plan');
   const state = deliveryPlanState(db, draft);
+  if (state.plan.workflow_phase !== 'finalize') {
+    throw new Error(`交付计划尚未走完阶段调用链；当前阶段是 ${state.plan.workflow_phase}`);
+  }
+  if (state.plan.validated_change_seq !== draft.change_seq) {
+    throw new Error('FINALIZE 尚未通过当前草稿版本的 validate；请先执行 delivery-plan validate');
+  }
   const errors = deliveryPlanValidationErrors(state);
   if (errors.length) {
     throw new Error(`交付计划不能完成：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
@@ -2294,7 +2533,14 @@ function submitDeliveryPlan(
       WHERE execution_id = ? AND status = 'running'
     `).run(JSON.stringify(result), execution.execution_id);
   })();
-  return '交付计划已提交成功。普通最终回复不再用于推进流程，可以结束本轮。';
+  return [
+    renderDeliveryPlanCommandResult({ command: 'delivery-plan complete', outcome: 'completed' }),
+    '',
+    '# NEXT',
+    '',
+    '- Owner: Application',
+    '- Agent Action: end_execution',
+  ].join('\n');
 }
 
 const requirementContextCommandIndex = [
@@ -2498,6 +2744,10 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
 }
 
 const deliveryPlanCommandIndex = [
+  ...DELIVERY_PLAN_PHASE_ORDER
+    .filter((phase) => phase !== 'finalize')
+    .map((phase) => `  ${DELIVERY_PLAN_WORKFLOW[phase].submit}`),
+  '  delivery-plan coverage reopen-units --reason <单元边界需要修正的原因>',
   '  delivery-plan rationale set --text <拆分依据>',
   '  delivery-plan coverage set --text <整体覆盖说明>',
   '  delivery-plan ordering set --text <排序与依赖说明>',
@@ -2569,13 +2819,17 @@ function deliveryPlanHelp(terminalActions: string[], topic?: string | null) {
     ];
   }
   if (topic === 'finish') {
+    const normalPath = deliveryPlanNormalCommandPath();
     return [
-      '校验不会推进流程；可以反复执行并根据覆盖、顺序或引用错误继续修改。',
+      '交付计划采用阶段调用链。每个阶段完成命令都会校验当前产物、保存转换并返回下一工作包；阶段命令不会结束 execution。',
       '',
+      '阶段路径：',
+      `  ${DELIVERY_PLAN_PHASE_SEQUENCE}`,
+      `  status → ${normalPath.map((command) => command.replace(/^delivery-plan /, '')).join(' → ')}`,
+      '  COVERAGE & ORDER 发现单元边界不成立时，使用 coverage reopen-units 返回 DELIVERY UNITS。',
+      '',
+      '最终校验与提交：',
       '  delivery-plan validate',
-      '',
-      '正常路径：',
-      '  status → rationale/coverage → unit upsert → source add → 必要的 ordering/dependency/move → validate → complete',
       `  ${terminalActions.find((action) => action.endsWith(' complete')) || 'delivery-plan complete'}`,
       '',
       '完成要求：',
@@ -2583,7 +2837,8 @@ function deliveryPlanHelp(terminalActions: string[], topic?: string | null) {
       '  每个单元必须形成独立业务闭环、关联至少一个来源，并至少承接 change 或 acceptance。',
       '  多单元计划必须说明推荐顺序；依赖必须无环并与顺序一致。',
       '  排序说明和依赖在单单元计划中可省略；交付规划 Agent 不向用户提问。',
-      '  validate 与 complete 使用同一套结构校验；validate 只反馈问题且不终止，complete 是唯一会提交计划并结束 execution 的命令。',
+      '  validate 绑定当前草稿变更版本；验证后任何编辑都会使验证失效，必须重新 validate。',
+      '  complete 只在 FINALIZE 验证通过后可执行，是唯一会提交计划并结束 execution 的命令。',
       '',
       '普通最终文本、Markdown 或手写 JSON 都不会结束 execution。',
     ];
@@ -2661,7 +2916,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         '长文本参数：',
         '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
-        `  返回完整索引：${command} help`,
+        `  其他主题：${command} help <context|unit|source|dependency|revision|finish>`,
       ].join('\n');
     }
     if (profile.draftType === 'analysis') {
@@ -2825,9 +3080,70 @@ function runDeliveryPlanCommand(input: {
     && draft.terminal_execution_id === execution.execution_id
     && draft.terminal_action === 'complete'
   ) {
-    return '该终止命令已经提交成功，无需重复提交，可以结束本轮。';
+    return [
+      renderDeliveryPlanCommandResult({ command, outcome: 'already_submitted' }),
+      '',
+      '# NEXT',
+      '',
+      '- Owner: Application',
+      '- Agent Action: end_execution',
+    ].join('\n');
   }
   assertViewed(draft, execution.execution_id, 'delivery-plan');
+  const accepted = (changed: string) =>
+    renderDeliveryPlanContinue(command, changed, deliveryPlanState(db, draft));
+
+  const phaseCompletion = new Map<string, DeliveryPlanPhase>(
+    DELIVERY_PLAN_PHASE_ORDER
+      .filter((phase) => phase !== 'finalize')
+      .map((phase) => [DELIVERY_PLAN_WORKFLOW[phase].submit, phase]),
+  );
+  const completedPhase = phaseCompletion.get(command);
+  if (completedPhase) {
+    const current = deliveryPlanState(db, draft);
+    const phaseIndex = DELIVERY_PLAN_PHASE_ORDER.indexOf(completedPhase);
+    const next = DELIVERY_PLAN_PHASE_ORDER[phaseIndex + 1];
+    if (!next) throw new Error(`${completedPhase} 没有可用的下一阶段`);
+    return transitionDeliveryPlanPhase({
+      db,
+      draft,
+      execution,
+      state: current,
+      from: completedPhase,
+      to: next,
+      reason: `${completedPhase} 阶段产物校验通过`,
+    });
+  }
+
+  if (command === 'delivery-plan coverage reopen-units') {
+    const current = deliveryPlanState(db, draft);
+    if (current.plan.workflow_phase !== 'coverage_order') {
+      throw new Error(`只有 coverage_order 阶段可以重新打开交付单元；当前阶段是 ${current.plan.workflow_phase}`);
+    }
+    const reason = bounded(required(flags, 'reason'), '重新打开交付单元的理由');
+    db.transaction(() => {
+      db.prepare(`
+        UPDATE delivery_plan_drafts
+        SET workflow_phase = 'delivery_units', validated_change_seq = NULL
+        WHERE draft_id = ?
+      `).run(draft.draft_id);
+      db.prepare(`
+        INSERT INTO delivery_plan_phase_transitions(
+          draft_id, from_phase, to_phase, reason, execution_id
+        ) VALUES(?, 'coverage_order', 'delivery_units', ?, ?)
+      `).run(draft.draft_id, reason, execution.execution_id);
+      touchDraft(db, draft.draft_id);
+    })();
+    return [
+      renderDeliveryPlanCommandResult({
+        command,
+        outcome: 'phase_completed',
+        details: ['From: coverage_order', 'To: delivery_units', `Reason: ${reason}`],
+      }),
+      '',
+      renderDeliveryPlanWorkPacket('delivery_units', deliveryPlanState(db, draft)),
+    ].join('\n');
+  }
 
   if (
     command === 'delivery-plan rationale set'
@@ -2844,7 +3160,7 @@ function runDeliveryPlanCommand(input: {
     db.prepare(`UPDATE delivery_plan_drafts SET ${column} = ? WHERE draft_id = ?`)
       .run(bounded(required(flags, 'text'), label), draft.draft_id);
     touchDraft(db, draft.draft_id);
-    return `${label}已保存。`;
+    return accepted(label);
   }
   if (command === 'delivery-plan unit upsert') {
     const key = bounded(required(flags, 'key'), '交付单元 key', 120);
@@ -2884,7 +3200,7 @@ function runDeliveryPlanCommand(input: {
       action: 'upsert',
     });
     touchDraft(db, draft.draft_id);
-    return `交付单元 ${key} 已保存。`;
+    return accepted(`unit/${key} upserted`);
   }
   if (
     command === 'delivery-plan unit dismiss'
@@ -2906,7 +3222,7 @@ function runDeliveryPlanCommand(input: {
       action: superseded ? 'supersede' : 'dismiss',
     });
     touchDraft(db, draft.draft_id);
-    return `交付单元 ${key} 已标记为${superseded ? '已取代' : '已排除'}。`;
+    return accepted(`unit/${key} ${superseded ? 'superseded' : 'dismissed'}`);
   }
   if (
     command === 'delivery-plan unit source add'
@@ -2934,7 +3250,7 @@ function runDeliveryPlanCommand(input: {
       if (!removed.changes) throw new Error(`交付单元 ${key} 未关联规划输入 ${sourceKey}`);
     }
     touchDraft(db, draft.draft_id);
-    return `交付单元 ${key} 与规划输入 ${sourceKey} 的关联已${command.endsWith('add') ? '保存' : '移除'}。`;
+    return accepted(`unit/${key} source/${sourceKey} ${command.endsWith('add') ? 'added' : 'removed'}`);
   }
   if (
     command === 'delivery-plan unit dependency add'
@@ -2959,7 +3275,7 @@ function runDeliveryPlanCommand(input: {
       if (!removed.changes) throw new Error(`交付单元 ${key} 不依赖 ${dependsOn}`);
     }
     touchDraft(db, draft.draft_id);
-    return `交付单元 ${key} 对 ${dependsOn} 的前置依赖已${command.endsWith('add') ? '保存' : '移除'}。`;
+    return accepted(`unit/${key} dependency/${dependsOn} ${command.endsWith('add') ? 'added' : 'removed'}`);
   }
   if (command === 'delivery-plan unit move') {
     const key = bounded(required(flags, 'key'), '交付单元 key', 120);
@@ -2980,12 +3296,33 @@ function runDeliveryPlanCommand(input: {
       }
       touchDraft(db, draft.draft_id);
     })();
-    return `交付单元 ${key} 已移动到第 ${Math.min(requested, reordered.length)} 位。`;
+    return accepted(`unit/${key} moved_to ${Math.min(requested, reordered.length)}`);
   }
   if (command === 'delivery-plan validate') {
-    const errors = deliveryPlanValidationErrors(deliveryPlanState(db, draft));
+    const current = deliveryPlanState(db, draft);
+    if (current.plan.workflow_phase !== 'finalize') {
+      throw new Error(`当前 ${current.plan.workflow_phase} 阶段不使用 validate；请先完成当前工作包`);
+    }
+    const errors = deliveryPlanValidationErrors(current);
     if (errors.length) throw new Error(`交付计划校验失败：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
-    return '交付计划草稿结构校验通过。';
+    db.prepare(`
+      UPDATE delivery_plan_drafts
+      SET validated_change_seq = ?
+      WHERE draft_id = ?
+    `).run(draft.change_seq, draft.draft_id);
+    return [
+      renderDeliveryPlanCommandResult({
+        command,
+        outcome: 'validation_passed',
+        details: ['Phase: finalize', 'Readiness: validated'],
+      }),
+      '',
+      '# NEXT',
+      '',
+      '- Phase: finalize',
+      '- Readiness: validated',
+      '- Action: `delivery-plan complete`',
+    ].join('\n');
   }
   if (command === 'delivery-plan complete') {
     return submitDeliveryPlan(db, draft, execution);
@@ -3202,11 +3539,13 @@ export async function runAgentCommand(input: {
 
   if (positionals[0] === 'help') {
     if (positionals.length > 2) throw new Error('help 最多接受一个主题');
-    if (profile.draftType === 'requirement_context' && !positionals[1]) {
+    if ((profile.draftType === 'requirement_context' || profile.draftType === 'delivery_plan') && !positionals[1]) {
+      const topics = profile.draftType === 'requirement_context'
+        ? 'context|assertion|impact|question|scope|finish'
+        : 'context|unit|source|dependency|revision|finish';
       throw new Error(
-        'requirement-context help 必须指定一个主题：'
-        + 'help <context|assertion|impact|question|scope|finish>。'
-        + '当前阶段可执行命令请查看 requirement-context status 返回的 AVAILABLE COMMANDS。',
+        `${profile.namespace} help 必须指定一个主题：help <${topics}>。`
+        + `当前阶段可执行命令请查看 ${profile.namespace} status 返回的 AVAILABLE COMMANDS。`,
       );
     }
     return helpText(execution, profile, positionals[1] || null);

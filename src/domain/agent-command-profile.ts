@@ -226,8 +226,8 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
     '```bash',
     `${command} help <${helpTopics}>`,
     '```',
-    ...(profile.draftType === 'requirement_context'
-      ? ['', '`requirement-context` 的 help 必须指定一个主题；当前阶段可执行命令以 `status` 返回的工作包为准。']
+    ...(['requirement_context', 'delivery_plan'].includes(profile.draftType)
+      ? ['', `\`${profile.namespace}\` 的 help 必须指定一个主题；当前阶段可执行命令以 \`status\` 返回的工作包为准。`]
       : []),
     '',
     '**编辑与提交规则：**',

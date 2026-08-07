@@ -69,7 +69,8 @@ try {
   process.stdout.write(`${output}\n`);
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
-  if (rawArgs[0] === 'requirement-context') {
+  if (rawArgs[0] === 'requirement-context' || rawArgs[0] === 'delivery-plan') {
+    const namespace = rawArgs[0];
     const firstFlag = rawArgs.findIndex((argument) => argument.startsWith('--'));
     const command = rawArgs.slice(0, firstFlag < 0 ? rawArgs.length : firstFlag).join(' ');
     process.stderr.write([
@@ -81,7 +82,7 @@ try {
       '# NEXT',
       '',
       '- Action: correct_and_retry',
-      '- Refresh If Needed: `requirement-context status`',
+      `- Refresh If Needed: \`${namespace} status\``,
       '',
       '# GUIDANCE',
       '',

@@ -1012,12 +1012,10 @@ test('story splitter help explains business units, source coverage, dependencies
   const { taskId, delegation } = await taskReadyForSplit('交付规划命令帮助');
   const active = await beginDelegation(delegation, `${taskId}-delivery-plan-help`);
 
-  const help = await command(active.executionId, active.token!, ['help']);
-  assert.match(help, /可独立验收的业务闭环/);
-  assert.match(help, /help unit/);
-  assert.match(help, /help source/);
-  assert.match(help, /同一语义修正：原 key upsert/);
-  assert.doesNotMatch(help, /requirement-context intent set/);
+  await assert.rejects(
+    command(active.executionId, active.token!, ['help']),
+    /help 必须指定一个主题.*context\|unit\|source\|dependency\|revision\|finish/s,
+  );
 
   const unitHelp = await command(active.executionId, active.token!, ['help', 'unit']);
   assert.match(unitHelp, /不能按数据库、API、页面或测试等技术层拆分/);
@@ -1043,7 +1041,8 @@ test('story splitter help explains business units, source coverage, dependencies
   const finishHelp = await command(active.executionId, active.token!, ['help', 'finish']);
   assert.match(finishHelp, /1 至 50 个有效交付单元/);
   assert.match(finishHelp, /交付规划 Agent 不向用户提问/);
-  assert.match(finishHelp, /validate 与 complete 使用同一套结构校验/);
+  assert.match(finishHelp, /PLANNING BASIS.*DELIVERY UNITS.*COVERAGE & ORDER.*FINALIZE/s);
+  assert.match(finishHelp, /验证后任何编辑都会使验证失效/);
   assert.match(finishHelp, /delivery-plan complete/);
 
   await assert.rejects(
@@ -1054,6 +1053,7 @@ test('story splitter help explains business units, source coverage, dependencies
 
 test('story splitter progressively restores, validates and submits an ordered delivery plan', async () => {
   const { getTask } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
   const { applyAgentResult } = await import('./agent-results');
   const {
     completeExecution,
@@ -1071,13 +1071,18 @@ test('story splitter progressively restores, validates and submits an ordered de
   );
   const initial = await command(first.executionId, first.token!, ['delivery-plan', 'status']);
   assert.match(initial, /交付计划草稿 v1/);
-  assert.match(initial, /至少需要一个可独立交付/);
-  await command(first.executionId, first.token!, [
+  assert.match(initial, /PLANNING BASIS · planning_basis/);
+  assert.match(initial, /Status: not_ready/);
+  assert.match(initial, /缺少拆分依据/);
+  assert.doesNotMatch(initial, /## SUBMIT/);
+  const rationaleSet = await command(first.executionId, first.token!, [
     'delivery-plan', 'rationale', 'set', '--text', '按用户可独立验收的业务闭环拆分',
   ]);
-  await command(first.executionId, first.token!, [
-    'delivery-plan', 'coverage', 'set', '--text', '覆盖导出入口、筛选继承与 CSV 下载结果',
-  ]);
+  assert.match(rationaleSet, /Readiness: structurally_ready/);
+  assert.match(rationaleSet, /Submit: `delivery-plan basis complete`/);
+  const basisComplete = await command(first.executionId, first.token!, ['delivery-plan', 'basis', 'complete']);
+  assert.match(basisComplete, /Outcome: phase_completed.*From: planning_basis.*To: delivery_units/s);
+  assert.match(basisComplete, /DELIVERY UNITS · delivery_units/);
   await command(first.executionId, first.token!, [
     'delivery-plan', 'unit', 'upsert',
     '--key', 'download-filtered-csv',
@@ -1096,6 +1101,7 @@ test('story splitter progressively restores, validates and submits an ordered de
   );
   const restored = await command(resumed.executionId, resumed.token!, ['delivery-plan', 'status']);
   assert.match(restored, /交付计划草稿 v1/);
+  assert.match(restored, /DELIVERY UNITS · delivery_units/);
   assert.match(restored, /download-filtered-csv · active：管理员下载当前筛选结果/);
   await command(resumed.executionId, resumed.token!, [
     'delivery-plan', 'unit', 'upsert',
@@ -1106,6 +1112,12 @@ test('story splitter progressively restores, validates and submits an ordered de
     '--outcome', '系统显示并采用当前列表可导出的字段',
     '--acceptance', '不在当前结果中的隐藏字段不会进入 CSV',
   ]);
+  const unitsComplete = await command(resumed.executionId, resumed.token!, ['delivery-plan', 'units', 'complete']);
+  assert.match(unitsComplete, /Outcome: phase_completed.*From: delivery_units.*To: coverage_order/s);
+  assert.match(unitsComplete, /COVERAGE & ORDER · coverage_order/);
+  await command(resumed.executionId, resumed.token!, [
+    'delivery-plan', 'coverage', 'set', '--text', '覆盖导出入口、筛选继承与 CSV 下载结果',
+  ]);
   await command(resumed.executionId, resumed.token!, [
     'delivery-plan', 'ordering', 'set', '--text', '先确认导出字段，再执行文件下载',
   ]);
@@ -1113,7 +1125,7 @@ test('story splitter progressively restores, validates and submits an ordered de
     'delivery-plan', 'unit', 'move', '--key', 'configure-export-fields', '--position', '1',
   ]);
   await assert.rejects(
-    command(resumed.executionId, resumed.token!, ['delivery-plan', 'validate']),
+    command(resumed.executionId, resumed.token!, ['delivery-plan', 'coverage', 'complete']),
     /未关联任何规划输入|尚未由任何有效交付单元承接/,
   );
   for (const unitKey of ['configure-export-fields', 'download-filtered-csv']) {
@@ -1135,13 +1147,13 @@ test('story splitter progressively restores, validates and submits an ordered de
     '--key', 'configure-export-fields', '--on', 'download-filtered-csv',
   ]);
   await assert.rejects(
-    command(resumed.executionId, resumed.token!, ['delivery-plan', 'validate']),
+    command(resumed.executionId, resumed.token!, ['delivery-plan', 'coverage', 'complete']),
     /前置.*必须排在它之前|依赖存在循环/,
   );
-  await command(resumed.executionId, resumed.token!, [
-    'delivery-plan', 'unit', 'dependency', 'remove',
-    '--key', 'configure-export-fields', '--on', 'download-filtered-csv',
+  const reopened = await command(resumed.executionId, resumed.token!, [
+    'delivery-plan', 'coverage', 'reopen-units', '--reason', '来源映射暴露出一个技术步骤型候选',
   ]);
+  assert.match(reopened, /Outcome: phase_completed.*From: coverage_order.*To: delivery_units/s);
   await command(resumed.executionId, resumed.token!, [
     'delivery-plan', 'unit', 'upsert',
     '--key', 'technical-only-candidate',
@@ -1155,23 +1167,61 @@ test('story splitter progressively restores, validates and submits an ordered de
     'delivery-plan', 'unit', 'dismiss',
     '--key', 'technical-only-candidate', '--reason', '这是技术步骤，不是独立业务闭环',
   ]);
+  await command(resumed.executionId, resumed.token!, ['delivery-plan', 'units', 'complete']);
+  await command(resumed.executionId, resumed.token!, [
+    'delivery-plan', 'unit', 'dependency', 'remove',
+    '--key', 'configure-export-fields', '--on', 'download-filtered-csv',
+  ]);
   await assert.rejects(
     command(resumed.executionId, resumed.token!, [
       'delivery-plan', 'unit', 'remove', '--key', 'configure-export-fields',
     ]),
     /未知命令/,
   );
-  assert.equal(
+  const coverageComplete = await command(resumed.executionId, resumed.token!, ['delivery-plan', 'coverage', 'complete']);
+  assert.match(coverageComplete, /Outcome: phase_completed.*From: coverage_order.*To: finalize/s);
+  assert.match(coverageComplete, /FINALIZE · finalize.*## VALIDATE.*delivery-plan validate/s);
+  await assert.rejects(
+    command(resumed.executionId, resumed.token!, ['delivery-plan', 'complete']),
+    /尚未通过当前草稿版本的 validate/,
+  );
+  assert.match(
     await command(resumed.executionId, resumed.token!, ['delivery-plan', 'validate']),
-    '交付计划草稿结构校验通过。',
+    /Outcome: validation_passed.*Readiness: validated.*Action: `delivery-plan complete`/s,
+  );
+  await command(resumed.executionId, resumed.token!, [
+    'delivery-plan', 'coverage', 'set', '--text', '覆盖导出入口、筛选继承与 CSV 下载结果',
+  ]);
+  await assert.rejects(
+    command(resumed.executionId, resumed.token!, ['delivery-plan', 'complete']),
+    /尚未通过当前草稿版本的 validate/,
+  );
+  await command(resumed.executionId, resumed.token!, ['delivery-plan', 'validate']);
+  assert.match(
+    await command(resumed.executionId, resumed.token!, ['delivery-plan', 'complete']),
+    /Outcome: completed.*Agent Action: end_execution/s,
   );
   assert.match(
     await command(resumed.executionId, resumed.token!, ['delivery-plan', 'complete']),
-    /提交成功/,
+    /Outcome: already_submitted.*Agent Action: end_execution/s,
   );
-  assert.match(
-    await command(resumed.executionId, resumed.token!, ['delivery-plan', 'complete']),
-    /已经提交成功/,
+
+  const db = await databaseConnection();
+  assert.deepEqual(
+    (db.prepare(`
+      SELECT from_phase, to_phase
+      FROM delivery_plan_phase_transitions transition_item
+      JOIN agent_work_drafts draft ON draft.draft_id = transition_item.draft_id
+      WHERE draft.task_id = ? AND draft.work_key LIKE 'delivery-plan:%'
+      ORDER BY transition_id
+    `).all(taskId) as { from_phase: string; to_phase: string }[]),
+    [
+      { from_phase: 'planning_basis', to_phase: 'delivery_units' },
+      { from_phase: 'delivery_units', to_phase: 'coverage_order' },
+      { from_phase: 'coverage_order', to_phase: 'delivery_units' },
+      { from_phase: 'delivery_units', to_phase: 'coverage_order' },
+      { from_phase: 'coverage_order', to_phase: 'finalize' },
+    ],
   );
 
   const result = await readAgentCommandSubmission(resumed.executionId);
@@ -1179,9 +1229,11 @@ test('story splitter progressively restores, validates and submits an ordered de
     result?.deliveryUnits?.map((unit) => unit.title),
     ['管理员确认导出字段', '管理员下载当前筛选结果'],
   );
-  assert.match(result?.artifact?.content || '', /稳定标识：`configure-export-fields`/);
+  assert.doesNotMatch(result?.artifact?.content || '', /稳定标识|configure-export-fields|impact:filtered-export|acceptance:download-matches-filter/);
   assert.match(result?.artifact?.content || '', /先确认导出字段，再执行文件下载/);
-  assert.match(result?.artifact?.content || '', /technical-only-candidate.*dismissed/);
+  assert.match(result?.artifact?.content || '', /准备导出存储结构：已排除；这是技术步骤，不是独立业务闭环/);
+  assert.match(result?.artifact?.content || '', /业务变化：管理员可以下载当前筛选命中的结果/);
+  assert.match(result?.artifact?.content || '', /验收语义：下载内容与当前筛选结果一致/);
   assert.deepEqual(result?.deliveryUnits?.[1]?.dependsOn, ['configure-export-fields']);
   await applyAgentResult(`RUN-command-split-${taskId}`, delegation, result!, {
     executionId: resumed.executionId,
@@ -1232,7 +1284,7 @@ test('feedback split uses the same progressive protocol with an isolated draft',
   );
   const active = await beginDelegation(feedbackDelegation, 'feedback-split');
   assert.match(
-    await command(active.executionId, active.token!, ['help']),
+    await command(active.executionId, active.token!, ['help', 'unit']),
     /delivery-plan unit upsert/,
   );
   const status = await command(active.executionId, active.token!, ['delivery-plan', 'status']);
@@ -1241,9 +1293,7 @@ test('feedback split uses the same progressive protocol with an isolated draft',
   await command(active.executionId, active.token!, [
     'delivery-plan', 'rationale', 'set', '--text', '评论新增了一个可独立验收的业务范围',
   ]);
-  await command(active.executionId, active.token!, [
-    'delivery-plan', 'coverage', 'set', '--text', '只覆盖评论要求的批量删除能力',
-  ]);
+  await command(active.executionId, active.token!, ['delivery-plan', 'basis', 'complete']);
   await command(active.executionId, active.token!, [
     'delivery-plan', 'unit', 'upsert',
     '--key', 'batch-delete',
@@ -1253,6 +1303,10 @@ test('feedback split uses the same progressive protocol with an isolated draft',
     '--outcome', '选中记录被删除且列表刷新',
     '--acceptance', '仅选中记录被删除，失败项有明确提示',
   ]);
+  await command(active.executionId, active.token!, ['delivery-plan', 'units', 'complete']);
+  await command(active.executionId, active.token!, [
+    'delivery-plan', 'coverage', 'set', '--text', '只覆盖评论要求的批量删除能力',
+  ]);
   await command(active.executionId, active.token!, [
     'delivery-plan', 'unit', 'source', 'add',
     '--key', 'batch-delete', '--source', 'change:feedback:batch-delete-scope',
@@ -1261,6 +1315,8 @@ test('feedback split uses the same progressive protocol with an isolated draft',
     'delivery-plan', 'unit', 'source', 'add',
     '--key', 'batch-delete', '--source', 'acceptance:feedback:batch-delete-scope:1',
   ]);
+  await command(active.executionId, active.token!, ['delivery-plan', 'coverage', 'complete']);
+  await command(active.executionId, active.token!, ['delivery-plan', 'validate']);
   await command(active.executionId, active.token!, ['delivery-plan', 'complete']);
   const result = await readAgentCommandSubmission(active.executionId);
   assert.equal(result?.deliveryUnits?.[0]?.key, 'batch-delete');
