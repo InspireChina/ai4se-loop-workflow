@@ -640,6 +640,91 @@ export async function getExecutionAgentContextSnapshot(executionId: string) {
   return stored.contextSnapshot;
 }
 
+function appendJsonSection(lines: string[], title: string, value: unknown) {
+  lines.push('', `## ${title}`, '', '```json', JSON.stringify(value, null, 2), '```');
+}
+
+function appendRequirementDescription(lines: string[], description: string | null) {
+  if (!description) return;
+  lines.push('- Description:');
+  for (const row of description.split(/\r?\n/)) lines.push(`  > ${row || ' '}`);
+}
+
+function nonEmptyObligations(snapshot: AgentContextSnapshot) {
+  const obligations = Object.fromEntries(Object.entries(snapshot.activeObligations)
+    .filter(([key, value]) => {
+      if (!Array.isArray(value) || value.length === 0) return false;
+      return !(key === 'questions'
+        && snapshot.work.agent === 'backlog-agent'
+        && snapshot.authoritativeFacts.requirementContextResume);
+    }));
+  return Object.keys(obligations).length ? obligations : null;
+}
+
+/**
+ * Render only the hot, role-relevant projection that belongs in the launch Prompt.
+ * The complete immutable snapshot remains available through agent-context commands.
+ */
+export function renderAgentWorkingContextPack(snapshot: AgentContextSnapshot) {
+  const { work, authoritativeFacts } = snapshot;
+  const lines = [
+    '下面是从完整冻结快照中按当前角色与阶段投影的即时上下文。未内联的资料仍保留在 Context Snapshot 中，可通过 agent-context 命令按需读取。',
+    '',
+    '## Current Work',
+    '',
+    `- Task: \`${work.taskId}\``,
+    `- Objective: ${work.objective}`,
+  ];
+  if (work.deliveryUnit != null) lines.push(`- Delivery Unit: ${work.deliveryUnit}`);
+  if (work.repositoryBaseCommit) lines.push(`- Repository Base Commit: \`${work.repositoryBaseCommit}\``);
+
+  const requirement = authoritativeFacts.requirement;
+  lines.push('', '## Requirement Input', '', `- Title: ${requirement.title}`);
+  appendRequirementDescription(lines, requirement.description);
+  lines.push(`- Reported Type: ${requirement.itemType}`);
+  if (requirement.priority) lines.push(`- Priority: ${requirement.priority}`);
+  if (requirement.link) lines.push(`- Supporting Link: ${requirement.link}`);
+
+  if (work.agent === 'backlog-agent') {
+    if (authoritativeFacts.requirementContextResume) {
+      appendJsonSection(lines, 'Resumed Requirement Context', authoritativeFacts.requirementContextResume);
+    } else {
+      lines.push(
+        '',
+        '## Requirement-Context State',
+        '',
+        '当前没有需要直接内联的恢复决策包。已有草稿、当前阶段和下一工作包以 requirement-context status 的返回为准。',
+      );
+    }
+  } else {
+    const relevantFacts: Record<string, unknown> = {};
+    if (['analyst-agent', 'dev-agent', 'test-agent', 'feedback-agent'].includes(work.agent)
+      && authoritativeFacts.currentDeliveryUnit) {
+      relevantFacts.currentDeliveryUnit = authoritativeFacts.currentDeliveryUnit;
+    }
+    if (['analyst-agent', 'dev-agent', 'test-agent', 'feedback-agent'].includes(work.agent)
+      && authoritativeFacts.currentDeliverySpec) {
+      relevantFacts.currentDeliverySpec = authoritativeFacts.currentDeliverySpec;
+    }
+    if (['story-splitter-agent', 'review-agent', 'feedback-agent'].includes(work.agent)
+      && authoritativeFacts.deliveryUnits.length) {
+      relevantFacts.deliveryUnits = authoritativeFacts.deliveryUnits;
+    }
+    if (['story-splitter-agent', 'analyst-agent', 'repro-agent', 'review-agent', 'feedback-agent'].includes(work.agent)
+      && authoritativeFacts.userDecisions.length) {
+      relevantFacts.confirmedDecisions = authoritativeFacts.userDecisions;
+    }
+    if (Object.keys(relevantFacts).length) appendJsonSection(lines, 'Relevant Authoritative Facts', relevantFacts);
+  }
+
+  const obligations = nonEmptyObligations(snapshot);
+  if (obligations) appendJsonSection(lines, 'Active Obligations', obligations);
+  if (snapshot.recentExecutionEvidence.length) {
+    appendJsonSection(lines, 'Recent Execution Evidence', snapshot.recentExecutionEvidence);
+  }
+  return lines.join('\n');
+}
+
 export function renderAgentContextOverview(snapshot: AgentContextSnapshot) {
   return [
     '# Current Work',

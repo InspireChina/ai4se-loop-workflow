@@ -1,3 +1,5 @@
+import { REQUIREMENT_CONTEXT_PHASE_SEQUENCE } from './requirement-context-workflow';
+
 export const FLOW_AGENT_IDS = [
   'backlog-agent',
   'story-splitter-agent',
@@ -23,7 +25,7 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '',
       '# 工作原则',
       '1. 每次启动的第一条草稿命令必须是 requirement-context status。它会恢复当前阶段、稳定 key、已有用户答案和当前工作包。严格完成工作包中的目标，成功提交当前阶段后，继续执行命令返回的下一工作包；不要自行跳步，也不要在阶段完成后结束 execution。',
-      '2. 阶段顺序是 AS-IS → Decision Tree → TO-BE → Impact Scan → SCOPE → Acceptance → Finalize。阶段完成命令只推进内层工作流；只有 request-clarification 和 requirement-context complete 会结束当前 execution。校验失败是可修正反馈，应按缺口继续修改并重试。',
+      `2. 阶段顺序是 ${REQUIREMENT_CONTEXT_PHASE_SEQUENCE}。阶段完成命令只推进内层工作流；只有 request-clarification 和 requirement-context complete 会结束当前 execution。校验失败是可修正反馈，应按缺口继续修改并重试。`,
       '3. AS-IS 是证据调查结果，不接受业务选择。主动选择适合项目的调查路径；知识可以来自产品文档、领域规则、运行环境、代码、测试、配置、历史记录或人员陈述。没有独立业务文档时，应深入代码和真实入口还原当前行为。',
       '4. 调查可以深入文件、函数、接口、字段和测试，但持久化内容必须提升为参与者、触发条件、业务规则、状态变化和可观察结果。代码是获取知识的手段，不是需求上下文的表达语言；实现位置、SQL、候选改动和技术方案不得成为业务产物主体。',
       '5. 区分 Actual、Existing Expected 与 TO-BE。代码、测试和运行结果通常只能证明当前实现或可观察 Actual，不能单独证明业务本来应该如此。Expected 只来自变更前已有权威规范；本次新增或改变后的结果属于 TO-BE。需求规格与代码呈现不同业务逻辑时，必须同时记录 Expected 与 Actual 及其真实来源。',

@@ -7,6 +7,12 @@ import {
   loopAgentCommandPrefix,
   type AgentCommandProfile,
 } from '../domain/agent-command-profile';
+import {
+  REQUIREMENT_CONTEXT_PHASE_ORDER,
+  REQUIREMENT_CONTEXT_WORKFLOW,
+  requirementContextNormalCommandPath,
+  type RequirementContextPhase,
+} from '../domain/requirement-context-workflow';
 import { databaseConnection, hash } from '../infrastructure/database';
 import {
   reproductionHelp,
@@ -70,9 +76,8 @@ type ContextDraft = {
   change_summary: string | null;
   classification: 'feature' | 'bug' | 'tech' | 'other' | null;
   workflow_phase: RequirementContextPhase;
+  validated_change_seq: number | null;
 };
-
-type RequirementContextPhase = 'as_is' | 'decision_tree' | 'to_be' | 'impact_scan' | 'scope' | 'acceptance' | 'finalize';
 
 type ContextAssertion = {
   assertion_key: string;
@@ -1219,16 +1224,6 @@ function questionStructureErrors(state: ReturnType<typeof draftState>) {
   return errors;
 }
 
-const requirementContextPhaseOrder: RequirementContextPhase[] = [
-  'as_is',
-  'decision_tree',
-  'to_be',
-  'impact_scan',
-  'scope',
-  'acceptance',
-  'finalize',
-];
-
 function phaseValidationErrors(
   state: ReturnType<typeof draftState>,
   phase: RequirementContextPhase,
@@ -1316,73 +1311,221 @@ function phaseValidationErrors(
   return validationErrors(state, 'complete');
 }
 
+type RequirementContextReadinessStatus =
+  | 'not_ready'
+  | 'ready_for_human'
+  | 'decisions_required'
+  | 'structurally_ready';
+
+type RequirementContextReadiness = {
+  status: RequirementContextReadinessStatus;
+  remaining: string[];
+  nextCommand: string | null;
+};
+
+function requirementContextReadiness(
+  state: ReturnType<typeof draftState>,
+  phase: RequirementContextPhase,
+): RequirementContextReadiness {
+  const definition = REQUIREMENT_CONTEXT_WORKFLOW[phase];
+  const pendingHuman = phase === 'decision_tree' && state.questions.some((question) =>
+    question.projection_status === 'active' && question.authority === 'human' && !question.answer);
+
+  if (pendingHuman) {
+    const remaining = validationErrors(state, 'request-clarification');
+    return remaining.length
+      ? { status: 'not_ready', remaining, nextCommand: null }
+      : {
+        status: 'ready_for_human',
+        remaining: [],
+        nextCommand: definition.pendingHumanSubmit || 'requirement-context request-clarification',
+      };
+  }
+
+  if (phase === 'impact_scan') {
+    const knownDecisionKeys = new Set(state.questions.map((question) => question.decision_key));
+    const projectedDecisionKeys = new Set(state.questions
+      .filter((question) => question.projection_status === 'active')
+      .map((question) => question.decision_key));
+    const needsDecision = state.impacts.filter((impact) =>
+      impact.lifecycle_status === 'active'
+      && impact.disposition === 'needs_decision'
+      && (!impact.decision_key
+        || projectedDecisionKeys.has(impact.decision_key)
+        || !knownDecisionKeys.has(impact.decision_key)));
+    if (needsDecision.length) {
+      const remaining = phaseValidationErrors(state, phase)
+        .filter((error) => error !== '影响扫描发现尚未关闭的业务分叉；应重新打开决策树');
+      for (const impact of needsDecision) {
+        if (!impact.decision_key) {
+          remaining.push(`待决影响 ${impact.impact_key} 缺少关联 decision key`);
+        } else if (!knownDecisionKeys.has(impact.decision_key)) {
+          remaining.push(`待决影响 ${impact.impact_key} 关联的问题 ${impact.decision_key} 不存在`);
+        }
+      }
+      return remaining.length
+        ? { status: 'not_ready', remaining: [...new Set(remaining)], nextCommand: null }
+        : {
+          status: 'decisions_required',
+          remaining: [],
+          nextCommand: 'requirement-context impact-scan reopen-decisions',
+        };
+    }
+  }
+
+  const remaining = phaseValidationErrors(state, phase);
+  if (remaining.length) return { status: 'not_ready', remaining, nextCommand: null };
+  return {
+    status: 'structurally_ready',
+    remaining: [],
+    nextCommand: phase === 'finalize' ? 'requirement-context validate' : definition.submit,
+  };
+}
+
+function renderRequirementContextReadiness(
+  phase: RequirementContextPhase,
+  state: ReturnType<typeof draftState>,
+) {
+  const definition = REQUIREMENT_CONTEXT_WORKFLOW[phase];
+  const readiness = requirementContextReadiness(state, phase);
+  const lines = ['## READINESS', '', `- Status: ${readiness.status}`];
+  if (readiness.status === 'not_ready') {
+    lines.push(
+      '',
+      '## REMAINING REQUIREMENTS',
+      '',
+      ...readiness.remaining.map((item, index) => `${index + 1}. ${item}`),
+      '',
+      '继续当前工作包；补齐以上缺口后再查看 `requirement-context status`。',
+    );
+    return lines;
+  }
+  if (readiness.status === 'decisions_required') {
+    lines.push(
+      '',
+      '## NEXT ACTION',
+      '',
+      'Impact Scan 已发现会形成不同业务结果的分叉，必须回到 Decision Tree 收敛。',
+      `\`${readiness.nextCommand} --reason <新发现的业务分叉>\``,
+    );
+    return lines;
+  }
+  lines.push(
+    '',
+    '## REVIEW BEFORE SUBMIT',
+    '',
+    ...definition.reviewBeforeSubmit.map((item) => `- ${item}`),
+    '',
+    phase === 'finalize' ? '## VALIDATE' : '## SUBMIT',
+    '',
+    `\`${readiness.nextCommand}\``,
+  );
+  return lines;
+}
+
 function renderRequirementContextWorkPacket(
   phase: RequirementContextPhase,
   state: ReturnType<typeof draftState>,
 ) {
-  const activeQuestions = state.questions.filter((question) => question.projection_status === 'active');
-  const answered = activeQuestions.filter((question) => question.answer).length;
-  const unanswered = activeQuestions.filter((question) =>
-    question.authority === 'human' && !question.answer).length;
-  const packets: Record<RequirementContextPhase, string[]> = {
-    as_is: [
-      'OBJECTIVE：建立足以讨论本次变化的 AS-IS 事实基线。',
-      'REQUIRED：Reported Intent、可靠 Actual、适用时的 Existing Expected，以及证据冲突和证明边界。',
-      'DO NOT：不要写 TO-BE、SCOPE 或用户决策问题；用户提出的做法此时仍是 reported 候选。',
-      'COMMANDS：intent set；assertion upsert/dismiss/supersede；help assertion；as-is complete。',
-      'SUBMIT：requirement-context as-is complete',
-    ],
-    decision_tree: [
-      'OBJECTIVE：依据 Reported Intent 与已接受的 AS-IS，覆盖所有会改变需求语义或交付规划的实质分叉。',
-      `CURRENT：活动决策 ${activeQuestions.length} 个，已关闭 ${answered} 个，待人工回答 ${unanswered} 个。`,
-      'REQUIRED：稳定 decision key、互斥选项及后果、推荐与理由；事实可关闭的节点不得询问用户。',
-      'BATCH：一次建立当前已知的全部根节点与条件子节点，以最少交互轮次充分覆盖，不按单问题拆轮次。',
-      'DO NOT：不要写最终 TO-BE 或 SCOPE；只问无法从证据确定且会形成不同业务结果的选择。',
-      'COMMANDS：question add/option-add/recommend/depends-on/decide/supersede/remove；assertion/impact 关联 decision key；help question。',
-      unanswered
-        ? 'SUBMIT：当前有待回答节点，执行 requirement-context request-clarification'
-        : 'SUBMIT：requirement-context decision-tree complete',
-    ],
-    to_be: [
-      'OBJECTIVE：把 Reported Intent、Active Decision Path 和必须保持的 Existing Expected 投影成 TO-BE。',
-      'REQUIRED：每条 Target 都能追溯到已关闭决定、权威输入或明确约束，并共同形成自洽业务结果。',
-      'DO NOT：TO-BE 不得创造未经记录的新选择；发现新业务分叉时重新打开决策树。',
-      'COMMANDS：assertion upsert --perspective target；assertion dismiss/supersede；help assertion。',
-      'SUBMIT：requirement-context to-be complete',
-    ],
-    impact_scan: [
-      'OBJECTIVE：对比 AS-IS 与 TO-BE，识别必须改变、必须保持和交付分析必须收敛的影响。',
-      'REQUIRED：Change Summary；每项影响明确为 change、preserve 或 technical。',
-      'DO NOT：识别影响不等于扩大范围；新业务结果或新业务分叉必须回到决策树。',
-      'COMMANDS：change set；impact upsert/dismiss/supersede；help impact；impact-scan reopen-decisions。',
-      'SUBMIT：requirement-context impact-scan complete',
-    ],
-    scope: [
-      'OBJECTIVE：根据冻结 TO-BE、选中分支和影响处置派生本轮业务边界。',
-      'REQUIRED：至少一个 In Scope；明确相关但未选择、独立扩展或推迟的 Out of Scope。',
-      'DO NOT：SCOPE 不得创造新的业务规则，也不得把 preserve 简化成无关事项。',
-      'COMMANDS：scope include/exclude/remove；constraint add/remove；help scope。',
-      'SUBMIT：requirement-context scope complete',
-    ],
-    acceptance: [
-      'OBJECTIVE：根据最终 TO-BE 与 SCOPE 形成需求级验收语义，并最后确定需求分类。',
-      'REQUIRED：可观察 Acceptance；feature、bug、tech 或 other 分类；Bug 必须有可靠 Existing Expected。',
-      'DO NOT：不要写测试步骤、技术验证方式或实现方案。',
-      'COMMANDS：acceptance upsert/dismiss/supersede；classification set；help assertion/scope。',
-      'SUBMIT：requirement-context acceptance complete',
-    ],
-    finalize: [
-      'OBJECTIVE：对完整业务变化上下文做最终一致性校验并提交。',
-      'CHECK：AS-IS 不由业务选择改写；DECISIONS 已关闭；TO-BE 不含隐含选择；SCOPE 不创造新语义。',
-      'COMMANDS：requirement-context validate；根据缺口修正；requirement-context complete。',
-      'SUBMIT：requirement-context complete',
-    ],
-  };
+  const definition = REQUIREMENT_CONTEXT_WORKFLOW[phase];
+  const current = phase === 'decision_tree'
+    ? (() => {
+      const active = state.questions.filter((question) => question.projection_status === 'active');
+      const answered = active.filter((question) => question.answer).length;
+      const pending = active.filter((question) => question.authority === 'human' && !question.answer).length;
+      return `活动决策 ${active.length} 个，已关闭 ${answered} 个，待人工回答 ${pending} 个。`;
+    })()
+    : null;
   return [
-    '# CURRENT WORK PACKET',
+    '# NEXT WORK PACKET',
     '',
-    `PHASE：${phase}`,
-    ...packets[phase],
+    '## PHASE',
+    '',
+    phase,
+    '',
+    '## OBJECTIVE',
+    '',
+    definition.objective,
+    ...(current ? ['', '## CURRENT', '', current] : []),
+    '',
+    '## REQUIRED',
+    '',
+    definition.required,
+    ...(definition.batch ? ['', '## BATCH', '', definition.batch] : []),
+    '',
+    '## DO NOT',
+    '',
+    definition.prohibited,
+    '',
+    '## AVAILABLE COMMANDS',
+    '',
+    ...definition.commands.map((item) => `- \`${item}\``),
+    '',
+    ...renderRequirementContextReadiness(phase, state),
+  ].join('\n');
+}
+
+type RequirementContextCommandOutcome =
+  | 'state_restored'
+  | 'accepted'
+  | 'phase_completed'
+  | 'validation_passed'
+  | 'waiting_for_human'
+  | 'completed'
+  | 'already_submitted';
+
+function renderRequirementContextResult(input: {
+  command: string;
+  outcome: RequirementContextCommandOutcome;
+  details?: string[];
+}) {
+  return [
+    '# COMMAND RESULT',
+    '',
+    `- Command: \`${input.command}\``,
+    `- Outcome: ${input.outcome}`,
+    ...(input.details || []).map((detail) => `- ${detail}`),
+  ].join('\n');
+}
+
+function renderRequirementContextContinue(
+  command: string,
+  changed: string,
+  state: ReturnType<typeof draftState>,
+) {
+  const phase = state.context.workflow_phase;
+  const readiness = requirementContextReadiness(state, phase);
+  const definition = REQUIREMENT_CONTEXT_WORKFLOW[phase];
+  const next = [
+    '# NEXT',
+    '',
+    `- Phase: ${phase}`,
+    `- Readiness: ${readiness.status}`,
+  ];
+  if (readiness.status === 'not_ready') {
+    next.push(
+      '- Action: continue_current_work_packet',
+      '- Remaining:',
+      ...readiness.remaining.map((item) => `  - ${item}`),
+      '- Refresh: `requirement-context status`',
+    );
+  } else if (readiness.status === 'decisions_required') {
+    next.push(
+      '- Action: reopen_decision_tree',
+      `- Command: \`${readiness.nextCommand} --reason <新发现的业务分叉>\``,
+    );
+  } else {
+    next.push(
+      '- Action: review_before_submit',
+      '- Review:',
+      ...definition.reviewBeforeSubmit.map((item) => `  - ${item}`),
+      `- ${phase === 'finalize' ? 'Validate' : 'Submit'}: \`${readiness.nextCommand}\``,
+    );
+  }
+  return [
+    renderRequirementContextResult({ command, outcome: 'accepted', details: [`Changed: ${changed}`] }),
+    '',
+    ...next,
   ].join('\n');
 }
 
@@ -1465,14 +1608,18 @@ function transitionRequirementContextPhase(input: {
   })();
   const nextState = draftState(db, draft);
   return [
-    `${from} 阶段已接受，进入 ${to}。`,
+    renderRequirementContextResult({
+      command: REQUIREMENT_CONTEXT_WORKFLOW[from].submit,
+      outcome: 'phase_completed',
+      details: [`From: ${from}`, `To: ${to}`],
+    }),
     '',
     renderRequirementContextWorkPacket(to, nextState),
   ].join('\n');
 }
 
 function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
-  const missing = phaseValidationErrors(state, state.context.workflow_phase);
+  const readiness = requirementContextReadiness(state, state.context.workflow_phase);
   const decisionKeys = activeDecisionKeys(state);
   const visibleForDecision = (decisionKey: string | null) => !decisionKey || decisionKeys.has(decisionKey);
   const visibleAssertions = state.assertions.filter((item) => visibleForDecision(item.decision_key));
@@ -1484,6 +1631,12 @@ function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
   const activeAcceptance = state.acceptance.filter((item) => item.lifecycle_status === 'active');
   const projectedQuestions = activeDecisionProjection(state);
   const lines = [
+    renderRequirementContextResult({
+      command: 'requirement-context status',
+      outcome: 'state_restored',
+      details: [`Phase: ${state.context.workflow_phase}`],
+    }),
+    '',
     renderRequirementContextWorkPacket(state.context.workflow_phase, state),
     '',
     '# CURRENT DRAFT',
@@ -1550,12 +1703,16 @@ function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
     }
   }
   if (projectedQuestions.length) lines.push('', renderActiveDecisionTree(state));
-  if (missing.length) {
-    lines.push('', '当前校验提示：', ...missing.map((item, index) => `${index + 1}. ${item}`));
-  } else if (state.context.workflow_phase !== 'finalize') {
-    lines.push('', `当前 ${state.context.workflow_phase} 阶段结构完整，可以执行工作包中的 SUBMIT 命令。`);
+  if (readiness.status === 'not_ready') {
+    lines.push('', '当前 readiness 缺口：', ...readiness.remaining.map((item, index) => `${index + 1}. ${item}`));
+  } else if (readiness.status === 'decisions_required') {
+    lines.push('', '当前 Impact Scan 需要重新打开 Decision Tree，不能完成本阶段。');
+  } else if (readiness.status === 'ready_for_human') {
+    lines.push('', '当前决策批次已具备提交给用户的结构，请复核后请求澄清。');
+  } else if (state.context.workflow_phase === 'finalize') {
+    lines.push('', '全部阶段结构完整；先执行 requirement-context validate，通过后才会返回 complete。');
   } else {
-    lines.push('', '全部阶段结构完整，可以执行 requirement-context complete。');
+    lines.push('', `当前 ${state.context.workflow_phase} 阶段结构完整；复核清单后可提交本阶段。`);
   }
   return lines.join('\n');
 }
@@ -1767,6 +1924,9 @@ function terminalSubmit(
   if (action === 'complete' && state.context.workflow_phase !== 'finalize') {
     throw new Error(`需求上下文尚未走完阶段调用链；当前阶段是 ${state.context.workflow_phase}`);
   }
+  if (action === 'complete' && state.context.validated_change_seq !== draft.change_seq) {
+    throw new Error('Finalize 尚未通过当前草稿版本的 validate；请先执行 requirement-context validate');
+  }
   const errors = validationErrors(state, action);
   if (errors.length) {
     throw new Error(`草稿不能执行 ${action}：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
@@ -1787,8 +1947,23 @@ function terminalSubmit(
     `).run(JSON.stringify(result), execution.execution_id);
   })();
   return action === 'complete'
-    ? '业务变化上下文已提交成功。普通最终回复不再用于推进流程，可以结束本轮。'
-    : '需求澄清请求已提交成功。普通最终回复不再用于推进流程，可以结束本轮。';
+    ? [
+      renderRequirementContextResult({ command: 'requirement-context complete', outcome: 'completed' }),
+      '',
+      '# NEXT',
+      '',
+      '- Owner: Application',
+      '- Agent Action: end_execution',
+    ].join('\n')
+    : [
+      renderRequirementContextResult({ command: 'requirement-context request-clarification', outcome: 'waiting_for_human' }),
+      '',
+      '# NEXT',
+      '',
+      '- Owner: Application',
+      '- Agent Action: end_execution',
+      '- Resume Entry: `requirement-context status`',
+    ].join('\n');
 }
 
 function deliveryPlanState(
@@ -2123,13 +2298,11 @@ function submitDeliveryPlan(
 }
 
 const requirementContextCommandIndex = [
-  '  requirement-context as-is complete',
-  '  requirement-context decision-tree complete',
-  '  requirement-context to-be complete',
-  '  requirement-context impact-scan complete',
+  ...REQUIREMENT_CONTEXT_PHASE_ORDER.flatMap((phase) => {
+    const definition = REQUIREMENT_CONTEXT_WORKFLOW[phase];
+    return [definition.submit, definition.pendingHumanSubmit].filter((command): command is string => Boolean(command));
+  }).map((command) => `  ${command}`),
   '  requirement-context impact-scan reopen-decisions --reason <新发现的业务分叉>',
-  '  requirement-context scope complete',
-  '  requirement-context acceptance complete',
   '  requirement-context intent set --text <业务意图>',
   '  requirement-context change set --text <Actual 与 TO-BE，以及适用的 Expected 的变化摘要>',
   '  requirement-context assertion upsert --key <key> --perspective <actual|expected|target> --statement <陈述> --evidence <observed|reported|inferred|decided|conflicted> --source <来源> [--decision <问题key>]',
@@ -2265,11 +2438,12 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
     ];
   }
   if (topic === 'finish') {
+    const normalPath = requirementContextNormalCommandPath();
     return [
       '需求上下文采用阶段调用链。每个阶段完成命令会校验当前产物、保存阶段转换，并直接返回下一阶段工作包；阶段命令不会结束 execution。',
       '',
       '阶段路径：',
-      '  status → as-is complete → decision-tree complete → to-be complete → impact-scan complete → scope complete → acceptance complete → validate → complete',
+      `  status → ${normalPath.map((command) => command.replace(/^requirement-context /, '')).join(' → ')}`,
       '  若影响扫描发现新的需求级业务分叉，使用 impact-scan reopen-decisions 返回决策树；这会形成可审计的阶段转换。',
       '  若决策树存在 HUMAN · PENDING 节点，批量建立全部当前已知问题后直接提交 request-clarification，不执行 decision-tree complete。',
       '',
@@ -2291,6 +2465,7 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
   return [
     '需求上下文通过内层阶段调用链完成。每次 status 会恢复当前阶段并返回这一阶段的目标、必需产物、禁止事项、可用命令和提交命令。',
     '阶段顺序由 Backlog Agent Prompt 引导；编辑命令不做阶段白名单限制，但每个阶段提交都会按阶段产物校验。',
+    '领域命令统一返回 COMMAND RESULT；继续当前阶段时返回 NEXT，阶段切换时返回 NEXT WORK PACKET。只按返回的 NEXT 推进。',
     '',
     '模板映射：',
     '  intent → BUSINESS INTENT',
@@ -2474,7 +2649,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         '长文本参数：',
         '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
-        `  返回完整索引：${command} help`,
+        `  其他主题：${command} help <context|assertion|impact|question|scope|finish>`,
       ].join('\n');
     }
     if (profile.draftType === 'delivery_plan') {
@@ -3027,6 +3202,13 @@ export async function runAgentCommand(input: {
 
   if (positionals[0] === 'help') {
     if (positionals.length > 2) throw new Error('help 最多接受一个主题');
+    if (profile.draftType === 'requirement_context' && !positionals[1]) {
+      throw new Error(
+        'requirement-context help 必须指定一个主题：'
+        + 'help <context|assertion|impact|question|scope|finish>。'
+        + '当前阶段可执行命令请查看 requirement-context status 返回的 AVAILABLE COMMANDS。',
+      );
+    }
     return helpText(execution, profile, positionals[1] || null);
   }
   if (command === 'whoami') {
@@ -3073,23 +3255,29 @@ export async function runAgentCommand(input: {
     && draft.terminal_execution_id === execution.execution_id
     && draft.terminal_action === command.replace('requirement-context ', '')
   ) {
-    return '该终止命令已经提交成功，无需重复提交，可以结束本轮。';
+    return [
+      renderRequirementContextResult({ command, outcome: 'already_submitted' }),
+      '',
+      '# NEXT',
+      '',
+      '- Owner: Application',
+      '- Agent Action: end_execution',
+    ].join('\n');
   }
   assertViewed(draft, execution.execution_id);
+  const accepted = (changed: string) =>
+    renderRequirementContextContinue(command, changed, draftState(db, draft));
 
-  const phaseCompletion = new Map<string, RequirementContextPhase>([
-    ['requirement-context as-is complete', 'as_is'],
-    ['requirement-context decision-tree complete', 'decision_tree'],
-    ['requirement-context to-be complete', 'to_be'],
-    ['requirement-context impact-scan complete', 'impact_scan'],
-    ['requirement-context scope complete', 'scope'],
-    ['requirement-context acceptance complete', 'acceptance'],
-  ]);
+  const phaseCompletion = new Map<string, RequirementContextPhase>(
+    REQUIREMENT_CONTEXT_PHASE_ORDER
+      .filter((phase) => phase !== 'finalize')
+      .map((phase) => [REQUIREMENT_CONTEXT_WORKFLOW[phase].submit, phase]),
+  );
   const completedPhase = phaseCompletion.get(command);
   if (completedPhase) {
     const current = draftState(db, draft);
-    const phaseIndex = requirementContextPhaseOrder.indexOf(completedPhase);
-    const next = requirementContextPhaseOrder[phaseIndex + 1];
+    const phaseIndex = REQUIREMENT_CONTEXT_PHASE_ORDER.indexOf(completedPhase);
+    const next = REQUIREMENT_CONTEXT_PHASE_ORDER[phaseIndex + 1];
     if (!next) throw new Error(`${completedPhase} 没有可用的下一阶段`);
     return transitionRequirementContextPhase({
       db,
@@ -3119,8 +3307,11 @@ export async function runAgentCommand(input: {
       touchDraft(db, draft.draft_id);
     })();
     return [
-      '影响扫描已创建新的决策树修订。',
-      `原因：${reason}`,
+      renderRequirementContextResult({
+        command,
+        outcome: 'phase_completed',
+        details: ['From: impact_scan', 'To: decision_tree', `Reason: ${reason}`],
+      }),
       '',
       renderRequirementContextWorkPacket('decision_tree', draftState(db, draft)),
     ].join('\n');
@@ -3135,7 +3326,7 @@ export async function runAgentCommand(input: {
     const value = bounded(required(flags, 'text'), label);
     db.prepare(`UPDATE requirement_context_drafts SET ${column} = ? WHERE draft_id = ?`).run(value, draft.draft_id);
     touchDraft(db, draft.draft_id);
-    return `${label}已保存。`;
+    return accepted(label);
   }
   if (command === 'requirement-context assertion upsert') {
     const key = bounded(required(flags, 'key'), '业务语义 key', 120);
@@ -3184,7 +3375,7 @@ export async function runAgentCommand(input: {
       action: 'upsert',
     });
     touchDraft(db, draft.draft_id);
-    return `业务语义 ${key} 已保存。`;
+    return accepted(`assertion/${key}`);
   }
   if (
     command === 'requirement-context assertion dismiss'
@@ -3210,7 +3401,7 @@ export async function runAgentCommand(input: {
       action: superseded ? 'supersede' : 'dismiss',
     });
     touchDraft(db, draft.draft_id);
-    return `业务语义 ${key} 已标记为${superseded ? '已取代' : '已排除'}。`;
+    return accepted(`assertion/${key} ${superseded ? 'superseded' : 'dismissed'}`);
   }
   if (command === 'requirement-context impact upsert') {
     const key = bounded(required(flags, 'key'), '业务影响 key', 120);
@@ -3255,7 +3446,7 @@ export async function runAgentCommand(input: {
       action: 'upsert',
     });
     touchDraft(db, draft.draft_id);
-    return `业务影响 ${key} 已保存为 ${disposition}。`;
+    return accepted(`impact/${key} ${disposition}`);
   }
   if (
     command === 'requirement-context impact dismiss'
@@ -3281,7 +3472,7 @@ export async function runAgentCommand(input: {
       action: superseded ? 'supersede' : 'dismiss',
     });
     touchDraft(db, draft.draft_id);
-    return `业务影响 ${key} 已标记为${superseded ? '已取代' : '已排除'}。`;
+    return accepted(`impact/${key} ${superseded ? 'superseded' : 'dismissed'}`);
   }
   if (command === 'requirement-context acceptance upsert') {
     const key = bounded(required(flags, 'key'), '验收语义 key', 120);
@@ -3315,7 +3506,7 @@ export async function runAgentCommand(input: {
       action: 'upsert',
     });
     touchDraft(db, draft.draft_id);
-    return `验收语义 ${key} 已保存。`;
+    return accepted(`acceptance/${key}`);
   }
   if (
     command === 'requirement-context acceptance dismiss'
@@ -3341,7 +3532,7 @@ export async function runAgentCommand(input: {
       action: superseded ? 'supersede' : 'dismiss',
     });
     touchDraft(db, draft.draft_id);
-    return `验收语义 ${key} 已标记为${superseded ? '已取代' : '已排除'}。`;
+    return accepted(`acceptance/${key} ${superseded ? 'superseded' : 'dismissed'}`);
   }
   if (command === 'requirement-context classification set') {
     const classification = positionals[3];
@@ -3351,7 +3542,7 @@ export async function runAgentCommand(input: {
     db.prepare('UPDATE requirement_context_drafts SET classification = ? WHERE draft_id = ?')
       .run(classification, draft.draft_id);
     touchDraft(db, draft.draft_id);
-    return `需求分类已设置为 ${classification}；后续 plan/repro 路由由系统确定。`;
+    return accepted(`classification/${classification}`);
   }
   if (command === 'requirement-context constraint add') {
     upsertSimpleItem(
@@ -3363,13 +3554,13 @@ export async function runAgentCommand(input: {
       bounded(required(flags, 'text'), '约束'),
     );
     touchDraft(db, draft.draft_id);
-    return '约束已保存。';
+    return accepted(`constraint/${required(flags, 'key')}`);
   }
   if (command === 'requirement-context constraint remove') {
     db.prepare('DELETE FROM requirement_context_constraints WHERE draft_id = ? AND constraint_key = ?')
       .run(draft.draft_id, required(flags, 'key'));
     touchDraft(db, draft.draft_id);
-    return '约束已删除。';
+    return accepted(`constraint/${required(flags, 'key')} removed`);
   }
   if (command === 'requirement-context scope include' || command === 'requirement-context scope exclude') {
     const direction = command.endsWith('include') ? 'included' : 'excluded';
@@ -3383,13 +3574,13 @@ export async function runAgentCommand(input: {
         direction = excluded.direction, content = excluded.content
     `).run(draft.draft_id, key, direction, content, ordinal);
     touchDraft(db, draft.draft_id);
-    return `范围 ${key} 已保存为${direction === 'included' ? '包含' : '排除'}。`;
+    return accepted(`scope/${key} ${direction}`);
   }
   if (command === 'requirement-context scope remove') {
     db.prepare('DELETE FROM requirement_context_scope_items WHERE draft_id = ? AND scope_key = ?')
       .run(draft.draft_id, required(flags, 'key'));
     touchDraft(db, draft.draft_id);
-    return '范围项已删除。';
+    return accepted(`scope/${required(flags, 'key')} removed`);
   }
   if (command === 'requirement-context question add') {
     const key = bounded(required(flags, 'key'), '问题 key', 120);
@@ -3413,7 +3604,7 @@ export async function runAgentCommand(input: {
       ordinal,
     );
     touchDraft(db, draft.draft_id);
-    return `问题 ${key} 已保存。`;
+    return accepted(`question/${key}`);
   }
   if (command === 'requirement-context question option-add') {
     const key = bounded(required(flags, 'key'), '问题 key', 120);
@@ -3437,7 +3628,7 @@ export async function runAgentCommand(input: {
       ordinal,
     );
     touchDraft(db, draft.draft_id);
-    return `问题 ${key} 的选项已保存。`;
+    return accepted(`question/${key}/option/${required(flags, 'id')}`);
   }
   if (command === 'requirement-context question recommend') {
     const key = bounded(required(flags, 'key'), '问题 key', 120);
@@ -3453,7 +3644,7 @@ export async function runAgentCommand(input: {
       WHERE draft_id = ? AND decision_key = ?
     `).run(option, bounded(required(flags, 'reason'), '推荐理由'), draft.draft_id, key);
     touchDraft(db, draft.draft_id);
-    return `问题 ${key} 的推荐答案已保存。`;
+    return accepted(`question/${key}/recommendation/${option}`);
   }
   if (command === 'requirement-context question depends-on') {
     const key = bounded(required(flags, 'key'), '问题 key', 120);
@@ -3477,7 +3668,7 @@ export async function runAgentCommand(input: {
       ON CONFLICT(draft_id, decision_key, parent_decision_key, parent_option_id) DO NOTHING
     `).run(draft.draft_id, key, parent, option, ordinal);
     touchDraft(db, draft.draft_id);
-    return `问题 ${key} 已设置为仅在 ${parent}=${option} 时生效。`;
+    return accepted(`question/${key}/dependency/${parent}=${option}`);
   }
   if (command === 'requirement-context question dependency-remove') {
     db.prepare(`
@@ -3490,7 +3681,7 @@ export async function runAgentCommand(input: {
       required(flags, 'option'),
     );
     touchDraft(db, draft.draft_id);
-    return '决策条件边已删除。';
+    return accepted(`question/${required(flags, 'key')}/dependency removed`);
   }
   if (command === 'requirement-context question decide') {
     const key = bounded(required(flags, 'key'), '问题 key', 120);
@@ -3576,7 +3767,7 @@ export async function runAgentCommand(input: {
     }
     recomputeBacklogQuestionApplicabilityInDb(db, draft.task_id);
     touchDraft(db, draft.draft_id);
-    return `Agent 决策 ${key} 已关闭。`;
+    return accepted(`question/${key} decided`);
   }
   if (command === 'requirement-context question supersede') {
     const key = bounded(required(flags, 'key'), '问题 key', 120);
@@ -3600,22 +3791,51 @@ export async function runAgentCommand(input: {
     `).run(`由 ${by} 取代`, draft.task_id, key);
     recomputeBacklogQuestionApplicabilityInDb(db, draft.task_id);
     touchDraft(db, draft.draft_id);
-    return `问题 ${key} 已由 ${by} 取代。`;
+    return accepted(`question/${key} superseded_by ${by}`);
   }
   if (command === 'requirement-context question remove') {
     db.prepare('DELETE FROM requirement_context_questions WHERE draft_id = ? AND decision_key = ?')
       .run(draft.draft_id, required(flags, 'key'));
     touchDraft(db, draft.draft_id);
-    return '问题已删除。';
+    return accepted(`question/${required(flags, 'key')} removed`);
   }
   if (command === 'requirement-context validate') {
     const current = draftState(db, draft);
-    const clarification = current.questions.some((question) => !question.answer);
-    const errors = validationErrors(current, clarification ? 'request-clarification' : null);
+    const phase = current.context.workflow_phase;
+    const clarification = phase === 'decision_tree' && current.questions.some((question) =>
+      question.projection_status === 'active' && question.authority === 'human' && !question.answer);
+    if (phase !== 'finalize' && !clarification) {
+      throw new Error(
+        `当前 ${phase} 阶段不使用 validate；请先完成当前工作包。`
+        + ' validate 仅用于完整的 HUMAN 澄清批次或 Finalize。',
+      );
+    }
+    const terminal = clarification ? 'request-clarification' : 'complete';
+    const errors = validationErrors(current, terminal);
     if (errors.length) throw new Error(`草稿校验失败：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
-    return clarification
-      ? '业务变化上下文澄清草稿校验通过，可以提交 request-clarification。'
-      : '业务变化上下文草稿结构校验通过；complete 仍会校验分类和未回答问题。';
+    if (phase === 'finalize') {
+      db.prepare(`
+        UPDATE requirement_context_drafts
+        SET validated_change_seq = ?
+        WHERE draft_id = ?
+      `).run(draft.change_seq, draft.draft_id);
+    }
+    const nextCommand = clarification
+      ? 'requirement-context request-clarification'
+      : 'requirement-context complete';
+    return [
+      renderRequirementContextResult({
+        command,
+        outcome: 'validation_passed',
+        details: [`Phase: ${phase}`, 'Readiness: validated'],
+      }),
+      '',
+      '# NEXT',
+      '',
+      `- Phase: ${phase}`,
+      '- Readiness: validated',
+      `- Action: \`${nextCommand}\``,
+    ].join('\n');
   }
   if (command === 'requirement-context complete') {
     return terminalSubmit(db, draft, execution, 'complete');
