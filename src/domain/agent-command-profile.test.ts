@@ -24,6 +24,8 @@ test('injects the complete read-only context and submission contract before Agen
   assert.match(prompt, /\*\*首次必须执行：\*\*\n\n```bash/);
   assert.match(prompt, /- `npm --prefix/);
   assert.match(prompt, /\*\*编辑与提交规则：\*\*/);
+  assert.match(prompt, /\$LOOP_AGENT_TMP_DIR/);
+  assert.match(prompt, /本次 Loop Run 结束后 Harness 会统一清理整个 Run 临时目录/);
   assert.doesNotMatch(prompt, /## 工具选择顺序|## 命令行为/);
   assert.doesNotMatch(prompt, /implementation complete/);
 });
@@ -49,7 +51,7 @@ test('advertises a role-specific command guide for every progressive flow Agent'
   assert.match(backlog || '', /help <context\|assertion\|impact\|question\|scope\|finish>/);
   assert.match(splitter || '', /help <context\|unit\|source\|dependency\|revision\|finish>/);
   assert.match(analyst || '', /help <context\|impact\|decision\|contract\|finish>/);
-  assert.match(development || '', /help <context\|evidence\|review\|input\|finish>/);
+  assert.match(development || '', /help <context\|evidence\|review\|commit\|input\|finish>/);
   assert.match(development || '', /implementation 命令统一返回 `COMMAND RESULT`/);
   assert.match(verification || '', /help <context\|plan\|execute\|evidence\|input\|finish>/);
   assert.match(verification || '', /verification 命令统一返回 `COMMAND RESULT`/);

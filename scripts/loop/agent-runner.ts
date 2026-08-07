@@ -48,6 +48,11 @@ import { agentCommandPrompt } from '../../src/domain/agent-command-profile';
 import { agentLabel, deliveryUnitLabel } from '../../src/domain/terminology';
 import { getAgentExecutor, type AgentExecutor, type AgentToolClass } from '../../src/infrastructure/agent-executor';
 import { executeDelegation } from '../../src/infrastructure/delegation-execution';
+import {
+  createAgentExecutionTempDirectory,
+  createAgentWorkspaceTempDirectory,
+  removeAgentWorkspaceTempDirectory,
+} from '../../src/infrastructure/agent-workspace-temp';
 import { startDispatchRetryRun } from '../../src/infrastructure/agent-runner';
 import { resolveAgentExecutionLimits } from '../../src/infrastructure/agent-execution-limits';
 import { paths } from '../../src/infrastructure/database';
@@ -58,6 +63,7 @@ import { startMaintenanceRunner } from '../../src/infrastructure/maintenance-run
 const runId = process.argv[2];
 if (!runId) throw new Error('missing run id');
 const backgroundEvaluations = new Set<Promise<void>>();
+let loopTemporary: ReturnType<typeof createAgentWorkspaceTempDirectory> | null = null;
 
 function scheduleEvolution(evaluation: Promise<void>) {
   const tracked = evaluation.finally(() => { backgroundEvaluations.delete(tracked); });
@@ -290,6 +296,8 @@ async function runDelegation(
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
   const durableToolEvent = createDurableToolEventNormalizer();
   const diagnostics: string[] = [];
+  if (!loopTemporary) throw new Error('Loop 临时目录尚未初始化');
+  const agentTemporaryDirectory = createAgentExecutionTempDirectory(loopTemporary, executionId);
   const execution = await executeDelegation({
     runId,
     prompt,
@@ -326,6 +334,7 @@ async function runDelegation(
       LOOP_APP_ROOT: paths.appRoot,
       LOOP_DATA_ROOT: paths.dataRoot,
       LOOP_EXECUTION_TOKEN: commandToken,
+      LOOP_AGENT_TMP_DIR: agentTemporaryDirectory,
     },
     cancellationRequested: () => executionCancellationRequested(executionId),
   });
@@ -685,6 +694,7 @@ async function main() {
 async function run() {
   let stopHeartbeat: (() => void) | undefined;
   try {
+    loopTemporary = createAgentWorkspaceTempDirectory(paths.root, runId);
     stopHeartbeat = await startRunHeartbeat(runId, 'agent-runner');
     await main();
   } catch (error) {
@@ -693,6 +703,15 @@ async function run() {
     await enqueueRunnerFailureMaintenance(error);
   } finally {
     stopHeartbeat?.();
+    let loopEnded = false;
+    try { loopEnded = !(await isRunActive()); } catch { /* Preserve files when Run state cannot be confirmed. */ }
+    if (loopEnded) {
+      const cleanup = removeAgentWorkspaceTempDirectory(loopTemporary);
+      if (!cleanup.ok) {
+        try { await appendLoopRunLog(runId, `[临时文件] Loop Run 清理失败：${cleanup.error}`); } catch { /* Runner is already terminating. */ }
+      }
+    }
+    loopTemporary = null;
   }
 }
 

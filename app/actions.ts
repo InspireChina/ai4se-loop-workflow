@@ -25,16 +25,25 @@ import {
 } from '../src/application/tasks';
 import { startAgentRun } from '../src/infrastructure/agent-runner';
 import { paths } from '../src/infrastructure/database';
+import { requirementPipeline } from '../src/domain/pipeline-catalog';
+import { requirementPriority } from '../src/domain/requirement-priority';
+import { parseRequirementMetadata } from '../src/domain/requirement-metadata';
 
 export async function createTaskAction(formData: FormData) {
+  const pipeline = requirementPipeline(formData.get('pipeline') || 'feature');
+  const priority = requirementPriority(formData.get('priority') || 'P2');
+  const metadataKeys = formData.getAll('metadataKey');
+  const metadataValues = formData.getAll('metadataValue');
+  const metadata = parseRequirementMetadata(metadataKeys.map((key, index) => ({
+    key,
+    value: metadataValues[index],
+  })));
   const taskId = await createTask({
     title: formData.get('title'),
     description: formData.get('description') || undefined,
-    link: formData.get('link'),
-    itemType: formData.get('itemType') || 'feature',
-    priority: formData.get('priority'),
-    externalId: formData.get('externalId'),
-    externalStatus: formData.get('externalStatus'),
+    itemType: pipeline,
+    priority,
+    metadata,
   });
   redirect(`/tasks/${taskId}`);
 }
@@ -226,7 +235,7 @@ export async function acknowledgeClosureAction(formData: FormData) {
     taskId: formData.get('taskId'),
     reviewRevision: formData.get('reviewRevision'),
   });
-  redirect(`/tasks/${formData.get('taskId')}`);
+  redirect('/tasks');
 }
 
 export async function saveAgentPromptAction(formData: FormData) {

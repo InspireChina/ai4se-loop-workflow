@@ -2899,6 +2899,12 @@ function deliveryPlanHelp(terminalActions: string[], topic?: string | null) {
   ];
 }
 
+const LONG_TEXT_FILE_HELP = [
+  '长文本参数：',
+  '  长文本必须写入 $LOOP_AGENT_TMP_DIR 指向的工作区 .tmp/loop-<run-id>/agent-<execution-id> 目录，再使用对应的 --*-file 参数读取 UTF-8 文件。',
+  '  本次 Loop Run 结束后 Harness 会统一清理整个 Run 临时目录；不要把临时文件写入源码目录或提交到 Git。',
+];
+
 function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?: string | null) {
   const appRoot = process.env.LOOP_APP_ROOT?.trim() || '<Loop App Root>';
   const command = loopAgentCommandPrefix(appRoot);
@@ -2931,8 +2937,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         ...requirementContextHelp(profile.terminalActions, topic),
         '',
-        '长文本参数：',
-        '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
+        ...LONG_TEXT_FILE_HELP,
         `  其他主题：${command} help <context|assertion|impact|question|scope|finish>`,
       ].join('\n');
     }
@@ -2943,8 +2948,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         ...deliveryPlanHelp(profile.terminalActions, topic),
         '',
-        '长文本参数：',
-        '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
+        ...LONG_TEXT_FILE_HELP,
         `  其他主题：${command} help <context|unit|source|dependency|revision|finish>`,
       ].join('\n');
     }
@@ -2955,8 +2959,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         ...deliveryAnalysisHelp(profile.terminalActions, topic),
         '',
-        '长文本参数：',
-        '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
+        ...LONG_TEXT_FILE_HELP,
         `  其他主题：${command} help <context|impact|decision|contract|finish>`,
       ].join('\n');
     }
@@ -2967,9 +2970,8 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         ...developmentHelp(profile.terminalActions, topic),
         '',
-        '长文本参数：',
-        '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
-        `  其他主题：${command} help <context|evidence|review|input|finish>`,
+        ...LONG_TEXT_FILE_HELP,
+        `  其他主题：${command} help <context|evidence|review|commit|input|finish>`,
       ].join('\n');
     }
     if (profile.draftType === 'verification') {
@@ -2979,8 +2981,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         ...verificationHelp(profile.terminalActions, topic),
         '',
-        '长文本参数：',
-        '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
+        ...LONG_TEXT_FILE_HELP,
         `  其他主题：${command} help <context|plan|execute|evidence|input|finish>`,
       ].join('\n');
     }
@@ -2991,8 +2992,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         ...reviewHelp(profile.terminalActions, topic),
         '',
-        '长文本参数：',
-        '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
+        ...LONG_TEXT_FILE_HELP,
         `  其他主题：${command} help <context|reconciliation|gap|assessment|report|forward|finish>`,
       ].join('\n');
     }
@@ -3019,8 +3019,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
       ...common,
       ...deliveryPlanHelp(profile.terminalActions, null),
       '',
-      '长文本参数：',
-      '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
+      ...LONG_TEXT_FILE_HELP,
     ].join('\n');
   }
   if (profile.draftType === 'reproduction') {
@@ -3028,8 +3027,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
       ...common,
       ...reproductionHelp(profile.terminalActions),
       '',
-      '长文本参数：',
-      '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
+      ...LONG_TEXT_FILE_HELP,
     ].join('\n');
   }
   if (profile.draftType === 'analysis') {
@@ -3037,8 +3035,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
       ...common,
       ...deliveryAnalysisHelp(profile.terminalActions, null),
       '',
-      '长文本参数：',
-      '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
+      ...LONG_TEXT_FILE_HELP,
     ].join('\n');
   }
   if (profile.draftType === 'development') {
@@ -3046,8 +3043,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
       ...common,
       ...developmentHelp(profile.terminalActions, null),
       '',
-      '长文本参数：',
-      '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
+      ...LONG_TEXT_FILE_HELP,
     ].join('\n');
   }
   if (profile.draftType === 'verification') {
@@ -3055,8 +3051,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
       ...common,
       ...verificationHelp(profile.terminalActions, null),
       '',
-      '长文本参数：',
-      '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
+      ...LONG_TEXT_FILE_HELP,
     ].join('\n');
   }
   if (profile.draftType === 'feedback') {
@@ -3064,8 +3059,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
       ...common,
       ...feedbackHelp(profile.terminalActions),
       '',
-      '长文本参数：',
-      '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
+      ...LONG_TEXT_FILE_HELP,
     ].join('\n');
   }
   if (profile.draftType === 'review') {
@@ -3073,16 +3067,14 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
       ...common,
       ...reviewHelp(profile.terminalActions, null),
       '',
-      '长文本参数：',
-      '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
+      ...LONG_TEXT_FILE_HELP,
     ].join('\n');
   }
   return [
     ...common,
     ...requirementContextHelp(profile.terminalActions, null),
     '',
-    '长文本参数：',
-    '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件',
+    ...LONG_TEXT_FILE_HELP,
   ].join('\n');
 }
 
@@ -3576,7 +3568,7 @@ export async function runAgentCommand(input: {
           : profile.draftType === 'analysis'
             ? 'context|impact|decision|contract|finish'
             : profile.draftType === 'development'
-              ? 'context|evidence|review|input|finish'
+              ? 'context|evidence|review|commit|input|finish'
               : profile.draftType === 'verification'
                 ? 'context|plan|execute|evidence|input|finish'
                 : 'context|reconciliation|gap|assessment|report|forward|finish';

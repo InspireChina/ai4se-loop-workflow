@@ -392,7 +392,9 @@ function developmentReadiness(
     ? implementationErrors(current)
     : phase === 'review'
       ? reviewErrors(current)
-      : developerVerificationErrors(current);
+      : phase === 'commit'
+        ? []
+        : developerVerificationErrors(current);
   if (remaining.length) return { status: 'not_ready', remaining, nextCommand: null };
   return {
     status: 'structurally_ready',
@@ -753,7 +755,9 @@ function transitionPhase(input: {
     ? implementationErrors(current)
     : from === 'review'
       ? reviewErrors(current)
-      : developerVerificationErrors(current);
+      : from === 'commit'
+        ? []
+        : developerVerificationErrors(current);
   if (errors.length) {
     throw new Error(`${from} 阶段不能完成：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
   }
@@ -854,6 +858,8 @@ const developmentCommandIndex = [
   '  implementation review complete',
   '  implementation verify reopen-implementation --reason <回流原因>',
   '  implementation verify complete',
+  '  implementation commit reopen-verification --reason <回流原因>',
+  '  implementation commit complete',
   '  implementation finalize reopen-verification --reason <回流原因>',
   '  implementation criterion satisfy --key <规格 criterion id> --evidence <实现证据>',
   '  implementation check record --key <稳定 key> --receipt <status 中的 receipt> --summary <检查意义与结论>',
@@ -899,6 +905,23 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
       '  只有 result=pass 且摘要与依据完整时才能进入 DEVELOPER VERIFY。',
     ];
   }
+  if (topic === 'commit') {
+    return [
+      'COMMIT 是 DEVELOPER VERIFY 之后的独立提交步骤。Agent 负责执行，Application 只接收阶段完成确认。',
+      '',
+      '有当前交付单元的代码变化时：',
+      '  只暂存属于当前交付单元的文件，按仓库规范执行 Git commit，然后确认：',
+      '  implementation commit complete',
+      '',
+      '没有代码变化时：',
+      '  不制造空提交；确认当前交付依赖现有实现后，同样执行 implementation commit complete。',
+      '',
+      '如果提交前发现实现或开发者验证需要修正：',
+      '  implementation commit reopen-verification --reason <回流原因>',
+      '',
+      'Application 不读取或校验 commit hash、HEAD、提交内容、暂存区、工作区状态，也不要求额外提交字段。阶段完成完全依赖 Agent 的显式确认。',
+    ];
+  }
   if (topic === 'input') {
     return [
       '运行信息只用于继续实现或开发者验证所必需、无法从上下文与仓库推导、适合由用户补充的非敏感条件。设计审批、业务决策、密钥和可自行调查的事实都不属于运行信息。',
@@ -916,7 +939,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
   }
   if (topic === 'finish') {
     return [
-      '开发实现采用四段调用链；每个阶段完成命令都会校验当前产物、记录转换并返回下一工作包。',
+      '开发实现采用五段调用链；前面阶段完成命令校验对应产物，COMMIT 只记录 Agent 的完成确认，然后返回下一工作包。',
       '',
       '阶段路径：',
       `  ${DEVELOPMENT_PHASE_SEQUENCE}`,
@@ -928,7 +951,8 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
       '完成要求：',
       '  1. 每个规格 key 都有实现证据，并至少选择一条 Runner 已捕获的成功关键检查。',
       '  2. 没有未回答的运行信息。',
-      '  3. Agent 已基于当前仓库重新检查功能完整性。Git 历史、分支、HEAD、Commit 和未提交文件只作为调查信息，不形成完成门禁。',
+      '  3. Agent 已基于当前仓库重新检查功能完整性。',
+      '  4. COMMIT 阶段已经由 Agent 显式确认；Application 不校验 Git 历史、分支、HEAD、commit hash、提交内容或工作区状态。',
       '',
       'validate 绑定当前草稿变更版本；验证后任何编辑或回流都会使它失效。',
       '代码审查或开发者验证发现实现问题时必须显式回流 IMPLEMENT，并重新经过 REVIEW。',
@@ -936,7 +960,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
     ];
   }
   if (topic) {
-    throw new Error(`开发实现 help 不支持主题：${topic}。可用主题：context、evidence、review、input、finish`);
+    throw new Error(`开发实现 help 不支持主题：${topic}。可用主题：context、evidence、review、commit、input、finish`);
   }
   return [
     'Dev Agent 把当前交付单元落实为可由 Test Agent 独立验收的仓库状态。',
@@ -958,6 +982,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
     '  help context   只读上下文工具与使用时机',
     '  help evidence  验收、关键检查、风险与恢复',
     '  help review    代码规范与 Clean Code 审查门禁',
+    '  help commit    Git 提交与无校验完成确认',
     '  help input     运行信息与真实失败',
     '  help finish    完成门槛与终止命令',
   ];
@@ -1010,6 +1035,7 @@ export function runDevelopmentCommand(input: {
     [DEVELOPMENT_WORKFLOW.implement.submit, 'implement'],
     [DEVELOPMENT_WORKFLOW.review.submit, 'review'],
     [DEVELOPMENT_WORKFLOW.developer_verify.submit, 'developer_verify'],
+    [DEVELOPMENT_WORKFLOW.commit.submit, 'commit'],
   ]);
   const completedPhase = phaseCompletion.get(command);
   if (completedPhase) {
@@ -1029,6 +1055,7 @@ export function runDevelopmentCommand(input: {
   const reopenCommands = new Map<string, [DevelopmentPhase, DevelopmentPhase]>([
     ['implementation review reopen-implementation', ['review', 'implement']],
     ['implementation verify reopen-implementation', ['developer_verify', 'implement']],
+    ['implementation commit reopen-verification', ['commit', 'developer_verify']],
     ['implementation finalize reopen-verification', ['finalize', 'developer_verify']],
   ]);
   const reopen = reopenCommands.get(command);

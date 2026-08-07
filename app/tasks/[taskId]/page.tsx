@@ -6,6 +6,8 @@ import { getTask, pipelineForTask } from '../../../src/application/tasks';
 import { getTaskContextChat } from '../../../src/application/task-context-chat';
 import { deliverySpecSchema } from '../../../src/domain/agent-result';
 import { agentLabel, deliveryUnitLabel, documentKindLabel, feedbackBatchStatusLabel, feedbackWorkTypeLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
+import { requirementPriorityLabel } from '../../../src/domain/requirement-priority';
+import { requirementMetadataDefinition } from '../../../src/domain/requirement-metadata';
 import { ArtifactDocument } from './artifact-document';
 import { TaskAutoRefresh } from './task-auto-refresh';
 import { TaskContextChat } from './task-context-chat';
@@ -107,7 +109,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const { taskId } = await params;
   const detail = await getTask(taskId);
   if (!detail) notFound();
-  const { task, lanes, stories, deliverySpecs, questions, runtimeInputs, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
+  const { task, metadata, lanes, stories, deliverySpecs, questions, runtimeInputs, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
   const analysisLane = lanes.find((lane) => lane.lane === 'analysis')!;
   const deliveryLane = lanes.find((lane) => lane.lane === 'delivery')!;
   const pipeline = await pipelineForTask(taskId);
@@ -150,11 +152,17 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       </div>
       <div className="chips">
         <TaskAutoRefresh/>
-        <span>{itemTypeLabel(task.item_type)}</span>
-        <span>{task.priority || '未定级'}</span>
+        <span>PIPELINE · {itemTypeLabel(task.item_type)}</span>
+        <span>优先级 · {requirementPriorityLabel(task.priority)}</span>
         <span>交付分析 · {agentLabel(analysisLane.current_agent)}</span>
         <span>开发验证 · {agentLabel(deliveryLane.current_agent)}</span>
-        {task.link && <a href={task.link} target="_blank" rel="noreferrer">{task.link}</a>}
+        {metadata.map((item) => {
+          const definition = requirementMetadataDefinition(item.metadata_key);
+          if (!definition) return null;
+          return definition.inputType === 'url'
+            ? <a href={item.metadata_value} target="_blank" rel="noreferrer" key={item.metadata_key}>{definition.label} · {item.metadata_value}</a>
+            : <span key={item.metadata_key}>{definition.label} · {item.metadata_value}</span>;
+        })}
       </div>
     </header>
 

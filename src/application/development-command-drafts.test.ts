@@ -185,10 +185,11 @@ async function recordCompletedImplementation(executionId: string, token: string)
   await passCodeReview(executionId, token);
   await recordDeveloperCheck(executionId, token);
   await command(executionId, token, ['implementation', 'verify', 'complete']);
+  await command(executionId, token, ['implementation', 'commit', 'complete']);
   await command(executionId, token, ['implementation', 'validate']);
 }
 
-test('development help exposes judgments without making Git a completion gate', () => {
+test('development help exposes judgments and a trusted commit confirmation phase', () => {
   const terminalActions = [
     'implementation complete',
     'implementation request-input',
@@ -197,8 +198,9 @@ test('development help exposes judgments without making Git a completion gate', 
   const help = developmentHelp(terminalActions).join('\n');
   assert.match(help, /help evidence/);
   assert.match(help, /Application 记录 Runner 命令事实/);
-  assert.match(help, /IMPLEMENT → REVIEW → DEVELOPER VERIFY → FINALIZE/);
+  assert.match(help, /IMPLEMENT → REVIEW → DEVELOPER VERIFY → COMMIT → FINALIZE/);
   assert.match(help, /implementation review complete/);
+  assert.match(help, /implementation commit complete/);
   assert.match(help, /修正、风险、恢复和运行信息属于按需路径/);
   assert.doesNotMatch(help, /handoff|开发交接|开发与验证交接/);
   assert.doesNotMatch(
@@ -224,17 +226,23 @@ test('development help exposes judgments without making Git a completion gate', 
   assert.match(review, /needs_changes/);
   assert.match(review, /回流会清除旧审查结论/);
 
+  const commit = developmentHelp(terminalActions, 'commit').join('\n');
+  assert.match(commit, /implementation commit complete/);
+  assert.match(commit, /不制造空提交/);
+  assert.match(commit, /不读取或校验 commit hash、HEAD、提交内容、暂存区、工作区状态/);
+
   const finish = developmentHelp(terminalActions, 'finish').join('\n');
   assert.match(finish, /基于当前仓库重新检查功能完整性/);
-  assert.match(finish, /Git 历史、分支、HEAD、Commit 和未提交文件.*不形成完成门禁/);
+  assert.match(finish, /COMMIT 阶段已经由 Agent 显式确认/);
+  assert.match(finish, /不校验 Git 历史、分支、HEAD、commit hash、提交内容或工作区状态/);
 
   assert.throws(
     () => developmentHelp(terminalActions, 'unknown'),
-    /可用主题：context、evidence、review、input、finish/,
+    /可用主题：context、evidence、review、commit、input、finish/,
   );
 });
 
-test('development agent proves an existing implementation without declaring a mode or commit', async () => {
+test('development agent confirms the commit phase without Application Git validation', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
@@ -349,7 +357,23 @@ test('development agent proves an existing implementation without declaring a mo
     '--receipt', recoveredReceipt,
     '--summary', '失败修复后重新执行完成状态分支回归并通过。',
   ]);
-  await command(started.executionId, started.token!, ['implementation', 'verify', 'complete']);
+  const commitPacket = await command(
+    started.executionId,
+    started.token!,
+    ['implementation', 'verify', 'complete'],
+  );
+  assert.match(commitPacket, /COMMIT · commit/);
+  assert.match(commitPacket, /Application 将信任本次确认/);
+  await assert.rejects(
+    command(started.executionId, started.token!, ['implementation', 'complete']),
+    /complete 只能在 finalize 阶段执行；当前阶段是 commit/,
+  );
+  const finalizePacket = await command(
+    started.executionId,
+    started.token!,
+    ['implementation', 'commit', 'complete'],
+  );
+  assert.match(finalizePacket, /From: commit[\s\S]*To: finalize/);
   await assert.rejects(
     command(started.executionId, started.token!, ['implementation', 'complete']),
     /尚未通过 validate/,
@@ -385,7 +409,8 @@ test('development agent proves an existing implementation without declaring a mo
     ['review', 'implement'],
     ['implement', 'review'],
     ['review', 'developer_verify'],
-    ['developer_verify', 'finalize'],
+    ['developer_verify', 'commit'],
+    ['commit', 'finalize'],
   ]);
 
   await applyAgentResult(`RUN-development-existing-${taskId}`, delegation, result!, {
@@ -573,6 +598,7 @@ test('development recovery cycle requires every active recovery and a check from
     '--summary', '刷新后的完成状态回归通过。',
   ]);
   await command(correction.executionId, correction.token!, ['implementation', 'verify', 'complete']);
+  await command(correction.executionId, correction.token!, ['implementation', 'commit', 'complete']);
   await command(correction.executionId, correction.token!, ['implementation', 'validate']);
 
   await cancelExecution(correction.executionId, 'simulate interrupted correction execution');
@@ -606,6 +632,7 @@ test('development recovery cycle requires every active recovery and a check from
     '--summary', '恢复执行后重新运行刷新状态回归并通过。',
   ]);
   await command(resumed.executionId, resumed.token!, ['implementation', 'verify', 'complete']);
+  await command(resumed.executionId, resumed.token!, ['implementation', 'commit', 'complete']);
   await command(resumed.executionId, resumed.token!, ['implementation', 'validate']);
   await command(resumed.executionId, resumed.token!, ['implementation', 'complete']);
   const result = await readAgentCommandSubmission(resumed.executionId);

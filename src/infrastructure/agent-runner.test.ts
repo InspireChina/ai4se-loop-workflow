@@ -68,3 +68,17 @@ test('runner resolves runtime settings for each delegated agent instead of once 
   assert.match(source, /executeDelegationStep\(delegation\)/);
   assert.doesNotMatch(source, /const settings = await getAgentExecutorSettings\(\)/);
 });
+
+test('shares execution-scoped .tmp directories for the Loop lifetime and cleans them at Runner exit', () => {
+  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+
+  assert.match(source, /createAgentWorkspaceTempDirectory\(paths\.root, runId\)/);
+  assert.match(source, /createAgentExecutionTempDirectory\(loopTemporary, executionId\)/);
+  assert.match(source, /LOOP_AGENT_TMP_DIR:\s*agentTemporaryDirectory/);
+  assert.match(source, /loopEnded = !\(await isRunActive\(\)\)/);
+  assert.match(source, /if \(loopEnded\)\s*{[\s\S]*removeAgentWorkspaceTempDirectory\(loopTemporary\)/);
+
+  const waiterSource = readFileSync(resolve(process.cwd(), 'scripts/loop/dispatch-waiter.ts'), 'utf8');
+  assert.match(waiterSource, /agentWorkspaceTempDirectoryFor\(paths\.root, runId\)/);
+  assert.match(waiterSource, /removeAgentWorkspaceTempDirectory/);
+});

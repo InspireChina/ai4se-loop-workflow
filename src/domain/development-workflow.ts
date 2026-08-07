@@ -2,6 +2,7 @@ export const DEVELOPMENT_PHASE_ORDER = [
   'implement',
   'review',
   'developer_verify',
+  'commit',
   'finalize',
 ] as const;
 
@@ -86,11 +87,30 @@ export const DEVELOPMENT_WORKFLOW: Record<DevelopmentPhase, DevelopmentWorkPacke
     ],
     submit: 'implementation verify complete',
   },
+  commit: {
+    title: 'COMMIT',
+    objective: '把当前交付单元的代码变化形成边界清晰的 Git 提交，并向 Application 确认提交步骤已经处理。',
+    required: '存在本单元代码变化时已经按仓库规范完成提交；没有代码变化时已经确认无需制造空提交。Application 只接收 Agent 的完成确认。',
+    prohibited: '不要混入已有的无关工作区改动，不要为了通过阶段制造空提交；Application 不校验 commit hash、HEAD、提交内容或工作区状态。',
+    commands: [
+      'implementation commit complete',
+      'implementation commit reopen-verification',
+      'help commit',
+      'help finish',
+    ],
+    reviewBeforeSubmit: [
+      '有代码变化时，已经只提交当前交付单元相关文件，并使用符合仓库规范的提交说明。',
+      '没有代码变化时，已经确认当前交付依赖现有实现，不制造空提交。',
+      '已知无关工作区改动没有被加入本次提交。',
+      'Application 将信任本次确认，不会检查 commit hash、HEAD、提交内容或工作区状态。',
+    ],
+    submit: 'implementation commit complete',
+  },
   finalize: {
     title: 'FINALIZE',
-    objective: '对实现证据、真实检查、风险和恢复处理做最终一致性校验并提交开发结果。',
+    objective: '对实现证据、真实检查、风险、恢复处理和已确认的提交步骤做最终一致性校验并提交开发结果。',
     required: '当前草稿版本通过 validate，且校验后没有任何编辑或阶段回流。',
-    prohibited: '不要在 FINALIZE 修改证据、检查或风险；发现问题时显式重新打开 DEVELOPER VERIFY。',
+    prohibited: '不要在 FINALIZE 修改证据、检查或风险；发现问题时显式重新打开 COMMIT 之前的 DEVELOPER VERIFY。',
     commands: [
       'implementation validate',
       'implementation finalize reopen-verification',
@@ -105,13 +125,14 @@ export const DEVELOPMENT_WORKFLOW: Record<DevelopmentPhase, DevelopmentWorkPacke
   },
 };
 
-export const DEVELOPMENT_PHASE_SEQUENCE = 'IMPLEMENT → REVIEW → DEVELOPER VERIFY → FINALIZE';
+export const DEVELOPMENT_PHASE_SEQUENCE = 'IMPLEMENT → REVIEW → DEVELOPER VERIFY → COMMIT → FINALIZE';
 
 export function developmentNormalCommandPath() {
   return [
     DEVELOPMENT_WORKFLOW.implement.submit,
     DEVELOPMENT_WORKFLOW.review.submit,
     DEVELOPMENT_WORKFLOW.developer_verify.submit,
+    DEVELOPMENT_WORKFLOW.commit.submit,
     'implementation validate',
     DEVELOPMENT_WORKFLOW.finalize.submit,
   ];

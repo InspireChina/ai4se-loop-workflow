@@ -1,11 +1,28 @@
 'use client';
 
-import { useRef } from 'react';
-import { Plus, X } from 'lucide-react';
+import { useRef, useState } from 'react';
+import { Plus, Trash2, X } from 'lucide-react';
+import { REQUIREMENT_PIPELINES } from '../../src/domain/pipeline-catalog';
+import { REQUIREMENT_PRIORITY_OPTIONS } from '../../src/domain/requirement-priority';
+import { REQUIREMENT_METADATA_DEFINITIONS, type RequirementMetadataKey } from '../../src/domain/requirement-metadata';
 import { createTaskAction } from '../actions';
 
 export default function CreateTaskDialog() {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const [metadataKeys, setMetadataKeys] = useState<RequirementMetadataKey[]>([]);
+
+  function addMetadata() {
+    const available = REQUIREMENT_METADATA_DEFINITIONS.find((definition) => !metadataKeys.includes(definition.key));
+    if (available) setMetadataKeys((current) => [...current, available.key]);
+  }
+
+  function changeMetadata(index: number, key: RequirementMetadataKey) {
+    setMetadataKeys((current) => current.map((item, itemIndex) => itemIndex === index ? key : item));
+  }
+
+  function removeMetadata(index: number) {
+    setMetadataKeys((current) => current.filter((_, itemIndex) => itemIndex !== index));
+  }
 
   return <>
     <button className="button" type="button" onClick={() => dialogRef.current?.showModal()}><Plus size={15}/>创建需求</button>
@@ -20,13 +37,29 @@ export default function CreateTaskDialog() {
         <label>标题<input name="title" required autoFocus placeholder="例如：项目列表支持按 PIC 筛选"/></label>
         <label>描述（可选）<textarea name="description" rows={4} placeholder="补充背景、目标或验收要求"/></label>
         <div className="fields">
-          <label>类型<select name="itemType" defaultValue="feature"><option value="feature">功能需求</option><option value="bug">缺陷</option><option value="tech">技术改进</option><option value="intake">待梳理</option><option value="other">其他</option></select></label>
-          <label>优先级<input name="priority" placeholder="P1"/></label>
+          <label>PIPELINE<select name="pipeline" defaultValue="feature">{REQUIREMENT_PIPELINES.map((pipeline) => <option value={pipeline.id} key={pipeline.id}>{pipeline.label}</option>)}</select></label>
+          <label>优先级<select name="priority" defaultValue="P2">{REQUIREMENT_PRIORITY_OPTIONS.map((priority) => <option value={priority.value} key={priority.value}>{priority.label}</option>)}</select></label>
         </div>
-        <label>原始 URL<input name="link" placeholder="https://..."/></label>
-        <div className="fields">
-          <label>External ID<input name="externalId"/></label>
-          <label>External Status<input name="externalStatus"/></label>
+        <div className="metadata-editor">
+          {metadataKeys.map((key, index) => {
+            const definition = REQUIREMENT_METADATA_DEFINITIONS.find((item) => item.key === key)!;
+            return <div className="metadata-row" key={`${key}-${index}`}>
+              <label>Metadata
+                <select name="metadataKey" value={key} onChange={(event) => changeMetadata(index, event.target.value as RequirementMetadataKey)}>
+                  {REQUIREMENT_METADATA_DEFINITIONS.map((option) => <option
+                    value={option.key}
+                    key={option.key}
+                    disabled={option.key !== key && metadataKeys.includes(option.key)}
+                  >{option.label}</option>)}
+                </select>
+              </label>
+              <label>{definition.label}
+                <input name="metadataValue" type={definition.inputType} placeholder={definition.placeholder}/>
+              </label>
+              <button className="icon-button metadata-remove" type="button" aria-label={`删除${definition.label}`} onClick={() => removeMetadata(index)}><Trash2 size={16}/></button>
+            </div>;
+          })}
+          <button className="metadata-add" type="button" onClick={addMetadata} disabled={metadataKeys.length >= REQUIREMENT_METADATA_DEFINITIONS.length}><Plus size={14}/>添加 metadata</button>
         </div>
         <div className="dialog-actions">
           <button className="button secondary" type="button" onClick={() => dialogRef.current?.close()}>取消</button>

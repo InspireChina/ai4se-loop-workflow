@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { tsImport } from 'tsx/esm/api';
 import { readFile } from 'node:fs/promises';
+import { relative, resolve } from 'node:path';
 
 function fail(message) {
   process.stderr.write(`loop-agent: ${message}\n`);
@@ -23,6 +24,17 @@ if (!hasFlowContext && !hasInternalContext) {
 
 const rawArgs = process.argv.slice(2);
 
+function assertAgentTemporaryFile(path, argument) {
+  const temporaryDirectory = process.env.LOOP_AGENT_TMP_DIR;
+  if (!temporaryDirectory) return;
+  const resolvedDirectory = resolve(temporaryDirectory);
+  const resolvedPath = resolve(path);
+  const relation = relative(resolvedDirectory, resolvedPath);
+  if (!relation || relation.startsWith('..') || resolve(resolvedDirectory, relation) !== resolvedPath) {
+    throw new Error(`${argument} 必须读取 $LOOP_AGENT_TMP_DIR 内的文件：${resolvedDirectory}`);
+  }
+}
+
 try {
   const args = [];
   for (let index = 0; index < rawArgs.length; index += 1) {
@@ -35,6 +47,7 @@ try {
     if (!path || path.startsWith('--')) {
       throw new Error(`${argument} 缺少文件路径`);
     }
+    assertAgentTemporaryFile(path, argument);
     const content = await readFile(path, 'utf8');
     if (content.length > 100_000) {
       throw new Error(`${argument} 文件超过 100000 字符`);

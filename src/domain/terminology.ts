@@ -28,7 +28,7 @@ const agentLabels: Record<string, string> = {
 
 const itemTypeLabels: Record<string, string> = {
   feature: '功能需求',
-  bug: '缺陷',
+  bug: 'BUG',
   tech: '技术改进',
   intake: '待梳理',
   other: '其他',

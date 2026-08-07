@@ -198,7 +198,7 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
       : profile.draftType === 'analysis'
         ? 'context|impact|decision|contract|finish'
         : profile.draftType === 'development'
-          ? 'context|evidence|review|input|finish'
+          ? 'context|evidence|review|commit|input|finish'
           : profile.draftType === 'verification'
             ? 'context|plan|execute|evidence|input|finish'
             : profile.draftType === 'review'
@@ -237,7 +237,7 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
       ? [`- ${profile.namespace} 命令统一返回 \`COMMAND RESULT\`；继续当前阶段时读取 \`NEXT\`，阶段切换时读取 \`NEXT WORK PACKET\`。`]
       : []),
     '- 草稿命令可以反复增加、修改或删除内容，不会推进业务状态。',
-    '- 长文本参数可从 `--text <内容>` 改为 `--text-file <UTF-8 文件路径>`；其他长文本参数同样支持对应的 `-file` 形式，Windows 上应优先使用。',
+    '- 长文本参数必须写入 `$LOOP_AGENT_TMP_DIR` 指向的工作区 `.tmp/loop-<run-id>/agent-<execution-id>` 目录，再使用 `--text-file <UTF-8 文件路径>`；其他长文本参数同样支持对应的 `-file` 形式。不要把临时文件写入源码目录或提交到 Git；本次 Loop Run 结束后 Harness 会统一清理整个 Run 临时目录。',
     '- 只有成功执行下列终止命令，当前工作才算提交：',
     ...profile.terminalActions.map((action) => `  - \`${command} ${terminalActionUsage(action)}\``),
     '- 普通最终回复、Markdown 代码块和自由文本不会推进流程。终止命令成功后，只需简短结束本轮。',

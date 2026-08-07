@@ -981,7 +981,9 @@ test('exposes the same execution-scoped protocol through the cross-platform Node
   assert.match(rejected.stderr, /缺少 Reported Intent/);
 
   const directory = mkdtempSync(join(tmpdir(), 'loop-agent-command-'));
+  const outsideDirectory = mkdtempSync(join(tmpdir(), 'loop-agent-command-outside-'));
   try {
+    env.LOOP_AGENT_TMP_DIR = directory;
     const goalPath = join(directory, 'intent.txt');
     writeFileSync(goalPath, '从 UTF-8 文件恢复一段较长的业务意图');
     const fileResult = spawnSync(
@@ -1003,8 +1005,26 @@ test('exposes the same execution-scoped protocol through the cross-platform Node
       await command(active.executionId, active.token!, ['requirement-context', 'status']),
       /从 UTF-8 文件恢复一段较长的业务意图/,
     );
+
+    const outsidePath = join(outsideDirectory, 'outside.txt');
+    writeFileSync(outsidePath, '不能从当前 Agent 临时目录之外读取');
+    const outsideResult = spawnSync(
+      process.execPath,
+      [
+        join(process.cwd(), 'scripts', 'loop', 'loop-agent.mjs'),
+        'requirement-context', 'intent', 'set', '--text-file', outsidePath,
+      ],
+      {
+        cwd: process.env.LOOP_WORKSPACE_ROOT_OVERRIDE,
+        env,
+        encoding: 'utf8',
+      },
+    );
+    assert.equal(outsideResult.status, 1);
+    assert.match(outsideResult.stderr, /必须读取 \$LOOP_AGENT_TMP_DIR 内的文件/);
   } finally {
     rmSync(directory, { recursive: true, force: true });
+    rmSync(outsideDirectory, { recursive: true, force: true });
   }
 });
 
@@ -1039,6 +1059,8 @@ test('story splitter help explains business units, source coverage, dependencies
   assert.match(revisionHelp, /不会自动迁移来源、顺序或依赖/);
 
   const finishHelp = await command(active.executionId, active.token!, ['help', 'finish']);
+  assert.match(finishHelp, /\$LOOP_AGENT_TMP_DIR/);
+  assert.match(finishHelp, /Loop Run 结束后 Harness 会统一清理/);
   assert.match(finishHelp, /1 至 50 个有效交付单元/);
   assert.match(finishHelp, /交付规划 Agent 不向用户提问/);
   assert.match(finishHelp, /PLANNING BASIS.*DELIVERY UNITS.*COVERAGE & ORDER.*FINALIZE/s);

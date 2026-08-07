@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { AlertTriangle, ArrowRight, CircleDot } from 'lucide-react';
 import { listPipeline, listTasks } from '../src/application/tasks';
 import { agentLabel, statusLabel, terminologyText } from '../src/domain/terminology';
+import { requirementPriorityLabel } from '../src/domain/requirement-priority';
 
 export const dynamic = 'force-dynamic';
 
@@ -31,6 +32,6 @@ export default async function Home() {
       const requirementAnswers = task.run_state === 'waiting_for_answers' && task.current_subagent === 'backlog-agent';
       const needsAttention = requirementAnswers || runtimeLane || answerLane || blockedLane;
       const label = requirementAnswers ? '等待需求澄清' : runtimeLane ? runtimeLane.current_agent === 'test-agent' ? '等待验证协助' : '等待运行信息' : answerLane ? '等待关键决策' : blockedLane ? `${blockedLane.lane === 'analysis' ? '交付分析' : '开发验证'}阻塞` : statusLabel(task.agile_status);
-      return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}><span><strong>{task.title}</strong><small>{task.task_id} · {task.priority || '未定级'}</small></span><span className={`badge ${task.agile_status === 'blocked' || needsAttention ? 'amber' : 'blue'}`}><CircleDot size={13}/>{label}</span><span>{phase(task)}</span><span>{terminologyText(task.next_step)}</span></Link>;
+      return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}><span><strong>{task.title}</strong><small>{task.task_id} · 优先级 {requirementPriorityLabel(task.priority)}</small></span><span className={`badge ${task.agile_status === 'blocked' || needsAttention ? 'amber' : 'blue'}`}><CircleDot size={13}/>{label}</span><span>{phase(task)}</span><span>{terminologyText(task.next_step)}</span></Link>;
     })}</div></section></>;
 }

@@ -98,6 +98,7 @@ prototype/              历史资料，不参与运行
 | 版本化最小单元契约 | SQLite `story_specs` |
 | Test 失败与恢复证据 | SQLite `documents` / `recovery_items` |
 | Agent 执行尝试与副作用收据 | SQLite `execution_attempts` / `execution_receipts` |
+| Agent 长文本命令临时文件 | 工作区 `.tmp/loop-<run-id>/agent-<execution-id>`；Loop Run 结束时统一清理 |
 | 项目 Agent Prompt、临时 Prompt candidate 与 Memory revision 历史 | SQLite `agent_profiles` / `agent_prompts` / `agent_prompt_candidates` / `agent_memory_versions` |
 | 当前实际 Agent 文件 | `data/<repo-hash>/agent-runtime/agents/<agent>/PROMPT.md` / `MEMORY.md` |
 | 演化观察与评估 | SQLite `agent_observations` / `agent_evolution_runs` 与 Runtime daily memory |

@@ -8,8 +8,8 @@ import {
 } from './development-workflow';
 
 test('defines the Development phase order and work packets in one catalog', () => {
-  assert.deepEqual(DEVELOPMENT_PHASE_ORDER, ['implement', 'review', 'developer_verify', 'finalize']);
-  assert.equal(DEVELOPMENT_PHASE_SEQUENCE, 'IMPLEMENT → REVIEW → DEVELOPER VERIFY → FINALIZE');
+  assert.deepEqual(DEVELOPMENT_PHASE_ORDER, ['implement', 'review', 'developer_verify', 'commit', 'finalize']);
+  assert.equal(DEVELOPMENT_PHASE_SEQUENCE, 'IMPLEMENT → REVIEW → DEVELOPER VERIFY → COMMIT → FINALIZE');
   for (const phase of DEVELOPMENT_PHASE_ORDER) {
     const packet = DEVELOPMENT_WORKFLOW[phase];
     assert.ok(packet.title);
@@ -24,6 +24,7 @@ test('defines the Development phase order and work packets in one catalog', () =
     'implementation implement complete',
     'implementation review complete',
     'implementation verify complete',
+    'implementation commit complete',
     'implementation validate',
     'implementation complete',
   ]);

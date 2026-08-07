@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { deliveryUnitContractSchema } from '../domain/delivery-unit';
+import { parseRequirementMetadata, type RequirementMetadataKey } from '../domain/requirement-metadata';
 import { AgentResultContractError, assertDeliverySpecDecisionCoverage, deliverySpecSchema } from '../domain/agent-result';
 import { agentCommandProfile } from '../domain/agent-command-profile';
 import { databaseConnection, paths } from '../infrastructure/database';
@@ -59,6 +60,14 @@ export type Task = TaskState & {
   completed_at: string | null;
 };
 export type TaskWithLanes = Task & { lanes: TaskLane[] };
+
+export type RequirementMetadata = {
+  task_id: string;
+  metadata_key: RequirementMetadataKey;
+  metadata_value: string;
+  created_at: string;
+  updated_at: string;
+};
 
 export type Story = {
   task_id: string;
@@ -378,6 +387,12 @@ export async function getTask(taskId: string) {
   const db = await databaseConnection();
   const task = fetchTask(db, taskId);
   if (!task) return null;
+  const metadata = db.prepare(`
+    SELECT task_id, metadata_key, metadata_value, created_at, updated_at
+    FROM requirement_metadata
+    WHERE task_id = ?
+    ORDER BY created_at, metadata_key
+  `).all(taskId) as RequirementMetadata[];
   const storyRows = db.prepare('SELECT * FROM stories WHERE task_id = ? ORDER BY story_index')
     .all(taskId) as Omit<Story, 'context_links' | 'depends_on_story_indexes'>[];
   const contextLinks = db.prepare(`
@@ -449,6 +464,7 @@ export async function getTask(taskId: string) {
   const events = db.prepare('SELECT * FROM task_events WHERE task_id = ? ORDER BY created_at DESC, rowid DESC').all(taskId) as Event[];
   return {
     task,
+    metadata,
     lanes,
     stories,
     deliverySpecs,
@@ -623,6 +639,10 @@ const createTaskSchema = z.object({
   link: z.string().trim().optional().nullable(),
   externalId: z.string().trim().optional().nullable(),
   externalStatus: z.string().trim().optional().nullable(),
+  metadata: z.array(z.object({
+    key: z.string(),
+    value: z.string(),
+  })).optional().default([]),
   itemType: z.enum(['feature', 'bug', 'tech', 'intake', 'other']).default('feature'),
   priority: z.string().trim().optional().nullable(),
   actor: z.enum(['human']).default('human'),
@@ -632,6 +652,7 @@ const createTaskSchema = z.object({
 
 export async function createTask(input: unknown) {
   const value = createTaskSchema.parse(input);
+  const metadata = parseRequirementMetadata(value.metadata);
   const description = value.description?.trim() || null;
   const link = value.link || null;
   const taskId = `REQ-${randomUUID()}`;
@@ -667,6 +688,11 @@ export async function createTask(input: unknown) {
         work_dir, blocked_reason, last_actor
       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, '', ?, ?)
     `).run(taskId, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, value.priority || null, value.status, currentSubagent, '新建需求，等待 Loop 梳理', state.blocked_reason, value.actor);
+    const insertMetadata = db.prepare(`
+      INSERT INTO requirement_metadata(task_id, metadata_key, metadata_value)
+      VALUES (?, ?, ?)
+    `);
+    for (const item of metadata) insertMetadata.run(taskId, item.key, item.value);
     const task = fetchTask(db, taskId);
     if (!task) throw new Error('需求创建失败');
     ensureTaskLanesInDb(db, task);

@@ -122,6 +122,8 @@ function summarizeCommand(command: string) {
     if (normalized.includes(' implementation risk ')) return '更新残余风险';
     if (normalized.includes(' implementation runtime-input ')) return '更新运行信息请求';
     if (normalized.includes(' implementation recovery ')) return '更新恢复事项';
+    if (normalized.includes(' implementation commit complete')) return '确认代码提交步骤';
+    if (normalized.includes(' implementation commit reopen-verification')) return '返回开发者验证';
     if (normalized.includes(' implementation validate')) return '校验开发实现草稿';
     if (normalized.includes(' implementation request-input')) return '提交运行信息请求';
     if (normalized.includes(' implementation complete')) return '完成开发实现';

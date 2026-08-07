@@ -199,6 +199,35 @@ test('always creates a new UUID requirement without title, URL, external ID, or 
   assert.equal((await getTask(thirdId))?.task.agile_status, 'backlog');
 });
 
+test('persists predefined metadata independently from legacy task columns', async () => {
+  const { createTask, getTask } = await import('./tasks');
+  const taskId = await createTask({
+    title: 'Requirement metadata',
+    metadata: [{
+      key: 'source.reference_url',
+      value: 'https://example.test/reference/metadata',
+    }, {
+      key: 'tracking.requirement_card_id',
+      value: 'CARD-2026-08',
+    }],
+  });
+
+  const detail = await getTask(taskId);
+  assert.ok(detail);
+  assert.equal(detail.task.link, null);
+  assert.equal(detail.task.external_id, null);
+  assert.deepEqual(detail.metadata.map((item) => ({
+    key: item.metadata_key,
+    value: item.metadata_value,
+  })), [{
+    key: 'source.reference_url',
+    value: 'https://example.test/reference/metadata',
+  }, {
+    key: 'tracking.requirement_card_id',
+    value: 'CARD-2026-08',
+  }]);
+});
+
 test('lists only completed Tasks in completion order while preserving terminal Task details', async () => {
   const { getTask, listCompletedTasks, listTasks } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
