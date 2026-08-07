@@ -1,22 +1,20 @@
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
-import { AlertTriangle, Check, CheckCircle2, Clock3, FileText, GitBranch } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Check, CheckCircle2, Clock3, FileText, GitBranch } from 'lucide-react';
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
 import { getTaskContextChat } from '../../../src/application/task-context-chat';
 import { deliverySpecSchema } from '../../../src/domain/agent-result';
-import { agentLabel, confirmationKindLabel, deliveryUnitLabel, documentKindLabel, feedbackBatchStatusLabel, feedbackWorkTypeLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
+import { agentLabel, deliveryUnitLabel, documentKindLabel, feedbackBatchStatusLabel, feedbackWorkTypeLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
 import { ArtifactDocument } from './artifact-document';
 import { TaskAutoRefresh } from './task-auto-refresh';
 import { TaskContextChat } from './task-context-chat';
 import {
   acknowledgeClosureAction,
   addStoryAction,
-  answerQuestionAction,
   answerRuntimeInputAction,
   cancelTaskAction,
   releaseBlockAction,
-  submitClarificationAnswersAction,
   submitRuntimeInputsAction,
 } from '../../actions';
 
@@ -115,6 +113,8 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const pipeline = await pipelineForTask(taskId);
   const contextChat = await getTaskContextChat(taskId);
   const unansweredQuestions = questions.filter((question) => question.status === 'pending');
+  const agentHandledDecisions = questions.filter((question) => question.decision_authority === 'agent' && ['answered', 'resolved'].includes(question.status));
+  const userDecisions = questions.filter((question) => question.decision_authority === 'human' && ['answered', 'resolved'].includes(question.status));
   const waitingForControlAnswers = task.run_state === 'waiting_for_answers'
     && (task.current_subagent === 'backlog-agent' || task.current_subagent === 'repro-agent' || task.current_subagent === 'feedback-agent');
   const waitingForAnswers = waitingForControlAnswers || analysisLane.status === 'waiting_for_answers';
@@ -226,6 +226,27 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       </article>)}
     </section>
 
+    <section className="task-decision-entry-section" id="decision-alignment">
+      <div className="section-head">
+        <h2>决策对齐</h2>
+        <small>任务级决策入口</small>
+      </div>
+      <div className="decision-alignment-entry card">
+        <span className="decision-alignment-entry-icon"><GitBranch size={18}/></span>
+        <div>
+          <p className="eyebrow">DECISION ALIGNMENT · LIVE</p>
+          <strong>查看任务级决策清单</strong>
+          <small>集中查看并处理需要你决定、Agent 已关闭和历史失效的决策节点。</small>
+          <div className="decision-alignment-entry-counts">
+            <span className="amber">需要我决策 {unansweredQuestions.length}</span>
+            <span>Agent 已处理 {agentHandledDecisions.length}</span>
+            <span className="green">用户已决定 {userDecisions.length}</span>
+          </div>
+        </div>
+        <Link href={`/decisions?taskId=${encodeURIComponent(task.task_id)}`} className="button secondary">打开决策对齐 <ArrowRight size={14}/></Link>
+      </div>
+    </section>
+
     <div className="task-detail-grid">
       <div className="task-main-column">
         <section className="task-section">
@@ -329,9 +350,9 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                   <div className="answer"><b>{parsed.unit.title}</b><br/>{parsed.unit.actor} 在 {parsed.unit.trigger} 时，{parsed.unit.observableOutcome}<br/><small>验收语义：{parsed.unit.acceptance}</small></div>
                   <div className="answer"><b>分析结论：</b>{parsed.summary}</div>
                   <pre>{parsed.impacts.map((item) =>
-                    `${item.key} · ${item.disposition} · ${item.area}\n${item.finding}\n证据：${item.evidence}${item.decisionKey ? `\n关联决策：${item.decisionKey}` : ''}`).join('\n\n')}</pre>
+                    `${item.disposition} · ${item.area}\n${item.finding}\n证据：${item.evidence}`).join('\n\n')}</pre>
                   {!!parsed.decisions.length && <pre>{parsed.decisions.map((item) => [
-                    `${item.key} · ${item.type} · ${item.title}`,
+                    `${item.type === 'business' ? '业务决策' : '技术决策'} · ${item.title}`,
                     item.status === 'resolved'
                       ? `已确定：${item.decision} · 权限 ${item.authority}${item.evidence ? `\n证据：${item.evidence}` : ''}`
                       : `等待用户决策：${item.question}`,
@@ -339,9 +360,9 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                   <div className="answer"><b>交付契约 · 实现方向：</b>{parsed.handoff.implementationGuidance}</div>
                   {!!parsed.handoff.guardrails.length && <small>保护约束：{parsed.handoff.guardrails.map((item) => item.content).join('；')}</small>}
                   <pre>{[
-                    `unit-acceptance · ${parsed.unit.acceptance}\nOracle: ${parsed.unit.observableOutcome}`,
+                    `${parsed.unit.acceptance}\nOracle: ${parsed.unit.observableOutcome}`,
                     ...parsed.handoff.verificationFocus.map((item) =>
-                      `${item.key} · ${item.expected}\nOracle: ${item.oracle}`),
+                      `${item.expected}\nOracle: ${item.oracle}`),
                   ].join('\n\n')}</pre>
                 </details>;
               })}
@@ -388,42 +409,6 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               <button className="button success">提交{lane.current_agent === 'test-agent' ? '验证协助' : `${lane.lane === 'analysis' ? '交付分析' : '开发验证'}运行信息`}并交回 {agentLabel(lane.current_agent)}</button>
             </form>;
           })}
-        </section>
-
-        <section className="task-section">
-          <div className="section-head">
-            <h2>人工决策</h2>
-            <small>{questions.length} 个问题</small>
-          </div>
-          <div className="question-list">
-            {questions.length === 0 ? <div className="card empty">当前没有待回答的业务或交付决策。</div> : questions.map((question) => <article className="question card" key={question.question_id}>
-              <div className="question-title">
-                <AlertTriangle size={18}/>
-                <div>
-                  <p className="eyebrow">{confirmationKindLabel(question.kind)} · {deliveryUnitLabel(question.story_index)}</p>
-                  <h3>{terminologyText(question.title)}</h3>
-                  {question.source_agent && <small>来源：{agentLabel(question.source_agent)}</small>}
-                </div>
-                <span className={`badge ${question.status === 'answered' || question.status === 'resolved' ? 'green' : 'amber'}`}>{question.status === 'resolved' ? '已纳入规格' : question.status === 'answered' ? '已回答' : '待回答'}</span>
-              </div>
-              <p>{terminologyText(question.question)}</p>
-              {question.why && <p className="muted">为什么问：{terminologyText(question.why)}</p>}
-              {question.recommendation && <div className="recommendation">推荐：{terminologyText(question.recommendation)}</div>}
-              {question.recommendation_reason && <p className="muted">推荐理由：{terminologyText(question.recommendation_reason)}</p>}
-              {question.alternatives_json && <pre>{(JSON.parse(question.alternatives_json) as { id: string; label: string; consequences: string[] }[]).map((option) => `${option.id} · ${option.label}${option.consequences.length ? `\n  ${option.consequences.join('\n  ')}` : ''}`).join('\n\n')}</pre>}
-              {question.depends_on_json && <p className="muted">依赖决策：{(JSON.parse(question.depends_on_json) as string[]).join('、')}</p>}
-              {question.answer ? <p className="answer"><b>你的答复：</b>{question.answer}</p> : <form action={answerQuestionAction}>
-                <input type="hidden" name="taskId" value={task.task_id}/>
-                <input type="hidden" name="questionId" value={question.question_id}/>
-                <textarea name="answer" required placeholder="填写产品或重大技术决策、边界或补充信息…"/>
-                <button className="button" type="submit">保存答复</button>
-              </form>}
-            </article>)}
-          </div>
-          {waitingForAnswers && unansweredQuestions.length === 0 && <form action={submitClarificationAnswersAction} className="release-block">
-            <input type="hidden" name="taskId" value={task.task_id}/>
-            <button className="button success">提交全部回答并交回 {agentLabel(waitingForControlAnswers ? task.current_subagent : 'analyst-agent')}</button>
-          </form>}
         </section>
 
         {(task.agile_status === 'ready_to_close' || closureAcknowledgements.length > 0) && <section className="task-section">

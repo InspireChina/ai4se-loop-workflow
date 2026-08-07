@@ -1,4 +1,11 @@
 import { agentResultSchema, deliverySpecSchema } from '../domain/agent-result';
+import {
+  DEVELOPMENT_PHASE_ORDER,
+  DEVELOPMENT_PHASE_SEQUENCE,
+  DEVELOPMENT_WORKFLOW,
+  developmentNormalCommandPath,
+  type DevelopmentPhase,
+} from '../domain/development-workflow';
 import { gitHead, gitWorkingTreeChanges } from '../infrastructure/git';
 import { databaseConnection, paths } from '../infrastructure/database';
 
@@ -145,6 +152,17 @@ function repositoryObservation() {
 }
 
 function state(db: Db, draft: DevelopmentDraftRow, execution: DevelopmentExecutionRow) {
+  const contract = db.prepare(`
+    SELECT workflow_phase, validated_change_seq,
+           review_result, review_summary, review_evidence
+    FROM development_drafts WHERE draft_id = ?
+  `).get(draft.draft_id) as {
+    workflow_phase: DevelopmentPhase;
+    validated_change_seq: number | null;
+    review_result: 'pass' | 'needs_changes' | null;
+    review_summary: string | null;
+    review_evidence: string | null;
+  };
   const criteria = db.prepare(`
     SELECT criterion_key, evidence, ordinal
     FROM development_criteria WHERE draft_id = ? ORDER BY ordinal, criterion_key
@@ -248,6 +266,7 @@ function state(db: Db, draft: DevelopmentDraftRow, execution: DevelopmentExecuti
     // saveDeliverySpec validates JSON before persistence; report the unreadable contract below.
   }
   return {
+    contract,
     criteria,
     checks,
     risks,
@@ -279,51 +298,72 @@ function activeRecoveryDeclarations(current: DevelopmentState) {
   return current.recovery.filter((item) => activeIds.has(item.recovery_id));
 }
 
+function implementationErrors(current: DevelopmentState) {
+  const errors: string[] = [];
+  if (!current.expectedCriteria.length) errors.push('当前交付单元没有可读取的已收敛交付规格验收标准');
+  const expectedKeys = new Set(current.expectedCriteria.map((item) => item.id));
+  const unknownKeys = current.criteria
+    .map((item) => item.criterion_key)
+    .filter((key) => !expectedKeys.has(key));
+  if (unknownKeys.length) errors.push(`验收证据引用了不存在的规格 key：${unknownKeys.join(', ')}`);
+  const missingKeys = current.expectedCriteria
+    .map((item) => item.id)
+    .filter((key) => !current.criteria.some((item) => item.criterion_key === key));
+  if (missingKeys.length) errors.push(`以下验收语义尚未证明：${missingKeys.join(', ')}`);
+  const declaredRecoveryIds = new Set(current.recovery.map((item) => item.recovery_id));
+  const missingRecoveries = current.activeRecoveries
+    .filter((item) => !declaredRecoveryIds.has(item.recovery_id));
+  if (missingRecoveries.length) {
+    errors.push(`以下活动恢复事项尚未声明处理：${missingRecoveries.map((item) => item.recovery_id).join(', ')}`);
+  }
+  if (current.runtimeInputs.some((item) => !item.answer)) {
+    errors.push('仍有未回答的运行信息请求，不能完成当前工作包');
+  }
+  return [...new Set(errors)];
+}
+
+function reviewErrors(current: DevelopmentState) {
+  const errors = [...implementationErrors(current)];
+  if (!current.contract.review_result) errors.push('缺少代码审查结论');
+  if (!current.contract.review_summary?.trim()) errors.push('缺少代码审查摘要');
+  if (!current.contract.review_evidence?.trim()) errors.push('缺少可定位的代码审查依据');
+  if (current.contract.review_result === 'needs_changes') {
+    errors.push('代码审查仍有阻塞修改；必须回流 IMPLEMENT 修正并重新审查');
+  }
+  return [...new Set(errors)];
+}
+
+function developerVerificationErrors(current: DevelopmentState) {
+  const errors = [...reviewErrors(current)];
+  const checks = completionChecks(current);
+  if (!checks.length) {
+    errors.push(current.activeRecoveries.length
+      ? '当前处于恢复修正周期，至少需要在本次 execution 重新执行并记录一条真实成功检查'
+      : '至少需要记录一条由 Application 捕获的真实成功检查');
+  }
+  const supersededChecks = checks.filter((item) =>
+    current.capturedCommands.some((command) =>
+      command.commandHash === item.command_hash
+      && (
+        item.source_execution_id !== current.executionId
+        || command.receiptKey > item.source_receipt_key
+      )));
+  if (supersededChecks.length) {
+    errors.push(
+      '以下关键检查之后又执行了同一命令，必须选择最新结果重新记录：'
+      + supersededChecks.map((item) => item.check_key).join(', '),
+    );
+  }
+  return [...new Set(errors)];
+}
+
 function validationErrors(
   current: DevelopmentState,
   terminal: 'complete' | 'request-input' | 'fail' | null = null,
 ) {
-  const errors: string[] = [];
-  if (terminal === 'complete' || terminal === null) {
-    if (!current.expectedCriteria.length) errors.push('当前交付单元没有可读取的已收敛交付规格验收标准');
-    const expectedKeys = new Set(current.expectedCriteria.map((item) => item.id));
-    const unknownKeys = current.criteria
-      .map((item) => item.criterion_key)
-      .filter((key) => !expectedKeys.has(key));
-    if (unknownKeys.length) errors.push(`验收证据引用了不存在的规格 key：${unknownKeys.join(', ')}`);
-    const missingKeys = current.expectedCriteria
-      .map((item) => item.id)
-      .filter((key) => !current.criteria.some((item) => item.criterion_key === key));
-    if (missingKeys.length) errors.push(`以下验收语义尚未证明：${missingKeys.join(', ')}`);
-    const checks = completionChecks(current);
-    if (!checks.length) {
-      errors.push(current.activeRecoveries.length
-        ? '当前处于恢复修正周期，至少需要在本次 execution 重新执行并记录一条真实成功检查'
-        : '至少需要记录一条由 Application 捕获的真实成功检查');
-    }
-    const supersededChecks = checks.filter((item) =>
-      current.capturedCommands.some((command) =>
-        command.commandHash === item.command_hash
-        && (
-          item.source_execution_id !== current.executionId
-          || command.receiptKey > item.source_receipt_key
-        )));
-    if (supersededChecks.length) {
-      errors.push(
-        `以下关键检查之后又执行了同一命令，必须选择最新结果重新记录：`
-        + supersededChecks.map((item) => item.check_key).join(', '),
-      );
-    }
-    const declaredRecoveryIds = new Set(current.recovery.map((item) => item.recovery_id));
-    const missingRecoveries = current.activeRecoveries
-      .filter((item) => !declaredRecoveryIds.has(item.recovery_id));
-    if (missingRecoveries.length) {
-      errors.push(`以下活动恢复事项尚未声明处理：${missingRecoveries.map((item) => item.recovery_id).join(', ')}`);
-    }
-    if (current.runtimeInputs.some((item) => !item.answer)) {
-      errors.push('仍有未回答的运行信息请求，不能完成开发');
-    }
-  }
+  const errors = terminal === 'complete' || terminal === null
+    ? developerVerificationErrors(current)
+    : [];
   if (terminal === 'request-input') {
     const unanswered = current.runtimeInputs.filter((item) => !item.answer);
     if (!unanswered.length) errors.push('没有待用户补充的运行信息，不能 request-input');
@@ -331,17 +371,173 @@ function validationErrors(
   return [...new Set(errors)];
 }
 
+type DevelopmentReadiness = {
+  status: 'not_ready' | 'input_required' | 'structurally_ready';
+  remaining: string[];
+  nextCommand: string | null;
+};
+
+function developmentReadiness(
+  current: DevelopmentState,
+  phase: DevelopmentPhase,
+): DevelopmentReadiness {
+  if (current.runtimeInputs.some((item) => !item.answer) && phase !== 'finalize') {
+    return {
+      status: 'input_required',
+      remaining: [],
+      nextCommand: 'implementation request-input',
+    };
+  }
+  const remaining = phase === 'implement'
+    ? implementationErrors(current)
+    : phase === 'review'
+      ? reviewErrors(current)
+      : developerVerificationErrors(current);
+  if (remaining.length) return { status: 'not_ready', remaining, nextCommand: null };
+  return {
+    status: 'structurally_ready',
+    remaining: [],
+    nextCommand: phase === 'finalize'
+      ? 'implementation validate'
+      : DEVELOPMENT_WORKFLOW[phase].submit,
+  };
+}
+
+function renderReadiness(current: DevelopmentState, phase: DevelopmentPhase) {
+  const readiness = developmentReadiness(current, phase);
+  const definition = DEVELOPMENT_WORKFLOW[phase];
+  const lines = ['## READINESS', '', `- Status: ${readiness.status}`];
+  if (readiness.status === 'not_ready') {
+    lines.push(
+      '',
+      '## REMAINING REQUIREMENTS',
+      '',
+      ...readiness.remaining.map((item, index) => `${index + 1}. ${item}`),
+      '',
+      '继续当前工作包；补齐以上缺口后再查看 `implementation status`。',
+    );
+    return lines;
+  }
+  if (readiness.status === 'input_required') {
+    lines.push('', '## SUBMIT INPUT REQUEST', '', '`implementation request-input`');
+    return lines;
+  }
+  lines.push(
+    '',
+    '## REVIEW BEFORE SUBMIT',
+    '',
+    ...definition.reviewBeforeSubmit.map((item) => `- ${item}`),
+    '',
+    phase === 'finalize' ? '## VALIDATE' : '## SUBMIT',
+    '',
+    `\`${readiness.nextCommand}\``,
+  );
+  return lines;
+}
+
+function renderWorkPacket(current: DevelopmentState, phase: DevelopmentPhase) {
+  const definition = DEVELOPMENT_WORKFLOW[phase];
+  return [
+    '# NEXT WORK PACKET',
+    '',
+    '## PHASE',
+    '',
+    `${definition.title} · ${phase}`,
+    '',
+    '## OBJECTIVE',
+    '',
+    definition.objective,
+    '',
+    '## REQUIRED',
+    '',
+    definition.required,
+    '',
+    '## DO NOT',
+    '',
+    definition.prohibited,
+    '',
+    '## AVAILABLE COMMANDS',
+    '',
+    ...definition.commands.map((command) => `- \`${command}\``),
+    '',
+    ...renderReadiness(current, phase),
+  ].join('\n');
+}
+
+type DevelopmentCommandOutcome =
+  | 'state_restored'
+  | 'accepted'
+  | 'phase_completed'
+  | 'validation_passed'
+  | 'waiting_for_human'
+  | 'completed'
+  | 'failed'
+  | 'already_submitted';
+
+function renderCommandResult(input: {
+  command: string;
+  outcome: DevelopmentCommandOutcome;
+  details?: string[];
+}) {
+  return [
+    '# COMMAND RESULT',
+    '',
+    `- Command: \`${input.command}\``,
+    `- Outcome: ${input.outcome}`,
+    ...(input.details || []).map((detail) => `- ${detail}`),
+  ].join('\n');
+}
+
+function renderContinue(command: string, changed: string, current: DevelopmentState) {
+  const phase = current.contract.workflow_phase;
+  const readiness = developmentReadiness(current, phase);
+  const definition = DEVELOPMENT_WORKFLOW[phase];
+  const next = ['# NEXT', '', `- Phase: ${phase}`, `- Readiness: ${readiness.status}`];
+  if (readiness.status === 'not_ready') {
+    next.push(
+      '- Action: continue_current_work_packet',
+      '- Remaining:',
+      ...readiness.remaining.map((item) => `  - ${item}`),
+      '- Refresh: `implementation status`',
+    );
+  } else if (readiness.status === 'input_required') {
+    next.push('- Action: `implementation request-input`');
+  } else {
+    next.push(
+      '- Action: review_before_submit',
+      '- Review:',
+      ...definition.reviewBeforeSubmit.map((item) => `  - ${item}`),
+      `- ${phase === 'finalize' ? 'Validate' : 'Submit'}: \`${readiness.nextCommand}\``,
+    );
+  }
+  return [
+    renderCommandResult({ command, outcome: 'accepted', details: [`Changed: ${changed}`] }),
+    '',
+    ...next,
+  ].join('\n');
+}
+
 function renderStatus(draft: DevelopmentDraftRow, current: DevelopmentState) {
-  const errors = validationErrors(current);
   const checks = completionChecks(current);
   const recoveryDeclarations = activeRecoveryDeclarations(current);
   const lines = [
+    renderCommandResult({
+      command: 'implementation status',
+      outcome: 'state_restored',
+      details: [`Phase: ${current.contract.workflow_phase}`],
+    }),
+    '',
+    renderWorkPacket(current, current.contract.workflow_phase),
+    '',
+    '# CURRENT DRAFT',
+    '',
     `开发实现草稿 v${draft.draft_version} · 变更 ${draft.change_seq}`,
     '',
     '仓库观察（仅供调查，不参与完成校验）：',
     `当前 HEAD：${current.repository.head ? current.repository.head.slice(0, 12) : '不可读'}`,
     `当前未提交项：${current.repository.changes.length}`,
     `验收证据：${current.criteria.length}/${current.expectedCriteria.length}`,
+    `代码审查：${current.contract.review_result || '未记录'}`,
     `关键检查：${checks.length}${current.activeRecoveries.length ? `（本次 execution；草稿共 ${current.checks.length}）` : ''}`,
     `风险：${current.risks.length}`,
     `运行信息：${current.runtimeInputs.length}（已回答 ${current.runtimeInputs.filter((item) => item.answer).length}）`,
@@ -371,6 +567,15 @@ function renderStatus(draft: DevelopmentDraftRow, current: DevelopmentState) {
   if (current.deliveryConstraints.length) {
     lines.push('', '交付影响与保护约束：', ...current.deliveryConstraints.map((item) => `- ${item}`));
   }
+  if (current.contract.review_summary) {
+    lines.push(
+      '',
+      '代码审查：',
+      `- 结论：${current.contract.review_result}`,
+      `- 摘要：${current.contract.review_summary}`,
+      `- 依据：${current.contract.review_evidence}`,
+    );
+  }
   if (current.activeRecoveries.length) {
     lines.push('', '活动恢复事项（必须逐字复用 RECOVERY id 声明处理）：');
     for (const item of current.activeRecoveries) {
@@ -381,11 +586,6 @@ function renderStatus(draft: DevelopmentDraftRow, current: DevelopmentState) {
       );
     }
     lines.push('- 恢复修正周期中的关键检查必须在本次 execution 重新执行并记录；旧检查只作为历史，不计入完成门槛。');
-  }
-  if (errors.length) {
-    lines.push('', '完成路径仍需处理：', ...errors.map((item, index) => `${index + 1}. ${item}`));
-  } else {
-    lines.push('', '完成路径的结构与机器事实校验已通过。');
   }
   return lines.join('\n');
 }
@@ -400,8 +600,14 @@ function renderArtifact(current: DevelopmentState) {
     '',
     ...current.expectedCriteria.map((criterion) => {
       const coverage = current.criteria.find((item) => item.criterion_key === criterion.id);
-      return `- **${criterion.id}** ${criterion.description}：${coverage ? `已证明 — ${coverage.evidence}` : '未证明'}`;
+      return `- ${criterion.description}：${coverage ? `已证明 — ${coverage.evidence}` : '未证明'}`;
     }),
+    '',
+    '## 代码审查',
+    '',
+    `- 结论：${current.contract.review_result === 'pass' ? '通过' : '需要修改'}`,
+    `- 摘要：${current.contract.review_summary || '未记录'}`,
+    `- 依据：${current.contract.review_evidence || '未记录'}`,
     '',
     '## 开发者关键检查',
     '',
@@ -416,7 +622,7 @@ function renderArtifact(current: DevelopmentState) {
   if (recoveryDeclarations.length) {
     lines.push('', '## 恢复事项处理', '');
     for (const item of recoveryDeclarations) {
-      lines.push(`- **${item.recovery_id}**：${item.summary}（证据：${item.evidence}）`);
+      lines.push(`- ${item.summary}（证据：${item.evidence}）`);
     }
   }
   return lines.join('\n');
@@ -481,6 +687,17 @@ function terminalSubmit(
 ) {
   assertViewed(draft, execution.execution_id);
   const current = state(db, draft, execution);
+  if (action === 'complete') {
+    if (current.contract.workflow_phase !== 'finalize') {
+      throw new Error(`complete 只能在 finalize 阶段执行；当前阶段是 ${current.contract.workflow_phase}`);
+    }
+    if (current.contract.validated_change_seq !== draft.change_seq) {
+      throw new Error('当前开发草稿版本尚未通过 validate，或验证后又发生了编辑');
+    }
+  }
+  if (action === 'request-input' && current.contract.workflow_phase === 'finalize') {
+    throw new Error('FINALIZE 不接受新的运行信息请求；请先重新打开 DEVELOPER VERIFY');
+  }
   const errors = validationErrors(current, action);
   if (errors.length) {
     throw new Error(`开发草稿不能执行 ${action}：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
@@ -503,11 +720,114 @@ function terminalSubmit(
       WHERE draft_id = ?
     `).run(status, action, execution.execution_id, draft.draft_id);
   })();
-  return action === 'complete'
-    ? '开发实现结果已提交。'
-    : action === 'request-input'
-      ? '运行信息请求已提交，等待用户补充。'
-      : '开发失败结果已提交。';
+  return [
+    renderCommandResult({
+      command: `implementation ${action}`,
+      outcome: action === 'complete'
+        ? 'completed'
+        : action === 'request-input'
+          ? 'waiting_for_human'
+          : 'failed',
+    }),
+    '',
+    '# NEXT',
+    '',
+    '- Owner: Application',
+    `- Agent Action: ${action === 'complete' || action === 'fail' ? 'end_execution' : 'wait_for_human'}`,
+  ].join('\n');
+}
+
+function transitionPhase(input: {
+  db: Db;
+  draft: DevelopmentDraftRow;
+  execution: DevelopmentExecutionRow;
+  current: DevelopmentState;
+  from: DevelopmentPhase;
+  to: DevelopmentPhase;
+}) {
+  const { db, draft, execution, current, from, to } = input;
+  if (current.contract.workflow_phase !== from) {
+    throw new Error(`当前阶段是 ${current.contract.workflow_phase}，不能提交 ${from}`);
+  }
+  const errors = from === 'implement'
+    ? implementationErrors(current)
+    : from === 'review'
+      ? reviewErrors(current)
+      : developerVerificationErrors(current);
+  if (errors.length) {
+    throw new Error(`${from} 阶段不能完成：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+  }
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE development_drafts
+      SET workflow_phase = ?, validated_change_seq = NULL
+      WHERE draft_id = ?
+    `).run(to, draft.draft_id);
+    db.prepare(`
+      INSERT INTO development_phase_transitions(
+        draft_id, from_phase, to_phase, reason, execution_id
+      ) VALUES(?, ?, ?, ?, ?)
+    `).run(
+      draft.draft_id,
+      from,
+      to,
+      `${from} 阶段产物校验通过`,
+      execution.execution_id,
+    );
+    touchDraft(db, draft.draft_id);
+  })();
+  const next = state(db, draft, execution);
+  return [
+    renderCommandResult({
+      command: DEVELOPMENT_WORKFLOW[from].submit,
+      outcome: 'phase_completed',
+      details: [`From: ${from}`, `To: ${to}`],
+    }),
+    '',
+    renderWorkPacket(next, to),
+  ].join('\n');
+}
+
+function reopenPhase(input: {
+  db: Db;
+  draft: DevelopmentDraftRow;
+  execution: DevelopmentExecutionRow;
+  command: string;
+  from: DevelopmentPhase;
+  to: DevelopmentPhase;
+  reason: string;
+}) {
+  const { db, draft, execution, command, from, to, reason } = input;
+  const current = state(db, draft, execution);
+  if (current.contract.workflow_phase !== from) {
+    throw new Error(`只有 ${from} 阶段可以执行该回流；当前阶段是 ${current.contract.workflow_phase}`);
+  }
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE development_drafts
+      SET workflow_phase = ?, validated_change_seq = NULL,
+          review_result = CASE WHEN ? = 'implement' THEN NULL ELSE review_result END,
+          review_summary = CASE WHEN ? = 'implement' THEN NULL ELSE review_summary END,
+          review_evidence = CASE WHEN ? = 'implement' THEN NULL ELSE review_evidence END
+      WHERE draft_id = ?
+    `).run(to, to, to, to, draft.draft_id);
+    db.prepare(`
+      INSERT INTO development_phase_transitions(
+        draft_id, from_phase, to_phase, reason, execution_id
+      ) VALUES(?, ?, ?, ?, ?)
+    `).run(draft.draft_id, from, to, reason, execution.execution_id);
+    touchDraft(db, draft.draft_id);
+  })();
+  const next = state(db, draft, execution);
+  return [
+    renderCommandResult({
+      command,
+      outcome: 'phase_completed',
+      details: [`From: ${from}`, `To: ${to}`, `Reason: ${reason}`],
+    }),
+    '',
+    renderWorkPacket(next, to),
+  ].join('\n');
 }
 
 function upsertSimple(
@@ -528,7 +848,13 @@ function upsertSimple(
 }
 
 const developmentCommandIndex = [
-  '  implementation status',
+  '  implementation implement complete',
+  '  implementation review record --result <pass|needs_changes> --summary <审查结论> --evidence <可定位依据>',
+  '  implementation review reopen-implementation --reason <回流原因>',
+  '  implementation review complete',
+  '  implementation verify reopen-implementation --reason <回流原因>',
+  '  implementation verify complete',
+  '  implementation finalize reopen-verification --reason <回流原因>',
   '  implementation criterion satisfy --key <规格 criterion id> --evidence <实现证据>',
   '  implementation check record --key <稳定 key> --receipt <status 中的 receipt> --summary <检查意义与结论>',
   '  implementation validate',
@@ -544,7 +870,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
       '  implementation criterion reopen --key <规格 criterion id>',
       '  criterion key 必须逐字复用 status 中列出的规格 key。satisfy 可反复执行以修正证据；只有确实不再满足时才 reopen。',
       '',
-      '关键检查：',
+      '关键检查（DEVELOPER VERIFY）：',
       '  implementation check record --key <稳定 key> --receipt <status 中的 receipt> --summary <为什么所选检查能支持交付结论>',
       '  implementation check discard --key <稳定 key>',
       '  在确认当前功能完整后，真实执行测试、构建或有意义的检查；随后重新执行 implementation status，从“Application 最近捕获的命令事实”选择明确成功的 receipt。Application 绑定该 receipt 的原始命令哈希；同一命令出现更新结果时必须选择最新结果。Git 历史、分支、HEAD 和未提交文件不使检查失效，也不参与完成校验。不要手抄 command、passed 或 exit code。',
@@ -555,6 +881,22 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
       '  implementation recovery resolve --id <RECOVERY id> --summary <处理方式> --evidence <证据>',
       '  implementation recovery reopen --id <RECOVERY id>',
       '  recovery 必须复用系统给出的 RECOVERY id；Dev 的处理声明不能关闭恢复事项，仍需 Test Agent 独立验证。',
+    ];
+  }
+  if (topic === 'review') {
+    return [
+      'REVIEW 是代码质量门禁，发生在实现证据齐备之后、开发者验证之前。它不以测试通过替代代码规范与 Clean Code 审查。',
+      '',
+      '记录审查：',
+      '  implementation review record --result <pass|needs_changes> --summary <规范、可读性、职责边界和维护性结论> --evidence <检查过的文件、diff 或项目规范>',
+      '',
+      '发现阻塞问题：',
+      '  implementation review reopen-implementation --reason <必须修改的原因>',
+      '  回流会清除旧审查结论；修正实现后必须重新经过完整 REVIEW。',
+      '',
+      '审查通过：',
+      '  implementation review complete',
+      '  只有 result=pass 且摘要与依据完整时才能进入 DEVELOPER VERIFY。',
     ];
   }
   if (topic === 'input') {
@@ -574,7 +916,11 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
   }
   if (topic === 'finish') {
     return [
-      '完成门槛由 Agent 判断与 Application 机器事实共同组成；validate 与 complete 使用同一套完成校验。',
+      '开发实现采用四段调用链；每个阶段完成命令都会校验当前产物、记录转换并返回下一工作包。',
+      '',
+      '阶段路径：',
+      `  ${DEVELOPMENT_PHASE_SEQUENCE}`,
+      `  status → ${developmentNormalCommandPath().map((command) => command.replace(/^implementation /, '')).join(' → ')}`,
       '',
       '  implementation validate',
       `  ${terminalActions.find((action) => action.endsWith(' complete')) || 'implementation complete'}`,
@@ -584,19 +930,20 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
       '  2. 没有未回答的运行信息。',
       '  3. Agent 已基于当前仓库重新检查功能完整性。Git 历史、分支、HEAD、Commit 和未提交文件只作为调查信息，不形成完成门禁。',
       '',
-      '标准路径：status → 调查/必要实现/真实检查 → status 查看 receipt → criterion/check → validate → complete。',
+      'validate 绑定当前草稿变更版本；验证后任何编辑或回流都会使它失效。',
+      '代码审查或开发者验证发现实现问题时必须显式回流 IMPLEMENT，并重新经过 REVIEW。',
       'request-input 与 fail 各按自己的较小门槛原子提交，不要求先通过 validate。普通最终文本、Markdown 或手写 JSON 都不会结束 execution。',
     ];
   }
   if (topic) {
-    throw new Error(`开发实现 help 不支持主题：${topic}。可用主题：context、evidence、input、finish`);
+    throw new Error(`开发实现 help 不支持主题：${topic}。可用主题：context、evidence、review、input、finish`);
   }
   return [
     'Dev Agent 把当前交付单元落实为可由 Test Agent 独立验收的仓库状态。',
     'Agent 只提交验收证据关系、关键检查选择和异常信息；Application 记录 Runner 命令事实并确定性生成完成摘要。',
     '',
-    '标准路径：',
-    '  status → 调查/必要实现/真实检查 → status 查看 receipt → criterion/check → validate → complete',
+    `阶段路径：${DEVELOPMENT_PHASE_SEQUENCE}`,
+    '当前阶段的命令、readiness 和下一步以 implementation status 返回的工作包为准。',
     '  缺少运行条件：status → runtime-input request → request-input',
     '  有证据确认无法完成：status → fail --reason',
     '',
@@ -610,6 +957,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
     '主题帮助：',
     '  help context   只读上下文工具与使用时机',
     '  help evidence  验收、关键检查、风险与恢复',
+    '  help review    代码规范与 Clean Code 审查门禁',
     '  help input     运行信息与真实失败',
     '  help finish    完成门槛与终止命令',
   ];
@@ -639,11 +987,85 @@ export function runDevelopmentCommand(input: {
     && draft.terminal_execution_id === execution.execution_id
     && draft.terminal_action === command.replace('implementation ', '')
   ) {
-    return '该终止命令已经提交成功，无需重复提交，可以结束本轮。';
+    return [
+      renderCommandResult({ command, outcome: 'already_submitted' }),
+      '',
+      '# NEXT',
+      '',
+      '- Owner: Application',
+      '- Agent Action: end_execution',
+    ].join('\n');
   }
   assertViewed(draft, execution.execution_id);
+  const current = () => state(db, draft, execution);
+  const accepted = (changed: string) => renderContinue(command, changed, current());
+  const assertPhase = (...allowed: DevelopmentPhase[]) => {
+    const phase = current().contract.workflow_phase;
+    if (!allowed.includes(phase)) {
+      throw new Error(`命令 ${command} 不属于当前 ${phase} 工作包；允许阶段：${allowed.join('、')}`);
+    }
+  };
+
+  const phaseCompletion = new Map<string, DevelopmentPhase>([
+    [DEVELOPMENT_WORKFLOW.implement.submit, 'implement'],
+    [DEVELOPMENT_WORKFLOW.review.submit, 'review'],
+    [DEVELOPMENT_WORKFLOW.developer_verify.submit, 'developer_verify'],
+  ]);
+  const completedPhase = phaseCompletion.get(command);
+  if (completedPhase) {
+    const phaseIndex = DEVELOPMENT_PHASE_ORDER.indexOf(completedPhase);
+    const next = DEVELOPMENT_PHASE_ORDER[phaseIndex + 1];
+    if (!next) throw new Error(`${completedPhase} 没有可用的下一阶段`);
+    return transitionPhase({
+      db,
+      draft,
+      execution,
+      current: current(),
+      from: completedPhase,
+      to: next,
+    });
+  }
+
+  const reopenCommands = new Map<string, [DevelopmentPhase, DevelopmentPhase]>([
+    ['implementation review reopen-implementation', ['review', 'implement']],
+    ['implementation verify reopen-implementation', ['developer_verify', 'implement']],
+    ['implementation finalize reopen-verification', ['finalize', 'developer_verify']],
+  ]);
+  const reopen = reopenCommands.get(command);
+  if (reopen) {
+    return reopenPhase({
+      db,
+      draft,
+      execution,
+      command,
+      from: reopen[0],
+      to: reopen[1],
+      reason: bounded(required(flags, 'reason'), '阶段回流原因'),
+    });
+  }
+
+  if (command === 'implementation review record') {
+    assertPhase('review');
+    const result = required(flags, 'result');
+    if (!['pass', 'needs_changes'].includes(result)) {
+      throw new Error('review result 必须是 pass 或 needs_changes');
+    }
+    db.prepare(`
+      UPDATE development_drafts
+      SET review_result = ?, review_summary = ?, review_evidence = ?
+      WHERE draft_id = ?
+    `).run(
+      result,
+      bounded(required(flags, 'summary'), '代码审查摘要', 10000),
+      bounded(required(flags, 'evidence'), '代码审查依据', 10000),
+      draft.draft_id,
+    );
+    touchDraft(db, draft.draft_id);
+    return accepted(`code review recorded_as ${result}`);
+  }
 
   if (command === 'implementation criterion satisfy') {
+    assertPhase('implement');
     const key = bounded(required(flags, 'key'), '验收标准 key', 120);
     const current = state(db, draft, execution);
     const allowedKeys = current.expectedCriteria.map((criterion) => criterion.id);
@@ -661,15 +1083,17 @@ export function runDevelopmentCommand(input: {
       ON CONFLICT(draft_id, criterion_key) DO UPDATE SET evidence = excluded.evidence
     `).run(draft.draft_id, key, evidence, ordinal);
     touchDraft(db, draft.draft_id);
-    return `验收语义 ${key} 的实现证据已保存。`;
+    return accepted(`criterion/${key} satisfied`);
   }
   if (command === 'implementation criterion reopen') {
+    assertPhase('implement');
     db.prepare('DELETE FROM development_criteria WHERE draft_id = ? AND criterion_key = ?')
       .run(draft.draft_id, required(flags, 'key'));
     touchDraft(db, draft.draft_id);
-    return '验收语义已重新打开。';
+    return accepted(`criterion/${required(flags, 'key')} reopened`);
   }
   if (command === 'implementation check record') {
+    assertPhase('developer_verify');
     const key = bounded(required(flags, 'key'), '检查 key', 120);
     const commands = capturedCommands(db, execution.execution_id);
     const receiptKey = bounded(required(flags, 'receipt'), 'Runner receipt key', 32);
@@ -718,15 +1142,17 @@ export function runDevelopmentCommand(input: {
       ordinal,
     );
     touchDraft(db, draft.draft_id);
-    return `关键检查 ${key} 已绑定到 Runner receipt ${selected.receiptKey}。`;
+    return accepted(`check/${key} bound_to receipt/${selected.receiptKey}`);
   }
   if (command === 'implementation check discard') {
+    assertPhase('developer_verify');
     db.prepare('DELETE FROM development_checks WHERE draft_id = ? AND check_key = ?')
       .run(draft.draft_id, required(flags, 'key'));
     touchDraft(db, draft.draft_id);
-    return '关键检查已取消选择。';
+    return accepted(`check/${required(flags, 'key')} discarded`);
   }
   if (command === 'implementation risk record') {
+    assertPhase('developer_verify');
     const key = bounded(required(flags, 'key'), '风险 key', 120);
     upsertSimple(
       db,
@@ -738,15 +1164,17 @@ export function runDevelopmentCommand(input: {
       bounded(required(flags, 'content'), '风险内容'),
     );
     touchDraft(db, draft.draft_id);
-    return `风险 ${key} 已记录。`;
+    return accepted(`risk/${key} recorded`);
   }
   if (command === 'implementation risk clear') {
+    assertPhase('developer_verify');
     db.prepare('DELETE FROM development_risks WHERE draft_id = ? AND risk_key = ?')
       .run(draft.draft_id, required(flags, 'key'));
     touchDraft(db, draft.draft_id);
-    return '风险记录已清除。';
+    return accepted(`risk/${required(flags, 'key')} cleared`);
   }
   if (command === 'implementation runtime-input request') {
+    assertPhase('implement', 'developer_verify');
     const key = bounded(required(flags, 'key'), '运行信息 key', 120);
     const ordinal = nextOrdinal(db, 'development_runtime_inputs', draft.draft_id);
     db.prepare(`
@@ -766,9 +1194,10 @@ export function runDevelopmentCommand(input: {
       ordinal,
     );
     touchDraft(db, draft.draft_id);
-    return `运行信息请求 ${key} 已保存。`;
+    return accepted(`runtime-input/${key} requested`);
   }
   if (command === 'implementation runtime-input withdraw') {
+    assertPhase('implement', 'developer_verify');
     const key = required(flags, 'key');
     const answered = state(db, draft, execution).runtimeInputs
       .find((item) => item.request_key === key)?.answer;
@@ -776,9 +1205,10 @@ export function runDevelopmentCommand(input: {
     db.prepare('DELETE FROM development_runtime_inputs WHERE draft_id = ? AND request_key = ?')
       .run(draft.draft_id, key);
     touchDraft(db, draft.draft_id);
-    return '运行信息请求已撤回。';
+    return accepted(`runtime-input/${key} withdrawn`);
   }
   if (command === 'implementation recovery resolve') {
+    assertPhase('implement');
     const id = bounded(required(flags, 'id'), '恢复事项 id', 200);
     const activeRecovery = state(db, draft, execution).activeRecoveries
       .find((item) => item.recovery_id === id);
@@ -799,20 +1229,40 @@ export function runDevelopmentCommand(input: {
       ordinal,
     );
     touchDraft(db, draft.draft_id);
-    return `恢复事项 ${id} 的处理声明已保存。`;
+    return accepted(`recovery/${id} resolved`);
   }
   if (command === 'implementation recovery reopen') {
+    assertPhase('implement');
     db.prepare('DELETE FROM development_recovery_resolutions WHERE draft_id = ? AND recovery_id = ?')
       .run(draft.draft_id, required(flags, 'id'));
     touchDraft(db, draft.draft_id);
-    return '恢复事项处理声明已重新打开。';
+    return accepted(`recovery/${required(flags, 'id')} reopened`);
   }
   if (command === 'implementation validate') {
-    const errors = validationErrors(state(db, draft, execution), 'complete');
+    assertPhase('finalize');
+    const currentState = current();
+    const errors = validationErrors(currentState, 'complete');
     if (errors.length) {
       throw new Error(`开发实现草稿校验失败：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
     }
-    return '开发实现草稿结构与机器事实校验通过。';
+    db.prepare(`
+      UPDATE development_drafts
+      SET validated_change_seq = ?
+      WHERE draft_id = ?
+    `).run(draft.change_seq, draft.draft_id);
+    return [
+      renderCommandResult({
+        command,
+        outcome: 'validation_passed',
+        details: ['Phase: finalize', 'Readiness: validated'],
+      }),
+      '',
+      '# NEXT',
+      '',
+      '- Phase: finalize',
+      '- Readiness: validated',
+      '- Action: `implementation complete`',
+    ].join('\n');
   }
   if (command === 'implementation complete') {
     return terminalSubmit(db, draft, execution, 'complete');

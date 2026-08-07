@@ -70,6 +70,7 @@ export type AgentContextSnapshot = {
     currentDeliverySpec: unknown | null;
     answeredDecisionKeys: string[];
     userDecisions: unknown[];
+    requirementContextResume: unknown | null;
   };
   activeObligations: {
     questions: unknown[];
@@ -99,6 +100,14 @@ function plainText(value: unknown) {
 function compact(value: unknown, limit = 240) {
   const text = plainText(value).replace(/\s+/g, ' ').trim();
   return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
+}
+
+function requirementBaseline(content: string | null | undefined) {
+  if (!content) return null;
+  const boundaries = ['\n## DECISIONS', '\n## OPEN QUESTIONS', '\n## TO-BE']
+    .map((heading) => content.indexOf(heading))
+    .filter((index) => index >= 0);
+  return content.slice(0, boundaries.length ? Math.min(...boundaries) : content.length).trimEnd();
 }
 
 function scope(storyIndex: number | null): AgentContextResource['scope'] {
@@ -284,13 +293,24 @@ export function buildAgentContextSnapshot(input: {
   ) || (delegation.agent === 'test-agent'
     ? null
     : latestBy(currentSpecs, (spec) => spec.revision));
-  const userDecisions = full.questions
-    .filter((question) => relevantToExecution(delegation.storyIndex, question.story_index) && Boolean(question.answer))
+  const projectedQuestions = full.questions.filter((question) =>
+    ['pending', 'answered', 'resolved'].includes(question.status));
+  const userDecisions = projectedQuestions
+    .filter((question) =>
+      relevantToExecution(delegation.storyIndex, question.story_index)
+      && ['answered', 'resolved'].includes(question.status)
+      && Boolean(question.answer))
     .map((question) => ({
       decisionKey: question.decision_key,
       title: question.title,
       question: question.question,
       answer: question.answer,
+      selectedOptionId: question.selected_option_id,
+      selectedOption: (parseJson(question.alternatives_json, []) as { id?: string; label?: string; consequences?: string[] }[])
+        .find((option) => option.id === question.selected_option_id) || null,
+      activatedBy: parseJson(question.activation_json, []),
+      decidedBy: question.decision_authority === 'agent' ? 'AGENT' : 'HUMAN',
+      sourceAgent: question.source_agent,
       deliveryUnit: question.story_index,
       specRevision: question.spec_revision,
       resolvedAt: question.resolved_at,
@@ -299,13 +319,18 @@ export function buildAgentContextSnapshot(input: {
     .map((decision) => decision.decisionKey)
     .filter((key): key is string => Boolean(key)))];
   const activeQuestions = full.questions
-    .filter((question) => relevantToExecution(delegation.storyIndex, question.story_index) && !question.answer && question.status !== 'superseded')
+    .filter((question) => relevantToExecution(delegation.storyIndex, question.story_index) && question.status === 'pending')
     .map((question) => ({
       questionId: question.question_id,
       title: question.title,
       question: question.question,
       why: question.why,
       recommendation: question.recommendation,
+      recommendationReason: question.recommendation_reason,
+      alternatives: parseJson(question.alternatives_json, []),
+      activation: parseJson(question.activation_json, []),
+      decidedBy: question.decision_authority === 'agent' ? 'AGENT' : 'HUMAN',
+      sourceAgent: question.source_agent,
       deliveryUnit: question.story_index,
       status: question.status,
     }));
@@ -373,19 +398,22 @@ export function buildAgentContextSnapshot(input: {
       content: deliverySpecValue(spec, delegation.agent),
     });
   }
-  for (const question of full.questions) {
+  for (const question of projectedQuestions) {
+    const hasActiveAnswer = ['answered', 'resolved'].includes(question.status) && Boolean(question.answer);
     const value = {
       questionId: question.question_id,
       decisionKey: question.decision_key,
       title: question.title,
       question: question.question,
-      answer: question.answer,
+      answer: hasActiveAnswer ? question.answer : null,
       why: question.why,
       recommendation: question.recommendation,
       alternatives: parseJson(question.alternatives_json, []),
       deliveryUnit: question.story_index,
       status: question.status,
       specRevision: question.spec_revision,
+      selectedOptionId: hasActiveAnswer ? question.selected_option_id : null,
+      activation: parseJson(question.activation_json, []),
     };
     allResources.push({
       ref: `DECISION:${question.question_id}`,
@@ -395,9 +423,9 @@ export function buildAgentContextSnapshot(input: {
       deliveryUnit: question.story_index,
       revision: question.spec_revision,
       status: question.status,
-      authority: question.answer ? 'authoritative' : 'supporting',
+      authority: hasActiveAnswer ? 'authoritative' : 'supporting',
       updatedAt: question.updated_at,
-      summary: compact(question.answer ? `${question.question} 答复：${question.answer}` : question.question),
+      summary: compact(hasActiveAnswer ? `${question.question} 答复：${question.answer}` : question.question),
       content: value,
     });
   }
@@ -479,6 +507,18 @@ export function buildAgentContextSnapshot(input: {
 
   const required = new Set<string>();
   if (currentSpec) required.add(`SPEC:${currentSpec.spec_id}:r${currentSpec.revision}`);
+  if (delegation.agent === 'analyst-agent' && currentStory) {
+    for (const dependencyIndex of currentStory.depends_on_story_indexes) {
+      const dependencySpec = latestBy(
+        full.deliverySpecs.filter((spec) =>
+          spec.story_index === dependencyIndex && spec.status === 'resolved'),
+        (spec) => spec.revision,
+      );
+      if (dependencySpec) {
+        required.add(`SPEC:${dependencySpec.spec_id}:r${dependencySpec.revision}`);
+      }
+    }
+  }
   if (delegation.agent === 'review-agent') {
     for (const story of full.stories) {
       const latest = latestBy(
@@ -562,6 +602,24 @@ export function buildAgentContextSnapshot(input: {
       currentDeliverySpec: currentSpec ? deliverySpecValue(currentSpec, delegation.agent) : null,
       answeredDecisionKeys,
       userDecisions,
+      requirementContextResume: delegation.agent === 'backlog-agent' && delegation.pipeline === 'resume'
+        ? {
+          phase: 'decision_tree',
+          objective: '消费当前有效决策树，在不读取废弃分支的前提下完成决策收敛并进入 TO-BE。',
+          businessContext: requirementBaseline(latestBy(
+            full.documents.filter((document) => document.kind === 'context' && document.source_agent === 'backlog-agent'),
+            (document) => document.revision,
+          )?.content),
+          activeDecisionTree: userDecisions.filter((decision) =>
+            decision.deliveryUnit == null && decision.sourceAgent === 'backlog-agent'),
+          activePending: activeQuestions.filter((question) =>
+            question.deliveryUnit == null && question.sourceAgent === 'backlog-agent'),
+          next: activeQuestions.some((question) =>
+            question.deliveryUnit == null && question.sourceAgent === 'backlog-agent')
+            ? '继续收敛当前活动决策'
+            : 'requirement-context decision-tree complete',
+        }
+        : null,
     },
     activeObligations: {
       questions: activeQuestions,
@@ -592,6 +650,91 @@ export async function getExecutionAgentContextSnapshot(executionId: string) {
   const stored = JSON.parse(row.input_json) as { contextSnapshot?: AgentContextSnapshot };
   if (!stored.contextSnapshot || stored.contextSnapshot.protocol !== agentContextProtocol) throw new Error('当前 execution 没有可读取的 Context Snapshot');
   return stored.contextSnapshot;
+}
+
+function appendJsonSection(lines: string[], title: string, value: unknown) {
+  lines.push('', `## ${title}`, '', '```json', JSON.stringify(value, null, 2), '```');
+}
+
+function appendRequirementDescription(lines: string[], description: string | null) {
+  if (!description) return;
+  lines.push('- Description:');
+  for (const row of description.split(/\r?\n/)) lines.push(`  > ${row || ' '}`);
+}
+
+function nonEmptyObligations(snapshot: AgentContextSnapshot) {
+  const obligations = Object.fromEntries(Object.entries(snapshot.activeObligations)
+    .filter(([key, value]) => {
+      if (!Array.isArray(value) || value.length === 0) return false;
+      return !(key === 'questions'
+        && snapshot.work.agent === 'backlog-agent'
+        && snapshot.authoritativeFacts.requirementContextResume);
+    }));
+  return Object.keys(obligations).length ? obligations : null;
+}
+
+/**
+ * Render only the hot, role-relevant projection that belongs in the launch Prompt.
+ * The complete immutable snapshot remains available through agent-context commands.
+ */
+export function renderAgentWorkingContextPack(snapshot: AgentContextSnapshot) {
+  const { work, authoritativeFacts } = snapshot;
+  const lines = [
+    '下面是从完整冻结快照中按当前角色与阶段投影的即时上下文。未内联的资料仍保留在 Context Snapshot 中，可通过 agent-context 命令按需读取。',
+    '',
+    '## Current Work',
+    '',
+    `- Task: \`${work.taskId}\``,
+    `- Objective: ${work.objective}`,
+  ];
+  if (work.deliveryUnit != null) lines.push(`- Delivery Unit: ${work.deliveryUnit}`);
+  if (work.repositoryBaseCommit) lines.push(`- Repository Base Commit: \`${work.repositoryBaseCommit}\``);
+
+  const requirement = authoritativeFacts.requirement;
+  lines.push('', '## Requirement Input', '', `- Title: ${requirement.title}`);
+  appendRequirementDescription(lines, requirement.description);
+  lines.push(`- Reported Type: ${requirement.itemType}`);
+  if (requirement.priority) lines.push(`- Priority: ${requirement.priority}`);
+  if (requirement.link) lines.push(`- Supporting Link: ${requirement.link}`);
+
+  if (work.agent === 'backlog-agent') {
+    if (authoritativeFacts.requirementContextResume) {
+      appendJsonSection(lines, 'Resumed Requirement Context', authoritativeFacts.requirementContextResume);
+    } else {
+      lines.push(
+        '',
+        '## Requirement-Context State',
+        '',
+        '当前没有需要直接内联的恢复决策包。已有草稿、当前阶段和下一工作包以 requirement-context status 的返回为准。',
+      );
+    }
+  } else {
+    const relevantFacts: Record<string, unknown> = {};
+    if (['analyst-agent', 'dev-agent', 'test-agent', 'feedback-agent'].includes(work.agent)
+      && authoritativeFacts.currentDeliveryUnit) {
+      relevantFacts.currentDeliveryUnit = authoritativeFacts.currentDeliveryUnit;
+    }
+    if (['analyst-agent', 'dev-agent', 'test-agent', 'feedback-agent'].includes(work.agent)
+      && authoritativeFacts.currentDeliverySpec) {
+      relevantFacts.currentDeliverySpec = authoritativeFacts.currentDeliverySpec;
+    }
+    if (['story-splitter-agent', 'review-agent', 'feedback-agent'].includes(work.agent)
+      && authoritativeFacts.deliveryUnits.length) {
+      relevantFacts.deliveryUnits = authoritativeFacts.deliveryUnits;
+    }
+    if (['story-splitter-agent', 'analyst-agent', 'repro-agent', 'review-agent', 'feedback-agent'].includes(work.agent)
+      && authoritativeFacts.userDecisions.length) {
+      relevantFacts.confirmedDecisions = authoritativeFacts.userDecisions;
+    }
+    if (Object.keys(relevantFacts).length) appendJsonSection(lines, 'Relevant Authoritative Facts', relevantFacts);
+  }
+
+  const obligations = nonEmptyObligations(snapshot);
+  if (obligations) appendJsonSection(lines, 'Active Obligations', obligations);
+  if (snapshot.recentExecutionEvidence.length) {
+    appendJsonSection(lines, 'Recent Execution Evidence', snapshot.recentExecutionEvidence);
+  }
+  return lines.join('\n');
 }
 
 export function renderAgentContextOverview(snapshot: AgentContextSnapshot) {

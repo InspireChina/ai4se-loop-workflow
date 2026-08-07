@@ -148,8 +148,24 @@ export async function endLoopRunAction(formData: FormData) {
 }
 
 export async function answerQuestionAction(formData: FormData) {
-  await answerQuestion({ taskId: formData.get('taskId'), questionId: formData.get('questionId'), answer: formData.get('answer') });
+  await answerQuestion({
+    taskId: formData.get('taskId'),
+    questionId: formData.get('questionId'),
+    answer: formData.get('answer') || '',
+    selectedOptionId: formData.get('selectedOptionId') || null,
+  });
   redirect(`/tasks/${formData.get('taskId')}`);
+}
+
+export async function answerDecisionQuestionAction(formData: FormData) {
+  const taskId = String(formData.get('taskId'));
+  await answerQuestion({
+    taskId,
+    questionId: formData.get('questionId'),
+    answer: formData.get('answer') || '',
+    selectedOptionId: formData.get('selectedOptionId') || null,
+  });
+  redirect(`/decisions?taskId=${encodeURIComponent(taskId)}`);
 }
 
 export async function answerRuntimeInputAction(formData: FormData) {
@@ -191,6 +207,12 @@ export async function releaseBlockAction(formData: FormData) {
 export async function submitClarificationAnswersAction(formData: FormData) {
   await submitClarificationAnswers(String(formData.get('taskId')));
   redirect(`/tasks/${formData.get('taskId')}`);
+}
+
+export async function submitDecisionAnswersAction(formData: FormData) {
+  const taskId = String(formData.get('taskId'));
+  await submitClarificationAnswers(taskId);
+  redirect(`/decisions?taskId=${encodeURIComponent(taskId)}`);
 }
 
 export async function submitRuntimeInputsAction(formData: FormData) {

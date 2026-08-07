@@ -176,6 +176,10 @@ export type Question = {
   alternatives_json: string | null;
   recommendation_reason: string | null;
   depends_on_json: string | null;
+  activation_json: string | null;
+  selected_option_id: string | null;
+  status_reason: string | null;
+  decision_authority: 'human' | 'agent';
   spec_revision: number;
   resolved_at: string | null;
   created_at: string;
@@ -876,23 +880,155 @@ export async function saveDeliverySpec(input: unknown) {
   return { specId, revision, status: value.status };
 }
 
-const answerSchema = z.object({ taskId: z.string().min(1), questionId: z.string().min(1), answer: z.string().min(1).max(4000) });
+const answerSchema = z.object({
+  taskId: z.string().min(1),
+  questionId: z.string().min(1),
+  answer: z.string().max(4000).optional().default(''),
+  selectedOptionId: z.string().min(1).max(100).optional().nullable(),
+}).refine((value) => Boolean(value.answer.trim() || value.selectedOptionId), {
+  message: '必须选择一个选项或填写答复',
+});
+
+type QuestionActivation = { decisionKey: string; optionId: string };
+
+function parseQuestionActivations(value: string | null): QuestionActivation[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((item): item is QuestionActivation =>
+      Boolean(item)
+      && typeof item === 'object'
+      && typeof (item as QuestionActivation).decisionKey === 'string'
+      && typeof (item as QuestionActivation).optionId === 'string');
+  } catch {
+    return [];
+  }
+}
+
+function recomputeQuestionApplicabilityInDb(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  taskId: string,
+  sourceAgent: 'backlog-agent' | 'analyst-agent',
+  storyIndex: number | null,
+) {
+  const rows = db.prepare(`
+    SELECT question_id, decision_key, title, answer, selected_option_id,
+           alternatives_json, activation_json, status
+    FROM questions
+    WHERE task_id = ? AND story_index IS ? AND source_agent = ?
+      AND decision_key IS NOT NULL
+    ORDER BY created_at, question_id
+  `).all(taskId, storyIndex, sourceAgent) as {
+    question_id: string;
+    decision_key: string;
+    title: string;
+    answer: string | null;
+    selected_option_id: string | null;
+    alternatives_json: string | null;
+    activation_json: string | null;
+    status: string;
+  }[];
+  const byKey = new Map(rows.map((row) => [row.decision_key, row]));
+  const optionLabel = (row: typeof rows[number] | undefined, optionId: string) => {
+    if (!row?.alternatives_json) return '指定选项';
+    try {
+      const options = JSON.parse(row.alternatives_json) as { id?: unknown; label?: unknown }[];
+      const option = Array.isArray(options)
+        ? options.find((item) => item?.id === optionId)
+        : null;
+      return typeof option?.label === 'string' ? option.label : '指定选项';
+    } catch {
+      return '指定选项';
+    }
+  };
+  for (let pass = 0; pass < rows.length + 1; pass += 1) {
+    let changed = false;
+    for (const row of rows) {
+      if (row.status === 'superseded' || row.status === 'resolved') continue;
+      const gates = parseQuestionActivations(row.activation_json);
+      let nextStatus: string;
+      let reason: string | null = null;
+      if (!gates.length) {
+        nextStatus = row.answer ? 'answered' : 'pending';
+      } else {
+        const parents = gates.map((gate) => ({ gate, parent: byKey.get(gate.decisionKey) }));
+        const inactive = parents.find(({ parent }) =>
+          !parent || ['not_applicable', 'superseded'].includes(parent.status));
+        const mismatch = parents.find(({ gate, parent }) =>
+          parent
+          && ['answered', 'resolved'].includes(parent.status)
+          && parent.selected_option_id
+          && parent.selected_option_id !== gate.optionId);
+        const unresolved = parents.find(({ parent }) =>
+          !parent || !['answered', 'resolved'].includes(parent.status) || !parent.selected_option_id);
+        if (inactive || mismatch) {
+          nextStatus = 'not_applicable';
+          const cause = inactive || mismatch;
+          reason = cause
+            ? `「${cause.parent?.title || '上游决策'}」未选择「${optionLabel(cause.parent, cause.gate.optionId)}」`
+            : '上游决策路径未命中';
+        } else if (unresolved) {
+          nextStatus = 'conditional';
+          reason = `等待「${unresolved.parent?.title || '上游决策'}」完成`;
+        } else {
+          nextStatus = row.status === 'not_applicable' && row.answer ? 'pending' : row.answer ? 'answered' : 'pending';
+        }
+      }
+      if (nextStatus !== row.status) {
+        row.status = nextStatus;
+        changed = true;
+      }
+      db.prepare(`
+        UPDATE questions SET status = ?, status_reason = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE question_id = ?
+      `).run(nextStatus, reason, row.question_id);
+    }
+    if (!changed) break;
+  }
+}
+
+export function recomputeBacklogQuestionApplicabilityInDb(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  taskId: string,
+) {
+  recomputeQuestionApplicabilityInDb(db, taskId, 'backlog-agent', null);
+}
 
 export async function answerQuestion(input: unknown) {
-  const { taskId, questionId, answer } = answerSchema.parse(input);
+  const { taskId, questionId, answer, selectedOptionId } = answerSchema.parse(input);
   const db = await databaseConnection();
   const question = db.prepare('SELECT * FROM questions WHERE question_id = ? AND task_id = ?').get(questionId, taskId) as Question | undefined;
   if (!question) throw new Error('确认事项不存在');
+  if (question.status !== 'pending') throw new Error('当前决策不在可回答状态');
+  const alternatives = question.alternatives_json
+    ? JSON.parse(question.alternatives_json) as { id: string; label: string }[]
+    : [];
+  const selected = selectedOptionId
+    ? alternatives.find((option) => option.id === selectedOptionId)
+    : null;
+  if (selectedOptionId && !selected) throw new Error('选择的决策选项不存在');
+  const normalizedAnswer = answer.trim() || selected?.label || '';
   db.exec('BEGIN');
   try {
-    db.prepare('UPDATE questions SET answer = ?, status = \'answered\', updated_at = CURRENT_TIMESTAMP WHERE question_id = ?').run(answer, questionId);
+    db.prepare(`
+      UPDATE questions
+      SET answer = ?, selected_option_id = ?, status = 'answered', status_reason = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE question_id = ?
+    `).run(normalizedAnswer, selectedOptionId || null, questionId);
+    if (question.source_agent === 'backlog-agent') {
+      recomputeBacklogQuestionApplicabilityInDb(db, taskId);
+    } else if (question.source_agent === 'analyst-agent') {
+      recomputeQuestionApplicabilityInDb(db, taskId, 'analyst-agent', question.story_index);
+    }
     addEvent(db, taskId, 'human', 'QuestionAnswered', `回答了「${question.title}」。`);
     db.exec('COMMIT');
   } catch (error) {
     db.exec('ROLLBACK');
     throw error;
   }
-  refreshPages(`/tasks/${taskId}`, '/');
+  refreshPages(`/tasks/${taskId}`, '/decisions', '/');
 }
 
 const runtimeInputSchema = z.object({
@@ -1036,7 +1172,7 @@ export async function submitRuntimeInputs(taskId: string, requestedLane?: TaskLa
       db.exec('ROLLBACK');
       throw error;
     }
-    refreshPages('/', `/tasks/${taskId}`);
+    refreshPages('/', `/tasks/${taskId}`, '/decisions');
     return;
   }
   if (!lane || !lane.current_agent) throw new Error('指定 Lane 当前不在等待运行信息状态');
@@ -1113,6 +1249,11 @@ const questionSchema = z.object({
   })).max(20).optional().default([]),
   recommendationReason: z.string().max(2000).optional().nullable(),
   dependsOn: z.array(z.string().min(1).max(240)).max(50).optional().default([]),
+  activation: z.array(z.object({
+    decisionKey: z.string().min(1).max(240),
+    optionId: z.string().min(1).max(100),
+  })).max(50).optional().default([]),
+  initialStatus: z.enum(['pending', 'conditional', 'not_applicable']).optional().default('pending'),
   specRevision: z.coerce.number().int().positive().default(1),
   blockedReason: z.string().max(1000).optional().nullable(),
   blockTask: z.coerce.boolean().default(true),
@@ -1144,14 +1285,17 @@ export async function addQuestion(input: unknown) {
       INSERT INTO questions(
         question_id, task_id, story_index, kind, title, question, why, recommendation,
         relative_path, source_agent, decision_key, alternatives_json,
-        recommendation_reason, depends_on_json, spec_revision
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        recommendation_reason, depends_on_json, activation_json, spec_revision, status,
+        status_reason
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       questionId, value.taskId, storyIndex || null, value.kind, value.title, value.question,
       value.why || null, value.recommendation || null, relativePath, value.actor,
       value.decisionKey || null, value.alternatives.length ? JSON.stringify(value.alternatives) : null,
       value.recommendationReason || null, value.dependsOn.length ? JSON.stringify(value.dependsOn) : null,
-      value.specRevision,
+      value.activation.length ? JSON.stringify(value.activation) : null, value.specRevision,
+      value.initialStatus,
+      value.initialStatus === 'conditional' ? '等待上游决策' : value.initialStatus === 'not_applicable' ? '上游路径未命中' : null,
     );
     if (value.blockTask) {
       const agent = value.kind === 'analysis' ? 'analyst-agent' : value.actor !== 'human' ? value.actor : task.current_subagent || 'backlog-agent';
@@ -1252,7 +1396,7 @@ export async function submitClarificationAnswers(taskId: string) {
     db.exec('ROLLBACK');
     throw error;
   }
-  refreshPages('/', `/tasks/${taskId}`);
+  refreshPages('/', `/tasks/${taskId}`, '/decisions');
 }
 
 export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind) {
@@ -1809,7 +1953,7 @@ function laneLine(task: Task, lane: TaskLane, codeSlotAvailable: boolean, delive
       'analyst-agent',
       task.analysis_index + 1,
       'none',
-      `分析交付单元 ${task.analysis_index + 1} 的需求和方案`,
+      `收敛交付单元 ${task.analysis_index + 1} 的实际影响、关键决策与冻结交付契约`,
     );
   }
   if (!deliveryTaskAvailable) return null;

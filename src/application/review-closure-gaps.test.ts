@@ -66,8 +66,48 @@ function closureGapResult() {
       reason: '实现记录与验证记录对最终状态的描述不一致。',
       boundary: '实现与独立验证对同一个可观察最终状态达成一致。',
     }],
+    closureGapUnits: [{
+      key: 'align-and-prove-final-result',
+      title: '统一并验证用户可见的最终结果',
+      actor: '用户',
+      trigger: '用户从真实入口完成既有流程',
+      observableOutcome: '用户看到与业务承诺一致且不存在冲突描述的最终结果',
+      acceptance: '实现与独立验证对最终状态一致，且 Test Agent 从真实入口取得通过证据',
+      gapKeys: ['visible-proof', 'terminal-state'],
+      dependsOn: [],
+    }],
   }));
 }
+
+test('Review forward delivery units reject cyclic dependencies at the Application boundary', async () => {
+  const { taskId } = await reviewReadyRequirement('cyclic-units');
+  const result = closureGapResult();
+  const units = [{
+    ...result.closureGapUnits![0],
+    key: 'unit-a',
+    gapKeys: ['visible-proof'],
+    dependsOn: ['unit-b'],
+  }, {
+    ...result.closureGapUnits![0],
+    key: 'unit-b',
+    gapKeys: ['terminal-state'],
+    dependsOn: ['unit-a'],
+  }];
+  await assert.rejects(
+    forwardReviewClosureGaps({
+      taskId,
+      sourceResultId: `RESULT-${randomUUID()}`,
+      gaps: result.closureGaps || [],
+      units,
+      expected: {
+        totalStories: 1,
+        reviewRevision: 0,
+        reviewDocumentId: '',
+      },
+    }),
+    /依赖不能形成环/,
+  );
+});
 
 test('Review closure gaps become idempotent forward delivery units', async () => {
   const { taskId, delegation } = await reviewReadyRequirement('forward');
@@ -80,7 +120,7 @@ test('Review closure gaps become idempotent forward delivery units', async () =>
   const detail = await getTask(taskId);
   assert.equal(detail?.task.agile_status, 'ready for dev');
   assert.equal(detail?.task.current_subagent, 'analyst-agent');
-  assert.equal(detail?.task.total_stories, 3);
+  assert.equal(detail?.task.total_stories, 2);
   assert.deepEqual(
     [detail?.task.analysis_index, detail?.task.dev_index, detail?.task.test_index],
     [1, 1, 1],
@@ -91,13 +131,13 @@ test('Review closure gaps become idempotent forward delivery units', async () =>
   const db = await databaseConnection();
   const mappings = db.prepare(`
     SELECT source_result_id, gap_key, story_index
-    FROM review_gap_delivery_units
+    FROM review_gap_delivery_unit_links
     WHERE task_id = ?
-    ORDER BY story_index
+    ORDER BY story_index, gap_key
   `).all(taskId) as { source_result_id: string; gap_key: string; story_index: number }[];
   assert.deepEqual(
     mappings.map((row) => [row.gap_key, row.story_index]),
-    [['visible-proof', 2], ['terminal-state', 3]],
+    [['terminal-state', 2], ['visible-proof', 2]],
   );
   const context = db.prepare(`
     SELECT story_index, source_kind, content
@@ -105,10 +145,11 @@ test('Review closure gaps become idempotent forward delivery units', async () =>
     WHERE task_id = ? AND story_index > 1
     ORDER BY story_index, source_key
   `).all(taskId) as { story_index: number; source_kind: string; content: string }[];
-  assert.equal(context.length, 6);
+  assert.equal(context.length, 4);
   assert.equal(context.some((item) => item.content.includes('UNIT:1:visible-result')), true);
   assert.equal(context.some((item) => item.content.includes('缺少从用户入口')), true);
   assert.equal(context.some((item) => item.content.includes('完成边界')), true);
+  assert.equal(new Set(mappings.map((row) => row.story_index)).size, 1);
 
   const lanes = db.prepare(`
     SELECT lane, status
@@ -125,6 +166,7 @@ test('Review closure gaps become idempotent forward delivery units', async () =>
     taskId,
     sourceResultId: mappings[0].source_result_id,
     gaps: result.closureGaps || [],
+    units: result.closureGapUnits || [],
     expected: {
       totalStories: 1,
       reviewRevision: 0,
@@ -134,7 +176,7 @@ test('Review closure gaps become idempotent forward delivery units', async () =>
   assert.equal(retried, 'already_applied');
   assert.equal(
     (db.prepare('SELECT COUNT(*) AS count FROM stories WHERE task_id = ?').get(taskId) as { count: number }).count,
-    3,
+    2,
   );
 
   db.prepare(`
@@ -150,7 +192,7 @@ test('Review closure gaps become idempotent forward delivery units', async () =>
   }
   assert.equal(
     (db.prepare('SELECT COUNT(*) AS count FROM stories WHERE task_id = ?').get(taskId) as { count: number }).count,
-    3,
+    2,
   );
 });
 
@@ -172,7 +214,7 @@ test('feedback-report rejects closure gaps instead of creating forward work', as
     1,
   );
   assert.equal(
-    (db.prepare('SELECT COUNT(*) AS count FROM review_gap_delivery_units WHERE task_id = ?').get(taskId) as { count: number }).count,
+    (db.prepare('SELECT COUNT(*) AS count FROM review_gap_delivery_unit_links WHERE task_id = ?').get(taskId) as { count: number }).count,
     0,
   );
 });

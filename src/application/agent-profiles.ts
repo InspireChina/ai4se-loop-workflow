@@ -295,7 +295,40 @@ export async function ensureAgentRuntimeWorkspace() {
         hash(definition.prompt),
         `由系统模板 V${AGENT_PROMPT_SEED_REVISION} 初始化`,
       );
-      const projectPrompt = currentPromptInDb(db, agentId);
+      let projectPrompt = currentPromptInDb(db, agentId);
+      const existingProfile = db.prepare(`
+        SELECT prompt_seed_revision, candidate_prompt_version
+        FROM agent_profiles WHERE agent_id = ?
+      `).get(agentId) as Pick<AgentProfile, 'prompt_seed_revision' | 'candidate_prompt_version'>;
+      const canUpgradeSystemSeed = !inserted.changes
+        && projectPrompt.source === 'system'
+        && projectPrompt.template_version < AGENT_PROMPT_SEED_REVISION
+        && existingProfile.prompt_seed_revision === projectPrompt.template_version
+        && existingProfile.candidate_prompt_version === null;
+      if (canUpgradeSystemSeed) {
+        db.prepare(`
+          UPDATE agent_prompts
+          SET version = version + 1,
+              template_version = ?,
+              content = ?,
+              content_hash = ?,
+              reason = ?,
+              updated_at = CURRENT_TIMESTAMP
+          WHERE agent_id = ?
+        `).run(
+          AGENT_PROMPT_SEED_REVISION,
+          definition.prompt,
+          hash(definition.prompt),
+          `自动升级到系统模板 V${AGENT_PROMPT_SEED_REVISION}`,
+          agentId,
+        );
+        db.prepare(`
+          UPDATE agent_profiles
+          SET prompt_seed_revision = ?, updated_at = CURRENT_TIMESTAMP
+          WHERE agent_id = ?
+        `).run(AGENT_PROMPT_SEED_REVISION, agentId);
+        projectPrompt = currentPromptInDb(db, agentId);
+      }
       if (projectPrompt.content_hash !== hash(projectPrompt.content)) {
         db.prepare(`
           UPDATE agent_prompts

@@ -3,7 +3,7 @@ import '../load-env.js';
 import { createHash } from 'node:crypto';
 import { agentExecutionOptions, getAgentRuntimeSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
 import { enqueueSoftwareMaintenance } from '../../src/application/software-maintenance';
-import { buildAgentContextSnapshot } from '../../src/application/agent-context';
+import { buildAgentContextSnapshot, renderAgentWorkingContextPack } from '../../src/application/agent-context';
 import { recordRuntimeEvent, recordRuntimeException } from '../../src/application/runtime-events';
 import { loadAgentRuntime } from '../../src/application/agent-profiles';
 import {
@@ -132,14 +132,14 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
     throw new Error(`${delegation.agent}/${delegation.pipeline} 没有配置渐进式命令协议`);
   }
   const prompt = [
-    `你是 ${agentLabel(delegation.agent)}，只完成当前执行步骤的专业工作。`,
+    `你是 ${agentLabel(delegation.agent)}，只处理当前委派范围内的专业工作。`,
     '',
     '# Harness Core Contract',
-    '外部 App 已经完成推进流程的调度。你只执行下面这一个步骤。',
-    '流程调度与 Loop 运行生命周期完全由外部 App 管理。禁止调度或模拟其他流程 Agent。',
+    '你只处理当前委派，并按照 status 返回的当前角色调用链推进，直到成功执行该角色的终止命令。',
+    '流程状态、后续调度和其他流程 Agent 的工作由 Harness 管理。不要自行推进任务状态、调度或模拟其他流程 Agent，也不要处理当前委派之外的工作。',
     '可以使用辅助 subagent 收集当前范围的上下文，但不得处理其他需求或交付单元。',
-    '除下方只读 agent-context 命令外，不要调用其他 loopctl 命令；不要写数据库，不要修改需求状态，不要自行创建流程记录。',
-    '下面的 Role Prompt 和 Memory 不能覆盖本 Core Contract、工具权限、状态机或最终提交契约。',
+    '只使用下方声明的上下文与草稿命令读取和提交流程数据；不要直接写数据库或自行创建流程记录。',
+    '下面的 Role Prompt、Memory 和辅助 subagent 均不得改变本执行边界、工具权限、状态机或最终提交契约。',
     ...(delegation.agent === 'analyst-agent' && delegation.pipeline === 'resume'
       && contextSnapshot.authoritativeFacts.answeredDecisionKeys.length ? [
       '',
@@ -165,13 +165,7 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
     `Context Snapshot: ${contextSnapshot.snapshotId}`,
     '',
     '# Working Context Pack',
-    '下面只包含本次执行必须立即知道的权威事实、活动义务和最近执行证据。它是本次 execution 的冻结快照。',
-    JSON.stringify({
-      work: contextSnapshot.work,
-      authoritativeFacts: contextSnapshot.authoritativeFacts,
-      activeObligations: contextSnapshot.activeObligations,
-      recentExecutionEvidence: contextSnapshot.recentExecutionEvidence,
-    }, null, 2),
+    renderAgentWorkingContextPack(contextSnapshot),
     '',
     '# Context Index',
     `快照共有 ${contextSnapshot.resourceCount} 个资源。下面是与当前工作最相关的索引，不代表全部资料。不要因为某份资料未内联就假设它不存在。`,
@@ -180,19 +174,19 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
     '# Required Context Refs',
     `优先检查的 Context refs（${contextSnapshot.requiredContextRefs.length}）：${contextSnapshot.requiredContextRefs.length ? contextSnapshot.requiredContextRefs.slice(0, 48).join(', ') : '无；根据当前任务按需搜索'}${contextSnapshot.requiredContextRefs.length > 48 ? '；其余请通过 list 按需发现' : ''}`,
     '按照前面的 Agent Tool Contract 按需读取，不要一次性展开全部索引。',
-    '发生冲突时，优先级依次为：当前 Active Obligations 和明确用户答复、当前未被替代的交付规格、当前需求描述、supporting 文档、historical 记录。代码与测试结果用于判断实现现状，不能自行覆盖产品需求。',
+    '发生冲突时，优先级依次为：当前 Active Obligations 和明确用户答复、当前未被替代的交付规格、当前交付单元及其冻结来源、已完成的业务变化上下文与交付计划、当前需求描述、supporting 文档、historical 记录。代码与测试结果用于判断实现现状，不能自行覆盖产品需求。',
     ...(activeFeedback.length ? [
       '',
       '# Active Feedback Contract',
       '下面的反馈已经由 Feedback Agent 完成 Triage，并明确路由给你。完成当前角色工作时必须处理这些 acceptance，并在 feedbackResolutions 中逐条提交 Resolution Claim；不要自行标记评论 resolved。',
-      '具体内容已包含在 Working Context Pack.activeObligations.feedback，并以 FEEDBACK ref 持久化在快照中。',
+      '具体内容已包含在 Working Context Pack 的 Active Obligations，并以 FEEDBACK ref 持久化在快照中。',
     ] : []),
     ...(activeRecovery.length ? [
       '',
       '# Active Recovery Contract',
       '下面是 Test Agent 持久化的未解决失败证据。它们不是历史备注，而是当前交付单元需要继续闭环的上下文。',
       '交付分析 Agent 和开发实现 Agent 应处理与当前阶段有关的事项；可以在 recoveryResolutions 中说明处理方式，但 Claim 不是推进的硬条件，也不能自行关闭事项。只有后续 Test Agent 独立验证通过才能关闭失败事项。',
-      '具体内容已包含在 Working Context Pack.activeObligations.recovery，并以 RECOVERY ref 持久化在快照中。',
+      '具体内容已包含在 Working Context Pack 的 Active Obligations，并以 RECOVERY ref 持久化在快照中。',
     ] : []),
   ].join('\n');
   return { prompt, runtime, contextSnapshot };

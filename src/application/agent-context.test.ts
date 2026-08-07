@@ -41,6 +41,46 @@ function delegation(taskId: string, overrides: Partial<DelegationEnvelope> = {})
   };
 }
 
+test('renders only the hot Backlog context in the launch Prompt while retaining the full snapshot', async () => {
+  const { createTask, getTaskContext } = await import('./tasks');
+  const { buildAgentContextSnapshot, renderAgentWorkingContextPack } = await import('./agent-context');
+  const taskId = await createTask({
+    title: 'Borrowing reminder',
+    description: 'Remind readers before a loan expires and handle overdue loans.',
+    itemType: 'feature',
+    priority: 'P2',
+  });
+  const full = await getTaskContext(taskId);
+  const snapshot = buildAgentContextSnapshot({
+    delegation: delegation(taskId, {
+      agent: 'backlog-agent',
+      lane: 'control',
+      pipeline: 'backlog',
+      storyIndex: null,
+      title: 'Borrowing reminder',
+      taskDescription: 'Remind readers before a loan expires and handle overdue loans.',
+      description: '澄清业务变化上下文',
+    }),
+    full,
+    activeFeedback: [],
+    activeRecovery: [],
+    repositoryBaseCommit: 'abc123',
+  });
+
+  const pack = renderAgentWorkingContextPack(snapshot);
+  assert.match(pack, new RegExp(taskId));
+  assert.match(pack, /Borrowing reminder/);
+  assert.match(pack, /Remind readers before a loan expires/);
+  assert.match(pack, /Repository Base Commit: `abc123`/);
+  assert.match(pack, /当前没有需要直接内联的恢复决策包/);
+  assert.doesNotMatch(pack, /lifecycle|lanes|progress|deliveryUnits|currentDeliverySpec|recentExecutionEvidence/);
+  assert.doesNotMatch(pack, /\[\]|null/);
+
+  assert.equal(snapshot.authoritativeFacts.lifecycle.progress.total, 0);
+  assert.deepEqual(snapshot.authoritativeFacts.deliveryUnits, []);
+  assert.deepEqual(snapshot.recentExecutionEvidence, []);
+});
+
 test('builds a compact execution snapshot while preserving full context for just-in-time reads', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const {
@@ -148,12 +188,114 @@ test('builds a compact execution snapshot while preserving full context for just
   assert.equal(reviewSnapshot.requiredContextRefs.some((ref) => ref.startsWith('SPEC:SPEC-context-unit-1')), true);
   assert.equal(reviewSnapshot.requiredContextRefs.some((ref) => ref.startsWith('SPEC:SPEC-context-unit-2')), true);
 
+  const analystSnapshot = buildAgentContextSnapshot({
+    delegation: delegation(taskId, {
+      agent: 'analyst-agent',
+      lane: 'analysis',
+      pipeline: 'analysis',
+      storyIndex: 2,
+      description: '收敛第二个交付单元的实际影响、关键决策与冻结交付契约',
+    }),
+    full,
+    activeFeedback: [],
+    activeRecovery: [],
+    repositoryBaseCommit: 'abc123',
+  });
+  assert.equal(
+    analystSnapshot.requiredContextRefs.includes('SPEC:SPEC-context-unit-1:r1'),
+    true,
+  );
+
   const started = await beginExecutionAttempt({
     runId: 'RUN-agent-context', delegation: delegation(taskId), prompt: 'compact prompt', contextSnapshot: snapshot,
   });
   const stored = await getExecutionAgentContextSnapshot(started.attempt.execution_id);
   assert.equal(stored.snapshotId, snapshot.snapshotId);
   assert.match(renderAgentContextResource(stored, `DOC:${currentDocumentId}`), /FULL-CONTEXT-TAIL/);
+});
+
+test('injects a semantic backlog resume packet while excluding pruned decision branches', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { addQuestion, answerQuestion, createTask, getTaskContext, upsertDocument } = await import('./tasks');
+  const { buildAgentContextSnapshot, renderAgentWorkingContextPack } = await import('./agent-context');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Conditional export', description: 'Align the export decision tree.' });
+  await upsertDocument({
+    taskId,
+    kind: 'context',
+    title: '业务变化上下文',
+    actor: 'backlog-agent',
+    content: [
+      '# 业务变化上下文',
+      '## BUSINESS INTENT',
+      '管理员需要导出审计结果。',
+      '## AS-IS',
+      '- 当前只能在线查看。',
+      '## OPEN QUESTIONS',
+      '- 旧的待答展示不应进入恢复基线。',
+      '## TO-BE',
+      '- 尚未形成。',
+    ].join('\n'),
+  });
+  const rootId = await addQuestion({
+    taskId,
+    actor: 'backlog-agent',
+    title: '导出受众',
+    question: '导出面向谁？',
+    decisionKey: 'audience',
+    alternatives: [
+      { id: 'admin', label: '仅管理员', consequences: ['普通成员没有导出入口'] },
+      { id: 'all', label: '所有成员', consequences: ['需要成员权限设计'] },
+    ],
+  });
+  await answerQuestion({ taskId, questionId: rootId, selectedOptionId: 'admin' });
+  const prunedId = await addQuestion({
+    taskId,
+    actor: 'backlog-agent',
+    title: '普通成员权限',
+    question: '普通成员如何获得权限？',
+    decisionKey: 'member-permission',
+    alternatives: [
+      { id: 'auto', label: '自动开放', consequences: ['所有成员可用'] },
+      { id: 'request', label: '申请开放', consequences: ['增加申请流程'] },
+    ],
+    activation: [{ decisionKey: 'audience', optionId: 'all' }],
+    dependsOn: ['audience'],
+    initialStatus: 'not_applicable',
+  });
+  db.prepare(`
+    UPDATE questions
+    SET answer = '这个废弃答案不能进入 Agent', selected_option_id = 'auto', status = 'not_applicable'
+    WHERE question_id = ?
+  `).run(prunedId);
+
+  const full = await getTaskContext(taskId);
+  const snapshot = buildAgentContextSnapshot({
+    delegation: delegation(taskId, {
+      agent: 'backlog-agent', lane: 'control', pipeline: 'resume', storyIndex: null,
+    }),
+    full,
+    activeFeedback: [],
+    activeRecovery: [],
+  });
+  const serialized = JSON.stringify(snapshot);
+  const launchPack = renderAgentWorkingContextPack(snapshot);
+  const resume = snapshot.authoritativeFacts.requirementContextResume as {
+    businessContext: string;
+    activeDecisionTree: { decisionKey: string; selectedOption: { label: string; consequences: string[] } }[];
+  };
+  assert.match(resume.businessContext, /当前只能在线查看/);
+  assert.doesNotMatch(resume.businessContext, /旧的待答展示/);
+  assert.equal(resume.activeDecisionTree[0]?.decisionKey, 'audience');
+  assert.equal(resume.activeDecisionTree[0]?.selectedOption.label, '仅管理员');
+  assert.deepEqual(resume.activeDecisionTree[0]?.selectedOption.consequences, ['普通成员没有导出入口']);
+  assert.match(launchPack, /Resumed Requirement Context/);
+  assert.match(launchPack, /当前只能在线查看/);
+  assert.match(launchPack, /audience/);
+  assert.doesNotMatch(launchPack, /lifecycle|lanes|progress/);
+  assert.doesNotMatch(serialized, /这个废弃答案不能进入 Agent/);
+  assert.doesNotMatch(serialized, /普通成员权限/);
+  assert.doesNotMatch(launchPack, /这个废弃答案不能进入 Agent|普通成员权限/);
 });
 
 test('hard-isolates Test context from Dev narratives while preserving the frozen verification contract', async () => {

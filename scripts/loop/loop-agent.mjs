@@ -21,8 +21,9 @@ if (!hasFlowContext && !hasInternalContext) {
   fail('命令只能在活动 Agent execution 内使用');
 }
 
+const rawArgs = process.argv.slice(2);
+
 try {
-  const rawArgs = process.argv.slice(2);
   const args = [];
   for (let index = 0; index < rawArgs.length; index += 1) {
     const argument = rawArgs[index];
@@ -67,5 +68,28 @@ try {
   }
   process.stdout.write(`${output}\n`);
 } catch (error) {
-  fail(error instanceof Error ? error.message : String(error));
+  const message = error instanceof Error ? error.message : String(error);
+  if (['requirement-context', 'delivery-plan', 'delivery-analysis', 'implementation', 'verification', 'review'].includes(rawArgs[0])) {
+    const namespace = rawArgs[0];
+    const firstFlag = rawArgs.findIndex((argument) => argument.startsWith('--'));
+    const command = rawArgs.slice(0, firstFlag < 0 ? rawArgs.length : firstFlag).join(' ');
+    process.stderr.write([
+      '# COMMAND RESULT',
+      '',
+      `- Command: \`${command}\``,
+      '- Outcome: rejected',
+      '',
+      '# NEXT',
+      '',
+      '- Action: correct_and_retry',
+      `- Refresh If Needed: \`${namespace} status\``,
+      '',
+      '# GUIDANCE',
+      '',
+      message,
+      '',
+    ].join('\n'));
+    process.exit(1);
+  }
+  fail(message);
 }

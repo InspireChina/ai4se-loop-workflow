@@ -7,6 +7,19 @@ import {
   loopAgentCommandPrefix,
   type AgentCommandProfile,
 } from '../domain/agent-command-profile';
+import {
+  REQUIREMENT_CONTEXT_PHASE_ORDER,
+  REQUIREMENT_CONTEXT_WORKFLOW,
+  requirementContextNormalCommandPath,
+  type RequirementContextPhase,
+} from '../domain/requirement-context-workflow';
+import {
+  DELIVERY_PLAN_PHASE_ORDER,
+  DELIVERY_PLAN_PHASE_SEQUENCE,
+  DELIVERY_PLAN_WORKFLOW,
+  deliveryPlanNormalCommandPath,
+  type DeliveryPlanPhase,
+} from '../domain/delivery-plan-workflow';
 import { databaseConnection, hash } from '../infrastructure/database';
 import {
   reproductionHelp,
@@ -20,6 +33,7 @@ import {
   developmentHelp,
   runDevelopmentCommand,
 } from './development-command-drafts';
+import { recomputeBacklogQuestionApplicabilityInDb } from './tasks';
 import {
   runVerificationCommand,
   verificationHelp,
@@ -68,6 +82,8 @@ type ContextDraft = {
   intent: string | null;
   change_summary: string | null;
   classification: 'feature' | 'bug' | 'tech' | 'other' | null;
+  workflow_phase: RequirementContextPhase;
+  validated_change_seq: number | null;
 };
 
 type ContextAssertion = {
@@ -103,11 +119,35 @@ type ContextAcceptance = {
   superseded_by: string | null;
 };
 
+type ContextQuestionDependency = {
+  decision_key: string;
+  parent_decision_key: string;
+  parent_option_id: string;
+};
+
+type ContextQuestion = {
+  decision_key: string;
+  title: string;
+  question: string;
+  impact: string;
+  recommendation_option_id: string | null;
+  recommendation_reason: string | null;
+  authority: 'human' | 'agent';
+  selected_option_id: string | null;
+  decision_text: string | null;
+  decision_reason: string | null;
+  lifecycle_status: 'active' | 'not_applicable' | 'superseded';
+  lifecycle_reason: string | null;
+  superseded_by: string | null;
+};
+
 type DeliveryPlanDraft = {
   draft_id: string;
   rationale: string | null;
   coverage: string | null;
   ordering_notes: string | null;
+  workflow_phase: DeliveryPlanPhase;
+  validated_change_seq: number | null;
 };
 
 type DeliveryPlanUnit = {
@@ -249,15 +289,20 @@ function cloneRequirementContextDraft(
 ) {
   db.prepare(`
     INSERT INTO requirement_context_drafts(
-      draft_id, intent, change_summary, classification
+      draft_id, intent, change_summary, classification, workflow_phase
     )
-    SELECT ?, intent, change_summary, classification
+    SELECT ?, intent, change_summary, classification, workflow_phase
     FROM requirement_context_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   for (const table of [
     ['requirement_context_constraints', 'constraint_key, content, ordinal'],
     ['requirement_context_scope_items', 'scope_key, direction, content, ordinal'],
-    ['requirement_context_questions', 'decision_key, title, question, impact, recommendation_option_id, recommendation_reason, ordinal'],
+    [
+      'requirement_context_questions',
+      `decision_key, title, question, impact, recommendation_option_id, recommendation_reason,
+       authority, selected_option_id, decision_text, decision_reason,
+       lifecycle_status, lifecycle_reason, superseded_by, ordinal`,
+    ],
     [
       'requirement_context_assertions',
       'assertion_key, perspective, statement, evidence_status, source, decision_key, lifecycle_status, lifecycle_reason, superseded_by, ordinal',
@@ -287,6 +332,13 @@ function cloneRequirementContextDraft(
     SELECT ?, decision_key, option_id, label, consequence, ordinal
     FROM requirement_context_question_options WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
+  db.prepare(`
+    INSERT INTO requirement_context_question_dependencies(
+      draft_id, decision_key, parent_decision_key, parent_option_id, ordinal
+    )
+    SELECT ?, decision_key, parent_decision_key, parent_option_id, ordinal
+    FROM requirement_context_question_dependencies WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
 }
 
 function cloneDeliveryPlanDraft(
@@ -295,8 +347,8 @@ function cloneDeliveryPlanDraft(
   target: DraftRow,
 ) {
   db.prepare(`
-    INSERT INTO delivery_plan_drafts(draft_id, rationale, coverage, ordering_notes)
-    SELECT ?, rationale, coverage, ordering_notes
+    INSERT INTO delivery_plan_drafts(draft_id, rationale, coverage, ordering_notes, workflow_phase)
+    SELECT ?, rationale, coverage, ordering_notes, workflow_phase
     FROM delivery_plan_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   db.prepare(`
@@ -588,10 +640,10 @@ function cloneDeliveryAnalysisContract(
   db.prepare(`
     INSERT INTO delivery_analysis_drafts(
       draft_id, unit_key, title, actor, trigger_condition, observable_outcome,
-      acceptance, summary, implementation_guidance
+      acceptance, summary, implementation_guidance, workflow_phase
     )
     SELECT ?, unit_key, title, actor, trigger_condition, observable_outcome,
-           acceptance, summary, implementation_guidance
+           acceptance, summary, implementation_guidance, workflow_phase
     FROM delivery_analysis_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   for (const table of [
@@ -616,6 +668,13 @@ function cloneDeliveryAnalysisContract(
     SELECT ?, decision_key, option_id, label, consequence, ordinal
     FROM delivery_analysis_decision_options WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
+  db.prepare(`
+    INSERT INTO delivery_analysis_decision_dependencies(
+      draft_id, decision_key, parent_decision_key, parent_option_id
+    )
+    SELECT ?, decision_key, parent_decision_key, parent_option_id
+    FROM delivery_analysis_decision_dependencies WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
 }
 
 function cloneDevelopmentDraft(
@@ -634,8 +693,25 @@ function cloneDevelopmentDraft(
   // waiting-for-answers draft is only a continuation of the same correction,
   // so its progressive judgments remain available after the user responds.
   const startsCorrectionCycle = activeRecovery && source.status !== 'waiting_for_answers';
-  db.prepare('INSERT INTO development_drafts(draft_id) VALUES(?)')
-    .run(target.draft_id);
+  const preservesWorkflow = source.status === 'waiting_for_answers';
+  db.prepare(`
+    INSERT INTO development_drafts(
+      draft_id, workflow_phase, review_result, review_summary, review_evidence
+    )
+    SELECT ?,
+           CASE WHEN ? THEN workflow_phase ELSE 'implement' END,
+           CASE WHEN ? THEN review_result ELSE NULL END,
+           CASE WHEN ? THEN review_summary ELSE NULL END,
+           CASE WHEN ? THEN review_evidence ELSE NULL END
+    FROM development_drafts WHERE draft_id = ?
+  `).run(
+    target.draft_id,
+    preservesWorkflow ? 1 : 0,
+    preservesWorkflow ? 1 : 0,
+    preservesWorkflow ? 1 : 0,
+    preservesWorkflow ? 1 : 0,
+    source.draft_id,
+  );
   for (const table of [
     ['development_criteria', 'criterion_key, evidence, ordinal'],
     ['development_risks', 'risk_key, content, ordinal'],
@@ -666,10 +742,11 @@ function cloneVerificationDraft(
   target: DraftRow,
 ) {
   const sourceHeader = db.prepare(`
-    SELECT phase, spec_revision
+    SELECT phase, workflow_phase, spec_revision
     FROM verification_drafts WHERE draft_id = ?
   `).get(source.draft_id) as {
     phase: 'planning' | 'executing';
+    workflow_phase: 'plan' | 'execute' | 'evidence_review' | 'finalize';
     spec_revision: number | null;
   };
   const currentSpec = db.prepare(`
@@ -679,23 +756,25 @@ function cloneVerificationDraft(
     ORDER BY revision DESC LIMIT 1
   `).get(target.task_id, target.story_index) as { revision: number } | undefined;
   const continuesAfterInput = source.status === 'waiting_for_answers';
-  const frozenPlanMatchesCurrentSpec = sourceHeader.phase === 'executing'
+  const frozenPlanMatchesCurrentSpec = sourceHeader.workflow_phase !== 'plan'
     && sourceHeader.spec_revision !== null
     && sourceHeader.spec_revision === currentSpec?.revision;
-  const canReuseFrozenPlan = sourceHeader.phase === 'executing'
-    && frozenPlanMatchesCurrentSpec;
-  const targetPhase = sourceHeader.phase === 'planning'
-    ? 'planning'
-    : (continuesAfterInput && frozenPlanMatchesCurrentSpec) || canReuseFrozenPlan
-      ? 'executing'
-      : 'planning';
-  const targetSpecRevision = targetPhase === 'executing'
+  const resumesBlockedCompletion = continuesAfterInput && source.terminal_action === 'complete';
+  const targetWorkflowPhase = !frozenPlanMatchesCurrentSpec
+    ? 'plan'
+    : resumesBlockedCompletion
+      ? 'execute'
+      : continuesAfterInput
+        ? sourceHeader.workflow_phase
+        : 'execute';
+  const targetLegacyPhase = targetWorkflowPhase === 'plan' ? 'planning' : 'executing';
+  const targetSpecRevision = targetWorkflowPhase !== 'plan'
     ? sourceHeader.spec_revision
     : null;
   db.prepare(`
-    INSERT INTO verification_drafts(draft_id, phase, spec_revision)
-    VALUES(?, ?, ?)
-  `).run(target.draft_id, targetPhase, targetSpecRevision);
+    INSERT INTO verification_drafts(draft_id, phase, workflow_phase, spec_revision)
+    VALUES(?, ?, ?, ?)
+  `).run(target.draft_id, targetLegacyPhase, targetWorkflowPhase, targetSpecRevision);
   for (const table of [
     ['verification_plan_scenarios', `scenario_key, channel, title, setup, steps,
       expected, coverage_refs_json, ordinal`],
@@ -708,7 +787,7 @@ function cloneVerificationDraft(
   // Waiting for user-provided runtime information is a continuation of the
   // same Test attempt. The shared runtime_input_requests table owns the
   // request and answer; this draft only restores already executed scenarios.
-  if (continuesAfterInput && targetPhase === 'executing') {
+  if (continuesAfterInput && targetWorkflowPhase === 'execute') {
     db.prepare(`
       INSERT INTO verification_results(
         draft_id, scenario_key, status, failure_kind, evidence,
@@ -761,9 +840,11 @@ function cloneReviewDraft(
 ) {
   db.prepare(`
     INSERT INTO review_drafts(
-      draft_id, mode, baseline_review_document_id, baseline_review_revision
+      draft_id, mode, baseline_review_document_id, baseline_review_revision,
+      workflow_phase
     )
-    SELECT ?, mode, baseline_review_document_id, baseline_review_revision
+    SELECT ?, mode, baseline_review_document_id, baseline_review_revision,
+           'fact_reconciliation'
     FROM review_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   for (const table of [
@@ -913,12 +994,20 @@ function answeredDecisions(
   taskId: string,
 ) {
   const rows = db.prepare(`
-    SELECT decision_key, title, question, answer
+    SELECT decision_key, title, question, answer, selected_option_id, status
     FROM questions
     WHERE task_id = ? AND source_agent = 'backlog-agent'
       AND decision_key IS NOT NULL AND answer IS NOT NULL
+      AND status IN ('answered', 'resolved')
     ORDER BY created_at, question_id
-  `).all(taskId) as { decision_key: string; title: string; question: string; answer: string }[];
+  `).all(taskId) as {
+    decision_key: string;
+    title: string;
+    question: string;
+    answer: string;
+    selected_option_id: string | null;
+    status: string;
+  }[];
   return new Map(rows.map((row) => [row.decision_key, row]));
 }
 
@@ -958,17 +1047,12 @@ function draftState(
     WHERE draft_id = ? ORDER BY ordinal, scope_key
   `).all(draft.draft_id) as { scope_key: string; direction: 'included' | 'excluded'; content: string }[];
   const questions = db.prepare(`
-    SELECT decision_key, title, question, impact, recommendation_option_id, recommendation_reason
+    SELECT decision_key, title, question, impact, recommendation_option_id, recommendation_reason,
+           authority, selected_option_id, decision_text, decision_reason,
+           lifecycle_status, lifecycle_reason, superseded_by
     FROM requirement_context_questions
     WHERE draft_id = ? ORDER BY ordinal, decision_key
-  `).all(draft.draft_id) as {
-    decision_key: string;
-    title: string;
-    question: string;
-    impact: string;
-    recommendation_option_id: string | null;
-    recommendation_reason: string | null;
-  }[];
+  `).all(draft.draft_id) as ContextQuestion[];
   const options = db.prepare(`
     SELECT decision_key, option_id, label, consequence
     FROM requirement_context_question_options
@@ -980,6 +1064,47 @@ function draftState(
     consequence: string;
   }[];
   const answers = answeredDecisions(db, draft.task_id);
+  const dependencies = db.prepare(`
+    SELECT decision_key, parent_decision_key, parent_option_id
+    FROM requirement_context_question_dependencies
+    WHERE draft_id = ? ORDER BY ordinal, decision_key, parent_decision_key
+  `).all(draft.draft_id) as ContextQuestionDependency[];
+  const resolvedSelections = new Map(questions.map((question) => {
+    const humanAnswer = answers.get(question.decision_key);
+    return [
+      question.decision_key,
+      question.authority === 'agent' ? question.selected_option_id : humanAnswer?.selected_option_id || null,
+    ];
+  }));
+  const projectionMemo = new Map<string, 'active' | 'conditional' | 'not_applicable' | 'superseded'>();
+  const projectionVisiting = new Set<string>();
+  const projectionStatus = (question: ContextQuestion): 'active' | 'conditional' | 'not_applicable' | 'superseded' => {
+    const cached = projectionMemo.get(question.decision_key);
+    if (cached) return cached;
+    if (question.lifecycle_status !== 'active') return question.lifecycle_status;
+    if (projectionVisiting.has(question.decision_key)) return 'conditional';
+    projectionVisiting.add(question.decision_key);
+    const gates = dependencies.filter((dependency) => dependency.decision_key === question.decision_key);
+    let status: 'active' | 'conditional' | 'not_applicable' = 'active';
+    const parentStates = gates.map((gate) => {
+      const parent = questions.find((candidate) => candidate.decision_key === gate.parent_decision_key);
+      return { gate, parent, status: parent ? projectionStatus(parent) : 'not_applicable' as const };
+    });
+    if (parentStates.some((parent) => ['not_applicable', 'superseded'].includes(parent.status))) {
+      status = 'not_applicable';
+    } else if (gates.some((gate) => {
+      const selected = resolvedSelections.get(gate.parent_decision_key);
+      return selected && selected !== gate.parent_option_id;
+    })) {
+      status = 'not_applicable';
+    } else if (parentStates.some((parent) => parent.status === 'conditional')
+      || gates.some((gate) => !resolvedSelections.get(gate.parent_decision_key))) {
+      status = 'conditional';
+    }
+    projectionVisiting.delete(question.decision_key);
+    projectionMemo.set(question.decision_key, status);
+    return status;
+  };
   return {
     context,
     assertions,
@@ -988,11 +1113,21 @@ function draftState(
     revisionCount,
     constraints,
     scope,
-    questions: questions.map((question) => ({
-      ...question,
-      options: options.filter((option) => option.decision_key === question.decision_key),
-      answer: answers.get(question.decision_key)?.answer || null,
-    })),
+    questions: questions.map((question) => {
+      const humanAnswer = answers.get(question.decision_key);
+      const selectedOptionId = question.authority === 'agent'
+        ? question.selected_option_id
+        : humanAnswer?.selected_option_id || null;
+      return {
+        ...question,
+        dependencies: dependencies.filter((dependency) => dependency.decision_key === question.decision_key),
+        options: options.filter((option) => option.decision_key === question.decision_key),
+        selected_option_id: selectedOptionId,
+        answer: question.authority === 'agent' ? question.decision_text : humanAnswer?.answer || null,
+        decision_reason: question.authority === 'agent' ? question.decision_reason : null,
+        projection_status: projectionStatus(question),
+      };
+    }),
   };
 }
 
@@ -1001,10 +1136,16 @@ function validationErrors(
   terminal: 'complete' | 'request-clarification' | null = null,
 ) {
   const errors: string[] = [];
-  const activeAssertions = state.assertions.filter((item) => item.lifecycle_status === 'active');
+  const projectedDecisionKeys = new Set(state.questions
+    .filter((question) => question.projection_status === 'active')
+    .map((question) => question.decision_key));
+  const visibleForDecision = (decisionKey: string | null) => !decisionKey || projectedDecisionKeys.has(decisionKey);
+  const activeAssertions = state.assertions.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
   const reliableAssertions = activeAssertions.filter((item) =>
     item.evidence_status !== 'inferred' && item.evidence_status !== 'conflicted');
-  const activeImpacts = state.impacts.filter((item) => item.lifecycle_status === 'active');
+  const activeImpacts = state.impacts.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
   const activeAcceptance = state.acceptance.filter((item) => item.lifecycle_status === 'active');
   if (!state.context.intent?.trim()) {
     errors.push('缺少业务意图：使用 requirement-context intent set --text <内容>');
@@ -1042,16 +1183,9 @@ function validationErrors(
   if (terminal === 'complete' && !state.context.classification) {
     errors.push('缺少需求分类：使用 requirement-context classification set <feature|bug|tech|other>');
   }
-  for (const question of state.questions) {
-    if (question.answer) continue;
-    if (question.options.length < 2) errors.push(`问题 ${question.decision_key} 至少需要两个互斥选项`);
-    if (!question.recommendation_option_id) errors.push(`问题 ${question.decision_key} 缺少推荐选项`);
-    else if (!question.options.some((option) => option.option_id === question.recommendation_option_id)) {
-      errors.push(`问题 ${question.decision_key} 的推荐选项不存在`);
-    }
-    if (!question.recommendation_reason?.trim()) errors.push(`问题 ${question.decision_key} 缺少推荐理由`);
-  }
-  const unanswered = state.questions.filter((question) => !question.answer);
+  errors.push(...questionStructureErrors(state));
+  const unanswered = state.questions.filter((question) =>
+    question.projection_status === 'active' && question.authority === 'human' && !question.answer);
   for (const assertion of activeAssertions.filter((item) => item.evidence_status === 'conflicted')) {
     if (!assertion.decision_key) {
       errors.push(`冲突陈述 ${assertion.assertion_key} 缺少关联 decision key`);
@@ -1081,12 +1215,470 @@ function validationErrors(
   return errors;
 }
 
-function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
-  const missing = validationErrors(state);
-  const activeAssertions = state.assertions.filter((item) => item.lifecycle_status === 'active');
-  const activeImpacts = state.impacts.filter((item) => item.lifecycle_status === 'active');
+function questionStructureErrors(state: ReturnType<typeof draftState>) {
+  const errors: string[] = [];
+  const knownKeys = new Set(state.questions.map((question) => question.decision_key));
+  const activeQuestions = state.questions.filter((item) => item.lifecycle_status === 'active');
+  for (const question of state.questions.filter((item) => item.lifecycle_status === 'active')) {
+    for (const dependency of question.dependencies) {
+      if (!knownKeys.has(dependency.parent_decision_key)) {
+        errors.push(`问题 ${question.decision_key} 的父决策 ${dependency.parent_decision_key} 不存在`);
+      }
+      if (dependency.parent_decision_key === question.decision_key) {
+        errors.push(`问题 ${question.decision_key} 不能依赖自身`);
+      }
+    }
+    if (question.options.length < 2) errors.push(`问题 ${question.decision_key} 至少需要两个互斥选项`);
+    if (question.authority === 'human') {
+      if (!question.recommendation_option_id) errors.push(`问题 ${question.decision_key} 缺少推荐选项`);
+      else if (!question.options.some((option) => option.option_id === question.recommendation_option_id)) {
+        errors.push(`问题 ${question.decision_key} 的推荐选项不存在`);
+      }
+      if (!question.recommendation_reason?.trim()) errors.push(`问题 ${question.decision_key} 缺少推荐理由`);
+    } else if (question.projection_status === 'active' && !question.answer) {
+      errors.push(`Agent 决策 ${question.decision_key} 尚未使用 question decide 关闭`);
+    }
+  }
+  const parentsByChild = new Map(activeQuestions.map((question) => [
+    question.decision_key,
+    question.dependencies.map((dependency) => dependency.parent_decision_key),
+  ]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (key: string): boolean => {
+    if (visiting.has(key)) return true;
+    if (visited.has(key)) return false;
+    visiting.add(key);
+    for (const parent of parentsByChild.get(key) || []) {
+      if (visit(parent)) return true;
+    }
+    visiting.delete(key);
+    visited.add(key);
+    return false;
+  };
+  if (activeQuestions.some((question) => visit(question.decision_key))) {
+    errors.push('决策树存在循环依赖，必须移除至少一条条件边');
+  }
+  return errors;
+}
+
+function phaseValidationErrors(
+  state: ReturnType<typeof draftState>,
+  phase: RequirementContextPhase,
+) {
+  const errors: string[] = [];
+  const projectedDecisionKeys = new Set(state.questions
+    .filter((question) => question.projection_status === 'active')
+    .map((question) => question.decision_key));
+  const visibleForDecision = (decisionKey: string | null) => !decisionKey || projectedDecisionKeys.has(decisionKey);
+  const activeAssertions = state.assertions.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
+  const reliableAssertions = activeAssertions.filter((item) =>
+    item.evidence_status !== 'inferred' && item.evidence_status !== 'conflicted');
+  const activeImpacts = state.impacts.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
   const activeAcceptance = state.acceptance.filter((item) => item.lifecycle_status === 'active');
+  const reliable = (perspective: ContextAssertion['perspective']) =>
+    reliableAssertions.some((item) => item.perspective === perspective);
+
+  if (phase === 'as_is') {
+    if (!state.context.intent?.trim()) {
+      errors.push('缺少 Reported Intent：使用 requirement-context intent set --text <内容>');
+    }
+    if (!reliable('actual')) {
+      errors.push('AS-IS 至少需要一条可靠 Actual；inferred 或 conflicted 陈述不能单独完成本阶段');
+    }
+    return errors;
+  }
+
+  if (phase === 'decision_tree') {
+    errors.push(...questionStructureErrors(state));
+    const unanswered = state.questions.filter((question) =>
+      question.projection_status === 'active' && question.authority === 'human' && !question.answer);
+    if (unanswered.length) {
+      errors.push(`仍有 ${unanswered.length} 个 HUMAN · PENDING 节点；应提交 request-clarification，而不是完成决策树`);
+    }
+    if (activeAssertions.some((item) => item.evidence_status === 'conflicted')) {
+      errors.push('仍有 conflicted 业务语义；应根据决定权关闭或关联待用户决策');
+    }
+    if (activeImpacts.some((item) => item.disposition === 'needs_decision')) {
+      errors.push('仍有 needs_decision 业务影响；应根据决定权关闭或关联待用户决策');
+    }
+    return errors;
+  }
+
+  if (phase === 'to_be') {
+    if (!reliable('target')) errors.push('缺少由已关闭决策派生的可靠 TO-BE 陈述');
+    if (state.questions.some((question) =>
+      question.projection_status === 'active' && question.authority === 'human' && !question.answer)) {
+      errors.push('仍有未回答的活动决策，不能冻结 TO-BE');
+    }
+    if (activeAssertions.some((item) => item.evidence_status === 'conflicted')) {
+      errors.push('TO-BE 中仍有 conflicted 陈述，必须重新打开决策树');
+    }
+    return errors;
+  }
+
+  if (phase === 'impact_scan') {
+    if (!state.context.change_summary?.trim()) {
+      errors.push('缺少 AS-IS → TO-BE 的变化摘要：使用 requirement-context change set --text <内容>');
+    }
+    if (!activeImpacts.length) errors.push('至少需要一条有效业务影响');
+    if (activeImpacts.some((item) => item.disposition === 'needs_decision')) {
+      errors.push('影响扫描发现尚未关闭的业务分叉；应重新打开决策树');
+    }
+    return errors;
+  }
+
+  if (phase === 'scope') {
+    if (!state.scope.some((item) => item.direction === 'included')) {
+      errors.push('SCOPE 至少需要一个由 TO-BE 和影响处置派生的 In Scope 条目');
+    }
+    return errors;
+  }
+
+  if (phase === 'acceptance') {
+    if (!activeAcceptance.length) errors.push('至少需要一条需求级验收语义');
+    if (!state.context.classification) errors.push('缺少最终需求分类');
+    if (state.context.classification === 'bug' && !reliable('expected')) {
+      errors.push('Bug 必须具备可靠 Existing Expected');
+    }
+    return errors;
+  }
+
+  return validationErrors(state, 'complete');
+}
+
+type RequirementContextReadinessStatus =
+  | 'not_ready'
+  | 'ready_for_human'
+  | 'decisions_required'
+  | 'structurally_ready';
+
+type RequirementContextReadiness = {
+  status: RequirementContextReadinessStatus;
+  remaining: string[];
+  nextCommand: string | null;
+};
+
+function requirementContextReadiness(
+  state: ReturnType<typeof draftState>,
+  phase: RequirementContextPhase,
+): RequirementContextReadiness {
+  const definition = REQUIREMENT_CONTEXT_WORKFLOW[phase];
+  const pendingHuman = phase === 'decision_tree' && state.questions.some((question) =>
+    question.projection_status === 'active' && question.authority === 'human' && !question.answer);
+
+  if (pendingHuman) {
+    const remaining = validationErrors(state, 'request-clarification');
+    return remaining.length
+      ? { status: 'not_ready', remaining, nextCommand: null }
+      : {
+        status: 'ready_for_human',
+        remaining: [],
+        nextCommand: definition.pendingHumanSubmit || 'requirement-context request-clarification',
+      };
+  }
+
+  if (phase === 'impact_scan') {
+    const knownDecisionKeys = new Set(state.questions.map((question) => question.decision_key));
+    const projectedDecisionKeys = new Set(state.questions
+      .filter((question) => question.projection_status === 'active')
+      .map((question) => question.decision_key));
+    const needsDecision = state.impacts.filter((impact) =>
+      impact.lifecycle_status === 'active'
+      && impact.disposition === 'needs_decision'
+      && (!impact.decision_key
+        || projectedDecisionKeys.has(impact.decision_key)
+        || !knownDecisionKeys.has(impact.decision_key)));
+    if (needsDecision.length) {
+      const remaining = phaseValidationErrors(state, phase)
+        .filter((error) => error !== '影响扫描发现尚未关闭的业务分叉；应重新打开决策树');
+      for (const impact of needsDecision) {
+        if (!impact.decision_key) {
+          remaining.push(`待决影响 ${impact.impact_key} 缺少关联 decision key`);
+        } else if (!knownDecisionKeys.has(impact.decision_key)) {
+          remaining.push(`待决影响 ${impact.impact_key} 关联的问题 ${impact.decision_key} 不存在`);
+        }
+      }
+      return remaining.length
+        ? { status: 'not_ready', remaining: [...new Set(remaining)], nextCommand: null }
+        : {
+          status: 'decisions_required',
+          remaining: [],
+          nextCommand: 'requirement-context impact-scan reopen-decisions',
+        };
+    }
+  }
+
+  const remaining = phaseValidationErrors(state, phase);
+  if (remaining.length) return { status: 'not_ready', remaining, nextCommand: null };
+  return {
+    status: 'structurally_ready',
+    remaining: [],
+    nextCommand: phase === 'finalize' ? 'requirement-context validate' : definition.submit,
+  };
+}
+
+function renderRequirementContextReadiness(
+  phase: RequirementContextPhase,
+  state: ReturnType<typeof draftState>,
+) {
+  const definition = REQUIREMENT_CONTEXT_WORKFLOW[phase];
+  const readiness = requirementContextReadiness(state, phase);
+  const lines = ['## READINESS', '', `- Status: ${readiness.status}`];
+  if (readiness.status === 'not_ready') {
+    lines.push(
+      '',
+      '## REMAINING REQUIREMENTS',
+      '',
+      ...readiness.remaining.map((item, index) => `${index + 1}. ${item}`),
+      '',
+      '继续当前工作包；补齐以上缺口后再查看 `requirement-context status`。',
+    );
+    return lines;
+  }
+  if (readiness.status === 'decisions_required') {
+    lines.push(
+      '',
+      '## NEXT ACTION',
+      '',
+      'Impact Scan 已发现会形成不同业务结果的分叉，必须回到 Decision Tree 收敛。',
+      `\`${readiness.nextCommand} --reason <新发现的业务分叉>\``,
+    );
+    return lines;
+  }
+  lines.push(
+    '',
+    '## REVIEW BEFORE SUBMIT',
+    '',
+    ...definition.reviewBeforeSubmit.map((item) => `- ${item}`),
+    '',
+    phase === 'finalize' ? '## VALIDATE' : '## SUBMIT',
+    '',
+    `\`${readiness.nextCommand}\``,
+  );
+  return lines;
+}
+
+function renderRequirementContextWorkPacket(
+  phase: RequirementContextPhase,
+  state: ReturnType<typeof draftState>,
+) {
+  const definition = REQUIREMENT_CONTEXT_WORKFLOW[phase];
+  const current = phase === 'decision_tree'
+    ? (() => {
+      const active = state.questions.filter((question) => question.projection_status === 'active');
+      const answered = active.filter((question) => question.answer).length;
+      const pending = active.filter((question) => question.authority === 'human' && !question.answer).length;
+      return `活动决策 ${active.length} 个，已关闭 ${answered} 个，待人工回答 ${pending} 个。`;
+    })()
+    : null;
+  return [
+    '# NEXT WORK PACKET',
+    '',
+    '## PHASE',
+    '',
+    phase,
+    '',
+    '## OBJECTIVE',
+    '',
+    definition.objective,
+    ...(current ? ['', '## CURRENT', '', current] : []),
+    '',
+    '## REQUIRED',
+    '',
+    definition.required,
+    ...(definition.batch ? ['', '## BATCH', '', definition.batch] : []),
+    '',
+    '## DO NOT',
+    '',
+    definition.prohibited,
+    '',
+    '## AVAILABLE COMMANDS',
+    '',
+    ...definition.commands.map((item) => `- \`${item}\``),
+    '',
+    ...renderRequirementContextReadiness(phase, state),
+  ].join('\n');
+}
+
+type RequirementContextCommandOutcome =
+  | 'state_restored'
+  | 'accepted'
+  | 'phase_completed'
+  | 'validation_passed'
+  | 'waiting_for_human'
+  | 'completed'
+  | 'already_submitted';
+
+function renderRequirementContextResult(input: {
+  command: string;
+  outcome: RequirementContextCommandOutcome;
+  details?: string[];
+}) {
+  return [
+    '# COMMAND RESULT',
+    '',
+    `- Command: \`${input.command}\``,
+    `- Outcome: ${input.outcome}`,
+    ...(input.details || []).map((detail) => `- ${detail}`),
+  ].join('\n');
+}
+
+function renderRequirementContextContinue(
+  command: string,
+  changed: string,
+  state: ReturnType<typeof draftState>,
+) {
+  const phase = state.context.workflow_phase;
+  const readiness = requirementContextReadiness(state, phase);
+  const definition = REQUIREMENT_CONTEXT_WORKFLOW[phase];
+  const next = [
+    '# NEXT',
+    '',
+    `- Phase: ${phase}`,
+    `- Readiness: ${readiness.status}`,
+  ];
+  if (readiness.status === 'not_ready') {
+    next.push(
+      '- Action: continue_current_work_packet',
+      '- Remaining:',
+      ...readiness.remaining.map((item) => `  - ${item}`),
+      '- Refresh: `requirement-context status`',
+    );
+  } else if (readiness.status === 'decisions_required') {
+    next.push(
+      '- Action: reopen_decision_tree',
+      `- Command: \`${readiness.nextCommand} --reason <新发现的业务分叉>\``,
+    );
+  } else {
+    next.push(
+      '- Action: review_before_submit',
+      '- Review:',
+      ...definition.reviewBeforeSubmit.map((item) => `  - ${item}`),
+      `- ${phase === 'finalize' ? 'Validate' : 'Submit'}: \`${readiness.nextCommand}\``,
+    );
+  }
+  return [
+    renderRequirementContextResult({ command, outcome: 'accepted', details: [`Changed: ${changed}`] }),
+    '',
+    ...next,
+  ].join('\n');
+}
+
+function activeDecisionProjection(state: ReturnType<typeof draftState>) {
+  return state.questions.filter((question) => question.projection_status === 'active');
+}
+
+function activeDecisionKeys(state: ReturnType<typeof draftState>) {
+  return new Set(activeDecisionProjection(state).map((question) => question.decision_key));
+}
+
+function renderActiveDecisionTree(state: ReturnType<typeof draftState>) {
+  const active = activeDecisionProjection(state);
+  const resolved = active.filter((question) => Boolean(question.answer));
+  const pending = active.filter((question) => question.authority === 'human' && !question.answer);
+  const lines = ['# ACTIVE DECISION TREE', ''];
+  if (!resolved.length) lines.push('尚无已关闭的活动决策。');
+  for (const question of resolved) {
+    const selected = question.options.find((option) => option.option_id === question.selected_option_id);
+    const parent = question.dependencies
+      .map((dependency) => `${dependency.parent_decision_key}=${dependency.parent_option_id}`)
+      .join(' AND ');
+    lines.push(
+      `## ${question.title} · ${question.decision_key}`,
+      '',
+      `- Question：${question.question}`,
+      `- Decision：${selected?.label || question.answer}`,
+      `- Decided By：${question.authority === 'human' ? 'HUMAN' : 'AGENT'}`,
+    );
+    if (question.authority === 'human' && selected && question.answer !== selected.label) {
+      lines.push(`- User Note：${question.answer}`);
+    }
+    if (question.authority === 'agent' && question.decision_reason) {
+      lines.push(`- Reason：${question.decision_reason}`);
+    }
+    if (selected?.consequence) lines.push(`- Consequence：${selected.consequence}`);
+    if (parent) lines.push(`- Activated By：${parent}`);
+    lines.push('');
+  }
+  lines.push('# ACTIVE PENDING', '');
+  if (!pending.length) lines.push('none');
+  for (const question of pending) {
+    lines.push(`## ${question.title} · ${question.decision_key}`, '', `- Question：${question.question}`);
+    if (question.impact) lines.push(`- Impact：${question.impact}`);
+    if (question.recommendation_option_id) {
+      const recommended = question.options.find((option) => option.option_id === question.recommendation_option_id);
+      if (recommended) lines.push(`- Recommendation：${recommended.label}`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n').trimEnd();
+}
+
+function transitionRequirementContextPhase(input: {
+  db: Awaited<ReturnType<typeof databaseConnection>>;
+  draft: DraftRow;
+  execution: ExecutionRow;
+  state: ReturnType<typeof draftState>;
+  from: RequirementContextPhase;
+  to: RequirementContextPhase;
+  reason: string;
+}) {
+  const { db, draft, execution, state, from, to, reason } = input;
+  if (state.context.workflow_phase !== from) {
+    throw new Error(`当前阶段是 ${state.context.workflow_phase}，不能提交 ${from}`);
+  }
+  const errors = phaseValidationErrors(state, from);
+  if (errors.length) {
+    throw new Error(`${from} 阶段不能完成：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+  }
+  db.transaction(() => {
+    db.prepare('UPDATE requirement_context_drafts SET workflow_phase = ? WHERE draft_id = ?')
+      .run(to, draft.draft_id);
+    db.prepare(`
+      INSERT INTO requirement_context_phase_transitions(
+        draft_id, from_phase, to_phase, reason, execution_id
+      ) VALUES(?, ?, ?, ?, ?)
+    `).run(draft.draft_id, from, to, reason, execution.execution_id);
+    touchDraft(db, draft.draft_id);
+  })();
+  const nextState = draftState(db, draft);
+  return [
+    renderRequirementContextResult({
+      command: REQUIREMENT_CONTEXT_WORKFLOW[from].submit,
+      outcome: 'phase_completed',
+      details: [`From: ${from}`, `To: ${to}`],
+    }),
+    '',
+    renderRequirementContextWorkPacket(to, nextState),
+  ].join('\n');
+}
+
+function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
+  const readiness = requirementContextReadiness(state, state.context.workflow_phase);
+  const decisionKeys = activeDecisionKeys(state);
+  const visibleForDecision = (decisionKey: string | null) => !decisionKey || decisionKeys.has(decisionKey);
+  const visibleAssertions = state.assertions.filter((item) => visibleForDecision(item.decision_key));
+  const visibleImpacts = state.impacts.filter((item) => visibleForDecision(item.decision_key));
+  const activeAssertions = state.assertions.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
+  const activeImpacts = state.impacts.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
+  const activeAcceptance = state.acceptance.filter((item) => item.lifecycle_status === 'active');
+  const projectedQuestions = activeDecisionProjection(state);
   const lines = [
+    renderRequirementContextResult({
+      command: 'requirement-context status',
+      outcome: 'state_restored',
+      details: [`Phase: ${state.context.workflow_phase}`],
+    }),
+    '',
+    renderRequirementContextWorkPacket(state.context.workflow_phase, state),
+    '',
+    '# CURRENT DRAFT',
+    '',
     `需求上下文草稿 v${draft.draft_version} · 变更 ${draft.change_seq}`,
     '',
     `业务意图：${state.context.intent || '未填写'}`,
@@ -1096,16 +1688,16 @@ function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
     `业务语义：Actual ${activeAssertions.filter((item) => item.perspective === 'actual').length}`
       + ` / Expected ${activeAssertions.filter((item) => item.perspective === 'expected').length}`
       + ` / TO-BE ${activeAssertions.filter((item) => item.perspective === 'target').length}`,
-    `业务影响：${activeImpacts.length}（历史 ${state.impacts.length - activeImpacts.length}）`,
+    `业务影响：${activeImpacts.length}`,
     `验收语义：${activeAcceptance.length}`,
     `语义修订记录：${state.revisionCount}`,
     `约束：${state.constraints.length}`,
     `范围：包含 ${state.scope.filter((item) => item.direction === 'included').length} / 排除 ${state.scope.filter((item) => item.direction === 'excluded').length}`,
-    `问题：${state.questions.length}（已回答 ${state.questions.filter((item) => item.answer).length}）`,
+    `活动决策：${projectedQuestions.length}（已关闭 ${projectedQuestions.filter((item) => item.answer).length}）`,
   ];
-  if (state.assertions.length) {
+  if (visibleAssertions.length) {
     lines.push('', '业务语义索引（跨轮次复用稳定 key）：');
-    for (const assertion of state.assertions) {
+    for (const assertion of visibleAssertions) {
       lines.push(
         `- ${assertion.assertion_key} · ${assertion.perspective}`
         + ` · ${assertion.evidence_status} · ${assertion.lifecycle_status}：${assertion.statement}`
@@ -1115,9 +1707,9 @@ function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
       );
     }
   }
-  if (state.impacts.length) {
+  if (visibleImpacts.length) {
     lines.push('', '业务影响索引（识别影响不等于自动纳入范围）：');
-    for (const impact of state.impacts) {
+    for (const impact of visibleImpacts) {
       lines.push(
         `- ${impact.impact_key} · ${impact.disposition} · ${impact.lifecycle_status}：${impact.statement}`
         + `（依据：${impact.rationale}；来源：${impact.source}）`
@@ -1148,30 +1740,17 @@ function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
       lines.push(`- ${item.scope_key} · ${item.direction === 'included' ? '包含' : '排除'}：${item.content}`);
     }
   }
-  if (state.questions.length) {
-    lines.push('', '问题索引（decision key 跨轮次不可改名）：');
-    for (const question of state.questions) {
-      const options = question.options.map((option) =>
-        `${option.option_id}=${option.label}${option.option_id === question.recommendation_option_id ? '（推荐）' : ''}`,
-      ).join('；');
-      lines.push(
-        `- ${question.decision_key}：${question.title} · ${question.answer ? `已回答：${question.answer}` : '待回答'}`
-        + (options ? ` · 选项：${options}` : ''),
-      );
-    }
-  }
-  if (missing.length) {
-    lines.push('', '当前校验提示：', ...missing.map((item, index) => `${index + 1}. ${item}`));
-  } else if (!state.context.classification) {
-    lines.push(
-      '',
-      '草稿基础结构完整，但 complete 前仍需确定需求分类。',
-      state.questions.some((question) => !question.answer)
-        ? '若分类取决于待回答问题，可以先提交 request-clarification；不要猜测临时分类。'
-        : '当前没有待回答问题，请设置 classification 后再 complete。',
-    );
+  if (projectedQuestions.length) lines.push('', renderActiveDecisionTree(state));
+  if (readiness.status === 'not_ready') {
+    lines.push('', '当前 readiness 缺口：', ...readiness.remaining.map((item, index) => `${index + 1}. ${item}`));
+  } else if (readiness.status === 'decisions_required') {
+    lines.push('', '当前 Impact Scan 需要重新打开 Decision Tree，不能完成本阶段。');
+  } else if (readiness.status === 'ready_for_human') {
+    lines.push('', '当前决策批次已具备提交给用户的结构，请复核后请求澄清。');
+  } else if (state.context.workflow_phase === 'finalize') {
+    lines.push('', '全部阶段结构完整；先执行 requirement-context validate，通过后才会返回 complete。');
   } else {
-    lines.push('', '草稿结构完整。请根据是否仍有未回答问题选择终止命令。');
+    lines.push('', `当前 ${state.context.workflow_phase} 阶段结构完整；复核清单后可提交本阶段。`);
   }
   return lines.join('\n');
 }
@@ -1181,6 +1760,8 @@ function renderArtifact(
   state: ReturnType<typeof draftState>,
   action: 'complete' | 'request-clarification',
 ) {
+  const decisionKeys = activeDecisionKeys(state);
+  const visibleForDecision = (decisionKey: string | null) => !decisionKey || decisionKeys.has(decisionKey);
   const included = state.scope.filter((item) => item.direction === 'included');
   const excluded = state.scope.filter((item) => item.direction === 'excluded');
   const assertionSection = (
@@ -1188,12 +1769,15 @@ function renderArtifact(
     fallback: string,
   ) => {
     const assertions = state.assertions.filter((item) =>
-      item.perspective === perspective && item.lifecycle_status === 'active');
+      item.perspective === perspective
+      && item.lifecycle_status === 'active'
+      && visibleForDecision(item.decision_key));
     return assertions.length
       ? assertions.map((item) => `- ${item.statement}`)
       : [`- ${fallback}`];
   };
-  const activeImpacts = state.impacts.filter((item) => item.lifecycle_status === 'active');
+  const activeImpacts = state.impacts.filter((item) =>
+    item.lifecycle_status === 'active' && visibleForDecision(item.decision_key));
   const impactSection = (
     heading: string,
     disposition: ContextImpact['disposition'],
@@ -1229,6 +1813,47 @@ function renderArtifact(
         ? '本需求未识别到独立于本次 TO-BE 的既有 Expected；变化按 Actual → TO-BE 表达'
         : '尚未形成可靠结论',
     ),
+  ];
+  const answered = activeDecisionProjection(state).filter((question) => question.answer);
+  if (answered.length) {
+    lines.push('', '## DECISIONS', '');
+    for (const question of answered) {
+      const outcomes = state.assertions
+        .filter((item) =>
+          item.lifecycle_status === 'active'
+          && item.perspective === 'target'
+          && item.decision_key === question.decision_key)
+        .map((item) => item.statement);
+      const impacts = activeImpacts
+        .filter((item) => item.decision_key === question.decision_key)
+        .map((item) => item.statement);
+      const selected = question.options.find((option) => option.option_id === question.selected_option_id);
+      lines.push(
+        `### ${question.title}`,
+        '',
+        `- 决定：${selected?.label || question.answer}`,
+        `- 决定者：${question.authority === 'human' ? '用户' : 'Agent'}`,
+      );
+      if (selected?.consequence) lines.push(`- 业务后果：${selected.consequence}`);
+      if (outcomes.length) lines.push(`- 形成的业务结果：${outcomes.join('；')}`);
+      if (impacts.length) lines.push(`- 业务影响：${impacts.join('；')}`);
+      lines.push('');
+    }
+  }
+  const unanswered = activeDecisionProjection(state).filter((question) =>
+    question.authority === 'human' && !question.answer);
+  if (action === 'request-clarification' && unanswered.length) {
+    lines.push('', '## OPEN QUESTIONS', '');
+    for (const question of unanswered) {
+      const pendingImpacts = activeImpacts
+        .filter((item) => item.decision_key === question.decision_key)
+        .map((item) => item.statement);
+      lines.push(`### ${question.title}`, '', `- 问题：${question.question}`, `- 决策影响：${question.impact}`);
+      if (pendingImpacts.length) lines.push(`- 待收敛影响：${pendingImpacts.join('；')}`);
+      lines.push('');
+    }
+  }
+  lines.push(
     '',
     '## TO-BE',
     '',
@@ -1266,38 +1891,7 @@ function renderArtifact(
           .map((item) => `- ${item.content}`)
         : ['- 尚未明确']
     ),
-  ];
-  const answered = state.questions.filter((question) => question.answer);
-  if (answered.length) {
-    lines.push('', '## DECISIONS', '');
-    for (const question of answered) {
-      const outcomes = state.assertions
-        .filter((item) =>
-          item.lifecycle_status === 'active'
-          && item.perspective === 'target'
-          && item.decision_key === question.decision_key)
-        .map((item) => item.statement);
-      const impacts = activeImpacts
-        .filter((item) => item.decision_key === question.decision_key)
-        .map((item) => item.statement);
-      lines.push(`### ${question.title}`, '', `- 决定：${question.answer}`);
-      if (outcomes.length) lines.push(`- 形成的业务结果：${outcomes.join('；')}`);
-      if (impacts.length) lines.push(`- 业务影响：${impacts.join('；')}`);
-      lines.push('');
-    }
-  }
-  const unanswered = state.questions.filter((question) => !question.answer);
-  if (action === 'request-clarification' && unanswered.length) {
-    lines.push('', '## OPEN QUESTIONS', '');
-    for (const question of unanswered) {
-      const pendingImpacts = activeImpacts
-        .filter((item) => item.decision_key === question.decision_key)
-        .map((item) => item.statement);
-      lines.push(`### ${question.title}`, '', `- 问题：${question.question}`, `- 决策影响：${question.impact}`);
-      if (pendingImpacts.length) lines.push(`- 待收敛影响：${pendingImpacts.join('；')}`);
-      lines.push('');
-    }
-  }
+  );
   return lines.join('\n').trimEnd();
 }
 
@@ -1306,7 +1900,11 @@ function buildResult(
   state: ReturnType<typeof draftState>,
   action: 'complete' | 'request-clarification',
 ) {
-  const questions = state.questions.filter((question) => !question.answer).map((question) => {
+  const questions = state.questions.filter((question) =>
+    question.authority === 'human'
+    && question.lifecycle_status === 'active'
+    && !question.answer
+    && (action === 'request-clarification' || question.projection_status === 'active')).map((question) => {
     const recommended = question.options.find((option) => option.option_id === question.recommendation_option_id)!;
     return {
       decisionKey: question.decision_key,
@@ -1320,7 +1918,16 @@ function buildResult(
         label: option.label,
         consequences: [option.consequence],
       })),
-      dependsOn: [],
+      dependsOn: question.dependencies.map((dependency) => dependency.parent_decision_key),
+      activation: question.dependencies.map((dependency) => ({
+        decisionKey: dependency.parent_decision_key,
+        optionId: dependency.parent_option_id,
+      })),
+      initialStatus: question.projection_status === 'active'
+        ? 'pending' as const
+        : question.projection_status === 'conditional'
+          ? 'conditional' as const
+          : 'not_applicable' as const,
     };
   });
   const complete = action === 'complete';
@@ -1349,6 +1956,15 @@ function terminalSubmit(
 ) {
   assertViewed(draft, execution.execution_id);
   const state = draftState(db, draft);
+  if (action === 'request-clarification' && state.context.workflow_phase !== 'decision_tree') {
+    throw new Error(`只有 decision_tree 阶段可以请求用户澄清；当前阶段是 ${state.context.workflow_phase}`);
+  }
+  if (action === 'complete' && state.context.workflow_phase !== 'finalize') {
+    throw new Error(`需求上下文尚未走完阶段调用链；当前阶段是 ${state.context.workflow_phase}`);
+  }
+  if (action === 'complete' && state.context.validated_change_seq !== draft.change_seq) {
+    throw new Error('Finalize 尚未通过当前草稿版本的 validate；请先执行 requirement-context validate');
+  }
   const errors = validationErrors(state, action);
   if (errors.length) {
     throw new Error(`草稿不能执行 ${action}：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
@@ -1369,8 +1985,23 @@ function terminalSubmit(
     `).run(JSON.stringify(result), execution.execution_id);
   })();
   return action === 'complete'
-    ? '业务变化上下文已提交成功。普通最终回复不再用于推进流程，可以结束本轮。'
-    : '需求澄清请求已提交成功。普通最终回复不再用于推进流程，可以结束本轮。';
+    ? [
+      renderRequirementContextResult({ command: 'requirement-context complete', outcome: 'completed' }),
+      '',
+      '# NEXT',
+      '',
+      '- Owner: Application',
+      '- Agent Action: end_execution',
+    ].join('\n')
+    : [
+      renderRequirementContextResult({ command: 'requirement-context request-clarification', outcome: 'waiting_for_human' }),
+      '',
+      '# NEXT',
+      '',
+      '- Owner: Application',
+      '- Agent Action: end_execution',
+      '- Resume Entry: `requirement-context status`',
+    ].join('\n');
 }
 
 function deliveryPlanState(
@@ -1378,7 +2009,7 @@ function deliveryPlanState(
   draft: DraftRow,
 ) {
   const plan = db.prepare(`
-    SELECT draft_id, rationale, coverage, ordering_notes
+    SELECT draft_id, rationale, coverage, ordering_notes, workflow_phase, validated_change_seq
     FROM delivery_plan_drafts WHERE draft_id = ?
   `).get(draft.draft_id) as DeliveryPlanDraft;
   const units = db.prepare(`
@@ -1420,32 +2051,29 @@ function deliveryPlanState(
   return { plan, units, sources, sourceLinks, dependencies, revisionCount, existingUnits };
 }
 
-function deliveryPlanValidationErrors(state: ReturnType<typeof deliveryPlanState>) {
+function deliveryPlanBasisErrors(state: ReturnType<typeof deliveryPlanState>) {
   const errors: string[] = [];
-  const activeUnits = state.units.filter((unit) => unit.lifecycle_status === 'active');
-  const activeKeys = new Set(activeUnits.map((unit) => unit.unit_key));
-  const existingKeys = new Set(state.existingUnits
-    .map((unit) => unit.unit_key)
-    .filter((key): key is string => Boolean(key)));
   if (!state.plan.rationale?.trim()) {
     errors.push('缺少拆分依据：使用 delivery-plan rationale set --text <内容>');
-  }
-  if (!state.plan.coverage?.trim()) {
-    errors.push('缺少整体覆盖说明：使用 delivery-plan coverage set --text <内容>');
   }
   if (!state.sources.length) {
     errors.push('交付计划缺少冻结的上游规划输入，不能完成');
   }
+  return errors;
+}
+
+function deliveryPlanUnitErrors(state: ReturnType<typeof deliveryPlanState>) {
+  const errors: string[] = [];
+  const activeUnits = state.units.filter((unit) => unit.lifecycle_status === 'active');
+  const existingKeys = new Set(state.existingUnits
+    .map((unit) => unit.unit_key)
+    .filter((key): key is string => Boolean(key)));
   if (!activeUnits.length) {
     errors.push('至少需要一个可独立交付的交付单元');
   }
   if (activeUnits.length > 50) {
     errors.push('单次交付计划最多包含 50 个有效交付单元');
   }
-  if (activeUnits.length > 1 && !state.plan.ordering_notes?.trim()) {
-    errors.push('存在多个交付单元时必须说明推荐顺序与依赖依据');
-  }
-
   const duplicateTitles = activeUnits
     .filter((unit, index) =>
       activeUnits.findIndex((candidate) => candidate.title.trim() === unit.title.trim()) !== index)
@@ -1458,6 +2086,19 @@ function deliveryPlanValidationErrors(state: ReturnType<typeof deliveryPlanState
     .filter((key) => existingKeys.has(key));
   if (conflictingKeys.length) {
     errors.push(`交付单元 key 已被当前需求中的既有单元使用：${conflictingKeys.join(', ')}`);
+  }
+  return errors;
+}
+
+function deliveryPlanCoverageErrors(state: ReturnType<typeof deliveryPlanState>) {
+  const errors: string[] = [];
+  const activeUnits = state.units.filter((unit) => unit.lifecycle_status === 'active');
+  const activeKeys = new Set(activeUnits.map((unit) => unit.unit_key));
+  if (!state.plan.coverage?.trim()) {
+    errors.push('缺少整体覆盖说明：使用 delivery-plan coverage set --text <内容>');
+  }
+  if (activeUnits.length > 1 && !state.plan.ordering_notes?.trim()) {
+    errors.push('存在多个交付单元时必须说明推荐顺序与依赖依据');
   }
 
   for (const unit of activeUnits) {
@@ -1530,12 +2171,184 @@ function deliveryPlanValidationErrors(state: ReturnType<typeof deliveryPlanState
   return errors;
 }
 
+function deliveryPlanValidationErrors(state: ReturnType<typeof deliveryPlanState>) {
+  return [
+    ...deliveryPlanBasisErrors(state),
+    ...deliveryPlanUnitErrors(state),
+    ...deliveryPlanCoverageErrors(state),
+  ];
+}
+
+function deliveryPlanPhaseValidationErrors(
+  state: ReturnType<typeof deliveryPlanState>,
+  phase: DeliveryPlanPhase,
+) {
+  if (phase === 'planning_basis') return deliveryPlanBasisErrors(state);
+  if (phase === 'delivery_units') return [
+    ...deliveryPlanBasisErrors(state),
+    ...deliveryPlanUnitErrors(state),
+  ];
+  if (phase === 'coverage_order') return deliveryPlanValidationErrors(state);
+  return deliveryPlanValidationErrors(state);
+}
+
+type DeliveryPlanReadiness = {
+  status: 'not_ready' | 'structurally_ready';
+  remaining: string[];
+  nextCommand: string | null;
+};
+
+function deliveryPlanReadiness(
+  state: ReturnType<typeof deliveryPlanState>,
+  phase: DeliveryPlanPhase,
+): DeliveryPlanReadiness {
+  const remaining = deliveryPlanPhaseValidationErrors(state, phase);
+  if (remaining.length) return { status: 'not_ready', remaining, nextCommand: null };
+  return {
+    status: 'structurally_ready',
+    remaining: [],
+    nextCommand: phase === 'finalize'
+      ? 'delivery-plan validate'
+      : DELIVERY_PLAN_WORKFLOW[phase].submit,
+  };
+}
+
+function renderDeliveryPlanReadiness(
+  phase: DeliveryPlanPhase,
+  state: ReturnType<typeof deliveryPlanState>,
+) {
+  const readiness = deliveryPlanReadiness(state, phase);
+  const definition = DELIVERY_PLAN_WORKFLOW[phase];
+  const lines = ['## READINESS', '', `- Status: ${readiness.status}`];
+  if (readiness.status === 'not_ready') {
+    lines.push(
+      '',
+      '## REMAINING REQUIREMENTS',
+      '',
+      ...readiness.remaining.map((item, index) => `${index + 1}. ${item}`),
+      '',
+      '继续当前工作包；补齐以上缺口后再查看 `delivery-plan status`。',
+    );
+    return lines;
+  }
+  lines.push(
+    '',
+    '## REVIEW BEFORE SUBMIT',
+    '',
+    ...definition.reviewBeforeSubmit.map((item) => `- ${item}`),
+    '',
+    phase === 'finalize' ? '## VALIDATE' : '## SUBMIT',
+    '',
+    `\`${readiness.nextCommand}\``,
+  );
+  return lines;
+}
+
+function renderDeliveryPlanWorkPacket(
+  phase: DeliveryPlanPhase,
+  state: ReturnType<typeof deliveryPlanState>,
+) {
+  const definition = DELIVERY_PLAN_WORKFLOW[phase];
+  return [
+    '# NEXT WORK PACKET',
+    '',
+    '## PHASE',
+    '',
+    `${definition.title} · ${phase}`,
+    '',
+    '## OBJECTIVE',
+    '',
+    definition.objective,
+    '',
+    '## REQUIRED',
+    '',
+    definition.required,
+    '',
+    '## DO NOT',
+    '',
+    definition.prohibited,
+    '',
+    '## AVAILABLE COMMANDS',
+    '',
+    ...definition.commands.map((item) => `- \`${item}\``),
+    '',
+    ...renderDeliveryPlanReadiness(phase, state),
+  ].join('\n');
+}
+
+type DeliveryPlanCommandOutcome =
+  | 'state_restored'
+  | 'accepted'
+  | 'phase_completed'
+  | 'validation_passed'
+  | 'completed'
+  | 'already_submitted';
+
+function renderDeliveryPlanCommandResult(input: {
+  command: string;
+  outcome: DeliveryPlanCommandOutcome;
+  details?: string[];
+}) {
+  return [
+    '# COMMAND RESULT',
+    '',
+    `- Command: \`${input.command}\``,
+    `- Outcome: ${input.outcome}`,
+    ...(input.details || []).map((detail) => `- ${detail}`),
+  ].join('\n');
+}
+
+function renderDeliveryPlanContinue(
+  command: string,
+  changed: string,
+  state: ReturnType<typeof deliveryPlanState>,
+) {
+  const phase = state.plan.workflow_phase;
+  const readiness = deliveryPlanReadiness(state, phase);
+  const definition = DELIVERY_PLAN_WORKFLOW[phase];
+  const next = [
+    '# NEXT',
+    '',
+    `- Phase: ${phase}`,
+    `- Readiness: ${readiness.status}`,
+  ];
+  if (readiness.status === 'not_ready') {
+    next.push(
+      '- Action: continue_current_work_packet',
+      '- Remaining:',
+      ...readiness.remaining.map((item) => `  - ${item}`),
+      '- Refresh: `delivery-plan status`',
+    );
+  } else {
+    next.push(
+      '- Action: review_before_submit',
+      '- Review:',
+      ...definition.reviewBeforeSubmit.map((item) => `  - ${item}`),
+      `- ${phase === 'finalize' ? 'Validate' : 'Submit'}: \`${readiness.nextCommand}\``,
+    );
+  }
+  return [
+    renderDeliveryPlanCommandResult({ command, outcome: 'accepted', details: [`Changed: ${changed}`] }),
+    '',
+    ...next,
+  ].join('\n');
+}
+
 function renderDeliveryPlanStatus(
   draft: DraftRow,
   state: ReturnType<typeof deliveryPlanState>,
 ) {
-  const errors = deliveryPlanValidationErrors(state);
   const lines = [
+    renderDeliveryPlanCommandResult({
+      command: 'delivery-plan status',
+      outcome: 'state_restored',
+      details: [`Phase: ${state.plan.workflow_phase}`],
+    }),
+    '',
+    renderDeliveryPlanWorkPacket(state.plan.workflow_phase, state),
+    '',
+    '# CURRENT DRAFT',
+    '',
     `交付计划草稿 v${draft.draft_version} · 变更 ${draft.change_seq}`,
     '',
     `拆分依据：${state.plan.rationale || '未填写'}`,
@@ -1579,16 +2392,58 @@ function renderDeliveryPlanStatus(
       );
     }
   }
-  if (errors.length) {
-    lines.push('', '当前校验提示：', ...errors.map((item, index) => `${index + 1}. ${item}`));
-  } else {
-    lines.push('', '交付计划草稿结构完整，可以校验并提交。');
-  }
   return lines.join('\n');
+}
+
+function transitionDeliveryPlanPhase(input: {
+  db: Awaited<ReturnType<typeof databaseConnection>>;
+  draft: DraftRow;
+  execution: ExecutionRow;
+  state: ReturnType<typeof deliveryPlanState>;
+  from: DeliveryPlanPhase;
+  to: DeliveryPlanPhase;
+  reason: string;
+}) {
+  const { db, draft, execution, state, from, to, reason } = input;
+  if (state.plan.workflow_phase !== from) {
+    throw new Error(`当前阶段是 ${state.plan.workflow_phase}，不能提交 ${from}`);
+  }
+  const errors = deliveryPlanPhaseValidationErrors(state, from);
+  if (errors.length) {
+    throw new Error(`${from} 阶段不能完成：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+  }
+  db.transaction(() => {
+    db.prepare('UPDATE delivery_plan_drafts SET workflow_phase = ?, validated_change_seq = NULL WHERE draft_id = ?')
+      .run(to, draft.draft_id);
+    db.prepare(`
+      INSERT INTO delivery_plan_phase_transitions(
+        draft_id, from_phase, to_phase, reason, execution_id
+      ) VALUES(?, ?, ?, ?, ?)
+    `).run(draft.draft_id, from, to, reason, execution.execution_id);
+    touchDraft(db, draft.draft_id);
+  })();
+  const nextState = deliveryPlanState(db, draft);
+  return [
+    renderDeliveryPlanCommandResult({
+      command: DELIVERY_PLAN_WORKFLOW[from].submit,
+      outcome: 'phase_completed',
+      details: [`From: ${from}`, `To: ${to}`],
+    }),
+    '',
+    renderDeliveryPlanWorkPacket(to, nextState),
+  ].join('\n');
 }
 
 function renderDeliveryPlanArtifact(state: ReturnType<typeof deliveryPlanState>) {
   const activeUnits = state.units.filter((unit) => unit.lifecycle_status === 'active');
+  const unitTitle = (key: string) =>
+    state.units.find((candidate) => candidate.unit_key === key)?.title || '未命名交付单元';
+  const sourceKindLabel: Record<DeliveryPlanSourceItem['source_kind'], string> = {
+    change: '业务变化',
+    preserve: '保持项',
+    technical: '分析义务',
+    acceptance: '验收语义',
+  };
   const lines = [
     '# 交付计划',
     '',
@@ -1615,15 +2470,14 @@ function renderDeliveryPlanArtifact(state: ReturnType<typeof deliveryPlanState>)
     lines.push(
       `### ${index + 1}. ${unit.title}`,
       '',
-      `- 稳定标识：\`${unit.unit_key}\``,
       `- 参与者：${unit.actor}`,
       `- 触发条件：${unit.trigger_condition}`,
       `- 用户可观察结果：${unit.observable_outcome}`,
       `- 验收标准：${unit.acceptance}`,
-      `- 前置单元：${dependencies.length ? dependencies.map((key) => `\`${key}\``).join('、') : '无'}`,
+      `- 前置单元：${dependencies.length ? dependencies.map(unitTitle).join('、') : '无'}`,
       '- 承接的规划输入：',
       ...linkedSources.map((source) =>
-        `  - \`${source.source_key}\` · ${source.source_kind}：${source.content}`),
+        `  - ${sourceKindLabel[source.source_kind]}：${source.content}`),
       '',
     );
   }
@@ -1631,9 +2485,10 @@ function renderDeliveryPlanArtifact(state: ReturnType<typeof deliveryPlanState>)
   if (historicalUnits.length) {
     lines.push('', '## 已修正的候选单元', '');
     for (const unit of historicalUnits) {
+      const lifecycle = unit.lifecycle_status === 'dismissed' ? '已排除' : '已取代';
       lines.push(
-        `- \`${unit.unit_key}\`：${unit.lifecycle_status}；${unit.lifecycle_reason || '未记录原因'}`
-        + `${unit.superseded_by ? `；由 \`${unit.superseded_by}\` 取代` : ''}`,
+        `- ${unit.title}：${lifecycle}；${unit.lifecycle_reason || '未记录原因'}`
+        + `${unit.superseded_by ? `；由「${unitTitle(unit.superseded_by)}」取代` : ''}`,
       );
     }
   }
@@ -1683,6 +2538,12 @@ function submitDeliveryPlan(
 ) {
   assertViewed(draft, execution.execution_id, 'delivery-plan');
   const state = deliveryPlanState(db, draft);
+  if (state.plan.workflow_phase !== 'finalize') {
+    throw new Error(`交付计划尚未走完阶段调用链；当前阶段是 ${state.plan.workflow_phase}`);
+  }
+  if (state.plan.validated_change_seq !== draft.change_seq) {
+    throw new Error('FINALIZE 尚未通过当前草稿版本的 validate；请先执行 delivery-plan validate');
+  }
   const errors = deliveryPlanValidationErrors(state);
   if (errors.length) {
     throw new Error(`交付计划不能完成：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
@@ -1701,10 +2562,22 @@ function submitDeliveryPlan(
       WHERE execution_id = ? AND status = 'running'
     `).run(JSON.stringify(result), execution.execution_id);
   })();
-  return '交付计划已提交成功。普通最终回复不再用于推进流程，可以结束本轮。';
+  return [
+    renderDeliveryPlanCommandResult({ command: 'delivery-plan complete', outcome: 'completed' }),
+    '',
+    '# NEXT',
+    '',
+    '- Owner: Application',
+    '- Agent Action: end_execution',
+  ].join('\n');
 }
 
 const requirementContextCommandIndex = [
+  ...REQUIREMENT_CONTEXT_PHASE_ORDER.flatMap((phase) => {
+    const definition = REQUIREMENT_CONTEXT_WORKFLOW[phase];
+    return [definition.submit, definition.pendingHumanSubmit].filter((command): command is string => Boolean(command));
+  }).map((command) => `  ${command}`),
+  '  requirement-context impact-scan reopen-decisions --reason <新发现的业务分叉>',
   '  requirement-context intent set --text <业务意图>',
   '  requirement-context change set --text <Actual 与 TO-BE，以及适用的 Expected 的变化摘要>',
   '  requirement-context assertion upsert --key <key> --perspective <actual|expected|target> --statement <陈述> --evidence <observed|reported|inferred|decided|conflicted> --source <来源> [--decision <问题key>]',
@@ -1721,9 +2594,13 @@ const requirementContextCommandIndex = [
   '  requirement-context constraint remove --key <key>',
   '  requirement-context scope include|exclude --key <key> --text <内容>',
   '  requirement-context scope remove --key <key>',
-  '  requirement-context question add --key <key> --title <标题> --question <问题> --impact <影响>',
+  '  requirement-context question add --key <key> --title <标题> --question <问题> --impact <影响> [--authority human|agent]',
   '  requirement-context question option-add --key <问题key> --id <选项id> --label <名称> --consequence <后果>',
   '  requirement-context question recommend --key <问题key> --option <选项id> --reason <理由>',
+  '  requirement-context question depends-on --key <子节点key> --parent <父节点key> --option <激活选项id>',
+  '  requirement-context question dependency-remove --key <子节点key> --parent <父节点key> --option <激活选项id>',
+  '  requirement-context question decide --key <Agent决策key> --option <选项id> --reason <职责内依据>',
+  '  requirement-context question supersede --key <旧key> --by <新key> --reason <理由>',
   '  requirement-context question remove --key <key>',
   '  requirement-context validate',
 ];
@@ -1787,21 +2664,29 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
   }
   if (topic === 'question') {
     return [
-      '只有无法从现有上下文和证据推导、并且会实质改变业务目标、规则、参与者、范围、分类或验收结果的问题才提交给用户。',
+      'Decision Tree 的目标是在 Backlog 职责内充分覆盖需求级实质分叉，并以最少交互轮次批量对齐；不是把问题数量压到最低。',
+      '能够从上下文或项目证据确定的事实不得询问；不会改变需求上下文或交付规划的单元级选择应形成 Analysis Obligation。',
       '',
       '提问路径：',
-      '  question add → 至少两次 option-add → question recommend → validate → request-clarification',
+      '  完成 AS-IS → 扫描完整决策树 → 为全部当前已知 HUMAN · PENDING 节点执行 question add/option-add/recommend → request-clarification',
       '',
-      '  requirement-context question add --key <稳定decision key> --title <标题> --question <问题> --impact <不同回答的业务影响>',
+      '  requirement-context question add --key <稳定decision key> --title <标题> --question <问题> --impact <不同回答的业务影响> [--authority human|agent]',
       '  requirement-context question option-add --key <问题key> --id <选项id> --label <名称> --consequence <后果>',
       '  requirement-context question recommend --key <问题key> --option <推荐选项id> --reason <推荐理由>',
+      '  requirement-context question depends-on --key <子节点key> --parent <父节点key> --option <激活选项id>',
+      '  requirement-context question decide --key <Agent决策key> --option <选项id> --reason <职责内依据>',
+      '  requirement-context question supersede --key <旧key> --by <新key> --reason <理由>',
       '  requirement-context question remove --key <key>',
       '',
-      '每个未回答问题至少需要两个真实互斥选项、一个推荐选项和推荐理由。question remove 只用于尚未提交给用户的错误候选。',
+      '每个人工决策至少需要两个真实互斥选项、各自业务后果、一个推荐选项和推荐理由。Agent 职责内决策使用 --authority agent 建立并以 decide 关闭，不提交给用户。',
+      '条件子节点必须用 depends-on 明确父 decision key 和激活 option id。未命中的子树保留给 UI 与审计，但不会进入 Agent status、Context Snapshot 或最终需求文档。',
+      'question remove 只用于尚未提交给用户的错误候选；已形成审计身份的错误或重复节点使用 supersede。',
+      '一次 request-clarification 应包含全部当前已知独立根节点和条件子节点；不要为了维持单问题交互而拆成多轮。用户自定义答案产生此前未知分支时，再追加增量批次。',
       '若问题源于 conflicted assertion 或 needs_decision impact，必须用同一 decision key 关联；普通问题本身不要求 assertion 或 impact 反向引用。',
       '',
       '恢复轮：',
-      '  先执行 status，逐字复用原 decision key 和用户答案；将关联的 conflicted assertion 更新为可靠结论，将 needs_decision impact 更新为 change、preserve 或 technical，再完成其余上下文。不得换 key 或重复询问。',
+      '  Prompt 的 Working Context Pack 与 status 都会直接给出 AS-IS 和完整 Active Decision Tree，包括问题、选中答案、后果、决定权与条件边；逐字复用原 decision key 进行稳定关联，但不要求逐项查询。',
+      '  只消费 Active Decision Tree；not_applicable 与 superseded 分支不会投影到运行上下文。将活动路径关联的 conflicted assertion 更新为可靠结论，将 needs_decision impact 更新为 change、preserve 或 technical，再继续阶段调用链。不得换 key 或重复询问。',
     ];
   }
   if (topic === 'scope') {
@@ -1828,27 +2713,23 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
     ];
   }
   if (topic === 'finish') {
+    const normalPath = requirementContextNormalCommandPath();
     return [
-      '校验不会推进流程；可以反复执行并根据错误继续修改草稿。',
+      '需求上下文采用阶段调用链。每个阶段完成命令会校验当前产物、保存阶段转换，并直接返回下一阶段工作包；阶段命令不会结束 execution。',
       '',
+      '阶段路径：',
+      `  status → ${normalPath.map((command) => command.replace(/^requirement-context /, '')).join(' → ')}`,
+      '  若影响扫描发现新的需求级业务分叉，使用 impact-scan reopen-decisions 返回决策树；这会形成可审计的阶段转换。',
+      '  若决策树存在 HUMAN · PENDING 节点，批量建立全部当前已知问题后直接提交 request-clarification，不执行 decision-tree complete。',
+      '',
+      '最终校验与提交：',
       '  requirement-context validate',
-      '',
-      '正常完成路径：',
-      '  status → intent → Actual/Target 与适用的 Expected assertions → change → impacts → acceptance → classification → validate → complete',
       `  ${terminalActions.find((action) => action.endsWith(' complete')) || 'requirement-context complete'}`,
-      '  必填：业务意图、可靠的 Actual 和 Target、变化摘要、至少一条有效影响、至少一条需求级验收语义和需求分类；Bug 额外必须具备可靠 Expected。',
-      '  若存在变更前的权威需求规格或业务规则，即使不是 Bug，也必须记录适用的 Expected；不得把本次新增目标误写成 Expected。',
-      '  可选：约束、显式范围和问题；只有业务上真实存在时才创建。',
       '',
       '澄清路径：',
-      '  完成必要调查并记录至少一条带来源陈述 → 建立有效问题与选项 → validate → request-clarification',
+      '  完成 AS-IS → 进入 decision_tree → 批量建立决策树与推荐 → request-clarification',
       `  ${terminalActions.find((action) => action.endsWith(' request-clarification')) || 'requirement-context request-clarification'}`,
-      '  澄清最低必填：业务意图、至少一条 active 且带来源的业务语义陈述，以及至少一个结构完整的未回答问题。',
-      '  澄清阶段不要求猜测尚未确定的完整 Target 或需求分类；用户回答后由新的 resume execution 在原 key 上继续。',
-      '',
-      'validate 的含义：',
-      '  存在未回答问题时，validate 自动按 request-clarification 的最低结构校验。',
-      '  没有未回答问题时，validate 检查完整上下文结构，但仍不校验 classification；只有 complete 执行包含分类在内的最终完成校验。',
+      '  用户回答后由新的 resume execution 恢复 decision_tree，逐字复用原 decision key，关闭适用分支后继续阶段调用链。',
       '',
       '普通最终文本、Markdown 或手写 JSON 都不会结束 execution。',
     ];
@@ -1857,8 +2738,9 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
     throw new Error(`需求上下文 help 不支持主题：${topic}。可用主题：context、assertion、impact、question、scope、finish`);
   }
   return [
-    '完成需求上下文必须建立可靠的 Actual 和 Target、适用时的 Expected，说明业务变化及影响，并形成需求级验收语义和分类。Bug 必须具备 Expected。',
-    '约束、显式范围和问题是可选项；只有真实存在时才创建。',
+    '需求上下文通过内层阶段调用链完成。每次 status 会恢复当前阶段并返回这一阶段的目标、必需产物、禁止事项、可用命令和提交命令。',
+    '阶段顺序由 Backlog Agent Prompt 引导；编辑命令不做阶段白名单限制，但每个阶段提交都会按阶段产物校验。',
+    '领域命令统一返回 COMMAND RESULT；继续当前阶段时返回 NEXT，阶段切换时返回 NEXT WORK PACKET。只按返回的 NEXT 推进。',
     '',
     '模板映射：',
     '  intent → BUSINESS INTENT',
@@ -1870,9 +2752,9 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
     '  已回答 question → DECISIONS；未回答 question 只在澄清态进入 OPEN QUESTIONS',
     '',
     '标准路径：',
-    '  正常完成：status → intent/assertions/change/impacts/acceptance/classification → validate → complete',
-    '  用户澄清：question + options + recommendation；若源于冲突或待决影响则关联同一 decision key → validate → request-clarification',
-    '  恢复处理：status → 复用原 decision key 消费回答 → 更新关联语义与影响 → complete',
+    '  正常完成：status → AS-IS → Decision Tree → TO-BE → Impact Scan → SCOPE → Acceptance → complete',
+    '  用户澄清：Decision Tree 中批量建立 question + options + recommendation → request-clarification',
+    '  恢复处理：status → 复用原 decision key 消费回答 → 继续当前 Decision Tree 工作包',
     '',
     '命令索引：',
     ...requirementContextCommandIndex,
@@ -1891,6 +2773,10 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
 }
 
 const deliveryPlanCommandIndex = [
+  ...DELIVERY_PLAN_PHASE_ORDER
+    .filter((phase) => phase !== 'finalize')
+    .map((phase) => `  ${DELIVERY_PLAN_WORKFLOW[phase].submit}`),
+  '  delivery-plan coverage reopen-units --reason <单元边界需要修正的原因>',
   '  delivery-plan rationale set --text <拆分依据>',
   '  delivery-plan coverage set --text <整体覆盖说明>',
   '  delivery-plan ordering set --text <排序与依赖说明>',
@@ -1962,13 +2848,17 @@ function deliveryPlanHelp(terminalActions: string[], topic?: string | null) {
     ];
   }
   if (topic === 'finish') {
+    const normalPath = deliveryPlanNormalCommandPath();
     return [
-      '校验不会推进流程；可以反复执行并根据覆盖、顺序或引用错误继续修改。',
+      '交付计划采用阶段调用链。每个阶段完成命令都会校验当前产物、保存转换并返回下一工作包；阶段命令不会结束 execution。',
       '',
+      '阶段路径：',
+      `  ${DELIVERY_PLAN_PHASE_SEQUENCE}`,
+      `  status → ${normalPath.map((command) => command.replace(/^delivery-plan /, '')).join(' → ')}`,
+      '  COVERAGE & ORDER 发现单元边界不成立时，使用 coverage reopen-units 返回 DELIVERY UNITS。',
+      '',
+      '最终校验与提交：',
       '  delivery-plan validate',
-      '',
-      '正常路径：',
-      '  status → rationale/coverage → unit upsert → source add → 必要的 ordering/dependency/move → validate → complete',
       `  ${terminalActions.find((action) => action.endsWith(' complete')) || 'delivery-plan complete'}`,
       '',
       '完成要求：',
@@ -1976,7 +2866,8 @@ function deliveryPlanHelp(terminalActions: string[], topic?: string | null) {
       '  每个单元必须形成独立业务闭环、关联至少一个来源，并至少承接 change 或 acceptance。',
       '  多单元计划必须说明推荐顺序；依赖必须无环并与顺序一致。',
       '  排序说明和依赖在单单元计划中可省略；交付规划 Agent 不向用户提问。',
-      '  validate 与 complete 使用同一套结构校验；validate 只反馈问题且不终止，complete 是唯一会提交计划并结束 execution 的命令。',
+      '  validate 绑定当前草稿变更版本；验证后任何编辑都会使验证失效，必须重新 validate。',
+      '  complete 只在 FINALIZE 验证通过后可执行，是唯一会提交计划并结束 execution 的命令。',
       '',
       '普通最终文本、Markdown 或手写 JSON 都不会结束 execution。',
     ];
@@ -2042,7 +2933,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         '长文本参数：',
         '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
-        `  返回完整索引：${command} help`,
+        `  其他主题：${command} help <context|assertion|impact|question|scope|finish>`,
       ].join('\n');
     }
     if (profile.draftType === 'delivery_plan') {
@@ -2054,7 +2945,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         '长文本参数：',
         '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
-        `  返回完整索引：${command} help`,
+        `  其他主题：${command} help <context|unit|source|dependency|revision|finish>`,
       ].join('\n');
     }
     if (profile.draftType === 'analysis') {
@@ -2066,7 +2957,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         '长文本参数：',
         '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
-        `  返回完整索引：${command} help`,
+        `  其他主题：${command} help <context|impact|decision|contract|finish>`,
       ].join('\n');
     }
     if (profile.draftType === 'development') {
@@ -2078,7 +2969,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         '长文本参数：',
         '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
-        `  返回完整索引：${command} help`,
+        `  其他主题：${command} help <context|evidence|review|input|finish>`,
       ].join('\n');
     }
     if (profile.draftType === 'verification') {
@@ -2090,7 +2981,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         '长文本参数：',
         '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
-        `  返回完整索引：${command} help`,
+        `  其他主题：${command} help <context|plan|execute|evidence|input|finish>`,
       ].join('\n');
     }
     if (profile.draftType === 'review') {
@@ -2102,7 +2993,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         '',
         '长文本参数：',
         '  任意参数都可使用对应的 --*-file 参数读取 UTF-8 文件。',
-        `  返回完整索引：${command} help`,
+        `  其他主题：${command} help <context|reconciliation|gap|assessment|report|forward|finish>`,
       ].join('\n');
     }
     throw new Error(`当前角色 help 不支持主题：${topic}。可用主题：context`);
@@ -2218,9 +3109,70 @@ function runDeliveryPlanCommand(input: {
     && draft.terminal_execution_id === execution.execution_id
     && draft.terminal_action === 'complete'
   ) {
-    return '该终止命令已经提交成功，无需重复提交，可以结束本轮。';
+    return [
+      renderDeliveryPlanCommandResult({ command, outcome: 'already_submitted' }),
+      '',
+      '# NEXT',
+      '',
+      '- Owner: Application',
+      '- Agent Action: end_execution',
+    ].join('\n');
   }
   assertViewed(draft, execution.execution_id, 'delivery-plan');
+  const accepted = (changed: string) =>
+    renderDeliveryPlanContinue(command, changed, deliveryPlanState(db, draft));
+
+  const phaseCompletion = new Map<string, DeliveryPlanPhase>(
+    DELIVERY_PLAN_PHASE_ORDER
+      .filter((phase) => phase !== 'finalize')
+      .map((phase) => [DELIVERY_PLAN_WORKFLOW[phase].submit, phase]),
+  );
+  const completedPhase = phaseCompletion.get(command);
+  if (completedPhase) {
+    const current = deliveryPlanState(db, draft);
+    const phaseIndex = DELIVERY_PLAN_PHASE_ORDER.indexOf(completedPhase);
+    const next = DELIVERY_PLAN_PHASE_ORDER[phaseIndex + 1];
+    if (!next) throw new Error(`${completedPhase} 没有可用的下一阶段`);
+    return transitionDeliveryPlanPhase({
+      db,
+      draft,
+      execution,
+      state: current,
+      from: completedPhase,
+      to: next,
+      reason: `${completedPhase} 阶段产物校验通过`,
+    });
+  }
+
+  if (command === 'delivery-plan coverage reopen-units') {
+    const current = deliveryPlanState(db, draft);
+    if (current.plan.workflow_phase !== 'coverage_order') {
+      throw new Error(`只有 coverage_order 阶段可以重新打开交付单元；当前阶段是 ${current.plan.workflow_phase}`);
+    }
+    const reason = bounded(required(flags, 'reason'), '重新打开交付单元的理由');
+    db.transaction(() => {
+      db.prepare(`
+        UPDATE delivery_plan_drafts
+        SET workflow_phase = 'delivery_units', validated_change_seq = NULL
+        WHERE draft_id = ?
+      `).run(draft.draft_id);
+      db.prepare(`
+        INSERT INTO delivery_plan_phase_transitions(
+          draft_id, from_phase, to_phase, reason, execution_id
+        ) VALUES(?, 'coverage_order', 'delivery_units', ?, ?)
+      `).run(draft.draft_id, reason, execution.execution_id);
+      touchDraft(db, draft.draft_id);
+    })();
+    return [
+      renderDeliveryPlanCommandResult({
+        command,
+        outcome: 'phase_completed',
+        details: ['From: coverage_order', 'To: delivery_units', `Reason: ${reason}`],
+      }),
+      '',
+      renderDeliveryPlanWorkPacket('delivery_units', deliveryPlanState(db, draft)),
+    ].join('\n');
+  }
 
   if (
     command === 'delivery-plan rationale set'
@@ -2237,7 +3189,7 @@ function runDeliveryPlanCommand(input: {
     db.prepare(`UPDATE delivery_plan_drafts SET ${column} = ? WHERE draft_id = ?`)
       .run(bounded(required(flags, 'text'), label), draft.draft_id);
     touchDraft(db, draft.draft_id);
-    return `${label}已保存。`;
+    return accepted(label);
   }
   if (command === 'delivery-plan unit upsert') {
     const key = bounded(required(flags, 'key'), '交付单元 key', 120);
@@ -2277,7 +3229,7 @@ function runDeliveryPlanCommand(input: {
       action: 'upsert',
     });
     touchDraft(db, draft.draft_id);
-    return `交付单元 ${key} 已保存。`;
+    return accepted(`unit/${key} upserted`);
   }
   if (
     command === 'delivery-plan unit dismiss'
@@ -2299,7 +3251,7 @@ function runDeliveryPlanCommand(input: {
       action: superseded ? 'supersede' : 'dismiss',
     });
     touchDraft(db, draft.draft_id);
-    return `交付单元 ${key} 已标记为${superseded ? '已取代' : '已排除'}。`;
+    return accepted(`unit/${key} ${superseded ? 'superseded' : 'dismissed'}`);
   }
   if (
     command === 'delivery-plan unit source add'
@@ -2327,7 +3279,7 @@ function runDeliveryPlanCommand(input: {
       if (!removed.changes) throw new Error(`交付单元 ${key} 未关联规划输入 ${sourceKey}`);
     }
     touchDraft(db, draft.draft_id);
-    return `交付单元 ${key} 与规划输入 ${sourceKey} 的关联已${command.endsWith('add') ? '保存' : '移除'}。`;
+    return accepted(`unit/${key} source/${sourceKey} ${command.endsWith('add') ? 'added' : 'removed'}`);
   }
   if (
     command === 'delivery-plan unit dependency add'
@@ -2352,7 +3304,7 @@ function runDeliveryPlanCommand(input: {
       if (!removed.changes) throw new Error(`交付单元 ${key} 不依赖 ${dependsOn}`);
     }
     touchDraft(db, draft.draft_id);
-    return `交付单元 ${key} 对 ${dependsOn} 的前置依赖已${command.endsWith('add') ? '保存' : '移除'}。`;
+    return accepted(`unit/${key} dependency/${dependsOn} ${command.endsWith('add') ? 'added' : 'removed'}`);
   }
   if (command === 'delivery-plan unit move') {
     const key = bounded(required(flags, 'key'), '交付单元 key', 120);
@@ -2373,12 +3325,33 @@ function runDeliveryPlanCommand(input: {
       }
       touchDraft(db, draft.draft_id);
     })();
-    return `交付单元 ${key} 已移动到第 ${Math.min(requested, reordered.length)} 位。`;
+    return accepted(`unit/${key} moved_to ${Math.min(requested, reordered.length)}`);
   }
   if (command === 'delivery-plan validate') {
-    const errors = deliveryPlanValidationErrors(deliveryPlanState(db, draft));
+    const current = deliveryPlanState(db, draft);
+    if (current.plan.workflow_phase !== 'finalize') {
+      throw new Error(`当前 ${current.plan.workflow_phase} 阶段不使用 validate；请先完成当前工作包`);
+    }
+    const errors = deliveryPlanValidationErrors(current);
     if (errors.length) throw new Error(`交付计划校验失败：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
-    return '交付计划草稿结构校验通过。';
+    db.prepare(`
+      UPDATE delivery_plan_drafts
+      SET validated_change_seq = ?
+      WHERE draft_id = ?
+    `).run(draft.change_seq, draft.draft_id);
+    return [
+      renderDeliveryPlanCommandResult({
+        command,
+        outcome: 'validation_passed',
+        details: ['Phase: finalize', 'Readiness: validated'],
+      }),
+      '',
+      '# NEXT',
+      '',
+      '- Phase: finalize',
+      '- Readiness: validated',
+      '- Action: `delivery-plan complete`',
+    ].join('\n');
   }
   if (command === 'delivery-plan complete') {
     return submitDeliveryPlan(db, draft, execution);
@@ -2595,6 +3568,23 @@ export async function runAgentCommand(input: {
 
   if (positionals[0] === 'help') {
     if (positionals.length > 2) throw new Error('help 最多接受一个主题');
+    if (['requirement_context', 'delivery_plan', 'analysis', 'development', 'verification', 'review'].includes(profile.draftType) && !positionals[1]) {
+      const topics = profile.draftType === 'requirement_context'
+        ? 'context|assertion|impact|question|scope|finish'
+        : profile.draftType === 'delivery_plan'
+          ? 'context|unit|source|dependency|revision|finish'
+          : profile.draftType === 'analysis'
+            ? 'context|impact|decision|contract|finish'
+            : profile.draftType === 'development'
+              ? 'context|evidence|review|input|finish'
+              : profile.draftType === 'verification'
+                ? 'context|plan|execute|evidence|input|finish'
+                : 'context|reconciliation|gap|assessment|report|forward|finish';
+      throw new Error(
+        `${profile.namespace} help 必须指定一个主题：help <${topics}>。`
+        + `当前阶段可执行命令请查看 ${profile.namespace} status 返回的 AVAILABLE COMMANDS。`,
+      );
+    }
     return helpText(execution, profile, positionals[1] || null);
   }
   if (command === 'whoami') {
@@ -2641,9 +3631,67 @@ export async function runAgentCommand(input: {
     && draft.terminal_execution_id === execution.execution_id
     && draft.terminal_action === command.replace('requirement-context ', '')
   ) {
-    return '该终止命令已经提交成功，无需重复提交，可以结束本轮。';
+    return [
+      renderRequirementContextResult({ command, outcome: 'already_submitted' }),
+      '',
+      '# NEXT',
+      '',
+      '- Owner: Application',
+      '- Agent Action: end_execution',
+    ].join('\n');
   }
   assertViewed(draft, execution.execution_id);
+  const accepted = (changed: string) =>
+    renderRequirementContextContinue(command, changed, draftState(db, draft));
+
+  const phaseCompletion = new Map<string, RequirementContextPhase>(
+    REQUIREMENT_CONTEXT_PHASE_ORDER
+      .filter((phase) => phase !== 'finalize')
+      .map((phase) => [REQUIREMENT_CONTEXT_WORKFLOW[phase].submit, phase]),
+  );
+  const completedPhase = phaseCompletion.get(command);
+  if (completedPhase) {
+    const current = draftState(db, draft);
+    const phaseIndex = REQUIREMENT_CONTEXT_PHASE_ORDER.indexOf(completedPhase);
+    const next = REQUIREMENT_CONTEXT_PHASE_ORDER[phaseIndex + 1];
+    if (!next) throw new Error(`${completedPhase} 没有可用的下一阶段`);
+    return transitionRequirementContextPhase({
+      db,
+      draft,
+      execution,
+      state: current,
+      from: completedPhase,
+      to: next,
+      reason: `${completedPhase} 阶段产物校验通过`,
+    });
+  }
+
+  if (command === 'requirement-context impact-scan reopen-decisions') {
+    const current = draftState(db, draft);
+    if (current.context.workflow_phase !== 'impact_scan') {
+      throw new Error(`只有 impact_scan 阶段可以重新打开决策树；当前阶段是 ${current.context.workflow_phase}`);
+    }
+    const reason = bounded(required(flags, 'reason'), '重新打开决策树的理由');
+    db.transaction(() => {
+      db.prepare('UPDATE requirement_context_drafts SET workflow_phase = ? WHERE draft_id = ?')
+        .run('decision_tree', draft.draft_id);
+      db.prepare(`
+        INSERT INTO requirement_context_phase_transitions(
+          draft_id, from_phase, to_phase, reason, execution_id
+        ) VALUES(?, 'impact_scan', 'decision_tree', ?, ?)
+      `).run(draft.draft_id, reason, execution.execution_id);
+      touchDraft(db, draft.draft_id);
+    })();
+    return [
+      renderRequirementContextResult({
+        command,
+        outcome: 'phase_completed',
+        details: ['From: impact_scan', 'To: decision_tree', `Reason: ${reason}`],
+      }),
+      '',
+      renderRequirementContextWorkPacket('decision_tree', draftState(db, draft)),
+    ].join('\n');
+  }
 
   if (
     command === 'requirement-context intent set'
@@ -2654,7 +3702,7 @@ export async function runAgentCommand(input: {
     const value = bounded(required(flags, 'text'), label);
     db.prepare(`UPDATE requirement_context_drafts SET ${column} = ? WHERE draft_id = ?`).run(value, draft.draft_id);
     touchDraft(db, draft.draft_id);
-    return `${label}已保存。`;
+    return accepted(label);
   }
   if (command === 'requirement-context assertion upsert') {
     const key = bounded(required(flags, 'key'), '业务语义 key', 120);
@@ -2703,7 +3751,7 @@ export async function runAgentCommand(input: {
       action: 'upsert',
     });
     touchDraft(db, draft.draft_id);
-    return `业务语义 ${key} 已保存。`;
+    return accepted(`assertion/${key}`);
   }
   if (
     command === 'requirement-context assertion dismiss'
@@ -2729,7 +3777,7 @@ export async function runAgentCommand(input: {
       action: superseded ? 'supersede' : 'dismiss',
     });
     touchDraft(db, draft.draft_id);
-    return `业务语义 ${key} 已标记为${superseded ? '已取代' : '已排除'}。`;
+    return accepted(`assertion/${key} ${superseded ? 'superseded' : 'dismissed'}`);
   }
   if (command === 'requirement-context impact upsert') {
     const key = bounded(required(flags, 'key'), '业务影响 key', 120);
@@ -2774,7 +3822,7 @@ export async function runAgentCommand(input: {
       action: 'upsert',
     });
     touchDraft(db, draft.draft_id);
-    return `业务影响 ${key} 已保存为 ${disposition}。`;
+    return accepted(`impact/${key} ${disposition}`);
   }
   if (
     command === 'requirement-context impact dismiss'
@@ -2800,7 +3848,7 @@ export async function runAgentCommand(input: {
       action: superseded ? 'supersede' : 'dismiss',
     });
     touchDraft(db, draft.draft_id);
-    return `业务影响 ${key} 已标记为${superseded ? '已取代' : '已排除'}。`;
+    return accepted(`impact/${key} ${superseded ? 'superseded' : 'dismissed'}`);
   }
   if (command === 'requirement-context acceptance upsert') {
     const key = bounded(required(flags, 'key'), '验收语义 key', 120);
@@ -2834,7 +3882,7 @@ export async function runAgentCommand(input: {
       action: 'upsert',
     });
     touchDraft(db, draft.draft_id);
-    return `验收语义 ${key} 已保存。`;
+    return accepted(`acceptance/${key}`);
   }
   if (
     command === 'requirement-context acceptance dismiss'
@@ -2860,7 +3908,7 @@ export async function runAgentCommand(input: {
       action: superseded ? 'supersede' : 'dismiss',
     });
     touchDraft(db, draft.draft_id);
-    return `验收语义 ${key} 已标记为${superseded ? '已取代' : '已排除'}。`;
+    return accepted(`acceptance/${key} ${superseded ? 'superseded' : 'dismissed'}`);
   }
   if (command === 'requirement-context classification set') {
     const classification = positionals[3];
@@ -2870,7 +3918,7 @@ export async function runAgentCommand(input: {
     db.prepare('UPDATE requirement_context_drafts SET classification = ? WHERE draft_id = ?')
       .run(classification, draft.draft_id);
     touchDraft(db, draft.draft_id);
-    return `需求分类已设置为 ${classification}；后续 plan/repro 路由由系统确定。`;
+    return accepted(`classification/${classification}`);
   }
   if (command === 'requirement-context constraint add') {
     upsertSimpleItem(
@@ -2882,13 +3930,13 @@ export async function runAgentCommand(input: {
       bounded(required(flags, 'text'), '约束'),
     );
     touchDraft(db, draft.draft_id);
-    return '约束已保存。';
+    return accepted(`constraint/${required(flags, 'key')}`);
   }
   if (command === 'requirement-context constraint remove') {
     db.prepare('DELETE FROM requirement_context_constraints WHERE draft_id = ? AND constraint_key = ?')
       .run(draft.draft_id, required(flags, 'key'));
     touchDraft(db, draft.draft_id);
-    return '约束已删除。';
+    return accepted(`constraint/${required(flags, 'key')} removed`);
   }
   if (command === 'requirement-context scope include' || command === 'requirement-context scope exclude') {
     const direction = command.endsWith('include') ? 'included' : 'excluded';
@@ -2902,33 +3950,37 @@ export async function runAgentCommand(input: {
         direction = excluded.direction, content = excluded.content
     `).run(draft.draft_id, key, direction, content, ordinal);
     touchDraft(db, draft.draft_id);
-    return `范围 ${key} 已保存为${direction === 'included' ? '包含' : '排除'}。`;
+    return accepted(`scope/${key} ${direction}`);
   }
   if (command === 'requirement-context scope remove') {
     db.prepare('DELETE FROM requirement_context_scope_items WHERE draft_id = ? AND scope_key = ?')
       .run(draft.draft_id, required(flags, 'key'));
     touchDraft(db, draft.draft_id);
-    return '范围项已删除。';
+    return accepted(`scope/${required(flags, 'key')} removed`);
   }
   if (command === 'requirement-context question add') {
     const key = bounded(required(flags, 'key'), '问题 key', 120);
+    const authority = optionalBounded(flags, 'authority', '决定权', 20) || 'human';
+    if (!['human', 'agent'].includes(authority)) throw new Error('--authority 必须是 human 或 agent');
     const ordinal = nextOrdinal(db, 'requirement_context_questions', draft.draft_id);
     db.prepare(`
       INSERT INTO requirement_context_questions(
-        draft_id, decision_key, title, question, impact, ordinal
-      ) VALUES(?, ?, ?, ?, ?, ?)
+        draft_id, decision_key, title, question, impact, authority, ordinal
+      ) VALUES(?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(draft_id, decision_key) DO UPDATE SET
-        title = excluded.title, question = excluded.question, impact = excluded.impact
+        title = excluded.title, question = excluded.question, impact = excluded.impact,
+        authority = excluded.authority
     `).run(
       draft.draft_id,
       key,
       bounded(required(flags, 'title'), '问题标题', 500),
       bounded(required(flags, 'question'), '问题内容'),
       bounded(required(flags, 'impact'), '问题影响'),
+      authority,
       ordinal,
     );
     touchDraft(db, draft.draft_id);
-    return `问题 ${key} 已保存。`;
+    return accepted(`question/${key}`);
   }
   if (command === 'requirement-context question option-add') {
     const key = bounded(required(flags, 'key'), '问题 key', 120);
@@ -2952,7 +4004,7 @@ export async function runAgentCommand(input: {
       ordinal,
     );
     touchDraft(db, draft.draft_id);
-    return `问题 ${key} 的选项已保存。`;
+    return accepted(`question/${key}/option/${required(flags, 'id')}`);
   }
   if (command === 'requirement-context question recommend') {
     const key = bounded(required(flags, 'key'), '问题 key', 120);
@@ -2968,22 +4020,198 @@ export async function runAgentCommand(input: {
       WHERE draft_id = ? AND decision_key = ?
     `).run(option, bounded(required(flags, 'reason'), '推荐理由'), draft.draft_id, key);
     touchDraft(db, draft.draft_id);
-    return `问题 ${key} 的推荐答案已保存。`;
+    return accepted(`question/${key}/recommendation/${option}`);
+  }
+  if (command === 'requirement-context question depends-on') {
+    const key = bounded(required(flags, 'key'), '问题 key', 120);
+    const parent = bounded(required(flags, 'parent'), '父决策 key', 120);
+    const option = bounded(required(flags, 'option'), '父决策选项', 120);
+    if (key === parent) throw new Error('问题不能依赖自身');
+    const childExists = db.prepare(`
+      SELECT 1 FROM requirement_context_questions WHERE draft_id = ? AND decision_key = ?
+    `).get(draft.draft_id, key);
+    if (!childExists) throw new Error(`问题 ${key} 不存在`);
+    const parentOptionExists = db.prepare(`
+      SELECT 1 FROM requirement_context_question_options
+      WHERE draft_id = ? AND decision_key = ? AND option_id = ?
+    `).get(draft.draft_id, parent, option);
+    if (!parentOptionExists) throw new Error(`父决策 ${parent} 不存在选项 ${option}`);
+    const ordinal = nextOrdinal(db, 'requirement_context_question_dependencies', draft.draft_id);
+    db.prepare(`
+      INSERT INTO requirement_context_question_dependencies(
+        draft_id, decision_key, parent_decision_key, parent_option_id, ordinal
+      ) VALUES(?, ?, ?, ?, ?)
+      ON CONFLICT(draft_id, decision_key, parent_decision_key, parent_option_id) DO NOTHING
+    `).run(draft.draft_id, key, parent, option, ordinal);
+    touchDraft(db, draft.draft_id);
+    return accepted(`question/${key}/dependency/${parent}=${option}`);
+  }
+  if (command === 'requirement-context question dependency-remove') {
+    db.prepare(`
+      DELETE FROM requirement_context_question_dependencies
+      WHERE draft_id = ? AND decision_key = ? AND parent_decision_key = ? AND parent_option_id = ?
+    `).run(
+      draft.draft_id,
+      required(flags, 'key'),
+      required(flags, 'parent'),
+      required(flags, 'option'),
+    );
+    touchDraft(db, draft.draft_id);
+    return accepted(`question/${required(flags, 'key')}/dependency removed`);
+  }
+  if (command === 'requirement-context question decide') {
+    const key = bounded(required(flags, 'key'), '问题 key', 120);
+    const option = bounded(required(flags, 'option'), '选中选项', 120);
+    const decisionState = draftState(db, draft).questions.find((question) => question.decision_key === key);
+    if (!decisionState || decisionState.authority !== 'agent' || decisionState.projection_status !== 'active') {
+      throw new Error(`Agent 决策 ${key} 当前不在 Active Decision Tree 中`);
+    }
+    const selected = db.prepare(`
+      SELECT option.label, option.consequence, question.title, question.question, question.impact
+      FROM requirement_context_question_options option
+      JOIN requirement_context_questions question
+        ON question.draft_id = option.draft_id AND question.decision_key = option.decision_key
+      WHERE option.draft_id = ? AND option.decision_key = ? AND option.option_id = ?
+        AND question.authority = 'agent' AND question.lifecycle_status = 'active'
+    `).get(draft.draft_id, key, option) as {
+      label: string;
+      consequence: string;
+      title: string;
+      question: string;
+      impact: string;
+    } | undefined;
+    if (!selected) throw new Error(`Agent 决策 ${key} 不存在活动选项 ${option}；先用 question add --authority agent 建立`);
+    const reason = bounded(required(flags, 'reason'), 'Agent 决策依据');
+    db.prepare(`
+      UPDATE requirement_context_questions
+      SET selected_option_id = ?, decision_text = ?, decision_reason = ?
+      WHERE draft_id = ? AND decision_key = ?
+    `).run(
+      option,
+      selected.label,
+      reason,
+      draft.draft_id,
+      key,
+    );
+    const decisionOptions = db.prepare(`
+      SELECT option_id, label, consequence
+      FROM requirement_context_question_options
+      WHERE draft_id = ? AND decision_key = ? ORDER BY ordinal, option_id
+    `).all(draft.draft_id, key) as { option_id: string; label: string; consequence: string }[];
+    const activation = db.prepare(`
+      SELECT parent_decision_key, parent_option_id
+      FROM requirement_context_question_dependencies
+      WHERE draft_id = ? AND decision_key = ? ORDER BY ordinal
+    `).all(draft.draft_id, key) as { parent_decision_key: string; parent_option_id: string }[];
+    const published = db.prepare(`
+      SELECT question_id FROM questions
+      WHERE task_id = ? AND story_index IS NULL AND source_agent = 'backlog-agent' AND decision_key = ?
+      ORDER BY created_at DESC LIMIT 1
+    `).get(draft.task_id, key) as { question_id: string } | undefined;
+    const alternativesJson = JSON.stringify(decisionOptions.map((candidate) => ({
+      id: candidate.option_id,
+      label: candidate.label,
+      consequences: [candidate.consequence],
+    })));
+    const activationJson = activation.length ? JSON.stringify(activation.map((gate) => ({
+      decisionKey: gate.parent_decision_key,
+      optionId: gate.parent_option_id,
+    }))) : null;
+    if (published) {
+      db.prepare(`
+        UPDATE questions
+        SET title = ?, question = ?, why = ?, answer = ?, status = 'answered',
+            selected_option_id = ?, alternatives_json = ?, activation_json = ?,
+            decision_authority = 'agent', recommendation_reason = ?, status_reason = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE question_id = ?
+      `).run(
+        selected.title, selected.question, selected.impact, selected.label, option,
+        alternativesJson, activationJson, reason, published.question_id,
+      );
+    } else {
+      db.prepare(`
+        INSERT INTO questions(
+          question_id, task_id, story_index, kind, title, question, why, answer, status,
+          relative_path, source_agent, decision_key, alternatives_json,
+          recommendation_reason, activation_json, selected_option_id, decision_authority
+        ) VALUES(?, ?, NULL, 'local', ?, ?, ?, ?, 'answered', NULL, 'backlog-agent', ?, ?, ?, ?, ?, 'agent')
+      `).run(
+        `Q-${randomUUID().slice(0, 8)}`, draft.task_id, selected.title, selected.question,
+        selected.impact, selected.label, key, alternativesJson, reason, activationJson, option,
+      );
+    }
+    recomputeBacklogQuestionApplicabilityInDb(db, draft.task_id);
+    touchDraft(db, draft.draft_id);
+    return accepted(`question/${key} decided`);
+  }
+  if (command === 'requirement-context question supersede') {
+    const key = bounded(required(flags, 'key'), '问题 key', 120);
+    const by = bounded(required(flags, 'by'), '取代问题 key', 120);
+    if (key === by) throw new Error('问题不能取代自身');
+    const replacement = db.prepare(`
+      SELECT 1 FROM requirement_context_questions
+      WHERE draft_id = ? AND decision_key = ? AND lifecycle_status = 'active'
+    `).get(draft.draft_id, by);
+    if (!replacement) throw new Error(`取代问题 ${by} 不存在或不是 active`);
+    db.prepare(`
+      UPDATE requirement_context_questions
+      SET lifecycle_status = 'superseded', lifecycle_reason = ?, superseded_by = ?
+      WHERE draft_id = ? AND decision_key = ? AND lifecycle_status = 'active'
+    `).run(bounded(required(flags, 'reason'), '废弃原因'), by, draft.draft_id, key);
+    db.prepare(`
+      UPDATE questions
+      SET status = 'superseded', status_reason = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ? AND source_agent = 'backlog-agent' AND decision_key = ?
+        AND status != 'superseded'
+    `).run(`由 ${by} 取代`, draft.task_id, key);
+    recomputeBacklogQuestionApplicabilityInDb(db, draft.task_id);
+    touchDraft(db, draft.draft_id);
+    return accepted(`question/${key} superseded_by ${by}`);
   }
   if (command === 'requirement-context question remove') {
     db.prepare('DELETE FROM requirement_context_questions WHERE draft_id = ? AND decision_key = ?')
       .run(draft.draft_id, required(flags, 'key'));
     touchDraft(db, draft.draft_id);
-    return '问题已删除。';
+    return accepted(`question/${required(flags, 'key')} removed`);
   }
   if (command === 'requirement-context validate') {
     const current = draftState(db, draft);
-    const clarification = current.questions.some((question) => !question.answer);
-    const errors = validationErrors(current, clarification ? 'request-clarification' : null);
+    const phase = current.context.workflow_phase;
+    const clarification = phase === 'decision_tree' && current.questions.some((question) =>
+      question.projection_status === 'active' && question.authority === 'human' && !question.answer);
+    if (phase !== 'finalize' && !clarification) {
+      throw new Error(
+        `当前 ${phase} 阶段不使用 validate；请先完成当前工作包。`
+        + ' validate 仅用于完整的 HUMAN 澄清批次或 Finalize。',
+      );
+    }
+    const terminal = clarification ? 'request-clarification' : 'complete';
+    const errors = validationErrors(current, terminal);
     if (errors.length) throw new Error(`草稿校验失败：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
-    return clarification
-      ? '业务变化上下文澄清草稿校验通过，可以提交 request-clarification。'
-      : '业务变化上下文草稿结构校验通过；complete 仍会校验分类和未回答问题。';
+    if (phase === 'finalize') {
+      db.prepare(`
+        UPDATE requirement_context_drafts
+        SET validated_change_seq = ?
+        WHERE draft_id = ?
+      `).run(draft.change_seq, draft.draft_id);
+    }
+    const nextCommand = clarification
+      ? 'requirement-context request-clarification'
+      : 'requirement-context complete';
+    return [
+      renderRequirementContextResult({
+        command,
+        outcome: 'validation_passed',
+        details: [`Phase: ${phase}`, 'Readiness: validated'],
+      }),
+      '',
+      '# NEXT',
+      '',
+      `- Phase: ${phase}`,
+      '- Readiness: validated',
+      `- Action: \`${nextCommand}\``,
+    ].join('\n');
   }
   if (command === 'requirement-context complete') {
     return terminalSubmit(db, draft, execution, 'complete');

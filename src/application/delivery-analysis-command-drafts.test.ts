@@ -66,6 +66,14 @@ async function deliveryAnalysisDelegation(title: string) {
   return { taskId, delegation: delegation! as DelegationEnvelope };
 }
 
+async function recordPreservedImpact(executionId: string, token: string) {
+  await command(executionId, token, [
+    'delivery-analysis', 'impact', 'upsert', '--key', 'export-engine',
+    '--area', '导出计算与调度', '--finding', '结果交付不需要改变现有计算和任务状态机',
+    '--disposition', 'preserve', '--evidence', '现有状态模型已独立覆盖计算、completed 和 failed',
+  ]);
+}
+
 async function recordContract(executionId: string, token: string) {
   await command(executionId, token, [
     'delivery-analysis', 'summary', 'set', '--text',
@@ -74,11 +82,6 @@ async function recordContract(executionId: string, token: string) {
   await command(executionId, token, [
     'delivery-analysis', 'contract', 'set', '--text',
     '开发时复用现有导出完成态，在结果交付边界内补齐入口；验证时从用户入口确认结果可识别和使用。',
-  ]);
-  await command(executionId, token, [
-    'delivery-analysis', 'impact', 'upsert', '--key', 'export-engine',
-    '--area', '导出计算与调度', '--finding', '结果交付不需要改变现有计算和任务状态机',
-    '--disposition', 'preserve', '--evidence', '现有状态模型已独立覆盖计算、completed 和 failed',
   ]);
   await command(executionId, token, [
     'delivery-analysis', 'guardrail', 'upsert', '--key', 'failed-export',
@@ -91,7 +94,7 @@ async function recordContract(executionId: string, token: string) {
   ]);
 }
 
-async function recordOutputDecision(executionId: string, token: string) {
+async function recordOutputDecisionSkeletons(executionId: string, token: string) {
   await command(executionId, token, [
     'delivery-analysis', 'decision', 'upsert', '--key', 'output-mode', '--type', 'business',
     '--title', '选择结果呈现模式',
@@ -99,18 +102,10 @@ async function recordOutputDecision(executionId: string, token: string) {
     '--impact', '决定用户可观察流程和结果契约',
   ]);
   await command(executionId, token, [
-    'delivery-analysis', 'decision', 'option-upsert', '--key', 'output-mode',
-    '--id', 'download', '--label', '下载 CSV',
-    '--consequence', '结果以文件形式交付，需要稳定的下载入口',
-  ]);
-  await command(executionId, token, [
-    'delivery-analysis', 'decision', 'option-upsert', '--key', 'output-mode',
-    '--id', 'inline', '--label', '页面内展示',
-    '--consequence', '结果成为页面能力，需要处理渲染与数据量边界',
-  ]);
-  await command(executionId, token, [
-    'delivery-analysis', 'decision', 'ask', '--key', 'output-mode',
-    '--option', 'download', '--reason', '现有项目以文件交付导出结果，下载方式改变更小',
+    'delivery-analysis', 'decision', 'upsert', '--key', 'inline-pagination', '--type', 'business',
+    '--title', '选择页面结果分页方式',
+    '--question', '若页面展示结果，应一次加载还是分页加载？',
+    '--impact', '仅在页面展示分支中决定大结果集的交互边界',
   ]);
   await command(executionId, token, [
     'delivery-analysis', 'impact', 'upsert', '--key', 'result-entry',
@@ -118,21 +113,55 @@ async function recordOutputDecision(executionId: string, token: string) {
     '--disposition', 'needs_decision', '--evidence', '当前需求同时描述了两个互斥呈现方向',
     '--decision', 'output-mode',
   ]);
+  await command(executionId, token, [
+    'delivery-analysis', 'impact', 'upsert', '--key', 'inline-result-loading',
+    '--area', '页面结果加载', '--finding', '页面展示分支需要确定大结果集加载边界',
+    '--disposition', 'needs_decision', '--evidence', '现有页面没有完整结果展示约定',
+    '--decision', 'inline-pagination',
+  ]);
 }
 
-test('delivery analysis help explains context tools, command semantics, and standard paths', async () => {
+async function configureOutputDecisionTree(executionId: string, token: string) {
+  for (const option of [
+    ['output-mode', 'download', '下载 CSV', '结果以文件形式交付，需要稳定的下载入口'],
+    ['output-mode', 'inline', '页面内展示', '结果成为页面能力，需要处理渲染与数据量边界'],
+    ['inline-pagination', 'all', '一次加载', '交互简单，但大结果集可能阻塞页面'],
+    ['inline-pagination', 'paged', '分页加载', '需要分页状态与结果导航能力'],
+  ]) {
+    await command(executionId, token, [
+      'delivery-analysis', 'decision', 'option-upsert', '--key', option[0],
+      '--id', option[1], '--label', option[2], '--consequence', option[3],
+    ]);
+  }
+  await command(executionId, token, [
+    'delivery-analysis', 'decision', 'depends-on', '--key', 'inline-pagination',
+    '--parent', 'output-mode', '--option', 'inline',
+  ]);
+  await command(executionId, token, [
+    'delivery-analysis', 'decision', 'ask', '--key', 'output-mode',
+    '--option', 'download', '--reason', '现有项目以文件交付导出结果，下载方式改变更小',
+  ]);
+  await command(executionId, token, [
+    'delivery-analysis', 'decision', 'ask', '--key', 'inline-pagination',
+    '--option', 'paged', '--reason', '如果选择页面展示，分页对大结果集更稳妥',
+  ]);
+}
+
+async function closeContractAndFinalize(executionId: string, token: string) {
+  await recordContract(executionId, token);
+  await command(executionId, token, ['delivery-analysis', 'contract', 'complete']);
+  await command(executionId, token, ['delivery-analysis', 'validate']);
+  await command(executionId, token, ['delivery-analysis', 'complete']);
+}
+
+test('delivery analysis help requires a topic and explains the four-stage chain', async () => {
   const { taskId, delegation } = await deliveryAnalysisDelegation('交付分析命令帮助');
   const active = await begin(delegation, `${taskId}-help`);
 
-  const help = await command(active.executionId, active.token!, ['help']);
-  assert.match(help, /公共诊断命令/);
-  assert.match(help, /whoami/);
-  assert.match(help, /agent-context overview/);
-  assert.match(help, /agent-context search/);
-  assert.match(help, /无关键决策：status → summary\/contract\/impact → validate → complete/);
-  assert.match(help, /用户决策：decision upsert/);
-  assert.match(help, /help decision/);
-  assert.doesNotMatch(help, /implementation complete/);
+  await assert.rejects(
+    command(active.executionId, active.token!, ['help']),
+    /必须指定一个主题|至少跟一个参数/,
+  );
   assert.match(
     await command(active.executionId, active.token!, ['whoami']),
     new RegExp(`analyst-agent · analysis · execution=${active.executionId}`),
@@ -141,7 +170,6 @@ test('delivery analysis help explains context tools, command semantics, and stan
   const contextHelp = await command(active.executionId, active.token!, ['help', 'context']);
   assert.match(contextHelp, /Prompt 已给出 required refs 时优先使用 get/);
   assert.match(contextHelp, /核对前序执行时使用 evidence/);
-  assert.match(contextHelp, /完成上述调查后仍无法唯一确定/);
 
   const impactHelp = await command(active.executionId, active.token!, ['help', 'impact']);
   assert.match(impactHelp, /change\s+本轮必须改变/);
@@ -149,17 +177,18 @@ test('delivery analysis help explains context tools, command semantics, and stan
 
   const decisionHelp = await command(active.executionId, active.token!, ['help', 'decision']);
   assert.match(decisionHelp, /Agent 自主关闭路径/);
-  assert.match(decisionHelp, /project_evidence/);
-  assert.match(decisionHelp, /至少两次 option-upsert/);
+  assert.match(decisionHelp, /depends-on/);
+  assert.match(decisionHelp, /impact resolve/);
 
   const contractHelp = await command(active.executionId, active.token!, ['help', 'contract']);
   assert.match(contractHelp, /共同依赖的冻结上游事实/);
   assert.match(contractHelp, /unit-acceptance 是 Application 自动注入/);
 
   const finishHelp = await command(active.executionId, active.token!, ['help', 'finish']);
-  assert.match(finishHelp, /delivery-analysis complete/);
-  assert.match(finishHelp, /delivery-analysis request-clarification/);
-  assert.match(finishHelp, /手写 JSON 都不会结束 execution/);
+  assert.match(finishHelp, /AS-IS & IMPACT SCAN → DECISION TREE → DELIVERY CONTRACT → FINALIZE/);
+  assert.match(finishHelp, /impact-scan complete/);
+  assert.match(finishHelp, /request-clarification/);
+  assert.match(finishHelp, /validate 绑定当前草稿变更版本/);
 
   await assert.rejects(
     command(active.executionId, active.token!, ['help', 'unknown']),
@@ -167,7 +196,7 @@ test('delivery analysis help explains context tools, command semantics, and stan
   );
 });
 
-test('delivery analysis progressively closes real impacts and resumes the same user decision', async () => {
+test('delivery analysis walks a conditional human decision tree and resumes the same keys', async () => {
   const {
     answerQuestion,
     getTask,
@@ -177,52 +206,73 @@ test('delivery analysis progressively closes real impacts and resumes the same u
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+  const { databaseConnection } = await import('../infrastructure/database');
   const { taskId, delegation } = await deliveryAnalysisDelegation('轻量交付分析');
   const first = await begin(delegation, `${taskId}-first`);
 
   await assert.rejects(
     command(first.executionId, first.token!, [
-      'delivery-analysis', 'summary', 'set', '--text', '不能跳过 status',
+      'delivery-analysis', 'impact', 'upsert', '--key', 'blocked', '--area', 'x',
+      '--finding', 'x', '--disposition', 'change', '--evidence', 'x',
     ]),
     /delivery-analysis status/,
   );
-  await assert.rejects(
-    command(first.executionId, first.token!, ['analysis', 'status']),
-    /不允许命令/,
-  );
-
   const initial = await command(first.executionId, first.token!, ['delivery-analysis', 'status']);
-  assert.match(initial, /交付分析草稿 v1/);
+  assert.match(initial, /Phase: impact_scan/);
+  assert.match(initial, /AS-IS & IMPACT SCAN/);
+  assert.match(initial, /Status: not_ready/);
+  assert.doesNotMatch(initial, /Submit: `delivery-analysis impact-scan complete`/);
   assert.match(initial, /export-result · 用户获得可用的导出结果/);
   assert.match(initial, /上游来源：3/);
-  await assert.rejects(
-    command(first.executionId, first.token!, ['delivery-analysis', 'walkthrough', 'set', '--text', '旧命令']),
-    /未知命令/,
-  );
-  await recordContract(first.executionId, first.token!);
-  await recordOutputDecision(first.executionId, first.token!);
-  assert.equal(
+
+  await recordPreservedImpact(first.executionId, first.token!);
+  await recordOutputDecisionSkeletons(first.executionId, first.token!);
+  const phaseTwo = await command(first.executionId, first.token!, [
+    'delivery-analysis', 'impact-scan', 'complete',
+  ]);
+  assert.match(phaseTwo, /From: impact_scan/);
+  assert.match(phaseTwo, /To: decision_tree/);
+  assert.match(phaseTwo, /DECISION TREE/);
+
+  await configureOutputDecisionTree(first.executionId, first.token!);
+  const readyForQuestions = await command(first.executionId, first.token!, ['delivery-analysis', 'status']);
+  assert.match(readyForQuestions, /Status: decisions_required/);
+  assert.match(readyForQuestions, /`delivery-analysis validate`/);
+  assert.match(
     await command(first.executionId, first.token!, ['delivery-analysis', 'validate']),
-    '交付分析草稿结构校验通过。',
+    /Outcome: validation_passed[\s\S]*Action: `delivery-analysis request-clarification`/,
   );
   await command(first.executionId, first.token!, ['delivery-analysis', 'request-clarification']);
   const pending = await readAgentCommandSubmission(first.executionId);
   assert.equal(pending?.outcome, 'needs_input');
-  assert.equal(pending?.questions[0]?.decisionKey, 'output-mode');
-  assert.match(pending?.artifact?.content || '', /# 交付分析/);
+  assert.equal(pending?.spec, undefined);
+  assert.deepEqual(
+    pending?.questions.map((question) => [question.decisionKey, question.initialStatus]),
+    [['output-mode', 'pending'], ['inline-pagination', 'conditional']],
+  );
+  assert.deepEqual(pending?.questions[1]?.activation, [
+    { decisionKey: 'output-mode', optionId: 'inline' },
+  ]);
   await applyAgentResult(`RUN-delivery-analysis-pending-${taskId}`, delegation, pending!, {
     executionId: first.executionId,
   });
   await completeExecution(first.executionId);
 
   let detail = await getTask(taskId);
-  const question = detail?.questions.find((item) => item.decision_key === 'output-mode');
-  assert.ok(question);
+  assert.deepEqual(detail?.deliverySpecs, []);
+  const root = detail?.questions.find((item) => item.decision_key === 'output-mode');
+  const child = detail?.questions.find((item) => item.decision_key === 'inline-pagination');
+  assert.ok(root);
+  assert.equal(root?.status, 'pending');
+  assert.equal(child?.status, 'conditional');
   await answerQuestion({
     taskId,
-    questionId: question!.question_id,
+    questionId: root!.question_id,
+    selectedOptionId: 'download',
     answer: '使用下载 CSV；不要在页面渲染完整结果。',
   });
+  detail = await getTask(taskId);
+  assert.equal(detail?.questions.find((item) => item.decision_key === 'inline-pagination')?.status, 'not_applicable');
   await submitClarificationAnswers(taskId);
 
   const resumedDelegation = (await pipelineForTask(taskId)).find((item) =>
@@ -230,7 +280,10 @@ test('delivery analysis progressively closes real impacts and resumes the same u
   const resumed = await begin(resumedDelegation, `${taskId}-resume`);
   const restored = await command(resumed.executionId, resumed.token!, ['delivery-analysis', 'status']);
   assert.match(restored, /交付分析草稿 v2/);
+  assert.match(restored, /Phase: decision_tree/);
   assert.match(restored, /output-mode.*已回答=使用下载 CSV/);
+  assert.match(restored, /未命中的决策分支：1 个/);
+  assert.doesNotMatch(restored, /inline-pagination · business/);
   await assert.rejects(
     command(resumed.executionId, resumed.token!, [
       'delivery-analysis', 'decision', 'remove', '--key', 'output-mode',
@@ -245,17 +298,45 @@ test('delivery analysis progressively closes real impacts and resumes the same u
     '--evidence', '人工回答：使用下载 CSV；不要在页面渲染完整结果。',
   ]);
   await command(resumed.executionId, resumed.token!, [
-    'delivery-analysis', 'impact', 'upsert', '--key', 'result-entry',
-    '--area', '导出完成后的用户入口', '--finding', '结果以 CSV 下载入口交付',
-    '--disposition', 'change', '--evidence', '用户已选择下载 CSV',
-    '--decision', 'output-mode',
+    'delivery-analysis', 'impact', 'resolve', '--key', 'result-entry',
+    '--disposition', 'change', '--finding', '结果以 CSV 下载入口交付',
+    '--evidence', '用户明确选择下载 CSV',
   ]);
+  const contractPacket = await command(resumed.executionId, resumed.token!, [
+    'delivery-analysis', 'decision-tree', 'complete',
+  ]);
+  assert.match(contractPacket, /DELIVERY CONTRACT/);
+  await recordContract(resumed.executionId, resumed.token!);
+  await command(resumed.executionId, resumed.token!, ['delivery-analysis', 'contract', 'complete']);
+  await assert.rejects(
+    command(resumed.executionId, resumed.token!, ['delivery-analysis', 'complete']),
+    /尚未通过 validate/,
+  );
+  await command(resumed.executionId, resumed.token!, [
+    'delivery-analysis', 'finalize', 'reopen-contract', '--reason', '最终复核时需要收紧实现表述',
+  ]);
+  await command(resumed.executionId, resumed.token!, [
+    'delivery-analysis', 'summary', 'set', '--text',
+    '导出结果以 CSV 下载入口交付，计算、调度和失败语义保持不变。',
+  ]);
+  await command(resumed.executionId, resumed.token!, ['delivery-analysis', 'contract', 'complete']);
+  await assert.rejects(
+    command(resumed.executionId, resumed.token!, ['delivery-analysis', 'complete']),
+    /尚未通过 validate/,
+  );
+  await command(resumed.executionId, resumed.token!, ['delivery-analysis', 'validate']);
   await command(resumed.executionId, resumed.token!, ['delivery-analysis', 'complete']);
+
   const completed = await readAgentCommandSubmission(resumed.executionId);
   assert.equal(completed?.outcome, 'completed');
   assert.equal(completed?.questions.length, 0);
   assert.equal(completed?.spec?.impacts.find((item) => item.key === 'result-entry')?.disposition, 'change');
-  assert.equal(completed?.spec?.handoff.verificationFocus[0]?.key, 'result-entry');
+  assert.equal(completed?.spec?.impacts.some((item) => item.key === 'inline-result-loading'), false);
+  assert.equal(completed?.spec?.decisions.some((item) => item.key === 'inline-pagination'), false);
+  assert.doesNotMatch(
+    completed?.artifact?.content || '',
+    /export-result|output-mode|inline-pagination|result-entry|failed-export/,
+  );
   await applyAgentResult(`RUN-delivery-analysis-completed-${taskId}`, resumedDelegation, completed!, {
     executionId: resumed.executionId,
   });
@@ -264,34 +345,45 @@ test('delivery analysis progressively closes real impacts and resumes the same u
   detail = await getTask(taskId);
   assert.deepEqual(
     detail?.deliverySpecs.map((spec) => [spec.revision, spec.status]),
-    [[1, 'superseded'], [2, 'resolved']],
+    [[1, 'resolved']],
   );
   assert.equal(detail?.task.analysis_index, 1);
+
+  const db = await databaseConnection();
+  const transitions = db.prepare(`
+    SELECT transition.from_phase, transition.to_phase
+    FROM delivery_analysis_phase_transitions transition
+    JOIN agent_work_drafts draft ON draft.draft_id = transition.draft_id
+    WHERE draft.task_id = ? AND draft.story_index = 1
+    ORDER BY transition.transition_id
+  `).all(taskId) as { from_phase: string; to_phase: string }[];
+  assert.deepEqual(transitions.map((item) => [item.from_phase, item.to_phase]), [
+    ['impact_scan', 'decision_tree'],
+    ['decision_tree', 'delivery_contract'],
+    ['delivery_contract', 'finalize'],
+    ['finalize', 'delivery_contract'],
+    ['delivery_contract', 'finalize'],
+  ]);
 });
 
-test('delivery analysis completes without manufacturing a decision or explicit verification form', async () => {
+test('delivery analysis completes the no-decision path through every phase', async () => {
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { taskId, delegation } = await deliveryAnalysisDelegation('无关键决策的交付分析');
   const active = await begin(delegation, `${taskId}-no-decision`);
   await command(active.executionId, active.token!, ['delivery-analysis', 'status']);
   await command(active.executionId, active.token!, [
-    'delivery-analysis', 'summary', 'set', '--text', '现有完成态只缺少结果入口。',
-  ]);
-  await command(active.executionId, active.token!, [
-    'delivery-analysis', 'contract', 'set', '--text', '复用现有完成态补齐结果入口。',
-  ]);
-  await command(active.executionId, active.token!, [
     'delivery-analysis', 'impact', 'upsert', '--key', 'result-entry',
     '--area', '导出完成态', '--finding', '现有完成态缺少用户可使用的入口',
     '--disposition', 'change', '--evidence', '完成态模型与页面走查',
   ]);
-  await command(active.executionId, active.token!, ['delivery-analysis', 'complete']);
+  await command(active.executionId, active.token!, ['delivery-analysis', 'impact-scan', 'complete']);
+  await command(active.executionId, active.token!, ['delivery-analysis', 'decision-tree', 'complete']);
+  await closeContractAndFinalize(active.executionId, active.token!);
   const completed = await readAgentCommandSubmission(active.executionId);
   assert.equal(completed?.outcome, 'completed');
   assert.deepEqual(completed?.spec?.decisions, []);
-  assert.deepEqual(completed?.spec?.handoff.verificationFocus, []);
   assert.match(completed?.artifact?.content || '', /没有需要单独记录的关键决策/);
-  assert.match(completed?.artifact?.content || '', /unit-acceptance/);
+  assert.match(completed?.artifact?.content || '', /验收语义/);
 });
 
 test('resolved technical decisions do not require manufactured options', async () => {
@@ -300,16 +392,17 @@ test('resolved technical decisions do not require manufactured options', async (
   const active = await begin(delegation, `${taskId}-technical-decision`);
   await command(active.executionId, active.token!, ['delivery-analysis', 'status']);
   await command(active.executionId, active.token!, [
-    'delivery-analysis', 'summary', 'set', '--text', '现有结果记录已有稳定扩展字段。',
-  ]);
-  await command(active.executionId, active.token!, [
-    'delivery-analysis', 'contract', 'set', '--text', '在既有结果记录上新增可空字段，不建立平行表。',
-  ]);
-  await command(active.executionId, active.token!, [
     'delivery-analysis', 'decision', 'upsert', '--key', 'result-storage', '--type', 'technical',
     '--title', '结果入口存储方式', '--question', '新增字段还是建立新表？',
     '--impact', '影响数据一致性与迁移复杂度',
   ]);
+  await command(active.executionId, active.token!, [
+    'delivery-analysis', 'impact', 'upsert', '--key', 'result-record',
+    '--area', '结果持久化', '--finding', '结果入口与现有结果记录同生命周期',
+    '--disposition', 'needs_decision', '--evidence', '数据模型和唯一约束',
+    '--decision', 'result-storage',
+  ]);
+  await command(active.executionId, active.token!, ['delivery-analysis', 'impact-scan', 'complete']);
   await command(active.executionId, active.token!, [
     'delivery-analysis', 'decision', 'resolve', '--key', 'result-storage',
     '--authority', 'project_evidence',
@@ -318,12 +411,11 @@ test('resolved technical decisions do not require manufactured options', async (
     '--evidence', '结果表唯一约束和现有迁移模式',
   ]);
   await command(active.executionId, active.token!, [
-    'delivery-analysis', 'impact', 'upsert', '--key', 'result-record',
-    '--area', '结果持久化', '--finding', '结果入口与现有结果记录同生命周期',
-    '--disposition', 'change', '--evidence', '数据模型和唯一约束',
-    '--decision', 'result-storage',
+    'delivery-analysis', 'impact', 'resolve', '--key', 'result-record',
+    '--disposition', 'change', '--evidence', '项目数据模型唯一确定存储方式',
   ]);
-  await command(active.executionId, active.token!, ['delivery-analysis', 'complete']);
+  await command(active.executionId, active.token!, ['delivery-analysis', 'decision-tree', 'complete']);
+  await closeContractAndFinalize(active.executionId, active.token!);
   const completed = await readAgentCommandSubmission(active.executionId);
   const decision = completed?.spec?.decisions[0];
   assert.equal(decision?.status, 'resolved');
@@ -331,15 +423,28 @@ test('resolved technical decisions do not require manufactured options', async (
   assert.equal(decision && 'selectedOption' in decision, false);
 });
 
-test('delivery analysis cannot complete while an impact still needs a decision', async () => {
+test('delivery analysis cannot leave decision tree while an active impact needs a decision', async () => {
   const { taskId, delegation } = await deliveryAnalysisDelegation('影响处置必须闭环');
   const active = await begin(delegation, `${taskId}-unresolved-impact`);
   await command(active.executionId, active.token!, ['delivery-analysis', 'status']);
-  await recordContract(active.executionId, active.token!);
-  await recordOutputDecision(active.executionId, active.token!);
+  await command(active.executionId, active.token!, [
+    'delivery-analysis', 'decision', 'upsert', '--key', 'output-mode', '--type', 'business',
+    '--title', '选择结果呈现模式', '--question', '下载还是页面展示？',
+    '--impact', '决定用户可观察结果',
+  ]);
+  await command(active.executionId, active.token!, [
+    'delivery-analysis', 'impact', 'upsert', '--key', 'result-entry',
+    '--area', '结果入口', '--finding', '存在互斥方向', '--disposition', 'needs_decision',
+    '--evidence', '需求同时给出下载与页面展示', '--decision', 'output-mode',
+  ]);
+  await command(active.executionId, active.token!, ['delivery-analysis', 'impact-scan', 'complete']);
+  await assert.rejects(
+    command(active.executionId, active.token!, ['delivery-analysis', 'decision-tree', 'complete']),
+    /至少需要两个真实互斥选项|尚未确定最终处理方式/,
+  );
   await assert.rejects(
     command(active.executionId, active.token!, ['delivery-analysis', 'complete']),
-    /待用户确认|尚未确定处理方式/,
+    /只能在 finalize 阶段执行/,
   );
 });
 
@@ -359,7 +464,7 @@ test('delivery analysis work keys isolate delivery units while resume preserves 
   );
 });
 
-test('delivery analysis migration keeps only the lightweight active model', async () => {
+test('delivery analysis migration exposes only the active workflow model', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const removedNames = db.prepare(`
@@ -372,8 +477,7 @@ test('delivery analysis migration keeps only the lightweight active model', asyn
       'delivery_analysis_facts', 'delivery_analysis_scenarios',
       'delivery_analysis_boundaries', 'delivery_analysis_criteria',
       'delivery_analysis_verification_steps', 'delivery_analysis_external_dependencies',
-      'delivery_analysis_scope_gaps', 'delivery_analysis_source_coverage',
-      'delivery_analysis_decision_dependencies'
+      'delivery_analysis_scope_gaps', 'delivery_analysis_source_coverage'
     )
     ORDER BY name
   `).all() as { name: string }[];
@@ -383,9 +487,11 @@ test('delivery analysis migration keeps only the lightweight active model', asyn
     WHERE type = 'table' AND name IN (
       'delivery_analysis_drafts', 'delivery_analysis_impacts',
       'delivery_analysis_decisions', 'delivery_analysis_decision_options',
-      'delivery_analysis_guardrails', 'delivery_analysis_verification_focus'
+      'delivery_analysis_decision_dependencies',
+      'delivery_analysis_guardrails', 'delivery_analysis_verification_focus',
+      'delivery_analysis_phase_transitions'
     )
     ORDER BY name
   `).all() as { name: string }[];
-  assert.equal(activeNames.length, 6);
+  assert.equal(activeNames.length, 8);
 });

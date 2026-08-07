@@ -14,7 +14,7 @@ async function begin(delegation: DelegationEnvelope, suffix: string) {
   const started = await beginExecutionAttempt({
     runId: `RUN-verification-${suffix}`,
     delegation,
-    prompt: `two-phase independent verification prompt ${suffix}`,
+    prompt: `four-phase independent verification prompt ${suffix}`,
   });
   const token = await issueAgentCommandToken(started.attempt.execution_id);
   assert.ok(token);
@@ -110,12 +110,29 @@ async function recordResult(
   return command(executionId, token, args);
 }
 
-test('verification freezes a complete frontend-led plan and advances from recorded results', async () => {
+async function finishVerification(
+  executionId: string,
+  token: string,
+  summary = '逐项复核了 Expected、Actual、独立证据和责任分类，证据足以支持所记录结论。',
+  risk?: string,
+) {
+  await command(executionId, token, ['verification', 'execute', 'complete']);
+  const review = ['verification', 'evidence-review', 'record', '--summary', summary];
+  if (risk) review.push('--risk', risk);
+  await command(executionId, token, review);
+  const finalizePacket = await command(executionId, token, ['verification', 'evidence-review', 'complete']);
+  assert.match(finalizePacket, /FINALIZE · finalize/);
+  assert.match(finalizePacket, /verification validate/);
+  await command(executionId, token, ['verification', 'validate']);
+  return command(executionId, token, ['verification', 'complete']);
+}
+
+test('verification advances through plan, execute, evidence review and finalize', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { getTask, pipelineForTask } = await import('./tasks');
-  const { taskId, delegation } = await verificationDelegation('两阶段前端独立验证');
+  const { taskId, delegation } = await verificationDelegation('四阶段前端独立验证');
   const started = await begin(delegation, `${taskId}-pass`);
 
   await assert.rejects(
@@ -123,7 +140,8 @@ test('verification freezes a complete frontend-led plan and advances from record
     /verification status/,
   );
   const initial = await command(started.executionId, started.token!, ['verification', 'status']);
-  assert.match(initial, /阶段：规划测试计划/);
+  assert.match(initial, /阶段：PLAN/);
+  assert.match(initial, /PLAN → EXECUTE → EVIDENCE REVIEW → FINALIZE/);
   assert.match(initial, /unit-acceptance.*未覆盖/);
   assert.match(initial, /focus:AC-status.*未覆盖/);
   assert.match(initial, /guardrail:pending-visible.*未覆盖/);
@@ -139,14 +157,16 @@ test('verification freezes a complete frontend-led plan and advances from record
     '--covers', 'unit-acceptance,focus:AC-status,guardrail:pending-visible',
   ]);
   await assert.rejects(
-    command(started.executionId, started.token!, ['verification', 'plan', 'freeze']),
+    command(started.executionId, started.token!, ['verification', 'plan', 'complete']),
     /unit-acceptance 必须由至少一个 frontend 场景覆盖/,
   );
   await command(started.executionId, started.token!, [
     'verification', 'plan', 'dismiss', '--key', 'api-only',
   ]);
   await upsertFrontendPlan(started.executionId, started.token!);
-  await command(started.executionId, started.token!, ['verification', 'plan', 'freeze']);
+  const executePacket = await command(started.executionId, started.token!, ['verification', 'plan', 'complete']);
+  assert.match(executePacket, /NEXT WORK PACKET/);
+  assert.match(executePacket, /EXECUTE · execute/);
 
   await assert.rejects(
     upsertFrontendPlan(started.executionId, started.token!),
@@ -157,20 +177,24 @@ test('verification freezes a complete frontend-led plan and advances from record
     evidence: '从浏览器打开结果页，完成与未完成状态均符合可观察期望',
   });
   const ready = await command(started.executionId, started.token!, ['verification', 'status']);
-  assert.match(ready, /所有计划场景均已记录结果/);
-  await command(started.executionId, started.token!, [
-    'verification', 'complete',
-    '--risk', '本轮只覆盖结果页相关业务状态，不代表全站视觉回归',
-  ]);
+  assert.match(ready, /Readiness: ready|Status: ready/);
+  await assert.rejects(command(started.executionId, started.token!, ['verification', 'complete']), /FINALIZE/);
+  await finishVerification(
+    started.executionId,
+    started.token!,
+    undefined,
+    '本轮只覆盖结果页相关业务状态，不代表全站视觉回归',
+  );
 
   const result = await readAgentCommandSubmission(started.executionId);
   assert.equal(result?.outcome, 'completed');
   assert.equal(result?.verdict, 'passed');
   assert.equal(result?.tests?.[0]?.passed, true);
-  assert.match(result?.artifact?.content || '', /result-page · frontend · passed/);
+  assert.match(result?.artifact?.content || '', /用户从结果页观察完成与未完成状态 · 前端 · 通过/);
   assert.match(result?.artifact?.content || '', /准备：应用已启动，存在一条完成结果和一条未完成结果/);
   assert.match(result?.artifact?.content || '', /测试步骤：打开 \/results，并分别查看两条结果/);
-  assert.match(result?.artifact?.content || '', /unit-acceptance/);
+  assert.doesNotMatch(result?.artifact?.content || '', /result-page|unit-acceptance|focus:AC-status|guardrail:pending-visible/);
+  assert.match(result?.artifact?.content || '', /证据复核/);
   assert.match(result?.artifact?.content || '', /不代表全站视觉回归/);
 
   await applyAgentResult(`RUN-verification-pass-${taskId}`, delegation, result!, {
@@ -183,29 +207,27 @@ test('verification freezes a complete frontend-led plan and advances from record
   assert.equal((await pipelineForTask(taskId))[0]?.agent, 'review-agent');
 });
 
-test('verification help explains the compact two-phase command surface', async () => {
+test('verification help exposes only the topic-scoped four-phase command surface', async () => {
   const { taskId, delegation } = await verificationDelegation('验证命令专题帮助');
   const started = await begin(delegation, `${taskId}-help`);
-  const all = await command(started.executionId, started.token!, ['help']);
-  assert.match(all, /verification plan upsert/);
-  assert.match(all, /--setup <前置条件与测试数据> --steps <入口与测试动作>/);
-  assert.match(all, /verification plan freeze/);
-  assert.match(all, /verification result record/);
-  assert.match(all, /verification complete \[--risk/);
-  assert.match(all, /verification request-input --key/);
-  assert.doesNotMatch(all, /--preconditions|--test-data|--entry|--actions/);
-  assert.doesNotMatch(all, /verification (?:criterion|check|failure|recovery|runtime-input|risk record|pass|fail|block)/);
+  await assert.rejects(command(started.executionId, started.token!, ['help']), /help 必须指定一个主题/);
 
   const plan = await command(started.executionId, started.token!, ['help', 'plan']);
   assert.match(plan, /frontend 场景覆盖真实业务闭环/);
+  assert.match(plan, /verification plan complete/);
   assert.match(plan, /API 场景可以补充业务证据或形成反例/);
   const execute = await command(started.executionId, started.token!, ['help', 'execute']);
   assert.match(execute, /implementation\/specification/);
   assert.match(execute, /environment\/inconclusive/);
+  assert.match(execute, /verification execute complete/);
+  const evidence = await command(started.executionId, started.token!, ['help', 'evidence']);
+  assert.match(evidence, /verification evidence-review record/);
+  assert.match(evidence, /reopen-execution/);
   const input = await command(started.executionId, started.token!, ['help', 'input']);
   assert.match(input, /必要资源无法自行取得/);
   const finish = await command(started.executionId, started.token!, ['help', 'finish']);
-  assert.match(finish, /Harness 只校验阶段、前端最低覆盖和结果完整性/);
+  assert.match(finish, /verification validate/);
+  assert.match(finish, /reopen-evidence-review/);
 
   await command(started.executionId, started.token!, ['verification', 'status']);
   await assert.rejects(
@@ -244,7 +266,7 @@ test('verification permits an API supplement but derives implementation failure 
     '--expected', 'status 为 completed',
     '--covers', 'focus:AC-status',
   ]);
-  await command(started.executionId, started.token!, ['verification', 'plan', 'freeze']);
+  await command(started.executionId, started.token!, ['verification', 'plan', 'complete']);
   await recordResult(started.executionId, started.token!, {
     status: 'failed',
     kind: 'implementation',
@@ -256,7 +278,7 @@ test('verification permits an API supplement but derives implementation failure 
     status: 'passed',
     evidence: '接口返回 completed，与业务期望一致',
   });
-  await command(started.executionId, started.token!, ['verification', 'complete']);
+  await finishVerification(started.executionId, started.token!);
   const result = await readAgentCommandSubmission(started.executionId);
   assert.equal(result?.verdict, 'failed');
   assert.equal(result?.failureKind, 'implementation');
@@ -288,14 +310,14 @@ test('blocked verification becomes human assistance and resumes the same plan', 
   const started = await begin(delegation, `${taskId}-block`);
   await command(started.executionId, started.token!, ['verification', 'status']);
   await upsertFrontendPlan(started.executionId, started.token!);
-  await command(started.executionId, started.token!, ['verification', 'plan', 'freeze']);
+  await command(started.executionId, started.token!, ['verification', 'plan', 'complete']);
   await recordResult(started.executionId, started.token!, {
     status: 'blocked',
     kind: 'environment',
     evidence: '尝试启动并访问项目预览入口，浏览器无法连接',
     actual: '项目没有可启动的前端预览环境',
   });
-  await command(started.executionId, started.token!, ['verification', 'complete']);
+  await finishVerification(started.executionId, started.token!);
   const result = await readAgentCommandSubmission(started.executionId);
   assert.equal(result?.outcome, 'needs_input');
   assert.equal(result?.verdict, undefined);
@@ -317,7 +339,7 @@ test('blocked verification becomes human assistance and resumes the same plan', 
   assert.equal(detail?.lanes.find((lane) => lane.lane === 'delivery')?.current_agent, 'test-agent');
   assert.equal(detail?.lanes.some((lane) => lane.status === 'system_blocked'), false);
   const assistance = detail?.runtimeInputs.find((input) =>
-    input.request_key.startsWith('verification-assistance:'));
+    input.request_key?.startsWith('verification-assistance:'));
   assert.ok(assistance);
 
   await answerRuntimeInput({
@@ -332,18 +354,14 @@ test('blocked verification becomes human assistance and resumes the same plan', 
 
   const resumed = await begin(resumedDelegation, `${taskId}-assistance-resume`);
   const restored = await command(resumed.executionId, resumed.token!, ['verification', 'status']);
-  assert.match(restored, /阶段：逐项执行测试/);
+  assert.match(restored, /阶段：EXECUTE/);
   assert.match(restored, /执行结果：1\/1/);
   assert.match(restored, /人工验证：通过/);
-  await assert.rejects(
-    command(resumed.executionId, resumed.token!, ['verification', 'complete']),
-    /验证协助已经有待处理或已回答记录/,
-  );
   await recordResult(resumed.executionId, resumed.token!, {
     status: 'passed',
     evidence: '用户在云桌面代为执行；实际观察与冻结 Oracle 一致；证据为截图 TEST-42',
   });
-  await command(resumed.executionId, resumed.token!, ['verification', 'complete']);
+  await finishVerification(resumed.executionId, resumed.token!);
   const completed = await readAgentCommandSubmission(resumed.executionId);
   assert.equal(completed?.verdict, 'passed');
   await applyAgentResult(`RUN-verification-assisted-${taskId}`, resumedDelegation, completed!, {
@@ -382,7 +400,7 @@ test('verification runtime input resumes the same frozen plan and partial result
     '--expected', '返回成功状态',
     '--covers', 'focus:AC-status',
   ]);
-  await command(first.executionId, first.token!, ['verification', 'plan', 'freeze']);
+  await command(first.executionId, first.token!, ['verification', 'plan', 'complete']);
   await recordResult(first.executionId, first.token!, {
     key: 'preview-health',
     status: 'passed',
@@ -417,7 +435,7 @@ test('verification runtime input resumes the same frozen plan and partial result
   const resumed = await begin(resumedDelegation, `${taskId}-resume`);
   const restored = await command(resumed.executionId, resumed.token!, ['verification', 'status']);
   assert.match(restored, /验证草稿 v2/);
-  assert.match(restored, /阶段：逐项执行测试/);
+  assert.match(restored, /阶段：EXECUTE/);
   assert.match(restored, /执行结果：1\/2/);
   assert.match(restored, /preview-url.*已回答=使用 http:\/\/localhost:3001/);
   await assert.rejects(
@@ -435,7 +453,7 @@ test('verification runtime input resumes the same frozen plan and partial result
     status: 'passed',
     evidence: '在用户提供的预览地址完成前端黑盒验证',
   });
-  await command(resumed.executionId, resumed.token!, ['verification', 'complete']);
+  await finishVerification(resumed.executionId, resumed.token!);
   const completed = await readAgentCommandSubmission(resumed.executionId);
   await applyAgentResult(`RUN-verification-resume-${taskId}`, resumedDelegation, completed!, {
     executionId: resumed.executionId,
@@ -455,24 +473,24 @@ test('a later verification cycle reuses a matching frozen plan but clears old re
   const first = await begin(delegation, `${taskId}-cycle-one`);
   await command(first.executionId, first.token!, ['verification', 'status']);
   await upsertFrontendPlan(first.executionId, first.token!);
-  await command(first.executionId, first.token!, ['verification', 'plan', 'freeze']);
+  await command(first.executionId, first.token!, ['verification', 'plan', 'complete']);
   await recordResult(first.executionId, first.token!, {
     status: 'failed',
     kind: 'implementation',
     evidence: '页面仍显示旧状态',
     actual: '页面未展示完成',
   });
-  await command(first.executionId, first.token!, ['verification', 'complete']);
+  await finishVerification(first.executionId, first.token!);
   assert.equal((await readAgentCommandSubmission(first.executionId))?.verdict, 'failed');
 
   const second = await begin(delegation, `${taskId}-cycle-two`);
   const restored = await command(second.executionId, second.token!, ['verification', 'status']);
   assert.match(restored, /验证草稿 v2/);
-  assert.match(restored, /阶段：逐项执行测试/);
+  assert.match(restored, /阶段：EXECUTE/);
   assert.match(restored, /计划场景：1/);
   assert.match(restored, /执行结果：0\/1/);
   await assert.rejects(
-    command(second.executionId, second.token!, ['verification', 'complete']),
+    command(second.executionId, second.token!, ['verification', 'execute', 'complete']),
     /result-page/,
   );
 });
@@ -492,7 +510,7 @@ test('a changed delivery contract reopens a waiting frozen plan without losing t
   const first = await begin(delegation, `${taskId}-spec-change-input`);
   await command(first.executionId, first.token!, ['verification', 'status']);
   await upsertFrontendPlan(first.executionId, first.token!);
-  await command(first.executionId, first.token!, ['verification', 'plan', 'freeze']);
+  await command(first.executionId, first.token!, ['verification', 'plan', 'complete']);
   await command(first.executionId, first.token!, [
     'verification', 'request-input',
     '--key', 'preview-url',
@@ -540,10 +558,56 @@ test('a changed delivery contract reopens a waiting frozen plan without losing t
   const resumed = await begin(resumedDelegation, `${taskId}-spec-change-resume`);
   const restored = await command(resumed.executionId, resumed.token!, ['verification', 'status']);
   assert.match(restored, /验证草稿 v2/);
-  assert.match(restored, /阶段：规划测试计划/);
+  assert.match(restored, /阶段：PLAN/);
   assert.match(restored, /计划绑定 未冻结/);
   assert.match(restored, /执行结果：0\/1/);
   assert.match(restored, /preview-url.*已回答=使用 http:\/\/localhost:3002/);
+});
+
+test('evidence review is a hard gate and can explicitly reopen execution', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { taskId, delegation } = await verificationDelegation('证据复核回流执行');
+  const started = await begin(delegation, `${taskId}-evidence-reopen`);
+  await command(started.executionId, started.token!, ['verification', 'status']);
+  await upsertFrontendPlan(started.executionId, started.token!);
+  await command(started.executionId, started.token!, ['verification', 'plan', 'complete']);
+  await recordResult(started.executionId, started.token!, {
+    status: 'passed',
+    evidence: '首次观察记录不够精确',
+  });
+  await command(started.executionId, started.token!, ['verification', 'execute', 'complete']);
+  await assert.rejects(
+    command(started.executionId, started.token!, ['verification', 'evidence-review', 'complete']),
+    /尚未记录证据复核摘要/,
+  );
+  await command(started.executionId, started.token!, [
+    'verification', 'evidence-review', 'record',
+    '--summary', '首次证据不能定位具体观察，需要重做。',
+  ]);
+  const reopened = await command(started.executionId, started.token!, [
+    'verification', 'evidence-review', 'reopen-execution',
+    '--reason', '证据无法支持 passed 状态',
+  ]);
+  assert.match(reopened, /EXECUTE · execute/);
+  await recordResult(started.executionId, started.token!, {
+    status: 'passed',
+    evidence: '浏览器打开结果页，截图明确显示完成与未完成两种可观察状态',
+  });
+  await finishVerification(started.executionId, started.token!);
+
+  const db = await databaseConnection();
+  const transitions = db.prepare(`
+    SELECT from_phase, to_phase FROM verification_phase_transitions
+    WHERE draft_id = (SELECT draft_id FROM agent_work_drafts WHERE terminal_execution_id = ?)
+    ORDER BY transition_id
+  `).all(started.executionId) as { from_phase: string; to_phase: string }[];
+  assert.deepEqual(transitions.map((item) => `${item.from_phase}->${item.to_phase}`), [
+    'plan->execute',
+    'execute->evidence_review',
+    'evidence_review->execute',
+    'execute->evidence_review',
+    'evidence_review->finalize',
+  ]);
 });
 
 test('legacy verification result-filling commands are not accepted', async () => {

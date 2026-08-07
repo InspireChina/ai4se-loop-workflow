@@ -1,0 +1,2 @@
+ALTER TABLE requirement_context_drafts
+ADD COLUMN validated_change_seq INTEGER;

@@ -20,6 +20,11 @@ const questionSchema = z.object({
     consequences: z.array(z.string().max(1000)).max(20).optional().default([]),
   })).max(20).optional().default([]),
   dependsOn: z.array(z.string().min(1).max(240)).max(50).optional().default([]),
+  activation: z.array(z.object({
+    decisionKey: z.string().min(1).max(240),
+    optionId: z.string().min(1).max(100),
+  })).max(50).optional().default([]),
+  initialStatus: z.enum(['pending', 'conditional', 'not_applicable']).optional().default('pending'),
 });
 
 const runtimeInputSchema = z.object({
@@ -36,6 +41,17 @@ const closureGapSchema = z.object({
   kind: z.enum(['missing_evidence', 'fact_conflict', 'unresolved_obligation']),
   reason: z.string().min(1).max(4000),
   boundary: z.string().min(1).max(4000),
+});
+
+const closureGapUnitSchema = z.object({
+  key: z.string().min(1).max(120),
+  title: z.string().min(1).max(200),
+  actor: z.string().min(1).max(500),
+  trigger: z.string().min(1).max(4000),
+  observableOutcome: z.string().min(1).max(4000),
+  acceptance: z.string().min(1).max(4000),
+  gapKeys: z.array(z.string().min(1).max(240)).min(1).max(100),
+  dependsOn: z.array(z.string().min(1).max(120)).max(50).default([]),
 });
 
 const feedbackTriageGroupSchema = z.object({
@@ -71,6 +87,24 @@ const feedbackResultSchema = z.discriminatedUnion('mode', [
     evidence: z.array(z.string().min(1).max(2000)).max(50).default([]),
   }),
 ]);
+
+function hasDependencyCycle(units: { key: string; dependsOn: string[] }[]) {
+  const dependencies = new Map(units.map((unit) => [unit.key, unit.dependsOn]));
+  const visiting = new Set<string>();
+  const visited = new Set<string>();
+  const visit = (key: string): boolean => {
+    if (visiting.has(key)) return true;
+    if (visited.has(key)) return false;
+    visiting.add(key);
+    for (const dependency of dependencies.get(key) || []) {
+      if (visit(dependency)) return true;
+    }
+    visiting.delete(key);
+    visited.add(key);
+    return false;
+  };
+  return units.some((unit) => visit(unit.key));
+}
 
 const decisionOptionSchema = z.object({
   id: z.string().min(1).max(100),
@@ -149,6 +183,7 @@ export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object
   stories: z.array(deliveryUnitContractSchema).max(50).optional(),
   verdict: z.enum(['passed', 'failed', 'report_ready', 'closure_gap', 'ready_for_approval', 'changes_requested']).optional(),
   closureGaps: z.array(closureGapSchema).max(100).optional(),
+  closureGapUnits: z.array(closureGapUnitSchema).max(100).optional(),
   failureKind: z.enum(['implementation', 'specification', 'environment', 'inconclusive']).optional(),
   rewindTo: z.enum(['plan', 'analysis', 'dev', 'test']).optional(),
   rewindDeliveryUnit: z.number().int().positive().optional(),
@@ -279,21 +314,42 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
       throw new Error('Review Agent 不得返回回退决策；反馈判断由 Feedback Agent 负责，Application 只执行前向路由');
     }
     const closureGaps = result.closureGaps || [];
+    const closureGapUnits = result.closureGapUnits || [];
     const duplicateGapKeys = duplicateKeys(closureGaps.map((gap) => gap.key));
     if (duplicateGapKeys.length) throw new Error(`Review Agent 的 closure gap key 不能重复：${duplicateGapKeys.join(', ')}`);
     if (result.verdict === 'report_ready') {
       if (!result.artifact) throw new Error('review-agent 结果缺少 artifact');
       if (closureGaps.length) throw new Error('report_ready 不能同时包含 closure gaps');
+      if (closureGapUnits.length) throw new Error('report_ready 不能同时包含 closure gap units');
       return;
     }
     if (result.verdict === 'closure_gap') {
       if (!closureGaps.length) throw new Error('closure_gap 必须包含至少一个事实缺口');
+      if (!closureGapUnits.length) throw new Error('closure_gap 必须包含至少一个完整前向交付单元');
       if (result.artifact) throw new Error('closure_gap 不得生成结卡报告 artifact');
+      const gapKeys = new Set(closureGaps.map((gap) => gap.key));
+      const unitKeys = closureGapUnits.map((unit) => unit.key);
+      const duplicateUnitKeys = duplicateKeys(unitKeys);
+      if (duplicateUnitKeys.length) throw new Error(`closure gap unit key 不能重复：${duplicateUnitKeys.join(', ')}`);
+      const covered = closureGapUnits.flatMap((unit) => unit.gapKeys);
+      const duplicateCoverage = duplicateKeys(covered);
+      if (duplicateCoverage.length) throw new Error(`closure gap 只能由一个单元覆盖：${duplicateCoverage.join(', ')}`);
+      const unknownGaps = covered.filter((key) => !gapKeys.has(key));
+      if (unknownGaps.length) throw new Error(`closure gap unit 引用了未知缺口：${unknownGaps.join(', ')}`);
+      const missingGaps = [...gapKeys].filter((key) => !covered.includes(key));
+      if (missingGaps.length) throw new Error(`closure gap 缺少前向单元覆盖：${missingGaps.join(', ')}`);
+      const unitKeySet = new Set(unitKeys);
+      for (const unit of closureGapUnits) {
+        if (unit.dependsOn.includes(unit.key)) throw new Error(`closure gap unit ${unit.key} 不能依赖自身`);
+        const unknownDependencies = unit.dependsOn.filter((key) => !unitKeySet.has(key));
+        if (unknownDependencies.length) throw new Error(`closure gap unit ${unit.key} 引用了未知依赖：${unknownDependencies.join(', ')}`);
+      }
+      if (hasDependencyCycle(closureGapUnits)) throw new Error('closure gap unit 依赖不能形成环');
       return;
     }
     throw new Error('Review Agent 只能返回 verdict=report_ready 或 closure_gap；反馈判断由 Feedback Agent 负责，Application 执行路由');
   }
-  if (result.closureGaps?.length) throw new Error('只有 Review Agent 可以返回 closure gaps');
+  if (result.closureGaps?.length || result.closureGapUnits?.length) throw new Error('只有 Review Agent 可以返回 closure gaps');
   if (agent === 'feedback-agent' && result.runtimeInputs.length) {
     throw new Error('feedback-agent 不能创建运行信息请求；无法安全分组时使用 questions');
   }
@@ -334,8 +390,12 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
       break;
     case 'analyst-agent':
       if (!result.artifact) throw new Error('analyst-agent 结果缺少 artifact');
-      if (!result.spec) throw new Error('交付分析 Agent 结果缺少结构化交付规格');
-      assertDeliverySpecDecisionCoverage(result.spec, result.questions);
+      if (result.questions.length) {
+        if (result.spec) assertDeliverySpecDecisionCoverage(result.spec, result.questions);
+        break;
+      }
+      if (!result.spec) throw new Error('交付分析 Agent 完成结果缺少结构化交付规格');
+      assertDeliverySpecDecisionCoverage(result.spec, []);
       break;
     case 'repro-agent':
       if (!result.artifact) throw new Error('repro-agent 结果缺少 artifact');

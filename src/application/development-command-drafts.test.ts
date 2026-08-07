@@ -150,7 +150,7 @@ async function recordCapturedCommand(executionId: string, actualCommand: string,
   return receiptKey;
 }
 
-async function recordCompletedImplementation(executionId: string, token: string) {
+async function recordImplementationEvidence(executionId: string, token: string) {
   await command(executionId, token, [
     'implementation', 'criterion', 'satisfy', '--key', 'AC-status',
     '--evidence', '结果状态组件覆盖完成结果分支。',
@@ -159,12 +159,33 @@ async function recordCompletedImplementation(executionId: string, token: string)
     'implementation', 'criterion', 'satisfy', '--key', 'unit-acceptance',
     '--evidence', '结果页从触发到完成状态形成可观察闭环。',
   ]);
+}
+
+async function passCodeReview(executionId: string, token: string) {
+  await command(executionId, token, ['implementation', 'implement', 'complete']);
+  await command(executionId, token, [
+    'implementation', 'review', 'record', '--result', 'pass',
+    '--summary', '实现符合现有组件边界、命名规则和错误处理惯例，没有重复或不必要复杂度。',
+    '--evidence', '走查结果状态组件、相邻组件模式和当前 diff。',
+  ]);
+  await command(executionId, token, ['implementation', 'review', 'complete']);
+}
+
+async function recordDeveloperCheck(executionId: string, token: string) {
   const receipt = await recordCapturedCommand(executionId, 'npm test -- result-status');
   await command(executionId, token, [
     'implementation', 'check', 'record', '--key', 'status-component',
     '--receipt', receipt,
     '--summary', '完成状态分支回归通过。',
   ]);
+}
+
+async function recordCompletedImplementation(executionId: string, token: string) {
+  await recordImplementationEvidence(executionId, token);
+  await passCodeReview(executionId, token);
+  await recordDeveloperCheck(executionId, token);
+  await command(executionId, token, ['implementation', 'verify', 'complete']);
+  await command(executionId, token, ['implementation', 'validate']);
 }
 
 test('development help exposes judgments without making Git a completion gate', () => {
@@ -176,7 +197,8 @@ test('development help exposes judgments without making Git a completion gate', 
   const help = developmentHelp(terminalActions).join('\n');
   assert.match(help, /help evidence/);
   assert.match(help, /Application 记录 Runner 命令事实/);
-  assert.match(help, /status → 调查\/必要实现\/真实检查 → status 查看 receipt → criterion\/check → validate → complete/);
+  assert.match(help, /IMPLEMENT → REVIEW → DEVELOPER VERIFY → FINALIZE/);
+  assert.match(help, /implementation review complete/);
   assert.match(help, /修正、风险、恢复和运行信息属于按需路径/);
   assert.doesNotMatch(help, /handoff|开发交接|开发与验证交接/);
   assert.doesNotMatch(
@@ -197,13 +219,18 @@ test('development help exposes judgments without making Git a completion gate', 
   assert.match(input, /implementation fail --reason/);
   assert.match(input, /不需要预先维护 failure 字段/);
 
+  const review = developmentHelp(terminalActions, 'review').join('\n');
+  assert.match(review, /代码质量门禁/);
+  assert.match(review, /needs_changes/);
+  assert.match(review, /回流会清除旧审查结论/);
+
   const finish = developmentHelp(terminalActions, 'finish').join('\n');
   assert.match(finish, /基于当前仓库重新检查功能完整性/);
   assert.match(finish, /Git 历史、分支、HEAD、Commit 和未提交文件.*不形成完成门禁/);
 
   assert.throws(
     () => developmentHelp(terminalActions, 'unknown'),
-    /可用主题：context、evidence、input、finish/,
+    /可用主题：context、evidence、review、input、finish/,
   );
 });
 
@@ -216,8 +243,10 @@ test('development agent proves an existing implementation without declaring a mo
   const { taskId, delegation } = await developmentDelegation('精简后的开发走查');
   const started = await begin(delegation, `${taskId}-existing`);
 
-  const help = await command(started.executionId, started.token!, ['help']);
-  assert.doesNotMatch(help, /help handoff|implementation handoff/);
+  await assert.rejects(
+    command(started.executionId, started.token!, ['help']),
+    /必须指定一个主题/,
+  );
   assert.match(
     await command(started.executionId, started.token!, ['help', 'evidence']),
     /帮助主题：evidence/,
@@ -230,6 +259,8 @@ test('development agent proves an existing implementation without declaring a mo
     /implementation status/,
   );
   const initial = await command(started.executionId, started.token!, ['implementation', 'status']);
+  assert.match(initial, /Phase: implement/);
+  assert.match(initial, /IMPLEMENT · implement/);
   assert.match(initial, /开发实现草稿 v1/);
   assert.match(initial, /仓库观察（仅供调查，不参与完成校验）/);
   assert.match(initial, /unit-acceptance.*尚未证明/);
@@ -257,6 +288,39 @@ test('development agent proves an existing implementation without declaring a mo
     ]),
     /未知命令：implementation handoff set/,
   );
+  await recordImplementationEvidence(started.executionId, started.token!);
+  const reviewPacket = await command(
+    started.executionId,
+    started.token!,
+    ['implementation', 'implement', 'complete'],
+  );
+  assert.match(reviewPacket, /REVIEW · review/);
+  await command(started.executionId, started.token!, [
+    'implementation', 'review', 'record', '--result', 'needs_changes',
+    '--summary', '发现结果状态分支存在重复条件，需要先收敛。',
+    '--evidence', '结果状态组件当前 diff 中的重复分支。',
+  ]);
+  await assert.rejects(
+    command(started.executionId, started.token!, ['implementation', 'review', 'complete']),
+    /必须回流 IMPLEMENT/,
+  );
+  const reopened = await command(started.executionId, started.token!, [
+    'implementation', 'review', 'reopen-implementation',
+    '--reason', '消除重复条件并按仓库模式收敛状态分支',
+  ]);
+  assert.match(reopened, /From: review[\s\S]*To: implement/);
+  await command(started.executionId, started.token!, ['implementation', 'implement', 'complete']);
+  await command(started.executionId, started.token!, [
+    'implementation', 'review', 'record', '--result', 'pass',
+    '--summary', '现有实现符合组件边界和仓库代码规范。',
+    '--evidence', '结果状态组件、相邻组件模式与当前 diff。',
+  ]);
+  const verifyPacket = await command(
+    started.executionId,
+    started.token!,
+    ['implementation', 'review', 'complete'],
+  );
+  assert.match(verifyPacket, /DEVELOPER VERIFY/);
   const failedReceipt = await recordCapturedCommand(
     started.executionId,
     'npm test -- result-status',
@@ -270,10 +334,10 @@ test('development agent proves an existing implementation without declaring a mo
     ]),
     /所选命令没有明确成功/,
   );
-  await recordCompletedImplementation(started.executionId, started.token!);
+  await recordDeveloperCheck(started.executionId, started.token!);
   await recordCapturedCommand(started.executionId, 'npm test -- result-status', false);
   await assert.rejects(
-    command(started.executionId, started.token!, ['implementation', 'validate']),
+    command(started.executionId, started.token!, ['implementation', 'verify', 'complete']),
     /关键检查之后又执行了同一命令/,
   );
   const recoveredReceipt = await recordCapturedCommand(
@@ -285,9 +349,14 @@ test('development agent proves an existing implementation without declaring a mo
     '--receipt', recoveredReceipt,
     '--summary', '失败修复后重新执行完成状态分支回归并通过。',
   ]);
-  assert.equal(
+  await command(started.executionId, started.token!, ['implementation', 'verify', 'complete']);
+  await assert.rejects(
+    command(started.executionId, started.token!, ['implementation', 'complete']),
+    /尚未通过 validate/,
+  );
+  assert.match(
     await command(started.executionId, started.token!, ['implementation', 'validate']),
-    '开发实现草稿结构与机器事实校验通过。',
+    /Outcome: validation_passed[\s\S]*Action: `implementation complete`/,
   );
   await command(started.executionId, started.token!, ['implementation', 'complete']);
   const result = await readAgentCommandSubmission(started.executionId);
@@ -301,6 +370,23 @@ test('development agent proves an existing implementation without declaring a mo
   );
   assert.doesNotMatch(result?.artifact?.content || '', /仓库事实|Git 基线|Commit/);
   assert.doesNotMatch(result?.artifact?.content || '', /开发与验证交接|开发交接/);
+  assert.doesNotMatch(result?.artifact?.content || '', /AC-status|unit-acceptance|status-component/);
+  assert.match(result?.artifact?.content || '', /## 代码审查[\s\S]*结论：通过/);
+
+  const transitions = db.prepare(`
+    SELECT from_phase, to_phase
+    FROM development_phase_transitions transition_record
+    JOIN agent_work_drafts draft ON draft.draft_id = transition_record.draft_id
+    WHERE draft.task_id = ? AND draft.story_index = 1
+    ORDER BY transition_id
+  `).all(taskId) as { from_phase: string; to_phase: string }[];
+  assert.deepEqual(transitions.map((item) => [item.from_phase, item.to_phase]), [
+    ['implement', 'review'],
+    ['review', 'implement'],
+    ['implement', 'review'],
+    ['review', 'developer_verify'],
+    ['developer_verify', 'finalize'],
+  ]);
 
   await applyAgentResult(`RUN-development-existing-${taskId}`, delegation, result!, {
     executionId: started.executionId,
@@ -438,11 +524,11 @@ test('development recovery cycle requires every active recovery and a check from
   assert.doesNotMatch(correctionStatus, /交接结论|开发交接/);
   assert.match(correctionStatus, /AC-status：.*已证明/);
   await assert.rejects(
-    command(correction.executionId, correction.token!, ['implementation', 'complete']),
+    command(correction.executionId, correction.token!, ['implementation', 'implement', 'complete']),
     new RegExp(recovery.recovery_id),
   );
   await assert.rejects(
-    command(correction.executionId, correction.token!, ['implementation', 'complete']),
+    command(correction.executionId, correction.token!, ['implementation', 'implement', 'complete']),
     new RegExp(analysisRecoveryId),
   );
   await assert.rejects(
@@ -461,7 +547,7 @@ test('development recovery cycle requires every active recovery and a check from
     '--evidence', '结果状态恢复用例已覆盖刷新场景。',
   ]);
   await assert.rejects(
-    command(correction.executionId, correction.token!, ['implementation', 'complete']),
+    command(correction.executionId, correction.token!, ['implementation', 'implement', 'complete']),
     new RegExp(`活动恢复事项尚未声明处理：${analysisRecoveryId}`),
   );
   await command(correction.executionId, correction.token!, [
@@ -470,6 +556,13 @@ test('development recovery cycle requires every active recovery and a check from
     '--summary', '已同步落实刷新状态来源的分析修正。',
     '--evidence', '实现与修订后的状态来源保持一致。',
   ]);
+  await command(correction.executionId, correction.token!, ['implementation', 'implement', 'complete']);
+  await command(correction.executionId, correction.token!, [
+    'implementation', 'review', 'record', '--result', 'pass',
+    '--summary', '恢复修正符合状态组件边界、仓库规范和 Clean Code 原则。',
+    '--evidence', '刷新恢复路径 diff、结果状态组件及相邻模式。',
+  ]);
+  await command(correction.executionId, correction.token!, ['implementation', 'review', 'complete']);
   const correctionReceipt = await recordCapturedCommand(
     correction.executionId,
     'npm test -- refresh-result-status',
@@ -479,10 +572,8 @@ test('development recovery cycle requires every active recovery and a check from
     '--receipt', correctionReceipt,
     '--summary', '刷新后的完成状态回归通过。',
   ]);
-  assert.equal(
-    await command(correction.executionId, correction.token!, ['implementation', 'validate']),
-    '开发实现草稿结构与机器事实校验通过。',
-  );
+  await command(correction.executionId, correction.token!, ['implementation', 'verify', 'complete']);
+  await command(correction.executionId, correction.token!, ['implementation', 'validate']);
 
   await cancelExecution(correction.executionId, 'simulate interrupted correction execution');
   const resumed = await begin(
@@ -501,6 +592,10 @@ test('development recovery cycle requires every active recovery and a check from
     command(resumed.executionId, resumed.token!, ['implementation', 'complete']),
     /本次 execution 重新执行并记录一条真实成功检查/,
   );
+  await command(resumed.executionId, resumed.token!, [
+    'implementation', 'finalize', 'reopen-verification',
+    '--reason', '恢复执行必须重新绑定当前 execution 的检查结果',
+  ]);
   const resumedReceipt = await recordCapturedCommand(
     resumed.executionId,
     'npm test -- refresh-result-status',
@@ -510,6 +605,8 @@ test('development recovery cycle requires every active recovery and a check from
     '--receipt', resumedReceipt,
     '--summary', '恢复执行后重新运行刷新状态回归并通过。',
   ]);
+  await command(resumed.executionId, resumed.token!, ['implementation', 'verify', 'complete']);
+  await command(resumed.executionId, resumed.token!, ['implementation', 'validate']);
   await command(resumed.executionId, resumed.token!, ['implementation', 'complete']);
   const result = await readAgentCommandSubmission(resumed.executionId);
   assert.deepEqual(result?.recoveryResolutions, [{
@@ -526,6 +623,7 @@ test('development recovery cycle requires every active recovery and a check from
     passed: true,
     summary: '恢复执行后重新运行刷新状态回归并通过。',
   }]);
+  assert.doesNotMatch(result?.artifact?.content || '', new RegExp(`${recovery.recovery_id}|${analysisRecoveryId}`));
   await completeExecution(resumed.executionId);
 });
 
