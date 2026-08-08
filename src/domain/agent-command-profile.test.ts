@@ -48,7 +48,7 @@ test('advertises a role-specific command guide for every progressive flow Agent'
   const verification = agentCommandPrompt('/app', 'test-agent', 'test');
   const review = agentCommandPrompt('/app', 'review-agent', 'review');
   assert.match(backlog || '', /COMMAND RESULT.*NEXT WORK PACKET/);
-  assert.match(backlog || '', /help <context\|assertion\|impact\|question\|scope\|finish>/);
+  assert.match(backlog || '', /help <context\|assertion\|impact\|decision-proposal\|decision-resolution\|scope\|finish>/);
   assert.match(splitter || '', /help <context\|unit\|source\|dependency\|revision\|finish>/);
   assert.match(analyst || '', /help <context\|impact\|decision-proposal\|decision-resolution\|contract\|finish>/);
   assert.match(development || '', /help <context\|evidence\|review\|commit\|input\|finish>/);

@@ -192,7 +192,7 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
   if (!profile) return null;
   const command = loopAgentCommandPrefix(appRoot);
   const helpTopics = profile.draftType === 'requirement_context'
-    ? 'context|assertion|impact|question|scope|finish'
+    ? 'context|assertion|impact|decision-proposal|decision-resolution|scope|finish'
     : profile.draftType === 'delivery_plan'
       ? 'context|unit|source|dependency|revision|finish'
       : profile.draftType === 'analysis'

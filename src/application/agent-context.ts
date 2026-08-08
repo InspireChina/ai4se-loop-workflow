@@ -604,7 +604,7 @@ export function buildAgentContextSnapshot(input: {
       userDecisions,
       requirementContextResume: delegation.agent === 'backlog-agent' && delegation.pipeline === 'resume'
         ? {
-          phase: 'decision_tree',
+          phase: 'decision_resolution',
           objective: '消费当前有效决策树，在不读取废弃分支的前提下完成决策收敛并进入 TO-BE。',
           businessContext: requirementBaseline(latestBy(
             full.documents.filter((document) => document.kind === 'context' && document.source_agent === 'backlog-agent'),
@@ -617,7 +617,7 @@ export function buildAgentContextSnapshot(input: {
           next: activeQuestions.some((question) =>
             question.deliveryUnit == null && question.sourceAgent === 'backlog-agent')
             ? '继续收敛当前活动决策'
-            : 'requirement-context decision-tree complete',
+            : 'requirement-context decision-resolution complete',
         }
         : null,
     },

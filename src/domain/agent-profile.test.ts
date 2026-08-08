@@ -12,7 +12,9 @@ test('ships rigorous V2 seed prompts for every flow Agent', () => {
     assert.match(prompt, /# (?:决策边界|禁止事项)/, agentId);
   }
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /现有实现已经满足承诺/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /AS-IS → Decision Tree → TO-BE → Impact Scan → SCOPE → Acceptance → Finalize/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /AS-IS → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → TO-BE → Impact Scan → SCOPE → Acceptance → Finalize/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /PROPOSE 与 RESOLVE 必须分开/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /自动决策强度处理 Agent 节点/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /request-clarification/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /第一条草稿命令必须是 requirement-context status/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /继续执行命令返回的下一工作包/);

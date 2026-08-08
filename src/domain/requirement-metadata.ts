@@ -10,7 +10,7 @@ export const REQUIREMENT_METADATA_DEFINITIONS = [{
   placeholder: '例如：REQ-1234',
 }, {
   key: 'workflow.analysis_decision_mode',
-  label: 'Analysis 自动决策强度',
+  label: 'Agent 自动决策强度',
   inputType: 'select',
   placeholder: '',
   options: [{
@@ -50,6 +50,9 @@ export function analysisDecisionMode(entries: readonly { metadata_key?: string; 
     ? value
     : DEFAULT_ANALYSIS_DECISION_MODE;
 }
+
+export const workflowDecisionMode = analysisDecisionMode;
+export type WorkflowDecisionMode = AnalysisDecisionMode;
 
 export function requirementMetadataValueLabel(key: string, value: string) {
   const definition = requirementMetadataDefinition(key);
