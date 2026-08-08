@@ -64,6 +64,10 @@ async function developmentDelegation(title: string) {
   const taskId = await createTask({
     title,
     description: '用户需要在结果页看到一个明确的完成状态。',
+    metadata: [{
+      key: 'tracking.requirement_card_id',
+      value: 'REQ-CARD-42',
+    }],
   });
   db.transaction(() => {
     db.prepare(`
@@ -273,6 +277,7 @@ test('development agent confirms the commit phase without Application Git valida
   assert.match(initial, /仓库观察（仅供调查，不参与完成校验）/);
   assert.match(initial, /unit-acceptance.*尚未证明/);
   assert.match(initial, /AC-status.*尚未证明/);
+  assert.doesNotMatch(initial, /REQ-CARD-42|COMMIT TRACEABILITY/);
   await assert.rejects(
     command(started.executionId, started.token!, [
       'implementation', 'criterion', 'satisfy',
@@ -303,6 +308,7 @@ test('development agent confirms the commit phase without Application Git valida
     ['implementation', 'implement', 'complete'],
   );
   assert.match(reviewPacket, /REVIEW · review/);
+  assert.doesNotMatch(reviewPacket, /REQ-CARD-42|COMMIT TRACEABILITY/);
   await command(started.executionId, started.token!, [
     'implementation', 'review', 'record', '--result', 'needs_changes',
     '--summary', '发现结果状态分支存在重复条件，需要先收敛。',
@@ -329,6 +335,7 @@ test('development agent confirms the commit phase without Application Git valida
     ['implementation', 'review', 'complete'],
   );
   assert.match(verifyPacket, /DEVELOPER VERIFY/);
+  assert.doesNotMatch(verifyPacket, /REQ-CARD-42|COMMIT TRACEABILITY/);
   const failedReceipt = await recordCapturedCommand(
     started.executionId,
     'npm test -- result-status',
@@ -364,6 +371,8 @@ test('development agent confirms the commit phase without Application Git valida
   );
   assert.match(commitPacket, /COMMIT · commit/);
   assert.match(commitPacket, /Application 将信任本次确认/);
+  assert.match(commitPacket, /COMMIT TRACEABILITY/);
+  assert.match(commitPacket, /Requirement Card ID: `REQ-CARD-42`/);
   await assert.rejects(
     command(started.executionId, started.token!, ['implementation', 'complete']),
     /complete 只能在 finalize 阶段执行；当前阶段是 commit/,
@@ -374,6 +383,7 @@ test('development agent confirms the commit phase without Application Git valida
     ['implementation', 'commit', 'complete'],
   );
   assert.match(finalizePacket, /From: commit[\s\S]*To: finalize/);
+  assert.doesNotMatch(finalizePacket, /REQ-CARD-42|COMMIT TRACEABILITY/);
   await assert.rejects(
     command(started.executionId, started.token!, ['implementation', 'complete']),
     /尚未通过 validate/,

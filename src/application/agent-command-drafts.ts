@@ -651,7 +651,7 @@ function cloneDeliveryAnalysisContract(
     ['delivery_analysis_upstream_dependencies', 'story_index, unit_key, title, ordinal'],
     ['delivery_analysis_decisions', `decision_key, decision_type, title, question, impact, authority, status,
       selected_option_id, decision_text, rationale, evidence,
-      recommendation_option_id, recommendation_reason, ordinal`],
+      recommendation_option_id, recommendation_reason, ordinal, proposed_authority, human_requested`],
     ['delivery_analysis_impacts', 'impact_key, area, finding, disposition, evidence, decision_key, ordinal'],
     ['delivery_analysis_guardrails', 'guardrail_key, content, rationale, ordinal'],
     ['delivery_analysis_verification_focus', 'focus_key, expected, oracle, ordinal'],

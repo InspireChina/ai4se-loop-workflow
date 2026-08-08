@@ -101,7 +101,11 @@ test('builds a compact execution snapshot while preserving full context for just
   } = await import('./agent-context');
   const { beginExecutionAttempt } = await import('./executions');
   const db = await databaseConnection();
-  const taskId = await createTask({ title: 'Context engineering', description: 'Implement one delivery unit.' });
+  const taskId = await createTask({
+    title: 'Context engineering',
+    description: 'Implement one delivery unit.',
+    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'autonomous' }],
+  });
   db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Current unit', 'unit-001'), (?, 2, 'Future unit', 'unit-002')").run(taskId, taskId);
   db.prepare(`
     UPDATE stories
@@ -161,6 +165,7 @@ test('builds a compact execution snapshot while preserving full context for just
   const snapshot = buildAgentContextSnapshot({
     delegation: delegation(taskId), full, activeFeedback: [], activeRecovery: [], repositoryBaseCommit: 'abc123',
   });
+  assert.doesNotMatch(JSON.stringify(snapshot), /analysisDecisionMode|workflow\.analysis_decision_mode/);
   const startup = JSON.stringify({
     authoritativeFacts: snapshot.authoritativeFacts,
     activeObligations: snapshot.activeObligations,
@@ -205,6 +210,22 @@ test('builds a compact execution snapshot while preserving full context for just
     analystSnapshot.requiredContextRefs.includes('SPEC:SPEC-context-unit-1:r1'),
     true,
   );
+  assert.doesNotMatch(JSON.stringify(analystSnapshot), /analysisDecisionMode|workflow\.analysis_decision_mode/);
+
+  const testSnapshot = buildAgentContextSnapshot({
+    delegation: delegation(taskId, {
+      agent: 'test-agent',
+      lane: 'delivery',
+      pipeline: 'test',
+      storyIndex: 1,
+      description: '独立验证当前交付单元',
+    }),
+    full,
+    activeFeedback: [],
+    activeRecovery: [],
+    repositoryBaseCommit: 'abc123',
+  });
+  assert.doesNotMatch(JSON.stringify(testSnapshot), /analysisDecisionMode|workflow\.analysis_decision_mode/);
 
   const started = await beginExecutionAttempt({
     runId: 'RUN-agent-context', delegation: delegation(taskId), prompt: 'compact prompt', contextSnapshot: snapshot,

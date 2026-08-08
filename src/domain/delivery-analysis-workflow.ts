@@ -1,6 +1,7 @@
 export const DELIVERY_ANALYSIS_PHASE_ORDER = [
   'impact_scan',
-  'decision_tree',
+  'decision_proposal',
+  'decision_resolution',
   'delivery_contract',
   'finalize',
 ] as const;
@@ -26,9 +27,9 @@ export const DELIVERY_ANALYSIS_WORKFLOW: Record<DeliveryAnalysisPhase, DeliveryA
     commands: [
       'delivery-analysis impact upsert',
       'delivery-analysis impact remove',
-      'delivery-analysis decision upsert',
+      'delivery-analysis decision propose',
       'help impact',
-      'help decision',
+      'help decision-proposal',
     ],
     reviewBeforeSubmit: [
       '已读取完整业务变化上下文、交付计划和所有前置单元的最新 resolved Delivery Spec。',
@@ -38,32 +39,51 @@ export const DELIVERY_ANALYSIS_WORKFLOW: Record<DeliveryAnalysisPhase, DeliveryA
     ],
     submit: 'delivery-analysis impact-scan complete',
   },
-  decision_tree: {
-    title: 'DECISION TREE',
-    objective: '按决定权关闭所有会让 Dev 或 Test 得出不同交付结果的关键选择，并将关联影响收敛为最终 disposition。',
-    required: '全部活动决策具有稳定 key 和决定权依据；HUMAN 节点具有互斥选项、后果、推荐及理由；已回答节点必须在原 key 上以 user 权限关闭。',
-    prohibited: '不要新增影响或改写上游业务契约；发现遗漏影响时显式回流 IMPACT SCAN。',
+  decision_proposal: {
+    title: 'DECISION TREE · PROPOSE',
+    objective: '先完整提出所有会让 Dev 或 Test 得出不同交付结果的关键选择、候选结果、依赖关系、推荐和建议决定权。',
+    required: '已发现的活动决策具有稳定 key、候选选项、后果、推荐及建议决定权；允许在充分扫描后以零决策完成。',
+    prohibited: '不要关闭决策、标记 HUMAN 或请求用户确认；即使答案明显，也只登记方案和推荐。发现遗漏影响时显式回流 IMPACT SCAN。',
     commands: [
-      'delivery-analysis decision upsert',
+      'delivery-analysis decision propose',
       'delivery-analysis decision option-upsert',
       'delivery-analysis decision option-remove',
       'delivery-analysis decision depends-on',
       'delivery-analysis decision dependency-remove',
-      'delivery-analysis decision resolve',
-      'delivery-analysis decision ask',
-      'delivery-analysis decision reopen',
+      'delivery-analysis decision recommend',
       'delivery-analysis decision remove',
-      'delivery-analysis impact resolve',
-      'delivery-analysis decision-tree reopen-impacts',
-      'help decision',
+      'delivery-analysis decision-proposal reopen-impacts',
+      'help decision-proposal',
     ],
     reviewBeforeSubmit: [
       '全部根节点和已知条件子节点已一次建立，没有把相互依赖的问题拆成多轮随机追问。',
-      '可由上游承诺、项目证据或 Agent 专业权限唯一关闭的选择没有转交用户。',
-      '所有活动 HUMAN 节点的选项互斥、后果明确，并有真实推荐与理由。',
+      '每个已登记节点的选项互斥、后果明确，并有真实推荐、理由和建议决定权。',
+      '尚未根据推荐、当前实现或 Agent 偏好关闭任何新发现的节点。',
+      '准备约束 Delivery Contract 的方案都已先登记，没有把选择直接藏进实现方向。',
+    ],
+    submit: 'delivery-analysis decision-proposal complete',
+  },
+  decision_resolution: {
+    title: 'DECISION TREE · RESOLVE',
+    objective: '按上游承诺、项目证据、本次自动决策强度与用户决定权，关闭已经完整提出的决策树。',
+    required: '全部活动决策已按有效决定权关闭或组成一个完整 HUMAN 批次；用户回答必须在原 key 上以 user 权限关闭。',
+    prohibited: '不要在回答阶段临时新增方案；发现遗漏决策时回流 PROPOSE，发现遗漏影响时回流 IMPACT SCAN。自动决策强度不能扩大产品决定权。',
+    commands: [
+      'delivery-analysis decision resolve',
+      'delivery-analysis decision ask',
+      'delivery-analysis decision reopen',
+      'delivery-analysis impact resolve',
+      'delivery-analysis decision-resolution reopen-proposals',
+      'delivery-analysis decision-resolution reopen-impacts',
+      'help decision-resolution',
+    ],
+    reviewBeforeSubmit: [
+      '先继承上游答案和具备决定权的项目证据，再应用本次自动决策强度。',
+      'Agent 自主结论没有创造新产品语义、用户可观察行为、公共契约、业务数据语义或兼容承诺。',
+      '所有剩余 HUMAN 节点已经一次标记并形成完整批次，而不是逐个随机追问。',
       '已关闭决策的关联影响不再保留 needs_decision；未命中分支不进入活动交付契约。',
     ],
-    submit: 'delivery-analysis decision-tree complete',
+    submit: 'delivery-analysis decision-resolution complete',
   },
   delivery_contract: {
     title: 'DELIVERY CONTRACT',
@@ -77,7 +97,8 @@ export const DELIVERY_ANALYSIS_WORKFLOW: Record<DeliveryAnalysisPhase, DeliveryA
       'delivery-analysis guardrail remove',
       'delivery-analysis verification-focus upsert',
       'delivery-analysis verification-focus remove',
-      'delivery-analysis contract reopen-decisions',
+      'delivery-analysis contract reopen-resolutions',
+      'delivery-analysis contract reopen-proposals',
       'delivery-analysis contract reopen-impacts',
       'help contract',
     ],
@@ -109,7 +130,7 @@ export const DELIVERY_ANALYSIS_WORKFLOW: Record<DeliveryAnalysisPhase, DeliveryA
 };
 
 export const DELIVERY_ANALYSIS_PHASE_SEQUENCE =
-  'AS-IS & IMPACT SCAN → DECISION TREE → DELIVERY CONTRACT → FINALIZE';
+  'AS-IS & IMPACT SCAN → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → DELIVERY CONTRACT → FINALIZE';
 
 export function deliveryAnalysisNormalCommandPath() {
   return DELIVERY_ANALYSIS_PHASE_ORDER.flatMap((phase) => {

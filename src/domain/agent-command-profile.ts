@@ -196,7 +196,7 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
     : profile.draftType === 'delivery_plan'
       ? 'context|unit|source|dependency|revision|finish'
       : profile.draftType === 'analysis'
-        ? 'context|impact|decision|contract|finish'
+        ? 'context|impact|decision-proposal|decision-resolution|contract|finish'
         : profile.draftType === 'development'
           ? 'context|evidence|review|commit|input|finish'
           : profile.draftType === 'verification'

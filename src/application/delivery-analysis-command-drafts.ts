@@ -6,6 +6,7 @@ import {
   deliveryAnalysisNormalCommandPath,
   type DeliveryAnalysisPhase,
 } from '../domain/delivery-analysis-workflow';
+import { analysisDecisionMode } from '../domain/requirement-metadata';
 import { databaseConnection } from '../infrastructure/database';
 
 type Db = Awaited<ReturnType<typeof databaseConnection>>;
@@ -33,6 +34,8 @@ type DecisionAuthority =
   | 'project_evidence'
   | 'agent_authority'
   | 'needs_user_input';
+
+type ProposedDecisionAuthority = Exclude<DecisionAuthority, 'user'>;
 
 type DecisionProjectionStatus = 'active' | 'conditional' | 'not_applicable';
 
@@ -139,6 +142,8 @@ function state(db: Db, draft: DeliveryAnalysisDraftRow) {
     question: string;
     impact: string;
     authority: DecisionAuthority;
+    proposed_authority: ProposedDecisionAuthority;
+    human_requested: 0 | 1;
     status: 'resolved' | 'needs_user_input';
     selected_option_id: string | null;
     decision_text: string | null;
@@ -259,6 +264,11 @@ function state(db: Db, draft: DeliveryAnalysisDraftRow) {
     decisions,
     guardrails,
     verificationFocus,
+    analysisDecisionMode: analysisDecisionMode(db.prepare(`
+      SELECT metadata_key, metadata_value
+      FROM requirement_metadata
+      WHERE task_id = ?
+    `).all(draft.task_id) as { metadata_key: string; metadata_value: string }[]),
     answeredKeys: answers.filter((answer) => answer.answer).map((answer) => answer.decision_key),
   };
 }
@@ -326,7 +336,26 @@ function decisionDependencyErrors(current: DeliveryAnalysisState) {
   return errors;
 }
 
-function decisionTreeStructuralErrors(current: DeliveryAnalysisState) {
+function decisionProposalErrors(current: DeliveryAnalysisState) {
+  const errors = [...impactScanErrors(current), ...decisionDependencyErrors(current)];
+  for (const decision of activeDecisions(current)) {
+    const optionIds = decision.options.map((option) => option.option_id);
+    if (decision.options.length < 2) {
+      errors.push(`已提出决策 ${decision.decision_key} 至少需要两个真实互斥选项`);
+    }
+    if (!decision.recommendation_option_id) {
+      errors.push(`已提出决策 ${decision.decision_key} 缺少推荐选项`);
+    } else if (!optionIds.includes(decision.recommendation_option_id)) {
+      errors.push(`已提出决策 ${decision.decision_key} 的推荐选项不存在`);
+    }
+    if (!decision.recommendation_reason?.trim()) {
+      errors.push(`已提出决策 ${decision.decision_key} 缺少推荐理由`);
+    }
+  }
+  return [...new Set(errors)];
+}
+
+function decisionResolutionStructuralErrors(current: DeliveryAnalysisState) {
   const errors = [...impactScanErrors(current), ...decisionDependencyErrors(current)];
   const decisions = activeDecisions(current);
   const impacts = activeImpacts(current);
@@ -388,7 +417,7 @@ function decisionTreeStructuralErrors(current: DeliveryAnalysisState) {
 }
 
 function decisionTreeCompletionErrors(current: DeliveryAnalysisState) {
-  const errors = [...decisionTreeStructuralErrors(current)];
+  const errors = [...decisionResolutionStructuralErrors(current)];
   const unresolved = activeDecisions(current).filter((decision) => decision.status === 'needs_user_input');
   if (unresolved.length) errors.push(`仍有 ${unresolved.length} 个活动关键决策未关闭`);
   if (activeImpacts(current).some((impact) => impact.disposition === 'needs_decision')) {
@@ -418,11 +447,32 @@ function deliveryAnalysisReadiness(
   current: DeliveryAnalysisState,
   phase: DeliveryAnalysisPhase,
 ): DeliveryAnalysisReadiness {
-  if (phase === 'decision_tree') {
-    const remaining = decisionTreeStructuralErrors(current);
+  if (phase === 'decision_proposal') {
+    const remaining = decisionProposalErrors(current);
     if (remaining.length) return { status: 'not_ready', remaining, nextCommand: null };
+    return {
+      status: 'structurally_ready',
+      remaining: [],
+      nextCommand: DELIVERY_ANALYSIS_WORKFLOW.decision_proposal.submit,
+    };
+  }
+  if (phase === 'decision_resolution') {
+    const remaining = decisionResolutionStructuralErrors(current);
+    if (remaining.length) return { status: 'not_ready', remaining, nextCommand: null };
+    const unprocessed = activeDecisions(current).filter((decision) =>
+      decision.status === 'needs_user_input'
+      && !decision.human_requested
+      && !decision.answer);
+    if (unprocessed.length) {
+      return {
+        status: 'not_ready',
+        remaining: unprocessed.map((decision) =>
+          `决策 ${decision.decision_key} 尚未按当前 RESOLVE 策略关闭或使用 decision ask 纳入 HUMAN 批次`),
+        nextCommand: null,
+      };
+    }
     const pending = activeDecisions(current).filter((decision) =>
-      decision.status === 'needs_user_input' && !decision.answer);
+      decision.status === 'needs_user_input' && decision.human_requested && !decision.answer);
     if (pending.length) {
       return { status: 'decisions_required', remaining: [], nextCommand: 'delivery-analysis validate' };
     }
@@ -431,7 +481,7 @@ function deliveryAnalysisReadiness(
     return {
       status: 'structurally_ready',
       remaining: [],
-      nextCommand: DELIVERY_ANALYSIS_WORKFLOW.decision_tree.submit,
+      nextCommand: DELIVERY_ANALYSIS_WORKFLOW.decision_resolution.submit,
     };
   }
   const remaining = phase === 'impact_scan'
@@ -479,6 +529,22 @@ function renderReadiness(current: DeliveryAnalysisState, phase: DeliveryAnalysis
 
 function renderWorkPacket(current: DeliveryAnalysisState, phase: DeliveryAnalysisPhase) {
   const definition = DELIVERY_ANALYSIS_WORKFLOW[phase];
+  const decisionPolicy = phase === 'decision_resolution'
+    ? {
+        conservative: [
+          '审慎对齐',
+          '不要使用 agent_authority；不能由上游承诺或具备决定权的项目证据唯一关闭的节点，纳入 HUMAN 批次。',
+        ],
+        balanced: [
+          '平衡',
+          '仅使用 agent_authority 关闭结果等价、可逆、纯内部的工程决策；其他结果分叉纳入 HUMAN 批次。',
+        ],
+        autonomous: [
+          '高度自主',
+          '可使用 agent_authority 关闭既有业务契约范围内的技术与工程边界决策；产品决定仍纳入 HUMAN 批次。',
+        ],
+      }[current.analysisDecisionMode]
+    : null;
   return [
     '# NEXT WORK PACKET',
     '',
@@ -497,6 +563,15 @@ function renderWorkPacket(current: DeliveryAnalysisState, phase: DeliveryAnalysi
     '## DO NOT',
     '',
     definition.prohibited,
+    ...(decisionPolicy ? [
+      '',
+      '## ANALYSIS DECISION POLICY',
+      '',
+      `- Mode: \`${current.analysisDecisionMode}\` · ${decisionPolicy[0]}`,
+      `- Instruction: ${decisionPolicy[1]}`,
+      '- Fixed Boundary: 任何强度都不能自主创造产品语义、用户可观察行为、公共契约、业务数据语义或兼容承诺。',
+      '- Scope: 本策略只在当前 DECISION TREE · RESOLVE 工作包生效，不属于其他阶段上下文。',
+    ] : []),
     '',
     '## AVAILABLE COMMANDS',
     '',
@@ -602,7 +677,7 @@ function renderStatus(draft: DeliveryAnalysisDraftRow, current: DeliveryAnalysis
   if (decisions.length) {
     lines.push('', '决策索引（decision key 跨轮次不可改名）：');
     for (const decision of decisions) {
-      lines.push(`- ${decision.decision_key} · ${decision.decision_type} · ${decision.projection_status} · ${decision.status} · ${decision.authority}${decision.answer ? ` · 已回答=${decision.answer}` : ''}`);
+      lines.push(`- ${decision.decision_key} · ${decision.decision_type} · ${decision.projection_status} · ${decision.status} · 建议权限=${decision.proposed_authority} · 当前权限=${decision.authority}${decision.human_requested ? ' · 已进入 HUMAN 批次' : ''}${decision.answer ? ` · 已回答=${decision.answer}` : ''}`);
     }
   }
   const pruned = current.decisions.length - decisions.length;
@@ -756,7 +831,7 @@ function renderDecisionDraftArtifact(current: DeliveryAnalysisState) {
 function buildResult(current: DeliveryAnalysisState, action: 'complete' | 'request-clarification') {
   const decisions = activeDecisions(current);
   const questions = decisions
-    .filter((decision) => decision.status === 'needs_user_input' && !decision.answer)
+    .filter((decision) => decision.status === 'needs_user_input' && decision.human_requested && !decision.answer)
     .map((decision) => {
       const recommended = decision.options.find((option) =>
         option.option_id === decision.recommendation_option_id)!;
@@ -812,7 +887,7 @@ function submit(
 ) {
   assertViewed(draft, execution.execution_id);
   const current = state(db, draft);
-  const expectedPhase: DeliveryAnalysisPhase = action === 'complete' ? 'finalize' : 'decision_tree';
+  const expectedPhase: DeliveryAnalysisPhase = action === 'complete' ? 'finalize' : 'decision_resolution';
   if (current.contract.workflow_phase !== expectedPhase) {
     throw new Error(`${action} 只能在 ${expectedPhase} 阶段执行；当前阶段是 ${current.contract.workflow_phase}`);
   }
@@ -821,10 +896,10 @@ function submit(
   }
   const errors = action === 'complete'
     ? deliveryAnalysisValidationErrors(current)
-    : decisionTreeStructuralErrors(current);
+    : decisionResolutionStructuralErrors(current);
   if (action === 'request-clarification') {
     const pending = activeDecisions(current).filter((decision) =>
-      decision.status === 'needs_user_input' && !decision.answer);
+      decision.status === 'needs_user_input' && decision.human_requested && !decision.answer);
     if (!pending.length) errors.push('没有待用户回答的活动关键决策');
   }
   if (errors.length) {
@@ -877,7 +952,9 @@ function transitionPhase(input: {
   }
   const errors = from === 'impact_scan'
     ? impactScanErrors(current)
-    : from === 'decision_tree'
+    : from === 'decision_proposal'
+      ? decisionProposalErrors(current)
+    : from === 'decision_resolution'
       ? decisionTreeCompletionErrors(current)
       : deliveryContractErrors(current);
   if (errors.length) {
@@ -949,10 +1026,14 @@ function reopenPhase(input: {
 
 const deliveryAnalysisCommandIndex = [
   '  delivery-analysis impact-scan complete',
-  '  delivery-analysis decision-tree complete',
+  '  delivery-analysis decision-proposal complete',
+  '  delivery-analysis decision-resolution complete',
   '  delivery-analysis contract complete',
-  '  delivery-analysis decision-tree reopen-impacts --reason <原因>',
-  '  delivery-analysis contract reopen-decisions --reason <原因>',
+  '  delivery-analysis decision-proposal reopen-impacts --reason <原因>',
+  '  delivery-analysis decision-resolution reopen-proposals --reason <原因>',
+  '  delivery-analysis decision-resolution reopen-impacts --reason <原因>',
+  '  delivery-analysis contract reopen-resolutions --reason <原因>',
+  '  delivery-analysis contract reopen-proposals --reason <原因>',
   '  delivery-analysis contract reopen-impacts --reason <原因>',
   '  delivery-analysis finalize reopen-contract --reason <原因>',
   '  delivery-analysis summary set --text <影响与决策分析结论>',
@@ -960,13 +1041,14 @@ const deliveryAnalysisCommandIndex = [
   '  delivery-analysis impact upsert --key <key> --area <受影响范围> --finding <发现> --disposition <change|preserve|exclude|needs_decision> --evidence <证据> [--decision <decisionKey>]',
   '  delivery-analysis impact remove --key <key>',
   '  delivery-analysis impact resolve --key <key> --disposition <change|preserve|exclude> --evidence <证据> [--finding <最终发现>]',
-  '  delivery-analysis decision upsert --key <key> --type <business|technical> --title <标题> --question <决策问题> --impact <不同选择的影响>',
+  '  delivery-analysis decision propose --key <key> --type <business|technical> --title <标题> --question <决策问题> --impact <不同选择的影响>',
   '  delivery-analysis decision option-upsert --key <key> --id <选项id> --label <名称> --consequence <后果>',
   '  delivery-analysis decision option-remove --key <key> --id <选项id>',
   '  delivery-analysis decision depends-on --key <key> --parent <decisionKey> --option <optionId>',
   '  delivery-analysis decision dependency-remove --key <key> --parent <decisionKey> --option <optionId>',
-  '  delivery-analysis decision resolve --key <key> [--option <选项id>] --authority <upstream|user|project_evidence|agent_authority> --decision <结论> --rationale <理由> --evidence <证据>',
-  '  delivery-analysis decision ask --key <key> --option <推荐选项id> --reason <推荐理由>',
+  '  delivery-analysis decision recommend --key <key> --option <推荐选项id> --authority <upstream|project_evidence|agent_authority|needs_user_input> --reason <推荐理由>',
+  '  delivery-analysis decision resolve --key <key> --option <选项id> --authority <upstream|user|project_evidence|agent_authority> --decision <结论> --rationale <理由> --evidence <证据>',
+  '  delivery-analysis decision ask --key <key>',
   '  delivery-analysis decision reopen --key <key>',
   '  delivery-analysis decision remove --key <key>',
   '  delivery-analysis guardrail upsert --key <key> --content <必须保护的约束> --rationale <理由>',
@@ -994,36 +1076,52 @@ export function deliveryAnalysisHelp(terminalActions: string[], topic?: string |
       'key 表示跨 attempt 的稳定语义身份；补充或修正同一影响时复用原 key。',
     ];
   }
-  if (topic === 'decision') {
+  if (topic === 'decision-proposal') {
     return [
       '关键决策只记录会改变业务结果、公共契约、数据语义、兼容策略、重大工程后果或独立验证结果的选择。',
       '',
-      '创建决策：',
-      '  delivery-analysis decision upsert --key <稳定key> --type <business|technical> --title <标题> --question <需要决定的事情> --impact <不同选择的影响>',
+      '本阶段只提出完整决策树，禁止 resolve、ask 或请求用户确认。即使结论明显，也必须先登记候选结果和推荐。',
       '',
-      'Agent 自主关闭路径：',
-      '  decision upsert → decision resolve',
-      '  delivery-analysis decision resolve --key <key> [--option <选项id>] --authority <upstream|user|project_evidence|agent_authority> --decision <结论> --rationale <理由> --evidence <证据>',
-      '  没有创建候选选项时可以省略 --option；如果已经创建候选选项，必须选择其中一项。',
-      '',
-      'authority：',
-      '  upstream          上游已经形成明确承诺。',
-      '  user              当前 decision key 已有用户明确回答。',
-      '  project_evidence  项目中有足以唯一确定结论的可定位证据。',
-      '  agent_authority   属于本角色可安全承担的专业决策。',
-      '',
-      '用户确认路径：',
-      '  decision upsert → 至少两次 option-upsert → impact needs_decision → decision ask → validate → request-clarification',
+      '提出决策：',
+      '  delivery-analysis decision propose --key <稳定key> --type <business|technical> --title <标题> --question <需要决定的事情> --impact <不同选择的影响>',
       '  delivery-analysis decision option-upsert --key <key> --id <选项id> --label <名称> --consequence <后果>',
       '  delivery-analysis decision option-remove --key <key> --id <选项id>',
       '  delivery-analysis decision depends-on --key <key> --parent <decisionKey> --option <optionId>',
       '  delivery-analysis decision dependency-remove --key <key> --parent <decisionKey> --option <optionId>',
-      '  delivery-analysis decision ask --key <key> --option <推荐选项id> --reason <推荐理由>',
+      '  delivery-analysis decision recommend --key <key> --option <推荐选项id> --authority <upstream|project_evidence|agent_authority|needs_user_input> --reason <推荐理由>',
+      '',
+      '建议决定权：',
+      '  upstream          上游已经形成明确承诺。',
+      '  project_evidence  项目中有足以唯一确定结论的可定位证据。',
+      '  agent_authority   建议在本次自动决策强度允许时由 Agent 回答。',
+      '  needs_user_input  涉及用户或产品决定权，应进入 HUMAN 批次。',
+      '',
+      '维护：',
+      '  delivery-analysis decision remove --key <key>',
+      '  已有用户回答的 key 不得删除或改名。',
+    ];
+  }
+  if (topic === 'decision-resolution') {
+    return [
+      '本阶段只回答已完整提出的决策树，不临时新增方案。处理顺序：上游承诺 → 项目证据 → 自动决策强度 → HUMAN 批次。',
+      '',
+      '关闭决策：',
+      '  delivery-analysis decision resolve --key <key> --option <选项id> --authority <upstream|user|project_evidence|agent_authority> --decision <结论> --rationale <理由> --evidence <证据>',
+      '  authority 必须与提出阶段登记的建议决定权相符；user 仅用于消费当前 key 的已有用户回答。',
+      '',
+      '自动决策强度：',
+      '  生效模式和具体指令只出现在当前 DECISION TREE · RESOLVE 工作包的 ANALYSIS DECISION POLICY 中。',
+      '  不要从需求详情、其他阶段、历史 execution 或通用 help 猜测本次模式。',
+      '  任何模式都不能自主创造产品语义、用户可观察行为、公共契约、业务数据语义或兼容承诺。',
+      '',
+      'HUMAN 批次：',
+      '  delivery-analysis decision ask --key <key>',
+      '  ask 只把提出阶段已经登记的推荐纳入 HUMAN 批次，不在回答阶段改写推荐。',
+      '  将全部 HUMAN 节点标记完成后统一 validate → request-clarification。',
       '  决策关闭后，使用 impact resolve 将关联影响更新为最终 disposition。',
       '',
       '维护：',
       '  delivery-analysis decision reopen --key <key>',
-      '  delivery-analysis decision remove --key <key>',
       '  已有用户回答的 key 不得删除、改名或重新打开；恢复轮必须在原 key 上以 user 权限关闭。',
     ];
   }
@@ -1049,16 +1147,16 @@ export function deliveryAnalysisHelp(terminalActions: string[], topic?: string |
   if (topic === 'finish') {
     const normalPath = deliveryAnalysisNormalCommandPath();
     return [
-      '交付分析采用四段调用链；每个阶段完成命令都会校验当前产物、记录转换并返回下一工作包。',
+      '交付分析采用五段调用链；每个阶段完成命令都会校验当前产物、记录转换并返回下一工作包。',
       '',
       '阶段路径：',
       `  ${DELIVERY_ANALYSIS_PHASE_SEQUENCE}`,
       `  status → ${normalPath.map((command) => command.replace(/^delivery-analysis /, '')).join(' → ')}`,
       '',
       '人工决策路径：',
-      '  DECISION TREE structurally complete → delivery-analysis validate',
+      '  DECISION TREE · RESOLVE structurally complete → delivery-analysis validate',
       `  ${terminalActions.find((action) => action.endsWith(' request-clarification')) || 'delivery-analysis request-clarification'}`,
-      '  恢复后仍处于 DECISION TREE，必须在原 decision key 上消费答案。',
+      '  恢复后仍处于 DECISION TREE · RESOLVE，必须在原 decision key 上消费答案。',
       '',
       '最终校验与提交：',
       '  delivery-analysis validate',
@@ -1069,7 +1167,7 @@ export function deliveryAnalysisHelp(terminalActions: string[], topic?: string |
     ];
   }
   if (topic) {
-    throw new Error(`交付分析 help 不支持主题：${topic}。可用主题：context、impact、decision、contract、finish`);
+    throw new Error(`交付分析 help 不支持主题：${topic}。可用主题：context、impact、decision-proposal、decision-resolution、contract、finish`);
   }
   return [
     `阶段路径：${DELIVERY_ANALYSIS_PHASE_SEQUENCE}`,
@@ -1084,7 +1182,8 @@ export function deliveryAnalysisHelp(terminalActions: string[], topic?: string |
     '主题帮助：',
     '  help context   只读上下文工具与使用时机',
     '  help impact    实际影响与 disposition 含义',
-    '  help decision  自主决策、用户决策与 authority 含义',
+    '  help decision-proposal  提出决策树、候选结果、推荐和建议决定权',
+    '  help decision-resolution  自动决策强度、关闭决策与 HUMAN 批次',
     '  help contract  交付契约、保护约束与验证关注点',
     '  help finish    校验、完成与请求用户确认',
   ];
@@ -1180,8 +1279,11 @@ export function runDeliveryAnalysisCommand(input: {
   }
 
   const reopenCommands = new Map<string, [DeliveryAnalysisPhase, DeliveryAnalysisPhase]>([
-    ['delivery-analysis decision-tree reopen-impacts', ['decision_tree', 'impact_scan']],
-    ['delivery-analysis contract reopen-decisions', ['delivery_contract', 'decision_tree']],
+    ['delivery-analysis decision-proposal reopen-impacts', ['decision_proposal', 'impact_scan']],
+    ['delivery-analysis decision-resolution reopen-proposals', ['decision_resolution', 'decision_proposal']],
+    ['delivery-analysis decision-resolution reopen-impacts', ['decision_resolution', 'impact_scan']],
+    ['delivery-analysis contract reopen-resolutions', ['delivery_contract', 'decision_resolution']],
+    ['delivery-analysis contract reopen-proposals', ['delivery_contract', 'decision_proposal']],
     ['delivery-analysis contract reopen-impacts', ['delivery_contract', 'impact_scan']],
     ['delivery-analysis finalize reopen-contract', ['finalize', 'delivery_contract']],
   ]);
@@ -1248,7 +1350,7 @@ export function runDeliveryAnalysisCommand(input: {
     return accepted(`impact/${required(flags, 'key')} removed`);
   }
   if (command === 'delivery-analysis impact resolve') {
-    assertPhase('decision_tree');
+    assertPhase('decision_resolution');
     const key = bounded(required(flags, 'key'), '影响 key', 120);
     const disposition = required(flags, 'disposition');
     if (!['change', 'preserve', 'exclude'].includes(disposition)) {
@@ -1291,15 +1393,15 @@ export function runDeliveryAnalysisCommand(input: {
     return accepted(`impact/${key} resolved_as ${disposition}`);
   }
 
-  if (command === 'delivery-analysis decision upsert') {
-    assertPhase('impact_scan', 'decision_tree');
+  if (command === 'delivery-analysis decision propose') {
+    assertPhase('impact_scan', 'decision_proposal');
     const key = bounded(required(flags, 'key'), 'decision key', 120);
     const decisionType = required(flags, 'type');
     if (!['business', 'technical'].includes(decisionType)) {
       throw new Error('决策 type 必须是 business 或 technical');
     }
     upsert(db, 'delivery_analysis_decisions',
-      ['decision_key', 'decision_type', 'title', 'question', 'impact', 'authority', 'status'],
+      ['decision_key', 'decision_type', 'title', 'question', 'impact', 'authority', 'status', 'proposed_authority'],
       [
         key,
         decisionType,
@@ -1308,13 +1410,14 @@ export function runDeliveryAnalysisCommand(input: {
         bounded(required(flags, 'impact'), '决策影响'),
         'needs_user_input',
         'needs_user_input',
+        'needs_user_input',
       ],
       'decision_key', ['decision_type', 'title', 'question', 'impact'], draft.draft_id);
     touchDraft(db, draft.draft_id);
     return accepted(`decision/${key} upserted`);
   }
   if (command === 'delivery-analysis decision option-upsert') {
-    assertPhase('decision_tree');
+    assertPhase('decision_proposal');
     const key = bounded(required(flags, 'key'), 'decision key', 120);
     if (!db.prepare(`
       SELECT 1 FROM delivery_analysis_decisions WHERE draft_id = ? AND decision_key = ?
@@ -1332,7 +1435,7 @@ export function runDeliveryAnalysisCommand(input: {
     return accepted(`decision/${key} option/${required(flags, 'id')} upserted`);
   }
   if (command === 'delivery-analysis decision option-remove') {
-    assertPhase('decision_tree');
+    assertPhase('decision_proposal');
     const result = db.prepare(`
       DELETE FROM delivery_analysis_decision_options
       WHERE draft_id = ? AND decision_key = ? AND option_id = ?
@@ -1345,7 +1448,7 @@ export function runDeliveryAnalysisCommand(input: {
     command === 'delivery-analysis decision depends-on'
     || command === 'delivery-analysis decision dependency-remove'
   ) {
-    assertPhase('decision_tree');
+    assertPhase('decision_proposal');
     const key = bounded(required(flags, 'key'), 'decision key', 120);
     const parent = bounded(required(flags, 'parent'), '父 decision key', 120);
     const option = bounded(required(flags, 'option'), '父决策选项 id', 100);
@@ -1378,15 +1481,41 @@ export function runDeliveryAnalysisCommand(input: {
     touchDraft(db, draft.draft_id);
     return accepted(`decision/${key} dependency/${parent}=${option} ${command.endsWith('depends-on') ? 'added' : 'removed'}`);
   }
-  if (command === 'delivery-analysis decision resolve') {
-    assertPhase('decision_tree');
+  if (command === 'delivery-analysis decision recommend') {
+    assertPhase('decision_proposal');
     const key = bounded(required(flags, 'key'), 'decision key', 120);
-    const optionId = optional(flags, 'option');
+    const optionId = bounded(required(flags, 'option'), '推荐选项 id', 100);
+    const proposedAuthority = required(flags, 'authority') as ProposedDecisionAuthority;
+    if (!['upstream', 'project_evidence', 'agent_authority', 'needs_user_input'].includes(proposedAuthority)) {
+      throw new Error('建议决定权必须是 upstream、project_evidence、agent_authority 或 needs_user_input');
+    }
+    if (!db.prepare(`
+      SELECT 1 FROM delivery_analysis_decision_options
+      WHERE draft_id = ? AND decision_key = ? AND option_id = ?
+    `).get(draft.draft_id, key, optionId)) throw new Error(`决策 ${key} 不存在选项 ${optionId}`);
+    db.prepare(`
+      UPDATE delivery_analysis_decisions
+      SET proposed_authority = ?, recommendation_option_id = ?, recommendation_reason = ?
+      WHERE draft_id = ? AND decision_key = ?
+    `).run(
+      proposedAuthority,
+      optionId,
+      bounded(required(flags, 'reason'), '推荐理由'),
+      draft.draft_id,
+      key,
+    );
+    touchDraft(db, draft.draft_id);
+    return accepted(`decision/${key} recommendation recorded`);
+  }
+  if (command === 'delivery-analysis decision resolve') {
+    assertPhase('decision_resolution');
+    const key = bounded(required(flags, 'key'), 'decision key', 120);
+    const optionId = bounded(required(flags, 'option'), '选项 id', 100);
     const authority = required(flags, 'authority') as DecisionAuthority;
     if (!['upstream', 'user', 'project_evidence', 'agent_authority'].includes(authority)) {
       throw new Error('决策 authority 必须是 upstream、user、project_evidence 或 agent_authority');
     }
-    if (optionId && !db.prepare(`
+    if (!db.prepare(`
       SELECT 1 FROM delivery_analysis_decision_options
       WHERE draft_id = ? AND decision_key = ? AND option_id = ?
     `).get(draft.draft_id, key, optionId)) {
@@ -1395,8 +1524,7 @@ export function runDeliveryAnalysisCommand(input: {
     const result = db.prepare(`
       UPDATE delivery_analysis_decisions
       SET authority = ?, status = 'resolved', selected_option_id = ?,
-          decision_text = ?, rationale = ?, evidence = ?,
-          recommendation_option_id = NULL, recommendation_reason = NULL
+          decision_text = ?, rationale = ?, evidence = ?, human_requested = 0
       WHERE draft_id = ? AND decision_key = ?
     `).run(
       authority,
@@ -1412,25 +1540,33 @@ export function runDeliveryAnalysisCommand(input: {
     return accepted(`decision/${key} resolved_by ${authority}`);
   }
   if (command === 'delivery-analysis decision ask') {
-    assertPhase('decision_tree');
+    assertPhase('decision_resolution');
     const key = bounded(required(flags, 'key'), 'decision key', 120);
-    const optionId = bounded(required(flags, 'option'), '推荐选项 id', 100);
-    if (!db.prepare(`
-      SELECT 1 FROM delivery_analysis_decision_options
-      WHERE draft_id = ? AND decision_key = ? AND option_id = ?
-    `).get(draft.draft_id, key, optionId)) throw new Error(`决策 ${key} 不存在选项 ${optionId}`);
+    const proposal = db.prepare(`
+      SELECT proposed_authority, recommendation_option_id, recommendation_reason
+      FROM delivery_analysis_decisions
+      WHERE draft_id = ? AND decision_key = ?
+    `).get(draft.draft_id, key) as {
+      proposed_authority: ProposedDecisionAuthority;
+      recommendation_option_id: string | null;
+      recommendation_reason: string | null;
+    } | undefined;
+    if (!proposal) throw new Error(`决策 ${key} 不存在`);
+    if (!proposal.recommendation_option_id || !proposal.recommendation_reason) {
+      throw new Error(`决策 ${key} 缺少提出阶段的推荐，不能纳入 HUMAN 批次`);
+    }
     db.prepare(`
       UPDATE delivery_analysis_decisions
       SET authority = 'needs_user_input', status = 'needs_user_input',
           selected_option_id = NULL, decision_text = NULL, rationale = NULL, evidence = NULL,
-          recommendation_option_id = ?, recommendation_reason = ?
+          human_requested = 1
       WHERE draft_id = ? AND decision_key = ?
-    `).run(optionId, bounded(required(flags, 'reason'), '推荐理由'), draft.draft_id, key);
+    `).run(draft.draft_id, key);
     touchDraft(db, draft.draft_id);
     return accepted(`decision/${key} marked_for_human`);
   }
   if (command === 'delivery-analysis decision reopen') {
-    assertPhase('decision_tree');
+    assertPhase('decision_resolution');
     const key = required(flags, 'key');
     const answered = db.prepare(`
       SELECT 1 FROM questions
@@ -1441,7 +1577,8 @@ export function runDeliveryAnalysisCommand(input: {
     const result = db.prepare(`
       UPDATE delivery_analysis_decisions
       SET authority = 'needs_user_input', status = 'needs_user_input',
-          selected_option_id = NULL, decision_text = NULL, rationale = NULL, evidence = NULL
+          selected_option_id = NULL, decision_text = NULL, rationale = NULL, evidence = NULL,
+          human_requested = 0
       WHERE draft_id = ? AND decision_key = ?
     `).run(draft.draft_id, key);
     if (!result.changes) throw new Error(`决策 ${key} 不存在`);
@@ -1449,7 +1586,7 @@ export function runDeliveryAnalysisCommand(input: {
     return accepted(`decision/${key} reopened`);
   }
   if (command === 'delivery-analysis decision remove') {
-    assertPhase('decision_tree');
+    assertPhase('impact_scan', 'decision_proposal');
     const key = required(flags, 'key');
     const answered = db.prepare(`
       SELECT 1 FROM questions
@@ -1509,7 +1646,7 @@ export function runDeliveryAnalysisCommand(input: {
     const currentState = current();
     const phase = currentState.contract.workflow_phase;
     const readiness = deliveryAnalysisReadiness(currentState, phase);
-    const clarification = phase === 'decision_tree' && readiness.status === 'decisions_required';
+    const clarification = phase === 'decision_resolution' && readiness.status === 'decisions_required';
     if (phase !== 'finalize' && !clarification) {
       throw new Error(
         `当前 ${phase} 阶段不使用 validate；请先完成当前工作包。`
@@ -1517,7 +1654,7 @@ export function runDeliveryAnalysisCommand(input: {
       );
     }
     const errors = clarification
-      ? decisionTreeStructuralErrors(currentState)
+      ? decisionResolutionStructuralErrors(currentState)
       : deliveryAnalysisValidationErrors(currentState);
     if (errors.length) {
       throw new Error(`交付分析草稿校验失败：\n${errors.map((error, index) => `${index + 1}. ${error}`).join('\n')}`);

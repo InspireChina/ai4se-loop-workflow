@@ -54,7 +54,12 @@ export default function CreateTaskDialog() {
                 </select>
               </label>
               <label>{definition.label}
-                <input name="metadataValue" type={definition.inputType} placeholder={definition.placeholder}/>
+                {definition.inputType === 'select'
+                  ? <select name="metadataValue" defaultValue="balanced">
+                      {definition.options.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
+                    </select>
+                  : <input name="metadataValue" type={definition.inputType} placeholder={definition.placeholder}/>
+                }
               </label>
               <button className="icon-button metadata-remove" type="button" aria-label={`删除${definition.label}`} onClick={() => removeMetadata(index)}><Trash2 size={16}/></button>
             </div>;

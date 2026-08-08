@@ -45,9 +45,10 @@ test('ships rigorous V2 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /不是需要持久化的过程模板/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /当前交付单元及其上游业务语义是本阶段必须履行的承诺/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /不同选择是否会产生不同的业务语义、用户可观察结果、信息层级、交互路径/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /存在多个合理且结果不同的选择、又没有权威依据时交给用户决定/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /先提出、再回答/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /容易修改、技术上可逆或 Agent 能够实现，都不能代替产品决定权/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /结果等价且属于专业工程判断的由 Agent 在权限内关闭/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /自动决策策略只由 DECISION TREE · RESOLVE 工作包提供/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /任何会约束 Dev 或 Test 的方案必须先在决策树中登记/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /保持原决定的稳定语义身份/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /让独立 Test Agent 建立唯一的业务 Oracle/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /两个合理的 Dev Agent.*实质差异的用户可观察结果/);

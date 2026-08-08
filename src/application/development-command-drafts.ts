@@ -241,6 +241,11 @@ function state(db: Db, draft: DevelopmentDraftRow, execution: DevelopmentExecuti
     WHERE task_id = ? AND story_index = ? AND status = 'resolved'
     ORDER BY revision DESC LIMIT 1
   `).get(draft.task_id, draft.story_index) as { spec_json: string } | undefined;
+  const requirementCard = db.prepare(`
+    SELECT metadata_value
+    FROM requirement_metadata
+    WHERE task_id = ? AND metadata_key = 'tracking.requirement_card_id'
+  `).get(draft.task_id) as { metadata_value: string } | undefined;
   let expectedCriteria: { id: string; description: string; oracle: string }[] = [];
   let deliveryConstraints: string[] = [];
   try {
@@ -280,6 +285,7 @@ function state(db: Db, draft: DevelopmentDraftRow, execution: DevelopmentExecuti
     executionId: execution.execution_id,
     expectedCriteria,
     deliveryConstraints,
+    requirementCardId: requirementCard?.metadata_value || null,
     capturedCommands: capturedCommands(db, execution.execution_id),
     repository: repositoryObservation(),
   };
@@ -457,6 +463,13 @@ function renderWorkPacket(current: DevelopmentState, phase: DevelopmentPhase) {
     '## DO NOT',
     '',
     definition.prohibited,
+    ...(phase === 'commit' && current.requirementCardId ? [
+      '',
+      '## COMMIT TRACEABILITY',
+      '',
+      `- Requirement Card ID: \`${current.requirementCardId}\``,
+      '- 使用目标仓库已有的提交说明规范，将该卡号作为本次提交的追溯信息；不要把它扩散到其他阶段产物。',
+    ] : []),
     '',
     '## AVAILABLE COMMANDS',
     '',

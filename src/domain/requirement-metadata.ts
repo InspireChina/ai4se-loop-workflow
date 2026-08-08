@@ -8,6 +8,21 @@ export const REQUIREMENT_METADATA_DEFINITIONS = [{
   label: '需求卡号',
   inputType: 'text',
   placeholder: '例如：REQ-1234',
+}, {
+  key: 'workflow.analysis_decision_mode',
+  label: 'Analysis 自动决策强度',
+  inputType: 'select',
+  placeholder: '',
+  options: [{
+    value: 'conservative',
+    label: '审慎对齐',
+  }, {
+    value: 'balanced',
+    label: '平衡',
+  }, {
+    value: 'autonomous',
+    label: '高度自主',
+  }],
 }] as const;
 
 export type RequirementMetadataKey = typeof REQUIREMENT_METADATA_DEFINITIONS[number]['key'];
@@ -17,12 +32,29 @@ export type RequirementMetadataInput = {
   value: string;
 };
 
+export const DEFAULT_ANALYSIS_DECISION_MODE = 'balanced' as const;
+export type AnalysisDecisionMode = 'conservative' | 'balanced' | 'autonomous';
+
 const definitionByKey = new Map<string, typeof REQUIREMENT_METADATA_DEFINITIONS[number]>(
   REQUIREMENT_METADATA_DEFINITIONS.map((definition) => [definition.key, definition]),
 );
 
 export function requirementMetadataDefinition(key: string) {
   return definitionByKey.get(key);
+}
+
+export function analysisDecisionMode(entries: readonly { metadata_key?: string; key?: string; metadata_value?: string; value?: string }[]): AnalysisDecisionMode {
+  const entry = entries.find((item) => (item.metadata_key || item.key) === 'workflow.analysis_decision_mode');
+  const value = entry?.metadata_value || entry?.value;
+  return value === 'conservative' || value === 'autonomous' || value === 'balanced'
+    ? value
+    : DEFAULT_ANALYSIS_DECISION_MODE;
+}
+
+export function requirementMetadataValueLabel(key: string, value: string) {
+  const definition = requirementMetadataDefinition(key);
+  if (!definition || definition.inputType !== 'select') return value;
+  return definition.options.find((option) => option.value === value)?.label || value;
 }
 
 export function parseRequirementMetadata(entries: readonly { key: unknown; value: unknown }[]): RequirementMetadataInput[] {
@@ -49,6 +81,10 @@ export function parseRequirementMetadata(entries: readonly { key: unknown; value
       if (url.protocol !== 'http:' && url.protocol !== 'https:') {
         throw new Error(`${definition.label}只支持 HTTP 或 HTTPS URL`);
       }
+    }
+    if (definition.inputType === 'select'
+      && !definition.options.some((option) => option.value === value)) {
+      throw new Error(`${definition.label}的值不受支持`);
     }
     metadata.push({ key: definition.key, value });
   }

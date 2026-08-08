@@ -7,7 +7,7 @@ import { getTaskContextChat } from '../../../src/application/task-context-chat';
 import { deliverySpecSchema } from '../../../src/domain/agent-result';
 import { agentLabel, deliveryUnitLabel, documentKindLabel, feedbackBatchStatusLabel, feedbackWorkTypeLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
 import { requirementPriorityLabel } from '../../../src/domain/requirement-priority';
-import { requirementMetadataDefinition } from '../../../src/domain/requirement-metadata';
+import { requirementMetadataDefinition, requirementMetadataValueLabel } from '../../../src/domain/requirement-metadata';
 import { ArtifactDocument } from './artifact-document';
 import { TaskAutoRefresh } from './task-auto-refresh';
 import { TaskContextChat } from './task-context-chat';
@@ -161,7 +161,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           if (!definition) return null;
           return definition.inputType === 'url'
             ? <a href={item.metadata_value} target="_blank" rel="noreferrer" key={item.metadata_key}>{definition.label} · {item.metadata_value}</a>
-            : <span key={item.metadata_key}>{definition.label} · {item.metadata_value}</span>;
+            : <span key={item.metadata_key}>{definition.label} · {requirementMetadataValueLabel(item.metadata_key, item.metadata_value)}</span>;
         })}
       </div>
     </header>
