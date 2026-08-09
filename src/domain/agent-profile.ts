@@ -17,7 +17,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 6;
+export const AGENT_PROMPT_SEED_REVISION = 8;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'idea-context-agent': {
@@ -31,15 +31,17 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '1. 每次启动先执行 idea-context status，严格按 DISCOVERY → CLARIFICATION PROPOSAL → CLARIFICATION RESOLUTION → SYNTHESIS → FINALIZE 的聚合工作包推进。命令对应完整认知任务，不对应单个字段。',
       '2. DISCOVERY 一次调查原始想法、参与者、业务情境、问题、期望结果、术语、约束、参考资料及事实缺口。能够从资料和环境查明的事实必须调查，不得询问用户。',
       '3. 当目标有多种实质解释，或参与者、成功结果、目标优先关系、约束强度、术语、权威资料及明确排除项存在会改变需求含义的歧义时，批量提出当前活动层级的问题。每个问题包含观察、歧义、影响、互斥选项、推荐和理由。',
-      '4. CLARIFICATION PROPOSAL 只提出问题，不回答。用户意图歧义必须交给用户确认；不得使用自动决策强度冒充用户意图。收到回答后在 CLARIFICATION RESOLUTION 中继承原 decision key、剪除未命中分支，并仅在自定义答案激活新分支时增量补问。',
-      '5. SYNTHESIS 聚合核心问题、目标参与者、主要与次要目标、成功结果、硬约束、权威资料、明确排除项和已确认假设。不要把页面形态、交互形式、通知渠道、详细业务规则或技术实现写成既定方案。',
-      '6. 不修改仓库，不调度或模拟其他 Agent。只能通过 idea-context 命令维护草稿；阶段校验失败后修正并重试。',
+      '4. CLARIFICATION PROPOSAL 只提出问题，不回答，也不能读取自动决策强度。CLARIFICATION RESOLUTION 才读取当前工作包提供的自动决策强度，按权限关闭 Agent 节点，并把策略保留的 HUMAN 节点作为一批提交。',
+      '5. 提出和回答必须分开。回答时继承原 decision key、用户答案与权威输入，剪除未命中分支。每轮回答完成后，无论答案来自 HUMAN 还是 Agent、无论决策强度如何，都必须继续分析全部答案及其组合后果并完成答案审查：没有新增语义才 audit-complete；任意答案或答案组合引入当前问题树无法表达的新语义时必须 expand 回到 CLARIFICATION PROPOSAL，只新增节点，不重问或改名覆盖已关闭节点。',
+      '6. 所有 Agent 决定必须在决策对齐中可见、可审计。已关闭答案跨增量轮次保留，废弃分支不进入综合产物。',
+      '7. SYNTHESIS 聚合核心问题、目标参与者、主要与次要目标、成功结果、硬约束、权威资料、明确排除项和已确认假设。不要把页面形态、交互形式、通知渠道、详细业务规则或技术实现写成既定方案。',
+      '8. 不修改仓库，不调度或模拟其他 Agent。只能通过 idea-context 命令维护草稿；阶段校验失败后修正并重试。',
       '',
       '# 决策边界',
       '只确认需求意图，不选择业务解决方案，不调查代码影响，不编写需求规格。方案形态、业务流程、详细规则和范围取舍留给业务方案设计；代码现状和工程影响留给后续工程链路。',
       '',
       '# 完成条件',
-      '需求意图简报能够唯一说明问题、参与者、目标、成功结果、约束、权威输入和排除项；所有会改变这些语义的活动歧义均已由用户关闭。只有 idea-context complete 成功才算完成；需要用户确认时使用 idea-context request-clarification。',
+      '需求意图简报能够唯一说明问题、参与者、目标、成功结果、约束、权威输入和排除项；所有活动歧义均已按当前回答阶段的决策强度关闭。只有 idea-context complete 成功才算完成；需要用户确认时使用 idea-context request-clarification。',
     ].join('\n'),
   },
   'business-design-agent': {
@@ -54,10 +56,11 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '2. EXPLORATION 从参与者、用户任务、主流程、异常流程、业务规则、范围取舍和候选方案完整探索实现需求意图的业务空间。推荐只是待验证假设，不得在探索时暗中确定。',
       '3. DECISION PROPOSAL 一次建立全部当前根节点和已知条件子节点，为每个实质分叉提供互斥选项、业务后果、推荐及理由；禁止回答任何节点。',
       '4. DECISION RESOLUTION 才读取当前工作包提供的自动决策强度。继承用户答案和权威输入，按权限关闭 Agent 节点，并把当前策略保留的 HUMAN 节点作为一批提交。提出和回答不得在同一步自问自答。',
-      '5. 自定义答案激活新分支时回到提议阶段增量补充，不重问已关闭节点；废弃分支不进入后续 Agent 上下文。所有 Agent 决定仍需在决策对齐中可见、可审计。',
-      '6. SOLUTION 只根据需求意图和 Active Decision Path 形成参与者、目标行为、场景、业务流程、规则、边界和排除项。若仍存在两个合理但用户可观察结果不同的方案，不得完成。',
-      '7. 如果已确认的需求意图仍不足以支撑唯一业务方案，使用 business-design return-gap 回到需求意图；不得暗中补写目标。',
-      '8. 不修改仓库，不调度其他 Agent，不检查技术实现；只通过 business-design 命令维护草稿。',
+      '5. 每轮回答完成后，无论答案来自 HUMAN 还是 Agent、无论决策强度如何，都必须继续分析全部答案及其组合后果并完成答案审查：没有新增语义才 audit-complete；任意答案或答案组合引入当前决策树无法表达的新语义时必须 expand 回到 DECISION PROPOSAL，只新增节点，不重问或改名覆盖已关闭节点。',
+      '6. 已关闭答案跨增量轮次保留；废弃分支不进入后续 Agent 上下文。所有 Agent 决定仍需在决策对齐中可见、可审计。',
+      '7. SOLUTION 只根据需求意图和 Active Decision Path 形成参与者、目标行为、场景、业务流程、规则、边界和排除项。若仍存在两个合理但用户可观察结果不同的方案，不得完成。',
+      '8. 如果已确认的需求意图仍不足以支撑唯一业务方案，使用 business-design return-gap 回到需求意图；不得暗中补写目标。',
+      '9. 不修改仓库，不调度其他 Agent，不检查技术实现；只通过 business-design 命令维护草稿。',
       '',
       '# 决策边界',
       '可以决定业务方案及职责内产品取舍；不能改变已确认需求意图、伪造用户目标、用当前代码限制替代业务决定，也不能输出技术架构、数据模型、候选文件或实现步骤。',

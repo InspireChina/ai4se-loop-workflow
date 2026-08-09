@@ -40,9 +40,9 @@ export const BUSINESS_ANALYSIS_WORKFLOWS: Record<BusinessAnalysisAgentId, {
       },
       clarification_resolution: {
         label: 'CLARIFICATION RESOLUTION',
-        objective: '读取用户回答，关闭当前活动问题，剪除未命中分支；只有自定义答案产生新歧义时才回到提议。',
-        required: ['有效答案的语义归纳', 'Active Intent Path', '废弃分支说明'],
-        prohibited: ['替用户回答意图歧义', '把废弃分支带入综合产物'],
+        objective: '按当前工作包提供的自动决策强度关闭活动需求意图节点，并把需要用户确认的节点作为一批提交。',
+        required: ['回答工作包 JSON', 'Agent 决定及依据', '需要 HUMAN 确认的 key', '全部答案完成后的强制答案审查与 audit-complete/expand 选择'],
+        prohibited: ['在提出阶段提前回答', '越过当前自动决策策略', '把废弃分支带入综合产物'],
         submit: 'idea-context clarification-resolution complete',
       },
       synthesis: {
@@ -82,7 +82,7 @@ export const BUSINESS_ANALYSIS_WORKFLOWS: Record<BusinessAnalysisAgentId, {
       decision_resolution: {
         label: 'DECISION RESOLUTION',
         objective: '按用户决定和本工作包提供的自动决策强度关闭活动节点。',
-        required: ['Agent 决定及依据', '需要 HUMAN 确认的 key', '有效决策路径'],
+        required: ['Agent 决定及依据', '需要 HUMAN 确认的 key', '有效决策路径', '全部答案完成后的强制答案审查与 audit-complete/expand 选择'],
         prohibited: ['提出新决策', '覆盖用户决定', '越过自动决策策略'],
         submit: 'business-design decision-resolution complete',
       },

@@ -69,14 +69,6 @@ const proposalSchema = z.object({
       context.addIssue({ code: 'custom', path: ['questions', index, 'recommendationOption'], message: '推荐选项不存在' });
     }
   }
-  for (const [index, question] of value.questions.entries()) {
-    for (const gate of question.activation) {
-      const parent = value.questions.find((candidate) => candidate.key === gate.decisionKey);
-      if (!parent || !parent.options.some((option) => option.id === gate.optionId)) {
-        context.addIssue({ code: 'custom', path: ['questions', index, 'activation'], message: '激活条件引用了未知父节点或选项' });
-      }
-    }
-  }
 });
 
 const resolutionSchema = z.object({
@@ -181,26 +173,40 @@ function decisionMode(db: Db, taskId: string) {
   return workflowDecisionMode(metadata);
 }
 
+function answerPhaseDecisionPolicy(agent: string, mode: ReturnType<typeof decisionMode>) {
+  if (agent === 'idea-context-agent') {
+    return {
+      conservative: '审慎对齐：只自行关闭由权威输入唯一确定的事实性解释，其余目标、参与者、成功结果和约束歧义进入 HUMAN 批次。',
+      balanced: '平衡：可自行关闭不改变需求含义的术语归一和等价表述；会改变目标、参与者、成功结果或硬约束的节点进入 HUMAN 批次。',
+      autonomous: '高度自主：可根据原始想法、权威资料和明确推荐关闭低风险意图解释；核心目标、目标参与者、成功标准或不可逆约束变化仍进入 HUMAN 批次。',
+      fully_autonomous: '完全自主：继承明确用户决定后，自行关闭全部活动需求意图节点，不得形成 HUMAN 决策批次。',
+    }[mode];
+  }
+  return {
+    conservative: '审慎对齐：只自行关闭由权威输入唯一确定的节点，其余业务取舍进入 HUMAN 批次。',
+    balanced: '平衡：可自行关闭低风险、可逆且不改变核心用户结果的节点；重要业务结果分叉进入 HUMAN 批次。',
+    autonomous: '高度自主：可在已确认需求意图内自行关闭有明确推荐和充分依据的业务取舍；目标、参与者、成功标准或不可逆高风险变化仍进入 HUMAN 批次。',
+    fully_autonomous: '完全自主：继承明确用户决定后，自行关闭全部活动业务节点，不得形成 HUMAN 决策批次。',
+  }[mode];
+}
+
 function workPacket(db: Db, execution: Execution, draft: Draft) {
   const workflow = workflowFor(execution);
   const current = state(db, draft.draft_id);
   const definition = workflow.definitions[current.draft.workflow_phase];
   if (!definition) throw new Error(`草稿阶段 ${current.draft.workflow_phase} 不受 ${execution.agent} 支持`);
-  const mode = execution.agent === 'business-design-agent' && current.draft.workflow_phase === 'decision_resolution'
+  const isAnswerPhase = (execution.agent === 'idea-context-agent' && current.draft.workflow_phase === 'clarification_resolution')
+    || (execution.agent === 'business-design-agent' && current.draft.workflow_phase === 'decision_resolution');
+  const mode = isAnswerPhase
     ? decisionMode(db, execution.task_id)
     : null;
-  const decisionPolicy = mode ? {
-    conservative: '审慎对齐：只自行关闭由权威输入唯一确定的节点，其余业务取舍进入 HUMAN 批次。',
-    balanced: '平衡：可自行关闭低风险、可逆且不改变核心用户结果的节点；重要业务结果分叉进入 HUMAN 批次。',
-    autonomous: '高度自主：可在已确认需求意图内自行关闭有明确推荐和充分依据的业务取舍；目标、参与者、成功标准或不可逆高风险变化仍进入 HUMAN 批次。',
-    fully_autonomous: '完全自主：继承明确用户决定后，自行关闭全部活动业务节点，不得形成 HUMAN 决策批次。',
-  }[mode] : null;
+  const decisionPolicy = mode ? answerPhaseDecisionPolicy(execution.agent, mode) : null;
   const lines = [
     '# NEXT WORK PACKET', '',
     `- Phase: ${definition.label}`,
     `- Objective: ${definition.objective}`,
     ...(mode ? [`- Decision Mode: ${mode}`] : []),
-    ...(decisionPolicy ? [`- Decision Policy: ${decisionPolicy}`, '- Policy Scope: 仅在当前 DECISION RESOLUTION 工作包生效。'] : []),
+    ...(decisionPolicy ? [`- Decision Policy: ${decisionPolicy}`, `- Policy Scope: 仅在当前 ${definition.label} 工作包生效。`] : []),
     '', '# REQUIRED OUTPUT', '',
     ...definition.required.map((item) => `- ${item}`),
     '', '# PROHIBITED', '',
@@ -211,8 +217,17 @@ function workPacket(db: Db, execution: Execution, draft: Draft) {
       ? ''
       : ' --artifact-file <工作包文件>';
     lines.push('', '# SUBMIT', '', `\`${definition.submit}${needsArtifact}\``);
-    if (execution.agent === 'idea-context-agent' && current.draft.workflow_phase === 'clarification_resolution') {
-      lines.push('', '首次进入本工作包且问题尚未发布时，先执行：', '', '`idea-context request-clarification`');
+    if (isAnswerPhase) {
+      const phaseCommand = execution.agent === 'idea-context-agent' ? 'clarification-resolution' : 'decision-resolution';
+      lines.push(
+        '',
+        '# AFTER RESOLUTION',
+        '',
+        '读取本轮全部 HUMAN 与 Agent 答案，继续分析它们的组合后果，以及是否引入当前问题树无法表达的新语义。任何决策主体和决策强度都不得跳过审查，只能选择一个出口：',
+        '',
+        `- 无新增分支：\`${workflow.namespace} ${phaseCommand} audit-complete --artifact-file <答案审查>\``,
+        `- 需要增量补问：\`${workflow.namespace} ${phaseCommand} expand --artifact-file <答案审查与新增分支依据>\``,
+      );
     }
   } else {
     lines.push('', '# SUBMIT', '', '`spec-review approve --artifact-file <完整需求规格>` 或 `spec-review return-revision --target <intent|business_design|specification> --reason-file <理由>`');
@@ -252,6 +267,61 @@ function proposalFor(db: Db, draftId: string, phase: 'clarification_proposal' | 
   const content = artifactFor(db, draftId, phase);
   if (!content) throw new Error(`${phase} 尚未保存问题树`);
   return parseJson(proposalSchema, content, '问题树');
+}
+
+function validateProposalRound(
+  db: Db,
+  execution: Execution,
+  proposal: z.infer<typeof proposalSchema>,
+) {
+  const priorRows = db.prepare(`
+    SELECT decision_key, alternatives_json
+    FROM questions
+    WHERE task_id = ? AND story_index IS NULL AND source_agent = ?
+      AND decision_key IS NOT NULL
+  `).all(execution.task_id, execution.agent) as { decision_key: string; alternatives_json: string | null }[];
+  const prior = new Map(priorRows.map((row) => [row.decision_key, row]));
+  const repeated = proposal.questions.filter((question) => prior.has(question.key));
+  if (repeated.length) {
+    throw new Error(`增量问题不得重问或改名覆盖已有节点：${repeated.map((question) => question.key).join('、')}`);
+  }
+  const current = new Map(proposal.questions.map((question) => [question.key, question.options]));
+  for (const question of proposal.questions) {
+    for (const gate of question.activation) {
+      const options = current.get(gate.decisionKey)
+        || parseJson(z.array(optionSchema), prior.get(gate.decisionKey)?.alternatives_json || '[]', `父决策 ${gate.decisionKey} 的选项`);
+      if (!options.some((option) => option.id === gate.optionId)) {
+        throw new Error(`问题 ${question.key} 的激活条件引用了未知父节点或选项：${gate.decisionKey}=${gate.optionId}`);
+      }
+    }
+  }
+}
+
+function assertAnswerAuditReady(
+  db: Db,
+  execution: Execution,
+  draftId: string,
+  phase: 'clarification_resolution' | 'decision_resolution',
+) {
+  const intentResolution = phase === 'clarification_resolution';
+  const proposal = proposalFor(db, draftId, intentResolution ? 'clarification_proposal' : 'decision_proposal');
+  const resolution = parseJson(
+    resolutionSchema,
+    artifactFor(db, draftId, phase) || '',
+    intentResolution ? '需求意图回答工作包' : '决策解决工作包',
+  );
+  recomputeTaskQuestionApplicabilityInDb(db, execution.task_id, execution.agent, null);
+  const rows = new Map(questionRows(db, execution.task_id, execution.agent).map((row) => [row.decision_key, row]));
+  const unresolvedHuman = resolution.humanDecisionKeys.filter((key) => {
+    const row = rows.get(key);
+    return !row || !['answered', 'resolved', 'not_applicable', 'superseded'].includes(row.status);
+  });
+  if (unresolvedHuman.length) throw new Error(`仍在等待用户回答：${unresolvedHuman.join('、')}`);
+  const unresolved = proposal.questions.filter((question) => {
+    const row = rows.get(question.key);
+    return !row || !['answered', 'resolved', 'not_applicable', 'superseded'].includes(row.status);
+  });
+  if (unresolved.length) throw new Error(`当前问题轮次仍有未关闭节点：${unresolved.map((question) => question.key).join('、')}`);
 }
 
 function questionRows(db: Db, taskId: string, sourceAgent: string) {
@@ -399,6 +469,14 @@ export function businessAnalysisHelp(agent: string, topic?: string | null) {
     `  ${workflow.namespace} status`,
     ...commands.map((command) => `  ${command}${command.endsWith(' complete') && !command.endsWith(`${workflow.namespace} complete`) ? ' --artifact-file <工作包文件>' : ''}`),
     ...(agent === 'idea-context-agent' || agent === 'business-design-agent' ? [`  ${workflow.namespace} request-clarification`] : []),
+    ...(agent === 'idea-context-agent' ? [
+      '  idea-context clarification-resolution audit-complete --artifact-file <答案审查>',
+      '  idea-context clarification-resolution expand --artifact-file <答案审查与新增分支依据>',
+    ] : []),
+    ...(agent === 'business-design-agent' ? [
+      '  business-design decision-resolution audit-complete --artifact-file <答案审查>',
+      '  business-design decision-resolution expand --artifact-file <答案审查与新增分支依据>',
+    ] : []),
     ...(agent === 'business-design-agent' ? ['  business-design return-gap --reason-file <需求意图缺口> [--artifact-file <缺口报告>]'] : []),
     ...(agent === 'requirement-spec-agent' ? ['  requirement-spec return-gap --target <intent|business_design> --reason-file <理由> [--artifact-file <缺口报告>]'] : []),
     ...(agent === 'spec-review-agent' ? [
@@ -457,9 +535,12 @@ export function runBusinessAnalysisCommand(input: Input) {
     if (!['clarification_resolution', 'decision_resolution'].includes(phase)) throw new Error('当前工作包不能请求澄清');
     const proposalPhase = execution.agent === 'idea-context-agent' ? 'clarification_proposal' : 'decision_proposal';
     const proposal = proposalFor(db, draft.draft_id, proposalPhase);
-    const requestedKeys = execution.agent === 'idea-context-agent'
-      ? proposal.questions.map((question) => question.key)
-      : parseJson(resolutionSchema, artifactFor(db, draft.draft_id, 'decision_resolution') || '', '决策解决工作包').humanDecisionKeys;
+    const resolutionPhase = execution.agent === 'idea-context-agent' ? 'clarification_resolution' : 'decision_resolution';
+    const requestedKeys = parseJson(
+      resolutionSchema,
+      artifactFor(db, draft.draft_id, resolutionPhase) || '',
+      execution.agent === 'idea-context-agent' ? '需求意图回答工作包' : '决策解决工作包',
+    ).humanDecisionKeys;
     const questions = proposalQuestionsForResult(db, execution, proposal, requestedKeys);
     if (!questions.length) throw new Error('当前没有尚未发布的 HUMAN 问题；请读取回答并完成解决工作包');
     return terminal(input, 'request-clarification', {
@@ -471,6 +552,34 @@ export function runBusinessAnalysisCommand(input: Input) {
         disposition: 'advance',
       },
     }, true);
+  }
+
+  const answerAuditPrefix = execution.agent === 'idea-context-agent'
+    ? 'idea-context clarification-resolution'
+    : execution.agent === 'business-design-agent'
+      ? 'business-design decision-resolution'
+      : null;
+  if (answerAuditPrefix && (command === `${answerAuditPrefix} audit-complete` || command === `${answerAuditPrefix} expand`)) {
+    const expectedPhase = execution.agent === 'idea-context-agent' ? 'clarification_resolution' : 'decision_resolution';
+    if (phase !== expectedPhase) throw new Error(`${command} 只允许在 ${expectedPhase}`);
+    assertAnswerAuditReady(db, execution, draft.draft_id, expectedPhase);
+    const audit = bounded(required(flags, 'artifact'), '答案审查', 100_000);
+    if (command.endsWith(' expand')) {
+      return transition(
+        input,
+        phase,
+        execution.agent === 'idea-context-agent' ? 'clarification_proposal' : 'decision_proposal',
+        audit,
+        '用户答案引入当前问题树无法表达的新语义，返回问题提出阶段增量补问',
+      );
+    }
+    return transition(
+      input,
+      phase,
+      execution.agent === 'idea-context-agent' ? 'synthesis' : 'solution',
+      audit,
+      '答案审查确认没有需要增量补问的新语义',
+    );
   }
 
   if (command === 'business-design return-gap') {
@@ -528,38 +637,41 @@ export function runBusinessAnalysisCommand(input: Input) {
 
   if (phase === 'clarification_proposal') {
     const proposal = parseJson(proposalSchema, artifact, '需求意图问题树');
-    if (proposal.questions.some((question) => question.proposedAuthority !== 'human')) {
-      throw new Error('需求意图问题必须由 HUMAN 决定');
-    }
-    return transition(input, phase, proposal.questions.length ? 'clarification_resolution' : 'synthesis', artifact, proposal.questions.length ? '发现需要用户确认的意图歧义' : '没有实质意图歧义');
-  }
-
-  if (phase === 'clarification_resolution') {
-    const proposal = proposalFor(db, draft.draft_id, 'clarification_proposal');
-    recomputeTaskQuestionApplicabilityInDb(db, execution.task_id, execution.agent, null);
-    const rows = new Map(questionRows(db, execution.task_id, execution.agent).map((row) => [row.decision_key, row]));
-    const unresolved = proposal.questions.filter((question) => {
-      const row = rows.get(question.key);
-      return !row || !['answered', 'resolved', 'not_applicable', 'superseded'].includes(row.status);
-    });
-    if (unresolved.length) throw new Error(`仍有未关闭的需求意图问题：${unresolved.map((question) => question.key).join('、')}`);
-    return transition(input, phase, 'synthesis', artifact, '用户意图回答已纳入有效路径');
+    validateProposalRound(db, execution, proposal);
+    return transition(input, phase, proposal.questions.length ? 'clarification_resolution' : 'synthesis', artifact, proposal.questions.length ? '发现需要在回答阶段关闭的意图歧义' : '没有实质意图歧义');
   }
 
   if (phase === 'decision_proposal') {
-    parseJson(proposalSchema, artifact, '业务决策树');
+    const proposal = parseJson(proposalSchema, artifact, '业务决策树');
+    validateProposalRound(db, execution, proposal);
     return transition(input, phase, 'decision_resolution', artifact, '业务决策树已完整提出，尚未回答');
   }
 
-  if (phase === 'decision_resolution') {
-    const proposal = proposalFor(db, draft.draft_id, 'decision_proposal');
-    const resolution = parseJson(resolutionSchema, artifact, '决策解决工作包');
+  if (phase === 'clarification_resolution' || phase === 'decision_resolution') {
+    const intentResolution = phase === 'clarification_resolution';
+    const proposal = proposalFor(db, draft.draft_id, intentResolution ? 'clarification_proposal' : 'decision_proposal');
+    const resolution = parseJson(resolutionSchema, artifact, intentResolution ? '需求意图回答工作包' : '决策解决工作包');
     const proposedKeys = new Set(proposal.questions.map((question) => question.key));
     const resolutionKeys = [...resolution.agentDecisions.map((decision) => decision.key), ...resolution.humanDecisionKeys];
     const unknown = resolutionKeys.filter((key) => !proposedKeys.has(key));
-    if (unknown.length) throw new Error(`决策解决引用未知 key：${unknown.join('、')}`);
+    if (unknown.length) throw new Error(`回答工作包引用未知 key：${unknown.join('、')}`);
     const duplicated = resolutionKeys.filter((key, index) => resolutionKeys.indexOf(key) !== index);
     if (duplicated.length) throw new Error(`同一决策不能同时交给 Agent 和 HUMAN：${[...new Set(duplicated)].join('、')}`);
+    const existingRows = new Map(questionRows(db, execution.task_id, execution.agent).map((row) => [row.decision_key, row]));
+    for (const question of proposal.questions) {
+      const existing = existingRows.get(question.key);
+      if (!existing) continue;
+      if (existing.decision_authority === 'human' && !resolution.humanDecisionKeys.includes(question.key)) {
+        throw new Error(`已经发布给 HUMAN 的节点不能改由 Agent 回答或从回答工作包移除：${question.key}`);
+      }
+      if (existing.decision_authority === 'agent') {
+        const repeatedDecision = resolution.agentDecisions.find((decision) => decision.key === question.key);
+        if (!repeatedDecision) throw new Error(`已经由 Agent 关闭的节点不能改交 HUMAN 或从回答工作包移除：${question.key}`);
+        if (existing.selected_option_id && existing.selected_option_id !== repeatedDecision.optionId) {
+          throw new Error(`已经由 Agent 关闭的节点不能更换答案：${question.key}`);
+        }
+      }
+    }
     const mode = decisionMode(db, execution.task_id);
     if (mode === 'fully_autonomous' && resolution.humanDecisionKeys.length) {
       throw new Error('完全自主模式不得形成 HUMAN 决策批次');
@@ -582,6 +694,17 @@ export function runBusinessAnalysisCommand(input: Input) {
       if (unresolvedHuman.length) {
         throw new Error(`仍在等待用户回答：${unresolvedHuman.join('、')}`);
       }
+      return [
+        commandResult(command, 'answer_audit_required', [
+          `Agent Answers: ${resolution.agentDecisions.length}`,
+          `HUMAN Answers: ${resolution.humanDecisionKeys.length}`,
+        ]),
+        '',
+        '# NEXT',
+        '',
+        `- No New Branch: \`${namespace} ${intentResolution ? 'clarification-resolution' : 'decision-resolution'} audit-complete --artifact-file <答案审查>\``,
+        `- New Branch Required: \`${namespace} ${intentResolution ? 'clarification-resolution' : 'decision-resolution'} expand --artifact-file <答案审查与新增分支依据>\``,
+      ].join('\n');
     }
     recomputeTaskQuestionApplicabilityInDb(db, execution.task_id, execution.agent, null);
     const rows = new Map(questionRows(db, execution.task_id, execution.agent).map((row) => [row.decision_key, row]));
@@ -589,13 +712,18 @@ export function runBusinessAnalysisCommand(input: Input) {
       const row = rows.get(question.key);
       return !row || !['answered', 'resolved', 'not_applicable', 'superseded'].includes(row.status);
     });
-    if (unresolved.length) throw new Error(`决策树仍有未关闭节点：${unresolved.map((question) => question.key).join('、')}`);
-    db.prepare(`UPDATE business_analysis_drafts SET workflow_phase = 'solution' WHERE draft_id = ?`).run(draft.draft_id);
-    db.prepare(`
-      INSERT INTO business_analysis_phase_transitions(draft_id, from_phase, to_phase, reason, execution_id)
-      VALUES(?, 'decision_resolution', 'solution', '全部活动业务决策已关闭', ?)
-    `).run(draft.draft_id, execution.execution_id);
-    return [commandResult(command, 'phase_completed', ['From: decision_resolution', 'To: solution']), '', workPacket(db, execution, draft)].join('\n');
+    if (unresolved.length) throw new Error(`${intentResolution ? '需求意图问题树' : '业务决策树'}仍有未关闭节点：${unresolved.map((question) => question.key).join('、')}`);
+    return [
+      commandResult(command, 'answer_audit_required', [
+        `Agent Answers: ${resolution.agentDecisions.length}`,
+        'HUMAN Answers: 0',
+      ]),
+      '',
+      '# NEXT',
+      '',
+      `- No New Branch: \`${namespace} ${intentResolution ? 'clarification-resolution' : 'decision-resolution'} audit-complete --artifact-file <答案审查>\``,
+      `- New Branch Required: \`${namespace} ${intentResolution ? 'clarification-resolution' : 'decision-resolution'} expand --artifact-file <答案审查与新增分支依据>\``,
+    ].join('\n');
   }
 
   if (phase === 'classification') {

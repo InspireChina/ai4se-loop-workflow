@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
-test('ships rigorous V6 seed prompts for every flow Agent', () => {
-  assert.equal(AGENT_PROMPT_SEED_REVISION, 6);
+test('ships rigorous V8 seed prompts for every flow Agent', () => {
+  assert.equal(AGENT_PROMPT_SEED_REVISION, 8);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
     assert.ok(prompt.length >= 450, `${agentId} seed prompt is too small to define a reliable role contract`);
@@ -12,9 +12,12 @@ test('ships rigorous V6 seed prompts for every flow Agent', () => {
     assert.match(prompt, /# (?:决策边界|禁止事项)/, agentId);
   }
   assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /DISCOVERY → CLARIFICATION PROPOSAL → CLARIFICATION RESOLUTION → SYNTHESIS → FINALIZE/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /用户意图歧义必须交给用户确认/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /CLARIFICATION RESOLUTION 才读取.*自动决策强度/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /提出和回答必须分开/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /无论答案来自 HUMAN 还是 Agent.*必须继续分析.*答案审查.*audit-complete.*expand/);
   assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /DECISION PROPOSAL.*DECISION RESOLUTION/);
   assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /自动决策强度/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /无论答案来自 HUMAN 还是 Agent.*必须继续分析.*答案审查.*audit-complete.*expand/);
   assert.match(AGENT_PROFILE_DEFINITIONS['requirement-spec-agent'].prompt, /AS IS、TO BE、ACTORS、SCENARIOS/);
   assert.match(AGENT_PROFILE_DEFINITIONS['spec-review-agent'].prompt, /intent、business_design 或 specification/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /现有实现已经满足承诺/);

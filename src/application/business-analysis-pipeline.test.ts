@@ -64,6 +64,7 @@ test('runs Business Analysis from a raw idea to an independently approved requir
     ['business-design', 'exploration', 'complete', '--artifact', '# 探索\n\n覆盖项目状态、风险信号、解释与后续行动。'],
     ['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify({ summary: '当前没有必须分叉的业务决定', questions: [] })],
     ['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify({ notes: '没有活动决策节点', agentDecisions: [], humanDecisionKeys: [] })],
+    ['business-design', 'decision-resolution', 'audit-complete', '--artifact', '# 答案审查\n\n当前没有活动决策节点，也没有新增业务语义。'],
     ['business-design', 'solution', 'complete', '--artifact', '# 业务方案\n\n项目成员可发起体检，查看分项状态、风险依据和建议行动。'],
     ['business-design', 'complete'],
   ], `${taskId}-design`);
@@ -97,7 +98,175 @@ test('runs Business Analysis from a raw idea to an independently approved requir
   assert.equal((await getTask(taskId))?.task.agile_status, 'done');
 });
 
-test('resumes the same Business Design decision packet after one batched human alignment', async () => {
+test('injects decision strength only while Idea Context answers and audits fully autonomous decisions before synthesis', async () => {
+  const { createTask, getTask, pipelineForTask } = await import('./tasks');
+  const { beginExecutionAttempt, completeExecution } = await import('./executions');
+  const {
+    issueAgentCommandToken,
+    readAgentCommandSubmission,
+    runAgentCommand,
+  } = await import('./agent-command-drafts');
+  const { applyAgentResult } = await import('./agent-results');
+  const taskId = await createTask({
+    title: '想办法让项目风险更早暴露',
+    itemType: 'business-analysis',
+    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
+  });
+  const delegation = (await pipelineForTask(taskId))[0];
+  const started = await beginExecutionAttempt({ runId: `RUN-ba-intent-mode-${taskId}`, delegation, prompt: 'Intent answer policy' });
+  const token = await issueAgentCommandToken(started.attempt.execution_id);
+  assert.ok(token);
+  const run = (args: string[]) => runAgentCommand({ executionId: started.attempt.execution_id, token, args });
+
+  const discoveryStatus = await run(['idea-context', 'status']);
+  assert.doesNotMatch(discoveryStatus, /Decision Mode|fully_autonomous/);
+  await run(['idea-context', 'discovery', 'complete', '--artifact', '# 调查\n\n目标用户可能是项目负责人或全体项目成员。']);
+  const proposal = {
+    summary: '目标参与者存在会改变成功结果的歧义',
+    questions: [{
+      key: 'primary-actor',
+      title: '主要目标参与者',
+      question: '项目体检首先帮助谁采取行动？',
+      impact: '参与者不同会改变结果表达和成功标准。',
+      options: [{ id: 'lead', label: '项目负责人', consequences: ['集中承担风险处置'] }, { id: 'team', label: '全体项目成员', consequences: ['团队共同识别和处置风险'] }],
+      recommendationOption: 'team',
+      recommendationReason: '项目健康风险通常需要团队共同消化和行动。',
+      proposedAuthority: 'human',
+      activation: [],
+    }],
+  };
+  const answerPacket = await run(['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify(proposal)]);
+  assert.match(answerPacket, /Phase: CLARIFICATION RESOLUTION/);
+  assert.match(answerPacket, /Decision Mode: fully_autonomous/);
+  assert.match(answerPacket, /Policy Scope: 仅在当前 CLARIFICATION RESOLUTION/);
+  const resolved = await run(['idea-context', 'clarification-resolution', 'complete', '--artifact', JSON.stringify({
+    notes: '根据需求目标选择能共同识别并处理风险的参与者。',
+    agentDecisions: [{ key: 'primary-actor', optionId: 'team', reason: '团队共同处理更符合提前暴露风险的目标。' }],
+    humanDecisionKeys: [],
+  })]);
+  assert.match(resolved, /Outcome: answer_audit_required/);
+  assert.match(resolved, /Agent Answers: 1/);
+  assert.match(resolved, /HUMAN Answers: 0/);
+  assert.doesNotMatch(resolved, /Decision Mode|fully_autonomous/);
+  const audited = await run(['idea-context', 'clarification-resolution', 'audit-complete', '--artifact', '# 答案审查\n\n参与者选择没有引入当前问题树外的新语义。']);
+  assert.match(audited, /To: synthesis/);
+  await run(['idea-context', 'synthesis', 'complete', '--artifact', '# 需求意图简报\n\n帮助全体项目成员更早识别并共同处理项目健康风险。']);
+  await run(['idea-context', 'complete']);
+  const result = await readAgentCommandSubmission(started.attempt.execution_id);
+  assert.equal(result?.outcome, 'completed');
+  assert.equal(result?.questions.length, 0);
+  await applyAgentResult(`RUN-ba-intent-mode-${taskId}`, delegation, result!, { executionId: started.attempt.execution_id });
+  await completeExecution(started.attempt.execution_id);
+  const detail = await getTask(taskId);
+  const decision = detail?.questions.find((question) => question.decision_key === 'primary-actor');
+  assert.equal(decision?.decision_authority, 'agent');
+  assert.equal(decision?.selected_option_id, 'team');
+  assert.equal(detail?.task.current_subagent, 'business-design-agent');
+});
+
+test('audits an Idea Context custom answer and returns to clarification proposal for incremental questions', async () => {
+  const { answerQuestion, createTask, getTask, pipelineForTask, submitClarificationAnswers } = await import('./tasks');
+  const { beginExecutionAttempt, completeExecution } = await import('./executions');
+  const { issueAgentCommandToken, readAgentCommandSubmission, runAgentCommand } = await import('./agent-command-drafts');
+  const { applyAgentResult } = await import('./agent-results');
+  const taskId = await createTask({
+    title: '定义项目体检是否成功',
+    itemType: 'business-analysis',
+    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'balanced' }],
+  });
+  const proposal = {
+    summary: '成功结果存在不同解释，需要用户明确',
+    questions: [{
+      key: 'success-outcome',
+      title: '需求成功结果',
+      question: '项目体检首先要带来什么成功结果？',
+      impact: '它决定后续业务方案优化的目标。',
+      options: [{ id: 'awareness', label: '风险被及时看见', consequences: ['关注风险发现'] }, { id: 'closure', label: '风险被持续关闭', consequences: ['关注后续行动'] }],
+      recommendationOption: 'closure',
+      recommendationReason: '只有形成行动闭环才能持续改善项目健康。',
+      proposedAuthority: 'human',
+      activation: [],
+    }],
+  };
+  const resolution = {
+    notes: '成功结果属于需求意图核心，按平衡策略交给 HUMAN。',
+    agentDecisions: [],
+    humanDecisionKeys: ['success-outcome'],
+  };
+
+  let delegation = (await pipelineForTask(taskId))[0];
+  const first = await beginExecutionAttempt({ runId: `RUN-ba-intent-expand-${taskId}-1`, delegation, prompt: 'Intent clarification proposal' });
+  const firstToken = await issueAgentCommandToken(first.attempt.execution_id);
+  assert.ok(firstToken);
+  const firstRun = (args: string[]) => runAgentCommand({ executionId: first.attempt.execution_id, token: firstToken, args });
+  await firstRun(['idea-context', 'status']);
+  await firstRun(['idea-context', 'discovery', 'complete', '--artifact', '# 调查\n\n成功可能表示发现风险，也可能表示关闭风险。']);
+  await firstRun(['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify(proposal)]);
+  await firstRun(['idea-context', 'clarification-resolution', 'complete', '--artifact', JSON.stringify(resolution)]);
+  await firstRun(['idea-context', 'request-clarification']);
+  const needsInput = await readAgentCommandSubmission(first.attempt.execution_id);
+  await applyAgentResult(`RUN-ba-intent-expand-${taskId}-1`, delegation, needsInput!, { executionId: first.attempt.execution_id });
+  await completeExecution(first.attempt.execution_id);
+
+  let detail = await getTask(taskId);
+  const question = detail?.questions.find((item) => item.decision_key === 'success-outcome');
+  await answerQuestion({
+    taskId,
+    questionId: question!.question_id,
+    answer: '30 天内至少关闭 80% 的阻断风险。',
+  });
+  await submitClarificationAnswers(taskId);
+
+  delegation = (await pipelineForTask(taskId))[0];
+  const resumed = await beginExecutionAttempt({ runId: `RUN-ba-intent-expand-${taskId}-2`, delegation, prompt: 'Intent answer audit' });
+  const resumedToken = await issueAgentCommandToken(resumed.attempt.execution_id);
+  assert.ok(resumedToken);
+  const resumedRun = (args: string[]) => runAgentCommand({ executionId: resumed.attempt.execution_id, token: resumedToken, args });
+  const restored = await resumedRun(['idea-context', 'status']);
+  assert.match(restored, /clarification-resolution expand/);
+  const expanded = await resumedRun([
+    'idea-context', 'clarification-resolution', 'expand', '--artifact',
+    '# 答案审查\n\n自定义答案引入了“阻断风险”的判定口径，需要增量确认。',
+  ]);
+  assert.match(expanded, /To: clarification_proposal/);
+  const followUp = {
+    summary: '只补充阻断风险的判定口径',
+    questions: [{
+      key: 'blocking-risk-definition',
+      title: '阻断风险定义',
+      question: '什么风险计入阻断风险？',
+      impact: '它决定 80% 成功指标的统计口径。',
+      options: [{ id: 'delivery-blocked', label: '已阻止关键交付', consequences: ['口径客观'] }, { id: 'high-probability', label: '高概率将阻止交付', consequences: ['可以更早预警'] }],
+      recommendationOption: 'delivery-blocked',
+      recommendationReason: '已发生阻断更容易形成一致统计口径。',
+      proposedAuthority: 'agent',
+      activation: [],
+    }],
+  };
+  await resumedRun(['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify(followUp)]);
+  const closed = await resumedRun(['idea-context', 'clarification-resolution', 'complete', '--artifact', JSON.stringify({
+    notes: '增量口径可以按平衡策略由 Agent 关闭。',
+    agentDecisions: [{ key: 'blocking-risk-definition', optionId: 'delivery-blocked', reason: '客观且便于审计。' }],
+    humanDecisionKeys: [],
+  })]);
+  assert.match(closed, /Outcome: answer_audit_required/);
+  const followUpAudited = await resumedRun([
+    'idea-context', 'clarification-resolution', 'audit-complete', '--artifact',
+    '# 答案审查\n\n阻断风险定义已经闭合，没有引入新的需求意图分支。',
+  ]);
+  assert.match(followUpAudited, /To: synthesis/);
+  await resumedRun(['idea-context', 'synthesis', 'complete', '--artifact', '# 需求意图简报\n\n帮助团队在 30 天内关闭至少 80% 已阻止关键交付的风险。']);
+  await resumedRun(['idea-context', 'complete']);
+  const completed = await readAgentCommandSubmission(resumed.attempt.execution_id);
+  await applyAgentResult(`RUN-ba-intent-expand-${taskId}-2`, delegation, completed!, { executionId: resumed.attempt.execution_id });
+  await completeExecution(resumed.attempt.execution_id);
+  detail = await getTask(taskId);
+  assert.equal(detail?.questions.find((item) => item.decision_key === 'success-outcome')?.answer, '30 天内至少关闭 80% 的阻断风险。');
+  assert.equal(detail?.questions.find((item) => item.decision_key === 'blocking-risk-definition')?.decision_authority, 'agent');
+  assert.equal(detail?.task.current_subagent, 'business-design-agent');
+});
+
+test('audits a Business Design custom answer and expands only the newly introduced decision branch', async () => {
   const {
     answerQuestion,
     createTask,
@@ -162,7 +331,11 @@ test('resumes the same Business Design decision packet after one batched human a
   let detail = await getTask(taskId);
   const question = detail?.questions.find((item) => item.decision_key === 'result-visibility');
   assert.equal(question?.status, 'pending');
-  await answerQuestion({ taskId, questionId: question!.question_id, selectedOptionId: 'members' });
+  await answerQuestion({
+    taskId,
+    questionId: question!.question_id,
+    answer: '普通风险对项目成员可见，严重风险仅对项目负责人可见。',
+  });
   await submitClarificationAnswers(taskId);
 
   delegation = (await pipelineForTask(taskId))[0];
@@ -173,9 +346,53 @@ test('resumes the same Business Design decision packet after one batched human a
   const resumedRun = (args: string[]) => runAgentCommand({ executionId: resumed.attempt.execution_id, token: resumedToken, args });
   const restored = await resumedRun(['business-design', 'status']);
   assert.match(restored, /Phase: decision_resolution/);
-  const advanced = await resumedRun(['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify(resolution)]);
-  assert.match(advanced, /To: solution/);
-  await resumedRun(['business-design', 'solution', 'complete', '--artifact', '# 业务方案\n\n项目成员默认可以共同查看体检结果。']);
+  assert.match(restored, /decision-resolution expand/);
+  await assert.rejects(
+    resumedRun(['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify({
+      notes: '尝试覆盖已经回答的 HUMAN 节点。',
+      agentDecisions: [{ key: 'result-visibility', optionId: 'members', reason: '不应被接受。' }],
+      humanDecisionKeys: [],
+    })]),
+    /已经发布给 HUMAN 的节点不能改由 Agent 回答/,
+  );
+  const auditRequired = await resumedRun(['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify(resolution)]);
+  assert.match(auditRequired, /Outcome: answer_audit_required/);
+  const expanded = await resumedRun([
+    'business-design', 'decision-resolution', 'expand', '--artifact',
+    '# 答案审查\n\n自定义答案引入严重程度边界，需要增量确认其判定方式。',
+  ]);
+  assert.match(expanded, /To: decision_proposal/);
+  await assert.rejects(
+    resumedRun(['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify(proposal)]),
+    /不得重问或改名覆盖已有节点：result-visibility/,
+  );
+  const followUpProposal = {
+    summary: '只补充自定义答案新引入的严重程度边界',
+    questions: [{
+      key: 'severe-risk-boundary',
+      title: '严重风险边界',
+      question: '什么条件下体检风险属于严重风险？',
+      impact: '该边界决定结果可见范围。',
+      options: [{ id: 'any-blocker', label: '存在阻断项', consequences: ['边界明确且易于解释'] }, { id: 'score-threshold', label: '综合评分达到阈值', consequences: ['可综合多个风险信号'] }],
+      recommendationOption: 'any-blocker',
+      recommendationReason: '阻断项是更直接且可解释的严重风险信号。',
+      proposedAuthority: 'agent',
+      activation: [],
+    }],
+  };
+  await resumedRun(['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify(followUpProposal)]);
+  const advanced = await resumedRun(['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify({
+    notes: '增量节点可以按平衡策略由 Agent 关闭。',
+    agentDecisions: [{ key: 'severe-risk-boundary', optionId: 'any-blocker', reason: '阻断项边界直接、透明且符合风险解释目标。' }],
+    humanDecisionKeys: [],
+  })]);
+  assert.match(advanced, /Outcome: answer_audit_required/);
+  const followUpAudited = await resumedRun([
+    'business-design', 'decision-resolution', 'audit-complete', '--artifact',
+    '# 答案审查\n\n严重风险边界已经闭合，没有引入新的业务方案分支。',
+  ]);
+  assert.match(followUpAudited, /To: solution/);
+  await resumedRun(['business-design', 'solution', 'complete', '--artifact', '# 业务方案\n\n普通风险对项目成员可见；存在阻断项时仅项目负责人可查看严重风险。']);
   await resumedRun(['business-design', 'complete']);
   const completed = await readAgentCommandSubmission(resumed.attempt.execution_id);
   assert.equal(completed?.businessAnalysis?.disposition, 'advance');
@@ -183,5 +400,6 @@ test('resumes the same Business Design decision packet after one batched human a
   await completeExecution(resumed.attempt.execution_id);
   detail = await getTask(taskId);
   assert.equal(detail?.task.current_subagent, 'requirement-spec-agent');
-  assert.equal(detail?.questions.find((item) => item.decision_key === 'result-visibility')?.selected_option_id, 'members');
+  assert.equal(detail?.questions.find((item) => item.decision_key === 'result-visibility')?.answer, '普通风险对项目成员可见，严重风险仅对项目负责人可见。');
+  assert.equal(detail?.questions.find((item) => item.decision_key === 'severe-risk-boundary')?.decision_authority, 'agent');
 });
