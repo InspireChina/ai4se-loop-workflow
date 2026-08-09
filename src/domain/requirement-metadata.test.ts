@@ -25,6 +25,11 @@ test('parses predefined requirement metadata and ignores blank values', () => {
     value: 'conservative',
   }]), 'conservative');
   assert.equal(requirementMetadataValueLabel('workflow.analysis_decision_mode', 'autonomous'), '高度自主');
+  assert.equal(analysisDecisionMode([{
+    key: 'workflow.analysis_decision_mode',
+    value: 'fully_autonomous',
+  }]), 'fully_autonomous');
+  assert.equal(requirementMetadataValueLabel('workflow.analysis_decision_mode', 'fully_autonomous'), '完全自主');
 });
 
 test('rejects unknown, duplicate, and unsafe URL metadata', () => {

@@ -47,4 +47,7 @@ test('defines the Backlog phase order, work packets, and normal command path in 
     REQUIREMENT_CONTEXT_WORKFLOW.decision_resolution.pendingHumanSubmit,
     'requirement-context request-clarification',
   );
+  assert.match(REQUIREMENT_CONTEXT_WORKFLOW.decision_proposal.objective, /输入业务方案.*规格和代码现状冲突.*遗漏影响/);
+  assert.match(REQUIREMENT_CONTEXT_WORKFLOW.decision_proposal.prohibited, /不要主动改良、替换或扩展输入业务方案/);
+  assert.match(REQUIREMENT_CONTEXT_WORKFLOW.to_be.objective, /输入业务方案.*AS-IS 与影响核对的 TO-BE/);
 });

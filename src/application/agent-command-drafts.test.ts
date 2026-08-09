@@ -486,6 +486,65 @@ test('separates backlog decision proposals from resolution and injects metadata 
   );
 });
 
+test('fully autonomous backlog resolution closes every decision without a HUMAN batch', async () => {
+  const { createTask } = await import('./tasks');
+  const taskId = await createTask({
+    title: '完全自主确认提醒对象',
+    description: '借阅到期前发送提醒，具体提醒对象由 Agent 决定。',
+    metadata: [{
+      key: 'workflow.analysis_decision_mode',
+      value: 'fully_autonomous',
+    }],
+  });
+  const active = await begin(taskId);
+  const initial = await command(active.executionId, active.token!, ['requirement-context', 'status']);
+  assert.doesNotMatch(initial, /fully_autonomous|REQUIREMENT DECISION POLICY|完全自主/);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'intent', 'set', '--text', '在借阅到期前通知适当参与者',
+  ]);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'assertion', 'upsert', '--key', 'actual-no-reminder',
+    '--perspective', 'actual', '--statement', '当前没有到期前主动提醒',
+    '--evidence', 'observed', '--source', '借阅流程调查',
+  ]);
+  const proposalPacket = await command(active.executionId, active.token!, [
+    'requirement-context', 'as-is', 'complete',
+  ]);
+  assert.doesNotMatch(proposalPacket, /fully_autonomous|REQUIREMENT DECISION POLICY|完全自主/);
+  assert.match(proposalPacket, /规格和代码现状冲突、遗漏影响处置/);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'question', 'add', '--key', 'reminder-audience',
+    '--title', '提醒对象', '--question', '提醒借阅人还是同时提醒管理员？',
+    '--impact', '参与者不同会改变用户可观察结果',
+  ]);
+  for (const option of [
+    ['borrower', '仅借阅人', '只触达直接责任人'],
+    ['both', '借阅人与管理员', '同时形成管理侧触达'],
+  ]) {
+    await command(active.executionId, active.token!, [
+      'requirement-context', 'question', 'option-add', '--key', 'reminder-audience',
+      '--id', option[0], '--label', option[1], '--consequence', option[2],
+    ]);
+  }
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'question', 'recommend', '--key', 'reminder-audience',
+    '--option', 'borrower', '--authority', 'needs_user_input',
+    '--reason', '这是会改变参与者的产品决定',
+  ]);
+  const resolutionPacket = await command(active.executionId, active.token!, [
+    'requirement-context', 'decision-proposal', 'complete',
+  ]);
+  assert.match(resolutionPacket, /Mode: `fully_autonomous` · 完全自主/);
+  assert.match(resolutionPacket, /不得使用 question ask，也不得形成 HUMAN 决策批次/);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'question', 'decide', '--key', 'reminder-audience',
+    '--option', 'borrower', '--reason', '直接责任人最能及时采取归还行动；代价是管理员暂不获得同步触达，未选双方触达以避免不必要通知',
+  ]);
+  const resolved = await command(active.executionId, active.token!, ['requirement-context', 'status']);
+  assert.match(resolved, /活动决策 1 个，已关闭 1 个，待人工回答 0 个/);
+  assert.match(resolved, /## SUBMIT[\s\S]*`requirement-context decision-resolution complete`/);
+});
+
 test('requirement context migration exposes split decision phases and proposal audit fields', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -996,6 +1055,8 @@ test('exposes only the new business-context protocol and rejects every legacy co
   const proposalHelp = await command(active.executionId, active.token!, ['help', 'decision-proposal']);
   assert.match(proposalHelp, /只完整提出 Decision Tree/);
   assert.match(proposalHelp, /建议决定权/);
+  assert.match(proposalHelp, /规格与代码现状冲突、遗漏影响处置/);
+  assert.match(proposalHelp, /不要主动改良、替换或扩展输入业务方案/);
   assert.match(proposalHelp, /普通问题本身不要求 assertion 或 impact 反向引用/);
   const resolutionHelp = await command(active.executionId, active.token!, ['help', 'decision-resolution']);
   assert.match(resolutionHelp, /只回答已经完整提出/);

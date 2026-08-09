@@ -1392,7 +1392,9 @@ function requirementContextReadiness(
     return {
       status: 'not_ready',
       remaining: unprocessed.map((question) =>
-        `决策 ${question.decision_key} 尚未使用 question decide 关闭或使用 question ask 纳入 HUMAN 批次`),
+        state.decisionMode === 'fully_autonomous'
+          ? `决策 ${question.decision_key} 尚未按完全自主策略使用 question decide 关闭；不得使用 question ask`
+          : `决策 ${question.decision_key} 尚未使用 question decide 关闭或使用 question ask 纳入 HUMAN 批次`),
       nextCommand: null,
     };
   }
@@ -1509,7 +1511,11 @@ function renderRequirementContextWorkPacket(
       ],
       autonomous: [
         '高度自主',
-        'Agent 可在明确 Reported Intent 与既有业务边界内关闭可逆选择；涉及范围扩张、不可逆承诺、合规风险或显著不同业务结果时仍必须纳入 HUMAN 批次。',
+        'Agent 可在明确的输入业务方案与既有业务边界内关闭可逆选择；涉及范围扩张、不可逆承诺、合规风险或显著不同业务结果时仍必须纳入 HUMAN 批次。',
+      ],
+      fully_autonomous: [
+        '完全自主',
+        '当前决策树中的全部未关闭活动节点都由 Agent 自行选择并关闭，包括会改变用户可观察行为、业务规则或当前目标内范围细节的选择；不得使用 question ask，也不得形成 HUMAN 决策批次。选择仍须遵守输入业务方案、已确认业务语义及本工作包边界。',
       ],
     } satisfies Record<WorkflowDecisionMode, [string, string]>)[state.decisionMode]
     : null;
@@ -1547,7 +1553,7 @@ function renderRequirementContextWorkPacket(
       '',
       `- Mode: \`${state.decisionMode}\` · ${decisionPolicy[0]}`,
       `- Instruction: ${decisionPolicy[1]}`,
-      '- Fixed Boundary: 任何强度都不能覆盖用户明确决定、伪造项目事实、扩大已表达目标或引入无关业务结果。',
+      '- Fixed Boundary: 任何强度都不能覆盖用户明确决定、伪造项目事实、扩大到已表达目标之外或引入无关业务结果。缺失的外部事实仍按事实缺口处理，不能伪装成 Agent 决策。',
       '- Scope: 本策略只在当前 DECISION TREE · RESOLVE 工作包生效，不属于其他 backlog 阶段上下文。',
     ] : []),
     '',
@@ -2747,6 +2753,7 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
     return [
       '本阶段只完整提出 Decision Tree，不回答任何新决策，也不请求用户确认。',
       '能够从上下文或项目证据确定的事实不得询问；不会改变需求上下文或交付规划的单元级选择应形成 Analysis Obligation。',
+      '本角色只关闭规格与代码现状冲突、遗漏影响处置，或为了让 TO-BE 与 SCOPE 在当前项目中唯一成立而必须关闭的语义分叉；不要主动改良、替换或扩展输入业务方案。',
       '',
       '  requirement-context question add --key <稳定decision key> --title <标题> --question <问题> --impact <不同回答的业务影响>',
       '  requirement-context question option-add --key <问题key> --id <选项id> --label <名称> --consequence <后果>',

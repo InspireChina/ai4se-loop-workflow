@@ -1,6 +1,7 @@
-import { notFound } from 'next/navigation';
 import Link from 'next/link';
+import { notFound } from 'next/navigation';
 import { AlertTriangle, ArrowRight, Check, CheckCircle2, Clock3, FileText, GitBranch } from 'lucide-react';
+import { decisionAlignmentQuestions } from '../../../src/application/decision-alignment';
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
 import { getTaskContextChat } from '../../../src/application/task-context-chat';
@@ -115,8 +116,10 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const pipeline = await pipelineForTask(taskId);
   const contextChat = await getTaskContextChat(taskId);
   const unansweredQuestions = questions.filter((question) => question.status === 'pending');
-  const agentHandledDecisions = questions.filter((question) => question.decision_authority === 'agent' && ['answered', 'resolved'].includes(question.status));
-  const userDecisions = questions.filter((question) => question.decision_authority === 'human' && ['answered', 'resolved'].includes(question.status));
+  const alignedDecisions = decisionAlignmentQuestions(questions, deliverySpecs);
+  const pendingDecisions = alignedDecisions.filter((question) => question.decision_authority === 'human' && question.status === 'pending');
+  const agentHandledDecisions = alignedDecisions.filter((question) => question.decision_authority === 'agent' && ['answered', 'resolved'].includes(question.status));
+  const userDecisions = alignedDecisions.filter((question) => question.decision_authority === 'human' && ['answered', 'resolved'].includes(question.status));
   const waitingForControlAnswers = task.run_state === 'waiting_for_answers'
     && (task.current_subagent === 'backlog-agent' || task.current_subagent === 'repro-agent' || task.current_subagent === 'feedback-agent');
   const waitingForAnswers = waitingForControlAnswers || analysisLane.status === 'waiting_for_answers';
@@ -246,7 +249,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           <strong>查看任务级决策清单</strong>
           <small>集中查看并处理需要你决定、Agent 已关闭和历史失效的决策节点。</small>
           <div className="decision-alignment-entry-counts">
-            <span className="amber">需要我决策 {unansweredQuestions.length}</span>
+            <span className="amber">需要我决策 {pendingDecisions.length}</span>
             <span>Agent 已处理 {agentHandledDecisions.length}</span>
             <span className="green">用户已决定 {userDecisions.length}</span>
           </div>

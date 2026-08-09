@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
-test('ships rigorous V2 seed prompts for every flow Agent', () => {
-  assert.equal(AGENT_PROMPT_SEED_REVISION, 2);
+test('ships rigorous V5 seed prompts for every flow Agent', () => {
+  assert.equal(AGENT_PROMPT_SEED_REVISION, 5);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
     assert.ok(prompt.length >= 450, `${agentId} seed prompt is too small to define a reliable role contract`);
@@ -26,15 +26,20 @@ test('ships rigorous V2 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /代码是获取知识的手段，不是需求上下文的表达语言/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /需求规格与代码呈现不同业务逻辑时，必须同时记录 Expected 与 Actual/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /technical.*作为 Analysis Obligations/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /目标不是最少问题，而是在职责范围内充分覆盖并使用最少交互轮次/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /一次批量提交独立根节点和已知条件子节点/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /目标不是最少问题，也不是探索所有可能方案.*以最少交互轮次/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /一次批量提交必要的根节点和已知条件子节点/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /互斥选项、各自业务后果、推荐选项及理由/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /输入的需求规格和业务方案与当前项目的真实业务行为进行核对/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /规格与代码或运行中的业务逻辑冲突/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不要主动提出超出输入业务方案的新产品形态、替代目标或增值方案/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /TO-BE 和 SCOPE 是正式产物/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /完全自主模式必须自行关闭全部活动节点/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /识别影响不等于扩大范围/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /会形成独立业务结果的影响不得暗中并入本轮/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /错误结论带理由 dismiss.*显式 supersede/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /能从上下文和项目证据确定的事实不得询问用户/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不得以“合理性”为名用 Agent 偏好覆盖用户决定/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /如果不同答案会改变需求上下文、业务范围或交付单元拆分/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不得以“合理性”为名用 Agent 偏好覆盖已确定的业务语义/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /如果规格与代码现状不一致.*SCOPE 或交付单元拆分/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不得修改工作区文件或提交代码/);
   assert.match(AGENT_PROFILE_DEFINITIONS['story-splitter-agent'].prompt, /每次启动先.*delivery-plan status/);
   assert.match(AGENT_PROFILE_DEFINITIONS['story-splitter-agent'].prompt, /稳定 unit key/);
@@ -48,8 +53,9 @@ test('ships rigorous V2 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /当前交付单元及其上游业务语义是本阶段必须履行的承诺/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /不同选择是否会产生不同的业务语义、用户可观察结果、信息层级、交互路径/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /先提出、再回答/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /容易修改、技术上可逆或 Agent 能够实现，都不能代替产品决定权/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /除非当前 RESOLVE 工作包明确给出完全自主权限.*不能代替产品决定权/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /自动决策策略只由 DECISION TREE · RESOLVE 工作包提供/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /只有完全自主模式允许 Agent.*自行决定产品语义/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /任何会约束 Dev 或 Test 的方案必须先在决策树中登记/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /保持原决定的稳定语义身份/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /让独立 Test Agent 建立唯一的业务 Oracle/);

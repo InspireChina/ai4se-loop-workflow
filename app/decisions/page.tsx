@@ -12,6 +12,7 @@ import {
   UserRound,
 } from 'lucide-react';
 import { answerDecisionQuestionAction, submitDecisionAnswersAction } from '../actions';
+import { decisionAlignmentQuestions, decisionAnswerText } from '../../src/application/decision-alignment';
 import { formatEventTime } from '../../src/application/event-time';
 import { getTask, type Question } from '../../src/application/tasks';
 import { agentLabel, deliveryUnitLabel, terminologyText } from '../../src/domain/terminology';
@@ -19,6 +20,7 @@ import { agentLabel, deliveryUnitLabel, terminologyText } from '../../src/domain
 export const dynamic = 'force-dynamic';
 
 type DecisionView = 'all' | 'mine' | 'agent' | 'answered' | 'audit';
+type DecisionSource = 'all' | 'backlog' | 'analysis';
 type DecisionOption = { id: string; label: string; consequences: string[] };
 type Activation = { decisionKey: string; optionId: string };
 
@@ -55,8 +57,17 @@ function authorityClass(question: Question) {
   return 'human';
 }
 
-function viewHref(taskId: string, view: DecisionView) {
-  return `/decisions?taskId=${encodeURIComponent(taskId)}${view === 'all' ? '' : `&view=${view}`}`;
+function viewHref(taskId: string, view: DecisionView, source: DecisionSource) {
+  const params = new URLSearchParams({ taskId });
+  if (view !== 'all') params.set('view', view);
+  if (source !== 'all') params.set('source', source);
+  return `/decisions?${params.toString()}`;
+}
+
+function visibleForSource(question: Question, source: DecisionSource) {
+  if (source === 'backlog') return question.source_agent === 'backlog-agent';
+  if (source === 'analysis') return question.source_agent === 'analyst-agent';
+  return true;
 }
 
 function visibleForView(question: Question, view: DecisionView) {
@@ -173,7 +184,7 @@ function DecisionCard({
 
         {!canAnswer && question.answer && ['answered', 'resolved'].includes(question.status) && <div className="decision-demo-inline-evidence">
           <b>{question.decision_authority === 'agent' ? 'Agent 决策' : '用户答案'}</b>
-          <span>{question.answer}{selectedOption?.consequences.length ? `。${selectedOption.consequences.join('；')}` : ''}</span>
+          <span>{decisionAnswerText(question.answer, selectedOption?.consequences || [])}</span>
         </div>}
         {!canAnswer && !question.answer && question.status === 'conditional' && <div className="decision-demo-inline-evidence"><b>等待上游</b><span>{question.status_reason || '上游决策完成后才可回答。'}</span></div>}
         {!canAnswer && ['not_applicable', 'superseded'].includes(question.status) && <div className="decision-demo-inline-evidence"><b>{question.status === 'superseded' ? '已失效' : '当前不适用'}</b><span>{question.status_reason || '当前有效决策路径未命中此节点。'}</span></div>}
@@ -189,7 +200,7 @@ function DecisionCard({
 export default async function DecisionsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ taskId?: string | string[]; view?: string | string[] }>;
+  searchParams: Promise<{ taskId?: string | string[]; view?: string | string[]; source?: string | string[] }>;
 }) {
   const params = await searchParams;
   const taskId = typeof params.taskId === 'string' ? params.taskId : null;
@@ -201,20 +212,27 @@ export default async function DecisionsPage({
   const view: DecisionView = ['mine', 'agent', 'answered', 'audit'].includes(requestedView)
     ? requestedView as DecisionView
     : 'all';
-  const { task, questions, events, lanes } = detail;
-  const orderedQuestions = orderDecisionTree(questions);
+  const requestedSource = typeof params.source === 'string' ? params.source : 'all';
+  const source: DecisionSource = ['backlog', 'analysis'].includes(requestedSource)
+    ? requestedSource as DecisionSource
+    : 'all';
+  const { task, events, lanes } = detail;
+  const questions = decisionAlignmentQuestions(detail.questions, detail.deliverySpecs);
+  const sourceQuestions = questions.filter((question) => visibleForSource(question, source));
+  const orderedQuestions = orderDecisionTree(sourceQuestions);
   const questionByKey = new Map(
     questions
       .filter((question) => question.decision_key)
       .map((question) => [question.decision_key!, question]),
   );
-  const humanPending = questions.filter((question) => question.decision_authority === 'human' && question.status === 'pending');
-  const agentResolved = questions.filter((question) => question.decision_authority === 'agent' && ['answered', 'resolved'].includes(question.status));
-  const humanResolved = questions.filter((question) => question.decision_authority === 'human' && ['answered', 'resolved'].includes(question.status));
-  const historical = questions.filter((question) => ['not_applicable', 'superseded'].includes(question.status));
+  const allHumanPending = questions.filter((question) => question.decision_authority === 'human' && question.status === 'pending');
+  const humanPending = sourceQuestions.filter((question) => question.decision_authority === 'human' && question.status === 'pending');
+  const agentResolved = sourceQuestions.filter((question) => question.decision_authority === 'agent' && ['answered', 'resolved'].includes(question.status));
+  const humanResolved = sourceQuestions.filter((question) => question.decision_authority === 'human' && ['answered', 'resolved'].includes(question.status));
+  const historical = sourceQuestions.filter((question) => ['not_applicable', 'superseded'].includes(question.status));
   const current = orderedQuestions.filter((question) => question.status !== 'superseded');
   const visibleQuestions = orderedQuestions.filter((question) => visibleForView(question, view));
-  const version = Math.max(1, ...questions.map((question) => question.spec_revision));
+  const version = Math.max(1, ...sourceQuestions.map((question) => question.spec_revision));
   const analysisLane = lanes.find((lane) => lane.lane === 'analysis');
   const waitingForControlAnswers = task.run_state === 'waiting_for_answers'
     && ['backlog-agent', 'repro-agent', 'feedback-agent'].includes(task.current_subagent || '');
@@ -222,6 +240,7 @@ export default async function DecisionsPage({
   const targetAgent = waitingForControlAnswers ? task.current_subagent : analysisLane?.current_agent || 'analyst-agent';
   const auditEvents = events.filter((event) => ['ClarificationRequested', 'QuestionAnswered', 'RequirementClarificationsResolved'].includes(event.event_type)).slice(0, 5);
   const viewTitle = view === 'mine' ? '需要我决策' : view === 'agent' ? 'Agent 已处理' : view === 'answered' ? '用户已决定' : view === 'audit' ? '失效与未命中节点' : '全部当前决策';
+  const sourceTitle = source === 'backlog' ? '需求梳理 Agent' : source === 'analysis' ? '交付分析 Agent' : '全部来源';
 
   return <div className="decision-demo-page">
     <header className="decision-demo-header">
@@ -243,15 +262,20 @@ export default async function DecisionsPage({
 
     <section className="decision-demo-toolbar card">
       <nav className="decision-demo-tabs" aria-label="决策筛选">
-        <Link className={view === 'mine' ? 'active' : ''} href={viewHref(taskId, 'mine')}>需要我决策 <b>{humanPending.length}</b></Link>
-        <Link className={view === 'agent' ? 'active' : ''} href={viewHref(taskId, 'agent')}>Agent 已处理 <b>{agentResolved.length}</b></Link>
-        <Link className={view === 'answered' ? 'active' : ''} href={viewHref(taskId, 'answered')}>用户已决定 <b>{humanResolved.length}</b></Link>
-        <Link className={view === 'all' ? 'active' : ''} href={viewHref(taskId, 'all')}>全部当前 <b>{current.length}</b></Link>
-        <Link className={view === 'audit' ? 'active' : ''} href={viewHref(taskId, 'audit')}>失效分支 <b>{historical.length}</b></Link>
+        <Link className={view === 'mine' ? 'active' : ''} href={viewHref(taskId, 'mine', source)}>需要我决策 <b>{humanPending.length}</b></Link>
+        <Link className={view === 'agent' ? 'active' : ''} href={viewHref(taskId, 'agent', source)}>Agent 已处理 <b>{agentResolved.length}</b></Link>
+        <Link className={view === 'answered' ? 'active' : ''} href={viewHref(taskId, 'answered', source)}>用户已决定 <b>{humanResolved.length}</b></Link>
+        <Link className={view === 'all' ? 'active' : ''} href={viewHref(taskId, 'all', source)}>全部当前 <b>{current.length}</b></Link>
+        <Link className={view === 'audit' ? 'active' : ''} href={viewHref(taskId, 'audit', source)}>失效分支 <b>{historical.length}</b></Link>
       </nav>
       <div className="decision-demo-filter-row">
         <span className="decision-demo-filter-label"><ListFilter size={14}/>当前视图：{viewTitle}</span>
-        <span className="decision-demo-version">决策图 v{version} · {questions.length} 个节点</span>
+        <nav className="decision-demo-source-filter" aria-label="决策来源筛选">
+          <Link className={source === 'all' ? 'active' : ''} href={viewHref(taskId, view, 'all')}>全部来源</Link>
+          <Link className={source === 'backlog' ? 'active' : ''} href={viewHref(taskId, view, 'backlog')}>需求梳理 Agent</Link>
+          <Link className={source === 'analysis' ? 'active' : ''} href={viewHref(taskId, view, 'analysis')}>交付分析 Agent</Link>
+        </nav>
+        <span className="decision-demo-version">{sourceTitle} · 决策图 v{version} · {sourceQuestions.length} 个节点</span>
       </div>
     </section>
 
@@ -272,10 +296,10 @@ export default async function DecisionsPage({
 
         {waitingForAnswers && <div className="decision-demo-submit card">
           <div>
-            <strong>{humanPending.length ? `当前还有 ${humanPending.length} 项需要你决策` : '当前适用决策均已回答'}</strong>
-            <small>{humanPending.length ? '逐项保存后，完成所有当前适用问题再提交整批答案。' : '提交后会把完整有效决策树交回负责 Agent。'}</small>
+            <strong>{allHumanPending.length ? `当前还有 ${allHumanPending.length} 项需要你决策` : '当前适用决策均已回答'}</strong>
+            <small>{allHumanPending.length ? '逐项保存后，完成所有当前适用问题再提交整批答案。' : '提交后会把完整有效决策树交回负责 Agent。'}</small>
           </div>
-          {humanPending.length === 0
+          {allHumanPending.length === 0
             ? <form action={submitDecisionAnswersAction}>
               <input type="hidden" name="taskId" value={taskId}/>
               <button type="submit" className="button success">提交本批决策并交回 {agentLabel(targetAgent)}</button>
@@ -311,7 +335,7 @@ export default async function DecisionsPage({
           {auditEvents.length === 0 ? <div className="empty">暂无决策审计事件。</div> : auditEvents.map((event) => <div key={event.event_id}>
             <span/><p><b>{agentLabel(event.actor)}</b>{terminologyText(event.summary)}<small>{formatEventTime(event.created_at)}</small></p>
           </div>)}
-          <Link className="decision-demo-audit-link" href={viewHref(taskId, 'audit')}><FileClock size={13}/>查看失效分支与被取代节点</Link>
+          <Link className="decision-demo-audit-link" href={viewHref(taskId, 'audit', source)}><FileClock size={13}/>查看失效分支与被取代节点</Link>
         </section>
 
         <section className="decision-demo-note">

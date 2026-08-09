@@ -467,7 +467,9 @@ function deliveryAnalysisReadiness(
       return {
         status: 'not_ready',
         remaining: unprocessed.map((decision) =>
-          `决策 ${decision.decision_key} 尚未按当前 RESOLVE 策略关闭或使用 decision ask 纳入 HUMAN 批次`),
+          current.analysisDecisionMode === 'fully_autonomous'
+            ? `决策 ${decision.decision_key} 尚未按完全自主策略使用 decision resolve 关闭；不得使用 decision ask`
+            : `决策 ${decision.decision_key} 尚未按当前 RESOLVE 策略关闭或使用 decision ask 纳入 HUMAN 批次`),
         nextCommand: null,
       };
     }
@@ -543,6 +545,10 @@ function renderWorkPacket(current: DeliveryAnalysisState, phase: DeliveryAnalysi
           '高度自主',
           '可使用 agent_authority 关闭既有业务契约范围内的技术与工程边界决策；产品决定仍纳入 HUMAN 批次。',
         ],
+        fully_autonomous: [
+          '完全自主',
+          '继承明确上游承诺和已有用户答案后，全部未关闭活动节点都使用 agent_authority 自行选择并关闭，包括当前冻结需求与交付单元目标内的产品行为、公共契约、数据语义、兼容策略和工程边界；不得使用 decision ask，也不得形成 HUMAN 决策批次。',
+        ],
       }[current.analysisDecisionMode]
     : null;
   return [
@@ -569,7 +575,7 @@ function renderWorkPacket(current: DeliveryAnalysisState, phase: DeliveryAnalysi
       '',
       `- Mode: \`${current.analysisDecisionMode}\` · ${decisionPolicy[0]}`,
       `- Instruction: ${decisionPolicy[1]}`,
-      '- Fixed Boundary: 任何强度都不能自主创造产品语义、用户可观察行为、公共契约、业务数据语义或兼容承诺。',
+      '- Fixed Boundary: 任何强度都不能覆盖明确的用户决定或冻结上游承诺、伪造项目事实、扩大当前需求与交付单元目标，或引入无关业务结果。缺失的外部事实仍按事实缺口处理，不能伪装成 Agent 决策。',
       '- Scope: 本策略只在当前 DECISION TREE · RESOLVE 工作包生效，不属于其他阶段上下文。',
     ] : []),
     '',
@@ -1107,12 +1113,12 @@ export function deliveryAnalysisHelp(terminalActions: string[], topic?: string |
       '',
       '关闭决策：',
       '  delivery-analysis decision resolve --key <key> --option <选项id> --authority <upstream|user|project_evidence|agent_authority> --decision <结论> --rationale <理由> --evidence <证据>',
-      '  authority 必须与提出阶段登记的建议决定权相符；user 仅用于消费当前 key 的已有用户回答。',
+      '  authority 先继承上游与已有用户回答，再按当前 ANALYSIS DECISION POLICY 处理建议权限；user 仅用于消费当前 key 的已有用户回答。',
       '',
       '自动决策强度：',
       '  生效模式和具体指令只出现在当前 DECISION TREE · RESOLVE 工作包的 ANALYSIS DECISION POLICY 中。',
       '  不要从需求详情、其他阶段、历史 execution 或通用 help 猜测本次模式。',
-      '  任何模式都不能自主创造产品语义、用户可观察行为、公共契约、业务数据语义或兼容承诺。',
+      '  只有完全自主模式允许在冻结需求与当前交付单元目标内自行决定产品语义、用户可观察行为、公共契约、业务数据语义或兼容承诺；任何模式都不能覆盖明确上游承诺或扩大当前目标。',
       '',
       'HUMAN 批次：',
       '  delivery-analysis decision ask --key <key>',

@@ -22,7 +22,7 @@ async function begin(delegation: DelegationEnvelope, suffix: string) {
 
 async function deliveryAnalysisDelegation(
   title: string,
-  analysisDecisionMode?: 'conservative' | 'balanced' | 'autonomous',
+  analysisDecisionMode?: 'conservative' | 'balanced' | 'autonomous' | 'fully_autonomous',
 ) {
   const { databaseConnection } = await import('../infrastructure/database');
   const { createTask, pipelineForTask } = await import('./tasks');
@@ -537,6 +537,62 @@ test('conservative metadata is injected only into the decision resolution work p
   assert.match(await command(active.executionId, active.token!, [
     'delivery-analysis', 'decision', 'ask', '--key', 'storage-shape',
   ]), /marked_for_human/);
+});
+
+test('fully autonomous analysis resolves product decisions without a HUMAN batch', async () => {
+  const { taskId, delegation } = await deliveryAnalysisDelegation('完全自主交付分析', 'fully_autonomous');
+  const active = await begin(delegation, `${taskId}-fully-autonomous`);
+  const initial = await command(active.executionId, active.token!, ['delivery-analysis', 'status']);
+  assert.doesNotMatch(initial, /fully_autonomous|ANALYSIS DECISION POLICY|完全自主/);
+  await command(active.executionId, active.token!, [
+    'delivery-analysis', 'decision', 'propose', '--key', 'output-presentation', '--type', 'business',
+    '--title', '结果呈现方式', '--question', '只显示结论还是同时显示评估依据？',
+    '--impact', '选择会改变用户可观察的信息层级',
+  ]);
+  await command(active.executionId, active.token!, [
+    'delivery-analysis', 'impact', 'upsert', '--key', 'presentation-impact',
+    '--area', '结果页面', '--finding', '呈现方式尚未由上游唯一确定', '--disposition', 'needs_decision',
+    '--evidence', '冻结需求与当前页面调查', '--decision', 'output-presentation',
+  ]);
+  const proposalPacket = await command(active.executionId, active.token!, [
+    'delivery-analysis', 'impact-scan', 'complete',
+  ]);
+  assert.doesNotMatch(proposalPacket, /fully_autonomous|ANALYSIS DECISION POLICY|完全自主/);
+  for (const option of [
+    ['summary', '只显示结论', '页面保持简洁'],
+    ['explanation', '显示结论及依据', '用户可以审查评估理由'],
+  ]) {
+    await command(active.executionId, active.token!, [
+      'delivery-analysis', 'decision', 'option-upsert', '--key', 'output-presentation',
+      '--id', option[0], '--label', option[1], '--consequence', option[2],
+    ]);
+  }
+  await command(active.executionId, active.token!, [
+    'delivery-analysis', 'decision', 'recommend', '--key', 'output-presentation',
+    '--option', 'explanation', '--authority', 'needs_user_input',
+    '--reason', '这是会改变用户可观察结果的产品决定',
+  ]);
+  const resolutionPacket = await command(active.executionId, active.token!, [
+    'delivery-analysis', 'decision-proposal', 'complete',
+  ]);
+  assert.match(resolutionPacket, /Mode: `fully_autonomous` · 完全自主/);
+  assert.match(resolutionPacket, /不得使用 decision ask，也不得形成 HUMAN 决策批次/);
+  assert.match(resolutionPacket, /产品行为、公共契约、数据语义、兼容策略和工程边界/);
+  await command(active.executionId, active.token!, [
+    'delivery-analysis', 'decision', 'resolve', '--key', 'output-presentation',
+    '--option', 'explanation', '--authority', 'agent_authority',
+    '--decision', '显示结论及评估依据',
+    '--rationale', '评估依据让用户核验结论；主要代价是页面信息增加，未选纯结论以避免不可解释结果',
+    '--evidence', '冻结目标、候选后果与现有页面信息结构',
+  ]);
+  await command(active.executionId, active.token!, [
+    'delivery-analysis', 'impact', 'resolve', '--key', 'presentation-impact',
+    '--disposition', 'change', '--finding', '页面显示结论及评估依据',
+    '--evidence', '完全自主决策已关闭 output-presentation',
+  ]);
+  const resolved = await command(active.executionId, active.token!, ['delivery-analysis', 'status']);
+  assert.match(resolved, /关键决策：1（已关闭 1 \/ 待确认 0）/);
+  assert.match(resolved, /## SUBMIT[\s\S]*`delivery-analysis decision-resolution complete`/);
 });
 
 test('delivery analysis work keys isolate delivery units while resume preserves one draft identity', async () => {

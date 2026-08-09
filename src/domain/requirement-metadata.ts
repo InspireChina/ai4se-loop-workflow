@@ -22,6 +22,9 @@ export const REQUIREMENT_METADATA_DEFINITIONS = [{
   }, {
     value: 'autonomous',
     label: '高度自主',
+  }, {
+    value: 'fully_autonomous',
+    label: '完全自主',
   }],
 }] as const;
 
@@ -33,7 +36,7 @@ export type RequirementMetadataInput = {
 };
 
 export const DEFAULT_ANALYSIS_DECISION_MODE = 'balanced' as const;
-export type AnalysisDecisionMode = 'conservative' | 'balanced' | 'autonomous';
+export type AnalysisDecisionMode = 'conservative' | 'balanced' | 'autonomous' | 'fully_autonomous';
 
 const definitionByKey = new Map<string, typeof REQUIREMENT_METADATA_DEFINITIONS[number]>(
   REQUIREMENT_METADATA_DEFINITIONS.map((definition) => [definition.key, definition]),
@@ -46,7 +49,10 @@ export function requirementMetadataDefinition(key: string) {
 export function analysisDecisionMode(entries: readonly { metadata_key?: string; key?: string; metadata_value?: string; value?: string }[]): AnalysisDecisionMode {
   const entry = entries.find((item) => (item.metadata_key || item.key) === 'workflow.analysis_decision_mode');
   const value = entry?.metadata_value || entry?.value;
-  return value === 'conservative' || value === 'autonomous' || value === 'balanced'
+  return value === 'conservative'
+    || value === 'balanced'
+    || value === 'autonomous'
+    || value === 'fully_autonomous'
     ? value
     : DEFAULT_ANALYSIS_DECISION_MODE;
 }

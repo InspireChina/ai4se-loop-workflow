@@ -66,8 +66,8 @@ export const DELIVERY_ANALYSIS_WORKFLOW: Record<DeliveryAnalysisPhase, DeliveryA
   decision_resolution: {
     title: 'DECISION TREE · RESOLVE',
     objective: '按上游承诺、项目证据、本次自动决策强度与用户决定权，关闭已经完整提出的决策树。',
-    required: '全部活动决策已按有效决定权关闭或组成一个完整 HUMAN 批次；用户回答必须在原 key 上以 user 权限关闭。',
-    prohibited: '不要在回答阶段临时新增方案；发现遗漏决策时回流 PROPOSE，发现遗漏影响时回流 IMPACT SCAN。自动决策强度不能扩大产品决定权。',
+    required: '全部活动决策已按有效决定权关闭或按当前策略组成一个完整 HUMAN 批次；用户回答必须在原 key 上以 user 权限关闭，完全自主模式下所有其余节点必须由 Agent 关闭。',
+    prohibited: '不要在回答阶段临时新增方案；发现遗漏决策时回流 PROPOSE，发现遗漏影响时回流 IMPACT SCAN。只能按当前 RESOLVE 工作包给出的自动决策强度行使决定权。',
     commands: [
       'delivery-analysis decision resolve',
       'delivery-analysis decision ask',
@@ -79,8 +79,8 @@ export const DELIVERY_ANALYSIS_WORKFLOW: Record<DeliveryAnalysisPhase, DeliveryA
     ],
     reviewBeforeSubmit: [
       '先继承上游答案和具备决定权的项目证据，再应用本次自动决策强度。',
-      'Agent 自主结论没有创造新产品语义、用户可观察行为、公共契约、业务数据语义或兼容承诺。',
-      '所有剩余 HUMAN 节点已经一次标记并形成完整批次，而不是逐个随机追问。',
+      'Agent 自主结论符合当前决策强度，且没有覆盖明确上游承诺、扩大当前交付目标或引入无关业务结果。',
+      '当前策略允许保留的 HUMAN 节点已经一次标记并形成完整批次，而不是逐个随机追问；完全自主模式下不存在 HUMAN 节点。',
       '已关闭决策的关联影响不再保留 needs_decision；未命中分支不进入活动交付契约。',
     ],
     submit: 'delivery-analysis decision-resolution complete',

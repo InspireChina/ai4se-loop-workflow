@@ -43,10 +43,10 @@ export const REQUIREMENT_CONTEXT_WORKFLOW: Record<RequirementContextPhase, Requi
     submit: 'requirement-context as-is complete',
   },
   decision_proposal: {
-    objective: '依据 Reported Intent 与已接受的 AS-IS，先完整提出所有会改变需求语义或交付规划的实质分叉。',
+    objective: '依据输入业务方案与已接受的 AS-IS，只提出规格和代码现状冲突、遗漏影响处置，或为了让 TO-BE 与 SCOPE 在当前项目中唯一成立而必须关闭的实质分叉。',
     required: '稳定 decision key、互斥选项及后果、推荐与理由，以及建议决定权；允许在充分扫描后以零决策完成。',
     batch: '一次建立当前已知的全部根节点与条件子节点，以最少交互轮次充分覆盖，不按单问题拆轮次。',
-    prohibited: '不要关闭决策或请求用户确认；即使答案明显，也只登记完整方案、推荐和建议决定权。不要写最终 TO-BE 或 SCOPE。',
+    prohibited: '不要关闭决策或请求用户确认；即使答案明显，也只登记完整选项、推荐和建议决定权。不要主动改良、替换或扩展输入业务方案，也不要写最终 TO-BE 或 SCOPE。',
     commands: [
       'requirement-context question add',
       'requirement-context question option-add',
@@ -63,13 +63,14 @@ export const REQUIREMENT_CONTEXT_WORKFLOW: Record<RequirementContextPhase, Requi
       '所有会形成不同业务结果的根节点与条件子节点都已覆盖。',
       '可从环境或证据确认的事实没有转交用户决定。',
       '每个节点都有互斥选项、后果、推荐、推荐理由和建议决定权。',
+      '所有节点都来自规格与现状冲突、遗漏影响或当前项目中的必要业务边界；没有主动改良、替换或扩展输入业务方案。',
       '尚未根据推荐、当前实现或 Agent 偏好关闭任何新发现的节点。',
     ],
     submit: 'requirement-context decision-proposal complete',
   },
   decision_resolution: {
     objective: '按已有承诺、项目证据、本次自动决策强度与用户决定权，关闭已经完整提出的需求级决策树。',
-    required: '全部活动节点已由 Agent 关闭、由已有用户回答关闭，或组成一个完整 HUMAN 批次。',
+    required: '全部活动节点已由 Agent 关闭、由已有用户回答关闭，或按当前策略组成一个完整 HUMAN 批次。',
     prohibited: '不要在回答阶段临时新增问题、选项或推荐；发现遗漏决策时回流 PROPOSE。自动决策强度不能覆盖用户明确决定或扩大需求范围。',
     commands: [
       'requirement-context question decide',
@@ -82,14 +83,14 @@ export const REQUIREMENT_CONTEXT_WORKFLOW: Record<RequirementContextPhase, Requi
     reviewBeforeSubmit: [
       '先继承已有用户决定和具备决定权的项目证据，再应用本次自动决策强度。',
       'Agent 自主结论没有覆盖明确输入、暗中扩大范围或创造无关业务结果。',
-      '所有剩余 HUMAN 节点已一次标记并形成完整批次，而不是逐个随机追问。',
+      '当前策略允许保留的 HUMAN 节点已一次标记并形成完整批次，而不是逐个随机追问；完全自主模式下不存在 HUMAN 节点。',
       '已回答节点沿用原 decision key，未命中分支不进入活动 TO-BE。',
     ],
     submit: 'requirement-context decision-resolution complete',
     pendingHumanSubmit: 'requirement-context request-clarification',
   },
   to_be: {
-    objective: '把 Reported Intent、Active Decision Path 和必须保持的 Existing Expected 投影成 TO-BE。',
+    objective: '把输入业务方案、Active Decision Path 和必须保持的 Existing Expected 投影成经过 AS-IS 与影响核对的 TO-BE。',
     required: '每条 Target 都能追溯到已关闭决定、权威输入或明确约束，并共同形成自洽业务结果。',
     prohibited: 'TO-BE 不得创造未经记录的新选择；发现新业务分叉时重新打开决策树。',
     commands: [
