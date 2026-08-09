@@ -120,6 +120,12 @@ export async function saveAgentExecutorAction(formData: FormData) {
   redirect('/settings');
 }
 
+function redirectToAgentSection(agentId: string, sectionInput: FormDataEntryValue | null): never {
+  const section = String(sectionInput || '');
+  const allowedSections = new Set(['runtime', 'prompt', 'memory', 'evolution', 'diagnostics']);
+  redirect(`/agents/${agentId}${allowedSections.has(section) ? `?section=${section}` : ''}`);
+}
+
 export async function saveAgentRuntimeAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
   await setAgentRuntimeSettings(agentId, {
@@ -128,7 +134,7 @@ export async function saveAgentRuntimeAction(formData: FormData) {
     codexReasoningEffort: formData.get('codexReasoningEffort'),
     claudeModel: formData.get('claudeModel'),
   });
-  redirect(`/agents/${agentId}`);
+  redirectToAgentSection(agentId, formData.get('section'));
 }
 
 export async function saveLangfuseSettingsAction(formData: FormData) {
@@ -241,26 +247,26 @@ export async function acknowledgeClosureAction(formData: FormData) {
 export async function saveAgentPromptAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
   await saveAgentPrompt({ agentId, content: formData.get('content'), reason: formData.get('reason') });
-  redirect(`/agents/${agentId}`);
+  redirectToAgentSection(agentId, formData.get('section'));
 }
 
 export async function resetAgentPromptAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
   if (formData.get('confirm') !== 'on') throw new Error('请先确认重置当前项目 Prompt');
   await resetAgentPromptToSystemTemplate({ agentId });
-  redirect(`/agents/${agentId}`);
+  redirectToAgentSection(agentId, formData.get('section'));
 }
 
 export async function saveAgentMemoryAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
   await saveAgentMemory({ agentId, content: formData.get('content'), reason: formData.get('reason') });
-  redirect(`/agents/${agentId}`);
+  redirectToAgentSection(agentId, formData.get('section'));
 }
 
 export async function setAgentAutoEvolutionAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
   await setAgentAutoEvolution({ agentId, enabled: formData.get('enabled') });
-  redirect(`/agents/${agentId}`);
+  redirectToAgentSection(agentId, formData.get('section'));
 }
 
 export async function saveSoftwareMaintenanceSettingsAction(formData: FormData) {
