@@ -47,6 +47,15 @@ const bugTaskSteps = [
   ...standardTaskSteps.slice(1),
 ] as const;
 
+const businessAnalysisSteps = [
+  { label: '需求意图确认', agent: 'idea-context-agent', statuses: ['backlog'] },
+  { label: '业务方案设计', agent: 'business-design-agent', statuses: ['backlog'] },
+  { label: '需求规格编写', agent: 'requirement-spec-agent', statuses: ['backlog'] },
+  { label: '规格独立审查', agent: 'spec-review-agent', statuses: ['backlog'] },
+  { label: '阅读规格', agent: null, statuses: ['ready_to_close'] },
+  { label: '完成', agent: null, statuses: ['done'] },
+] as const;
+
 function stepDetail(task: { agile_status: string; run_state: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number }, lanes: { lane: string; status: string; current_agent: string | null }[]) {
   const laneAttention = lanes.filter((lane) => ['waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked'].includes(lane.status));
   if (laneAttention.length) return laneAttention.map((lane) => {
@@ -111,6 +120,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const detail = await getTask(taskId);
   if (!detail) notFound();
   const { task, metadata, lanes, stories, deliverySpecs, questions, runtimeInputs, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
+  const isBusinessAnalysis = task.item_type === 'business-analysis';
   const analysisLane = lanes.find((lane) => lane.lane === 'analysis')!;
   const deliveryLane = lanes.find((lane) => lane.lane === 'delivery')!;
   const pipeline = await pipelineForTask(taskId);
@@ -121,14 +131,18 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const agentHandledDecisions = alignedDecisions.filter((question) => question.decision_authority === 'agent' && ['answered', 'resolved'].includes(question.status));
   const userDecisions = alignedDecisions.filter((question) => question.decision_authority === 'human' && ['answered', 'resolved'].includes(question.status));
   const waitingForControlAnswers = task.run_state === 'waiting_for_answers'
-    && (task.current_subagent === 'backlog-agent' || task.current_subagent === 'repro-agent' || task.current_subagent === 'feedback-agent');
+    && ['idea-context-agent', 'business-design-agent', 'backlog-agent', 'repro-agent', 'feedback-agent'].includes(task.current_subagent || '');
   const waitingForAnswers = waitingForControlAnswers || analysisLane.status === 'waiting_for_answers';
   const nextStepText = waitingForAnswers && unansweredQuestions.length === 0
     ? `回答已保存，提交后交回 ${agentLabel(waitingForControlAnswers ? task.current_subagent : 'analyst-agent')}`
     : terminologyText(task.next_step) || '—';
   const currentStepDetail = waitingForAnswers && unansweredQuestions.length === 0
     ? `回答已保存，等待提交 · ${agentLabel(waitingForControlAnswers ? task.current_subagent : 'analyst-agent')}`
-    : stepDetail(task, lanes);
+    : isBusinessAnalysis
+      ? task.agile_status === 'ready_to_close' ? '需求规格已通过独立审查，等待阅读'
+        : task.agile_status === 'done' ? 'Business Analysis 已完成'
+          : `${agentLabel(task.current_subagent)}正在推进当前工作包`
+      : stepDetail(task, lanes);
   const unansweredRuntimeInputs = runtimeInputs.filter((input) => input.status === 'pending');
   const waitingRuntimeLanes = lanes.filter((lane) => lane.status === 'waiting_for_runtime_input');
   const waitingForRuntimeInput = waitingRuntimeLanes.length > 0;
@@ -139,8 +153,12 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const blockingFeedback = documentComments.filter((comment) => comment.feedback_status !== 'resolved');
   const deliveryDocuments = documents.filter((document) => document.document_id !== reviewDocument?.document_id);
   const progressStatus = task.agile_status === 'blocked' ? task.resume_status || 'backlog' : task.agile_status;
-  const taskSteps = task.item_type === 'bug' || progressStatus === 'in repro' ? bugTaskSteps : standardTaskSteps;
-  const currentStep = taskSteps.findIndex((step) => step.statuses.some((status) => status === progressStatus));
+  const taskSteps = isBusinessAnalysis ? businessAnalysisSteps : task.item_type === 'bug' || progressStatus === 'in repro' ? bugTaskSteps : standardTaskSteps;
+  const currentStep = isBusinessAnalysis
+    ? progressStatus === 'done' ? businessAnalysisSteps.length - 1
+      : progressStatus === 'ready_to_close' ? businessAnalysisSteps.length - 2
+        : Math.max(0, businessAnalysisSteps.findIndex((step) => step.agent === task.current_subagent))
+    : taskSteps.findIndex((step) => step.statuses.some((status) => status === progressStatus));
   const currentSpecs = deliverySpecs.filter((spec) => spec.status !== 'superseded');
 
   return <>
@@ -151,14 +169,14 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           <p className="eyebrow">{task.task_id}</p>
           <h1>{task.title}</h1>
         </div>
-        <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : statusLabel(task.agile_status)}</span>
+        <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : isBusinessAnalysis ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status)}</span>
       </div>
       <div className="chips">
         <TaskAutoRefresh/>
         <span>PIPELINE · {itemTypeLabel(task.item_type)}</span>
         <span>优先级 · {requirementPriorityLabel(task.priority)}</span>
-        <span>交付分析 · {agentLabel(analysisLane.current_agent)}</span>
-        <span>开发验证 · {agentLabel(deliveryLane.current_agent)}</span>
+        {!isBusinessAnalysis && <span>交付分析 · {agentLabel(analysisLane.current_agent)}</span>}
+        {!isBusinessAnalysis && <span>开发验证 · {agentLabel(deliveryLane.current_agent)}</span>}
         {metadata.map((item) => {
           const definition = requirementMetadataDefinition(item.metadata_key);
           if (!definition) return null;
@@ -203,22 +221,25 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         <span className="caption-dot"/>
         <div>
           <small>{taskSteps[Math.max(currentStep, 0)]?.label}</small>
-          <strong>{currentStepDetail}</strong>
+          <strong>{isBusinessAnalysis && task.agile_status === 'backlog'
+            ? `${businessAnalysisSteps[currentStep]?.label} · ${agentLabel(task.current_subagent || 'idea-context-agent')}`
+            : currentStepDetail}</strong>
         </div>
       </div>
     </section>
 
     <section className="card task-summary">
-      <div><small>交付分析</small><b>{task.analysis_index} / {task.total_stories}</b></div>
+      {!isBusinessAnalysis && <><div><small>交付分析</small><b>{task.analysis_index} / {task.total_stories}</b></div>
       <div><small>实现</small><b>{task.dev_index} / {task.total_stories}</b></div>
-      <div><small>验证</small><b>{task.test_index} / {task.total_stories}</b></div>
+      <div><small>验证</small><b>{task.test_index} / {task.total_stories}</b></div></>}
+      {isBusinessAnalysis && <div><small>当前阶段</small><b>{businessAnalysisSteps[currentStep]?.label}</b></div>}
       <div><small>待回答决策</small><b>{unansweredQuestions.length}</b></div>
       <div><small>待补充信息或验证协助</small><b>{unansweredRuntimeInputs.length}</b></div>
       <div className="summary-wide"><small>下一步</small><p>{nextStepText}</p></div>
       <div className="summary-wide"><small>文档</small><p>{documents.length} 个数据库文档</p></div>
     </section>
 
-    <section className="lane-grid" aria-label="任务并行 Lane 状态">
+    {!isBusinessAnalysis && <section className="lane-grid" aria-label="任务并行 Lane 状态">
       {[analysisLane, deliveryLane].map((lane) => <article className={`card lane-card ${lane.status}`} key={lane.lane}>
         <div className="lane-card-head">
           <div>
@@ -235,7 +256,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         <p>{lane.current_agent ? `${agentLabel(lane.current_agent)}${lane.current_story_index ? ` · ${deliveryUnitLabel(lane.current_story_index)}` : ''}` : lane.status === 'pending' ? '等待可消费的上游结果' : '当前没有运行中的 Agent'}</p>
         {lane.blocked_reason && <small>{terminologyText(lane.blocked_reason)}</small>}
       </article>)}
-    </section>
+    </section>}
 
     <section className="task-decision-entry-section" id="decision-alignment">
       <div className="section-head">
@@ -260,7 +281,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
 
     <div className="task-detail-grid">
       <div className="task-main-column">
-        <section className="task-section">
+        {!isBusinessAnalysis && <section className="task-section">
           <div className="section-head">
             <h2>交付单元</h2>
             <small>{stories.length ? `${stories.length} 个交付单元` : '尚未拆分'}</small>
@@ -284,11 +305,11 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             <label>新增交付单元<input name="title" required placeholder="描述可独立验收的最小业务闭环"/></label>
             <button className="button secondary" type="submit">添加</button>
           </form>
-        </section>
+        </section>}
 
         <section className="task-section">
           <div>
-            <div className="section-head"><h2>交付文档</h2><small>{deliveryDocuments.length} 个文档 · {documentComments.filter((comment) => comment.feedback_status !== 'resolved').length} 条待处理反馈</small></div>
+            <div className="section-head"><h2>{isBusinessAnalysis ? 'Business Analysis 产物' : '交付文档'}</h2><small>{deliveryDocuments.length} 个文档 · {documentComments.filter((comment) => comment.feedback_status !== 'resolved').length} 条待处理反馈</small></div>
             <div className="card document-list">{deliveryDocuments.length === 0 ? <div className="empty">还没有数据库文档。</div> : deliveryDocuments.map((document) => <details key={document.document_id} className="document-item">
               <summary><FileText size={15}/><span>{terminologyText(document.title)}</span><small>{[documentKindLabel(document.kind), deliveryUnitLabel(document.story_index), agentLabel(document.source_agent)].filter(Boolean).join(' · ')}</small></summary>
               <ArtifactDocument
@@ -299,14 +320,14 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                 revision={document.revision}
                 comments={documentComments.filter((comment) => comment.document_id === document.document_id)}
                 feedbackGroups={feedbackGroups}
-                allowReopen={task.agile_status !== 'done'}
-                allowComment={task.agile_status !== 'done'}
+                allowReopen={!isBusinessAnalysis && task.agile_status !== 'done'}
+                allowComment={!isBusinessAnalysis && task.agile_status !== 'done'}
               />
             </details>)}</div>
           </div>
         </section>
 
-        {feedbackBatches.length > 0 && <section className="task-section">
+        {!isBusinessAnalysis && feedbackBatches.length > 0 && <section className="task-section">
           <div className="section-head">
             <h2>反馈批次</h2>
             <small>{feedbackBatches.length} 个批次 · {feedbackBatches.filter((batch) => !['completed', 'cancelled'].includes(batch.status)).length} 个活动批次</small>
@@ -341,7 +362,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           </div>
         </section>}
 
-        <section className="task-section">
+        {!isBusinessAnalysis && <section className="task-section">
           <div className="section-head">
             <h2>交付规格</h2>
             <small>{currentSpecs.length} 个当前规格</small>
@@ -379,9 +400,9 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               })}
             </>}
           </div>
-        </section>
+        </section>}
 
-        <section className="task-section">
+        {!isBusinessAnalysis && <section className="task-section">
           <div className="section-head">
             <h2>运行信息与验证协助</h2>
             <small>{runtimeInputs.length} 个请求</small>
@@ -420,10 +441,10 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               <button className="button success">提交{lane.current_agent === 'test-agent' ? '验证协助' : `${lane.lane === 'analysis' ? '交付分析' : '开发验证'}运行信息`}并交回 {agentLabel(lane.current_agent)}</button>
             </form>;
           })}
-        </section>
+        </section>}
 
         {(task.agile_status === 'ready_to_close' || closureAcknowledgements.length > 0) && <section className="task-section">
-          <div className="section-head"><h2>结卡报告</h2><small>版本 {task.review_revision}</small></div>
+          <div className="section-head"><h2>{isBusinessAnalysis ? '通过审查的需求规格说明书' : '结卡报告'}</h2><small>版本 {task.review_revision}</small></div>
           <div className="card document-list">
             {reviewDocument ? <div className="document-item"><ArtifactDocument
               taskId={task.task_id}
@@ -433,8 +454,8 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               revision={reviewDocument.revision}
               comments={documentComments.filter((comment) => comment.document_id === reviewDocument.document_id)}
               feedbackGroups={feedbackGroups}
-              allowReopen={task.agile_status !== 'done'}
-              allowComment={task.agile_status !== 'done'}
+              allowReopen={!isBusinessAnalysis && task.agile_status !== 'done'}
+              allowComment={!isBusinessAnalysis && task.agile_status !== 'done'}
             /></div> : <div className="empty">结卡报告不可用，请重新运行 Review Agent。</div>}
           </div>
           {task.agile_status === 'ready_to_close' && reviewDocument && blockingFeedback.length > 0 && <div className="release-block">
@@ -443,7 +464,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           {task.agile_status === 'ready_to_close' && reviewDocument && blockingFeedback.length === 0 && <form action={acknowledgeClosureAction} className="release-block">
             <input type="hidden" name="taskId" value={task.task_id}/>
             <input type="hidden" name="reviewRevision" value={task.review_revision}/>
-            <button className="button success">我已阅读结卡报告并关闭需求</button>
+            <button className="button success">{isBusinessAnalysis ? '我已阅读需求规格说明书并结束分析' : '我已阅读结卡报告并关闭需求'}</button>
           </form>}
         </section>}
 

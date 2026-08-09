@@ -495,7 +495,7 @@ const documentSchema = z.object({
   title: z.string().min(1).max(240).optional().nullable(),
   content: z.string().max(100000),
   format: z.enum(['markdown', 'json', 'text']).default('markdown'),
-  actor: z.enum(['human', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent']).default('human'),
+  actor: z.enum(['human', 'idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent']).default('human'),
 });
 
 export async function upsertDocument(input: unknown) {
@@ -643,7 +643,7 @@ const createTaskSchema = z.object({
     key: z.string(),
     value: z.string(),
   })).optional().default([]),
-  itemType: z.enum(['feature', 'bug', 'tech', 'intake', 'other']).default('feature'),
+  itemType: z.enum(['business-analysis', 'feature', 'bug', 'tech', 'intake', 'other']).default('feature'),
   priority: z.string().trim().optional().nullable(),
   actor: z.enum(['human']).default('human'),
   status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'in feedback', 'ready_to_close', 'done', 'cancelled', 'blocked']).default('backlog'),
@@ -656,10 +656,13 @@ export async function createTask(input: unknown) {
   const description = value.description?.trim() || null;
   const link = value.link || null;
   const taskId = `REQ-${randomUUID()}`;
-  const currentSubagent = value.currentSubagent || null;
-  assertActorCanCreate(value.actor, value.status, currentSubagent);
+  const requestedSubagent = value.currentSubagent || null;
+  assertActorCanCreate(value.actor, value.status, requestedSubagent);
+  const currentSubagent = requestedSubagent
+    || (value.itemType === 'business-analysis' ? 'idea-context-agent' : null);
   const state: TaskState = {
     task_id: taskId,
+    item_type: value.itemType,
     agile_status: value.status,
     current_subagent: currentSubagent,
     analysis_index: 0,
@@ -932,10 +935,10 @@ function parseQuestionActivations(value: string | null): QuestionActivation[] {
   }
 }
 
-function recomputeQuestionApplicabilityInDb(
+export function recomputeTaskQuestionApplicabilityInDb(
   db: Awaited<ReturnType<typeof databaseConnection>>,
   taskId: string,
-  sourceAgent: 'backlog-agent' | 'analyst-agent',
+  sourceAgent: string,
   storyIndex: number | null,
 ) {
   const rows = db.prepare(`
@@ -1018,7 +1021,7 @@ export function recomputeBacklogQuestionApplicabilityInDb(
   db: Awaited<ReturnType<typeof databaseConnection>>,
   taskId: string,
 ) {
-  recomputeQuestionApplicabilityInDb(db, taskId, 'backlog-agent', null);
+  recomputeTaskQuestionApplicabilityInDb(db, taskId, 'backlog-agent', null);
 }
 
 export async function answerQuestion(input: unknown) {
@@ -1046,7 +1049,9 @@ export async function answerQuestion(input: unknown) {
     if (question.source_agent === 'backlog-agent') {
       recomputeBacklogQuestionApplicabilityInDb(db, taskId);
     } else if (question.source_agent === 'analyst-agent') {
-      recomputeQuestionApplicabilityInDb(db, taskId, 'analyst-agent', question.story_index);
+      recomputeTaskQuestionApplicabilityInDb(db, taskId, 'analyst-agent', question.story_index);
+    } else if (question.source_agent === 'idea-context-agent' || question.source_agent === 'business-design-agent') {
+      recomputeTaskQuestionApplicabilityInDb(db, taskId, question.source_agent, null);
     }
     addEvent(db, taskId, 'human', 'QuestionAnswered', `回答了「${question.title}」。`);
     db.exec('COMMIT');
@@ -1283,7 +1288,7 @@ const questionSchema = z.object({
   specRevision: z.coerce.number().int().positive().default(1),
   blockedReason: z.string().max(1000).optional().nullable(),
   blockTask: z.coerce.boolean().default(true),
-  actor: z.enum(['human', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent', 'feedback-agent']).default('human'),
+  actor: z.enum(['human', 'idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent', 'feedback-agent']).default('human'),
 });
 
 export async function addQuestion(input: unknown) {
@@ -1360,7 +1365,7 @@ export async function submitClarificationAnswers(taskId: string) {
   if (!task) throw new Error('需求不存在');
   const lane = taskLaneInDb(db, task, 'analysis');
   const controlAgent = task.run_state === 'waiting_for_answers'
-    && (task.current_subagent === 'backlog-agent' || task.current_subagent === 'repro-agent' || task.current_subagent === 'feedback-agent')
+    && (['idea-context-agent', 'business-design-agent', 'backlog-agent', 'repro-agent', 'feedback-agent'].includes(task.current_subagent || ''))
     ? task.current_subagent
     : null;
   const analysisLevel = !controlAgent && lane.status === 'waiting_for_answers';
@@ -1387,6 +1392,10 @@ export async function submitClarificationAnswers(taskId: string) {
       controlAgent ? 1 : 0,
       controlAgent === 'backlog-agent'
         ? '用户回答已提交，交回需求梳理 Agent 更新需求边界'
+        : controlAgent === 'idea-context-agent'
+          ? '用户回答已提交，交回需求意图 Agent 综合有效意图路径'
+          : controlAgent === 'business-design-agent'
+            ? '用户回答已提交，交回业务方案 Agent 关闭有效业务决策树'
         : controlAgent === 'repro-agent'
           ? '用户回答已提交，交回问题复现 Agent 重新复现并核对证据'
           : controlAgent === 'feedback-agent'
@@ -1411,6 +1420,10 @@ export async function submitClarificationAnswers(taskId: string) {
       'ClarificationAnswersSubmitted',
       controlAgent === 'backlog-agent'
         ? '提交全部需求级澄清回答，等待 AI 更新需求边界。'
+        : controlAgent === 'idea-context-agent'
+          ? '提交全部需求意图回答，等待 Agent 综合有效意图路径。'
+          : controlAgent === 'business-design-agent'
+            ? '提交全部业务方案决定，等待 Agent 关闭有效决策树。'
         : controlAgent === 'repro-agent'
           ? '提交全部复现对齐回答，等待 AI 重新复现并核对证据。'
           : controlAgent === 'feedback-agent'
@@ -2190,7 +2203,7 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
   let analysisSlots = Math.max(0, 4 - active.filter((item) => item.lane === 'analysis').length);
   let codeAvailable = !tasks.some(occupiesCodeSlot) && !active.some((item) => item.agent === 'dev-agent');
   const readyDev = !codeAvailable ? null : tasks.find((task) => task.agile_status === 'ready for dev' && task.dev_index < task.analysis_index)?.task_id || null;
-  let browserUsed = active.some((item) => ['backlog-agent', 'repro-agent', 'test-agent'].includes(item.agent));
+  let browserUsed = active.some((item) => ['idea-context-agent', 'backlog-agent', 'repro-agent', 'test-agent'].includes(item.agent));
   const lines: DelegationEnvelope[] = [];
   const analysisCandidates: { task: Task; lane: TaskLane }[] = [];
   for (const task of tasks) {

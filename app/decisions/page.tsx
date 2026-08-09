@@ -20,7 +20,7 @@ import { agentLabel, deliveryUnitLabel, terminologyText } from '../../src/domain
 export const dynamic = 'force-dynamic';
 
 type DecisionView = 'all' | 'mine' | 'agent' | 'answered' | 'audit';
-type DecisionSource = 'all' | 'backlog' | 'analysis';
+type DecisionSource = 'all' | 'intent' | 'business-design' | 'backlog' | 'analysis';
 type DecisionOption = { id: string; label: string; consequences: string[] };
 type Activation = { decisionKey: string; optionId: string };
 
@@ -65,6 +65,8 @@ function viewHref(taskId: string, view: DecisionView, source: DecisionSource) {
 }
 
 function visibleForSource(question: Question, source: DecisionSource) {
+  if (source === 'intent') return question.source_agent === 'idea-context-agent';
+  if (source === 'business-design') return question.source_agent === 'business-design-agent';
   if (source === 'backlog') return question.source_agent === 'backlog-agent';
   if (source === 'analysis') return question.source_agent === 'analyst-agent';
   return true;
@@ -213,7 +215,7 @@ export default async function DecisionsPage({
     ? requestedView as DecisionView
     : 'all';
   const requestedSource = typeof params.source === 'string' ? params.source : 'all';
-  const source: DecisionSource = ['backlog', 'analysis'].includes(requestedSource)
+  const source: DecisionSource = ['intent', 'business-design', 'backlog', 'analysis'].includes(requestedSource)
     ? requestedSource as DecisionSource
     : 'all';
   const { task, events, lanes } = detail;
@@ -235,12 +237,16 @@ export default async function DecisionsPage({
   const version = Math.max(1, ...sourceQuestions.map((question) => question.spec_revision));
   const analysisLane = lanes.find((lane) => lane.lane === 'analysis');
   const waitingForControlAnswers = task.run_state === 'waiting_for_answers'
-    && ['backlog-agent', 'repro-agent', 'feedback-agent'].includes(task.current_subagent || '');
+    && ['idea-context-agent', 'business-design-agent', 'backlog-agent', 'repro-agent', 'feedback-agent'].includes(task.current_subagent || '');
   const waitingForAnswers = waitingForControlAnswers || analysisLane?.status === 'waiting_for_answers';
   const targetAgent = waitingForControlAnswers ? task.current_subagent : analysisLane?.current_agent || 'analyst-agent';
   const auditEvents = events.filter((event) => ['ClarificationRequested', 'QuestionAnswered', 'RequirementClarificationsResolved'].includes(event.event_type)).slice(0, 5);
   const viewTitle = view === 'mine' ? '需要我决策' : view === 'agent' ? 'Agent 已处理' : view === 'answered' ? '用户已决定' : view === 'audit' ? '失效与未命中节点' : '全部当前决策';
-  const sourceTitle = source === 'backlog' ? '需求梳理 Agent' : source === 'analysis' ? '交付分析 Agent' : '全部来源';
+  const sourceTitle = source === 'intent' ? '需求意图 Agent'
+    : source === 'business-design' ? '业务方案 Agent'
+      : source === 'backlog' ? '需求梳理 Agent'
+        : source === 'analysis' ? '交付分析 Agent'
+          : '全部来源';
 
   return <div className="decision-demo-page">
     <header className="decision-demo-header">
@@ -272,6 +278,8 @@ export default async function DecisionsPage({
         <span className="decision-demo-filter-label"><ListFilter size={14}/>当前视图：{viewTitle}</span>
         <nav className="decision-demo-source-filter" aria-label="决策来源筛选">
           <Link className={source === 'all' ? 'active' : ''} href={viewHref(taskId, view, 'all')}>全部来源</Link>
+          <Link className={source === 'intent' ? 'active' : ''} href={viewHref(taskId, view, 'intent')}>需求意图 Agent</Link>
+          <Link className={source === 'business-design' ? 'active' : ''} href={viewHref(taskId, view, 'business-design')}>业务方案 Agent</Link>
           <Link className={source === 'backlog' ? 'active' : ''} href={viewHref(taskId, view, 'backlog')}>需求梳理 Agent</Link>
           <Link className={source === 'analysis' ? 'active' : ''} href={viewHref(taskId, view, 'analysis')}>交付分析 Agent</Link>
         </nav>

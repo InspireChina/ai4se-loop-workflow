@@ -62,6 +62,22 @@ function summarizeCommand(command: string) {
   const normalized = command.replace(/["']/g, '');
   const unescaped = command.replace(/\\(["'])/g, '$1');
   if (/(?:^|[/\\])loop-agent\.mjs(?:["']|\s)/.test(unescaped)) {
+    if (normalized.includes(' idea-context status')) return '恢复需求意图草稿';
+    if (normalized.includes(' idea-context request-clarification')) return '提交需求意图确认问题';
+    if (normalized.includes(' idea-context complete')) return '完成需求意图确认';
+    if (normalized.includes(' idea-context ')) return '提交需求意图工作包';
+    if (normalized.includes(' business-design status')) return '恢复业务方案草稿';
+    if (normalized.includes(' business-design request-clarification')) return '提交业务方案决策';
+    if (normalized.includes(' business-design complete')) return '完成业务方案设计';
+    if (normalized.includes(' business-design ')) return '提交业务方案工作包';
+    if (normalized.includes(' requirement-spec status')) return '恢复需求规格草稿';
+    if (normalized.includes(' requirement-spec return-gap')) return '回流需求规格上游缺口';
+    if (normalized.includes(' requirement-spec complete')) return '完成需求规格说明书';
+    if (normalized.includes(' requirement-spec ')) return '提交需求规格工作包';
+    if (normalized.includes(' spec-review status')) return '恢复规格审查草稿';
+    if (normalized.includes(' spec-review approve')) return '批准需求规格说明书';
+    if (normalized.includes(' spec-review return-revision')) return '回流规格审查缺口';
+    if (normalized.includes(' spec-review ')) return '提交规格审查工作包';
     if (normalized.includes(' requirement-context status')) return '恢复需求上下文草稿';
     if (normalized.includes(' requirement-context intent set')) return '保存业务意图';
     if (normalized.includes(' requirement-context change set')) return '保存业务变化';

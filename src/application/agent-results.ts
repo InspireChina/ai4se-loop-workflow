@@ -34,6 +34,10 @@ import { forwardReviewClosureGaps } from './review-closure-gaps';
 import { publishReviewReport } from './review-report-publication';
 
 const artifactKinds: Record<string, string> = {
+  'idea-context-agent': 'ba_intent',
+  'business-design-agent': 'ba_solution',
+  'requirement-spec-agent': 'ba_spec',
+  'spec-review-agent': 'ba_review',
   'backlog-agent': 'context',
   'story-splitter-agent': 'delivery_split',
   'analyst-agent': 'analysis',
@@ -184,7 +188,7 @@ function envelopeFromTask(row: QueuedAgentResult, detail: NonNullable<Awaited<Re
     pipeline: row.pipeline,
     agent: row.agent,
     storyIndex: row.story_index,
-    resource: ['backlog-agent', 'repro-agent', 'test-agent'].includes(row.agent) ? 'browser' : 'none',
+    resource: ['idea-context-agent', 'backlog-agent', 'repro-agent', 'test-agent'].includes(row.agent) ? 'browser' : 'none',
     description: '应用排队中的 Agent 结果',
     title: task.title,
     taskDescription: task.description,
@@ -340,7 +344,9 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
   const canAskAlignmentQuestions = delegation.agent === 'backlog-agent'
     || delegation.agent === 'analyst-agent'
     || delegation.agent === 'repro-agent'
-    || delegation.agent === 'feedback-agent';
+    || delegation.agent === 'feedback-agent'
+    || delegation.agent === 'idea-context-agent'
+    || delegation.agent === 'business-design-agent';
   if (result.questions.length && !canAskAlignmentQuestions) {
     throw new Error(`${delegation.agent} 不允许创建业务或交付决策问题；运行所需信息请使用 runtimeInputs`);
   }
@@ -435,6 +441,101 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     : await saveArtifact(delegation, result);
   const actor = delegation.agent as Actor;
   switch (delegation.agent) {
+    case 'idea-context-agent': {
+      if (result.questions.length) {
+        await saveQuestions(delegation, result);
+        return 'blocked';
+      }
+      requireArtifact(result, delegation.agent);
+      if (result.businessAnalysis?.disposition !== 'advance') throw new Error('需求意图 Agent 必须完成意图简报或请求澄清');
+      await updateTask(delegation.taskId, actor, {
+        agile_status: 'backlog',
+        current_subagent: 'business-design-agent',
+        next_step: '需求意图已确认，等待业务方案设计',
+      });
+      return 'advanced';
+    }
+    case 'business-design-agent': {
+      if (result.questions.length) {
+        await saveQuestions(delegation, result);
+        return 'blocked';
+      }
+      if (result.businessAnalysis?.disposition === 'return_revision') {
+        const target = result.businessAnalysis.target;
+        if (target !== 'intent') throw new Error('业务方案 Agent 只能把上游缺口返回需求意图');
+        await updateTask(delegation.taskId, actor, {
+          agile_status: 'backlog',
+          current_subagent: 'idea-context-agent',
+          next_step: result.businessAnalysis.reason || result.summary,
+        });
+        return 'rewound';
+      }
+      requireArtifact(result, delegation.agent);
+      if (result.businessAnalysis?.disposition !== 'advance') throw new Error('业务方案 Agent 缺少推进结果');
+      await updateTask(delegation.taskId, actor, {
+        agile_status: 'backlog',
+        current_subagent: 'requirement-spec-agent',
+        next_step: '业务方案已确定，等待编写需求规格说明书',
+      });
+      return 'advanced';
+    }
+    case 'requirement-spec-agent': {
+      if (result.businessAnalysis?.disposition === 'return_revision') {
+        const targetAgent = result.businessAnalysis.target === 'intent'
+          ? 'idea-context-agent'
+          : result.businessAnalysis.target === 'business_design'
+            ? 'business-design-agent'
+            : null;
+        if (!targetAgent) throw new Error('需求规格缺口必须返回需求意图或业务方案');
+        await updateTask(delegation.taskId, actor, {
+          agile_status: 'backlog',
+          current_subagent: targetAgent,
+          next_step: result.businessAnalysis.reason || result.summary,
+        });
+        return 'rewound';
+      }
+      requireArtifact(result, delegation.agent);
+      if (result.businessAnalysis?.disposition !== 'advance') throw new Error('需求规格 Agent 缺少推进结果');
+      await updateTask(delegation.taskId, actor, {
+        agile_status: 'backlog',
+        current_subagent: 'spec-review-agent',
+        next_step: '需求规格草稿已完成，等待独立规格审查',
+      });
+      return 'advanced';
+    }
+    case 'spec-review-agent': {
+      if (result.businessAnalysis?.disposition === 'return_revision') {
+        const targetAgent = result.businessAnalysis.target === 'intent'
+          ? 'idea-context-agent'
+          : result.businessAnalysis.target === 'business_design'
+            ? 'business-design-agent'
+            : result.businessAnalysis.target === 'specification'
+              ? 'requirement-spec-agent'
+              : null;
+        if (!targetAgent) throw new Error('规格审查回流缺少有效目标');
+        await updateTask(delegation.taskId, actor, {
+          agile_status: 'backlog',
+          current_subagent: targetAgent,
+          next_step: result.businessAnalysis.reason || result.summary,
+        });
+        return 'rewound';
+      }
+      requireArtifact(result, delegation.agent);
+      if (result.businessAnalysis?.disposition !== 'approved') throw new Error('规格审查必须批准或回流');
+      if (!artifactDocumentId) throw new Error('规格审查批准缺少最终需求规格文档');
+      const detail = await getTask(delegation.taskId);
+      if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
+      await updateTask(delegation.taskId, actor, {
+        agile_status: 'ready_to_close',
+        current_subagent: null,
+        run_state: 'idle',
+        closure_status: 'awaiting_read',
+        review_revision: detail.task.review_revision + 1,
+        review_document_id: artifactDocumentId,
+        next_step: '需求规格已通过独立审查，等待用户阅读确认',
+      });
+      return 'advanced';
+    }
     case 'backlog-agent': {
       if (result.questions.length) {
         await saveQuestions(delegation, result);

@@ -227,6 +227,10 @@ function deliverySpecValue<T extends { spec_json: string }>(spec: T, agent: stri
 }
 
 const requiredDocumentKinds: Record<string, string[]> = {
+  'idea-context-agent': [],
+  'business-design-agent': ['ba_intent'],
+  'requirement-spec-agent': ['ba_intent', 'ba_solution'],
+  'spec-review-agent': ['ba_intent', 'ba_solution', 'ba_spec'],
   'backlog-agent': ['context'],
   'story-splitter-agent': ['context', 'repro', 'delivery_split'],
   'repro-agent': ['context', 'repro'],
@@ -725,6 +729,10 @@ export function renderAgentWorkingContextPack(snapshot: AgentContextSnapshot) {
     if (['story-splitter-agent', 'analyst-agent', 'repro-agent', 'review-agent', 'feedback-agent'].includes(work.agent)
       && authoritativeFacts.userDecisions.length) {
       relevantFacts.confirmedDecisions = authoritativeFacts.userDecisions;
+    }
+    if (['business-design-agent', 'requirement-spec-agent', 'spec-review-agent'].includes(work.agent)
+      && authoritativeFacts.userDecisions.length) {
+      relevantFacts.confirmedBusinessDecisions = authoritativeFacts.userDecisions;
     }
     if (Object.keys(relevantFacts).length) appendJsonSection(lines, 'Relevant Authoritative Facts', relevantFacts);
   }

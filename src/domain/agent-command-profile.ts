@@ -3,11 +3,43 @@ export type AgentCommandProfile = {
   agent: string;
   pipelines: string[];
   namespace: string;
-  draftType: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification' | 'feedback' | 'review';
+  draftType: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification' | 'feedback' | 'review' | 'business_analysis';
   terminalActions: string[];
 };
 
 const PROFILES: AgentCommandProfile[] = [
+  {
+    id: 'idea-context',
+    agent: 'idea-context-agent',
+    pipelines: ['ba-intent', 'resume'],
+    namespace: 'idea-context',
+    draftType: 'business_analysis',
+    terminalActions: ['idea-context complete', 'idea-context request-clarification'],
+  },
+  {
+    id: 'business-design',
+    agent: 'business-design-agent',
+    pipelines: ['ba-design', 'resume'],
+    namespace: 'business-design',
+    draftType: 'business_analysis',
+    terminalActions: ['business-design complete', 'business-design request-clarification', 'business-design return-gap'],
+  },
+  {
+    id: 'requirement-spec',
+    agent: 'requirement-spec-agent',
+    pipelines: ['ba-spec', 'resume'],
+    namespace: 'requirement-spec',
+    draftType: 'business_analysis',
+    terminalActions: ['requirement-spec complete', 'requirement-spec return-gap'],
+  },
+  {
+    id: 'spec-review',
+    agent: 'spec-review-agent',
+    pipelines: ['ba-review', 'resume'],
+    namespace: 'spec-review',
+    draftType: 'business_analysis',
+    terminalActions: ['spec-review approve', 'spec-review return-revision'],
+  },
   {
     id: 'requirement-context',
     agent: 'backlog-agent',
@@ -124,6 +156,7 @@ export function agentCommandWorkKey(
   const profile = agentCommandProfile(agent, pipeline);
   if (!profile) return null;
   if (profile.draftType === 'requirement_context') return `requirement-context:${taskId}`;
+  if (profile.draftType === 'business_analysis') return `business-analysis:${taskId}:${agent}`;
   if (profile.draftType === 'delivery_plan') {
     return `delivery-plan:${taskId}:${pipeline}:${delegationKey || storyIndex || 'task'}`;
   }
@@ -182,9 +215,12 @@ export function agentContextHelpLines(appRoot: string) {
 }
 
 function terminalActionUsage(action: string) {
-  return action === 'implementation fail'
-    ? `${action} --reason <原因与证据>`
-    : action;
+  if (action === 'implementation fail') return `${action} --reason <原因与证据>`;
+  if (action === 'business-design return-gap') return `${action} --reason-file <需求意图缺口> [--artifact-file <缺口报告>]`;
+  if (action === 'requirement-spec return-gap') return `${action} --target <intent|business_design> --reason-file <理由> [--artifact-file <缺口报告>]`;
+  if (action === 'spec-review approve') return `${action} --artifact-file <完整需求规格>`;
+  if (action === 'spec-review return-revision') return `${action} --target <intent|business_design|specification> --reason-file <理由> [--artifact-file <审查报告>]`;
+  return action;
 }
 
 export function agentCommandPrompt(appRoot: string, agent: string, pipeline: string) {
@@ -203,6 +239,8 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
             ? 'context|plan|execute|evidence|input|finish'
             : profile.draftType === 'review'
               ? 'context|reconciliation|gap|assessment|report|forward|finish'
+              : profile.draftType === 'business_analysis'
+                ? 'context|workflow|artifact|decision|finish'
             : 'context';
   return [
     '# Agent Tool Contract',
@@ -226,14 +264,14 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
     '```bash',
     `${command} help <${helpTopics}>`,
     '```',
-    ...(['requirement_context', 'delivery_plan', 'analysis', 'development', 'verification', 'review'].includes(profile.draftType)
+    ...(['requirement_context', 'delivery_plan', 'analysis', 'development', 'verification', 'review', 'business_analysis'].includes(profile.draftType)
       ? ['', `\`${profile.namespace}\` 的 help 必须指定一个主题；当前阶段可执行命令以 \`status\` 返回的工作包为准。`]
       : []),
     '',
     '**编辑与提交规则：**',
     '',
     '- 命令失败时，根据 Application 返回的错误修正后自行重试；不要因为一次校验失败就结束工作。',
-    ...(['requirement-context', 'delivery-plan', 'delivery-analysis', 'implementation', 'verification', 'review'].includes(profile.namespace)
+    ...(['requirement-context', 'delivery-plan', 'delivery-analysis', 'implementation', 'verification', 'review', 'idea-context', 'business-design', 'requirement-spec', 'spec-review'].includes(profile.namespace)
       ? [`- ${profile.namespace} 命令统一返回 \`COMMAND RESULT\`；继续当前阶段时读取 \`NEXT\`，阶段切换时读取 \`NEXT WORK PACKET\`。`]
       : []),
     '- 草稿命令可以反复增加、修改或删除内容，不会推进业务状态。',

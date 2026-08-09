@@ -39,11 +39,19 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
           const hasCompletedAt = Boolean(task.completed_at);
           const timeLabel = hasCompletedAt ? '完成时间' : '更新时间';
           const timeValue = task.completed_at ?? task.updated_at;
-          const waitingForRequirementAnswers = !completedView && task.run_state === 'waiting_for_answers' && task.current_subagent === 'backlog-agent';
+          const waitingForRequirementAnswers = !completedView && task.run_state === 'waiting_for_answers'
+            && ['idea-context-agent', 'business-design-agent', 'backlog-agent'].includes(task.current_subagent || '');
           const laneSummary = completedView ? '' : waitingForRequirementAnswers
             ? `${agentLabel(task.current_subagent)}（等待用户回答）`
+            : task.item_type === 'business-analysis'
+              ? task.current_subagent ? agentLabel(task.current_subagent) : '等待用户阅读需求规格'
             : (task as TaskWithLanes).lanes.map((lane) => `${lane.lane === 'analysis' ? '交付分析' : '开发验证'}：${agentLabel(lane.current_agent)}（${laneStatusLabels[lane.status] || lane.status}）`).join(' · ');
-          const displayStatus = waitingForRequirementAnswers ? '等待需求澄清' : statusLabel(task.agile_status);
+          const businessAnalysisStatus = task.item_type === 'business-analysis'
+            ? task.agile_status === 'ready_to_close' ? '等待阅读规格'
+              : task.current_subagent ? agentLabel(task.current_subagent).replace(' Agent', '')
+                : task.agile_status === 'backlog' ? '等待需求意图确认' : statusLabel(task.agile_status)
+            : null;
+          const displayStatus = waitingForRequirementAnswers ? '等待需求确认' : businessAnalysisStatus || statusLabel(task.agile_status);
 
           return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}>
             <span><strong>{task.title}</strong><small>{task.task_id} · 优先级 {requirementPriorityLabel(task.priority)}</small></span>

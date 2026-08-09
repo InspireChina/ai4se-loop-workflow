@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 test('stores runtime settings independently for each flow agent', async () => {
+  const { FLOW_AGENT_IDS } = await import('../domain/agent-profile');
   const {
     agentExecutionOptions,
     getAgentRuntimeSettings,
@@ -31,7 +32,7 @@ test('stores runtime settings independently for each flow agent', async () => {
     assert.deepEqual(agentExecutionOptions(backlog), { model: 'gpt-5.6-terra', reasoningEffort: 'high' });
     assert.equal(dev.executorId, 'claude');
     assert.deepEqual(agentExecutionOptions(dev), { model: 'claude-sonnet-4-6' });
-    assert.equal((await listAgentRuntimeSettings()).length, 8);
+    assert.equal((await listAgentRuntimeSettings()).length, FLOW_AGENT_IDS.length);
     await assert.rejects(() => getAgentRuntimeSettings('unknown-agent'), /未知 Agent/);
   } finally {
     await setAgentRuntimeSettings('backlog-agent', backlogBefore);

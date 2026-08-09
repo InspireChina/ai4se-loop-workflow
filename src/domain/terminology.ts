@@ -23,6 +23,10 @@ const agentLabels: Record<string, string> = {
   'test-agent': '验证 Agent',
   'review-agent': '结卡报告 Agent',
   'feedback-agent': '反馈处理 Agent',
+  'idea-context-agent': '需求意图 Agent',
+  'business-design-agent': '业务方案 Agent',
+  'requirement-spec-agent': '需求规格 Agent',
+  'spec-review-agent': '规格审查 Agent',
   'context-chat-agent': '上下文 Chat Agent',
 };
 
@@ -32,6 +36,7 @@ const itemTypeLabels: Record<string, string> = {
   tech: '技术改进',
   intake: '待梳理',
   other: '其他',
+  'business-analysis': 'Business Analysis',
 };
 
 const flowLabels: Record<string, string> = {
@@ -48,6 +53,10 @@ const flowLabels: Record<string, string> = {
   'feedback-split': '反馈交付拆分',
   'feedback-report': '反馈报告修订',
   resume: '恢复推进',
+  'ba-intent': '需求意图确认',
+  'ba-design': '业务方案设计',
+  'ba-spec': '需求规格编写',
+  'ba-review': '规格独立审查',
 };
 
 const documentKindLabels: Record<string, string> = {
@@ -59,6 +68,10 @@ const documentKindLabels: Record<string, string> = {
   test_result: '验证结果',
   review: '整体验收',
   feedback: '反馈澄清',
+  ba_intent: '需求意图简报',
+  ba_solution: '业务方案',
+  ba_spec: '需求规格说明书',
+  ba_review: '规格审查',
 };
 
 const confirmationKindLabels: Record<string, string> = {

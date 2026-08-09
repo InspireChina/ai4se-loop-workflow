@@ -127,6 +127,24 @@ test('labels command-driven draft updates as Agent domain commands', () => {
   assert.match(parsed || '', /恢复需求上下文草稿/);
 });
 
+test('labels Business Analysis packets as Agent domain commands', () => {
+  const line = JSON.stringify({
+    type: 'item.started',
+    item: {
+      type: 'command_execution',
+      command: 'node "/app/scripts/loop/loop-agent.mjs" business-design decision-proposal complete --artifact-file /tmp/tree.json',
+    },
+  });
+  const parsed = getAgentExecutor('codex').parseStdout(line, {
+    agent: 'business-design-agent',
+    taskId: 'REQ-BA',
+    storyIndex: null,
+    pipeline: 'ba-design',
+  });
+  assert.match(parsed || '', /tool=agent-command/);
+  assert.match(parsed || '', /提交业务方案工作包/);
+});
+
 test('labels quoted delivery-plan arguments with the specific progressive action', () => {
   const line = JSON.stringify({
     type: 'item.started',

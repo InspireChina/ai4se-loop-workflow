@@ -47,6 +47,12 @@ import {
   reviewHelp,
   runReviewCommand,
 } from './review-command-drafts';
+import {
+  businessAnalysisHelp,
+  cloneBusinessAnalysisDraft,
+  initializeBusinessAnalysisDraft,
+  runBusinessAnalysisCommand,
+} from './business-analysis-command-drafts';
 
 type ExecutionRow = {
   execution_id: string;
@@ -65,7 +71,7 @@ type DraftRow = {
   draft_id: string;
   work_key: string;
   draft_version: number;
-  draft_type: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification' | 'feedback' | 'review';
+  draft_type: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification' | 'feedback' | 'review' | 'business_analysis';
   task_id: string;
   story_index: number | null;
   agent: string;
@@ -934,6 +940,9 @@ function createDraft(
               : 'closure',
           );
       }
+    } else if (profile.draftType === 'business_analysis') {
+      if (source) cloneBusinessAnalysisDraft(db, source, created, execution.agent);
+      else initializeBusinessAnalysisDraft(db, created, execution.agent);
     }
     return created;
   })();
@@ -3091,6 +3100,17 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         `  其他主题：${command} help <context|reconciliation|gap|assessment|report|forward|finish>`,
       ].join('\n');
     }
+    if (profile.draftType === 'business_analysis') {
+      return [
+        `当前身份：${execution.agent} · ${execution.pipeline}`,
+        `帮助主题：${topic}`,
+        '',
+        ...businessAnalysisHelp(execution.agent, topic),
+        '',
+        ...LONG_TEXT_FILE_HELP,
+        `  其他主题：${command} help <context|workflow|artifact|decision|finish>`,
+      ].join('\n');
+    }
     throw new Error(`当前角色 help 不支持主题：${topic}。可用主题：context`);
   }
   const common = [
@@ -3161,6 +3181,14 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
     return [
       ...common,
       ...reviewHelp(profile.terminalActions, null),
+      '',
+      ...LONG_TEXT_FILE_HELP,
+    ].join('\n');
+  }
+  if (profile.draftType === 'business_analysis') {
+    return [
+      ...common,
+      ...businessAnalysisHelp(execution.agent, null),
       '',
       ...LONG_TEXT_FILE_HELP,
     ].join('\n');
@@ -3655,7 +3683,7 @@ export async function runAgentCommand(input: {
 
   if (positionals[0] === 'help') {
     if (positionals.length > 2) throw new Error('help 最多接受一个主题');
-    if (['requirement_context', 'delivery_plan', 'analysis', 'development', 'verification', 'review'].includes(profile.draftType) && !positionals[1]) {
+    if (['requirement_context', 'delivery_plan', 'analysis', 'development', 'verification', 'review', 'business_analysis'].includes(profile.draftType) && !positionals[1]) {
       const topics = profile.draftType === 'requirement_context'
         ? 'context|assertion|impact|decision-proposal|decision-resolution|scope|finish'
         : profile.draftType === 'delivery_plan'
@@ -3664,8 +3692,10 @@ export async function runAgentCommand(input: {
             ? 'context|impact|decision|contract|finish'
             : profile.draftType === 'development'
               ? 'context|evidence|review|commit|input|finish'
-              : profile.draftType === 'verification'
-                ? 'context|plan|execute|evidence|input|finish'
+            : profile.draftType === 'verification'
+              ? 'context|plan|execute|evidence|input|finish'
+              : profile.draftType === 'business_analysis'
+                ? 'context|workflow|artifact|decision|finish'
                 : 'context|reconciliation|gap|assessment|report|forward|finish';
       throw new Error(
         `${profile.namespace} help 必须指定一个主题：help <${topics}>。`
@@ -3702,6 +3732,9 @@ export async function runAgentCommand(input: {
   }
   if (profile.draftType === 'review') {
     return runReviewCommand({ db, execution, draft, command, flags });
+  }
+  if (profile.draftType === 'business_analysis') {
+    return runBusinessAnalysisCommand({ db, execution, draft, command, flags });
   }
   if (command === 'requirement-context status') {
     db.prepare(`

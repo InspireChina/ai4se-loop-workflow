@@ -1,4 +1,4 @@
-export type RequirementPipelineId = 'feature' | 'bug';
+export type RequirementPipelineId = 'business-analysis' | 'feature' | 'bug';
 
 export type RequirementPipelineStage = {
   key: string;
@@ -62,6 +62,41 @@ const requirementContext: RequirementPipelineStage = {
 };
 
 export const REQUIREMENT_PIPELINES: readonly RequirementPipelineDefinition[] = [{
+  id: 'business-analysis',
+  label: 'Business Analysis',
+  summary: '用于把一个模糊想法发展为经过独立审查的需求规格说明书。',
+  stages: [{
+    key: 'idea-context',
+    title: '需求意图确认',
+    owner: '需求意图 Agent',
+    lane: '控制',
+    description: '调查原始想法，批量关闭目标、参与者、成功结果、约束和权威资料中的歧义。',
+  }, {
+    key: 'business-design',
+    title: '业务方案设计',
+    owner: '业务方案 Agent',
+    lane: '控制',
+    description: '探索业务场景，分离提出与回答决策树，并形成唯一业务方案。',
+  }, {
+    key: 'requirement-spec',
+    title: '需求规格编写',
+    owner: '需求规格 Agent',
+    lane: '控制',
+    description: '把已确认意图和业务方案编译为完整、一致、可验证的需求规格说明书。',
+  }, {
+    key: 'spec-review',
+    title: '规格独立审查',
+    owner: '规格审查 Agent',
+    lane: '控制',
+    description: '独立检查目标、决策、场景、规则、范围、验收和来源追踪，批准或结构化回流。',
+  }, {
+    key: 'spec-acknowledgement',
+    title: '阅读规格',
+    owner: '用户',
+    lane: '人工',
+    description: '阅读通过审查的需求规格说明书并结束本次 Business Analysis。',
+  }],
+}, {
   id: 'feature',
   label: '功能需求',
   summary: '用于新增或主动改变业务能力与用户可观察行为。',
@@ -80,6 +115,6 @@ export const REQUIREMENT_PIPELINES: readonly RequirementPipelineDefinition[] = [
 }];
 
 export function requirementPipeline(input: unknown): RequirementPipelineId {
-  if (input === 'feature' || input === 'bug') return input;
-  throw new Error('PIPELINE 只能选择功能需求或 BUG');
+  if (input === 'business-analysis' || input === 'feature' || input === 'bug') return input;
+  throw new Error('PIPELINE 只能选择 Business Analysis、功能需求或 BUG');
 }

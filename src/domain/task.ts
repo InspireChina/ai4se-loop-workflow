@@ -1,4 +1,4 @@
-export const ACTORS = ['human', 'system', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent', 'feedback-agent'] as const;
+export const ACTORS = ['human', 'system', 'idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent', 'feedback-agent'] as const;
 export const TASK_STATUSES = ['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'in feedback', 'ready_to_close', 'done', 'cancelled', 'blocked'] as const;
 export const RUN_STATES = ['runnable', 'waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked', 'idle'] as const;
 export type Actor = typeof ACTORS[number];
@@ -7,6 +7,7 @@ export type RunState = typeof RUN_STATES[number];
 
 export type TaskState = {
   task_id: string;
+  item_type?: string;
   agile_status: TaskStatus;
   current_subagent: string | null;
   analysis_index: number;
@@ -25,7 +26,7 @@ export type TaskState = {
 };
 
 const transitions: Record<TaskStatus, TaskStatus[]> = {
-  backlog: ['backlog', 'in plan', 'in repro', 'blocked'],
+  backlog: ['backlog', 'in plan', 'in repro', 'ready_to_close', 'blocked'],
   'in repro': ['in repro', 'in plan', 'blocked'],
   'in plan': ['in plan', 'ready for dev', 'blocked'],
   'ready for dev': ['ready for dev', 'in dev', 'blocked'],
@@ -39,6 +40,10 @@ const transitions: Record<TaskStatus, TaskStatus[]> = {
 };
 
 const fieldPermissions: Partial<Record<Actor, string[]>> = {
+  'idea-context-agent': ['agile_status', 'current_subagent', 'next_step'],
+  'business-design-agent': ['agile_status', 'current_subagent', 'next_step'],
+  'requirement-spec-agent': ['agile_status', 'current_subagent', 'next_step'],
+  'spec-review-agent': ['agile_status', 'current_subagent', 'next_step', 'run_state', 'closure_status', 'review_revision', 'review_document_id'],
   'backlog-agent': ['title', 'agile_status', 'current_subagent', 'next_step', 'item_type', 'priority'],
   'story-splitter-agent': ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'next_step'],
   'analyst-agent': ['agile_status', 'current_subagent', 'analysis_index', 'spec_resolved_index', 'next_step'],
@@ -49,6 +54,10 @@ const fieldPermissions: Partial<Record<Actor, string[]>> = {
 };
 
 const statusPermissions: Partial<Record<Actor, TaskStatus[]>> = {
+  'idea-context-agent': ['backlog'],
+  'business-design-agent': ['backlog'],
+  'requirement-spec-agent': ['backlog'],
+  'spec-review-agent': ['backlog', 'ready_to_close'],
   'backlog-agent': ['backlog', 'in plan', 'in repro'],
   'story-splitter-agent': ['in plan', 'ready for dev', 'in dev'],
   'analyst-agent': ['ready for dev', 'in dev'],
@@ -59,6 +68,10 @@ const statusPermissions: Partial<Record<Actor, TaskStatus[]>> = {
 };
 
 const agentPermissions: Partial<Record<Actor, string[]>> = {
+  'idea-context-agent': ['idea-context-agent', 'business-design-agent'],
+  'business-design-agent': ['idea-context-agent', 'business-design-agent', 'requirement-spec-agent'],
+  'requirement-spec-agent': ['idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent'],
+  'spec-review-agent': ['idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent'],
   'backlog-agent': ['backlog-agent', 'story-splitter-agent', 'repro-agent'],
   'story-splitter-agent': ['story-splitter-agent', 'analyst-agent'],
   'analyst-agent': ['analyst-agent'],
@@ -172,7 +185,7 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
     pipeline,
     agent,
     storyIndex,
-    resource: ['backlog-agent', 'repro-agent', 'test-agent'].includes(agent) ? 'browser' : 'none',
+    resource: ['idea-context-agent', 'backlog-agent', 'repro-agent', 'test-agent'].includes(agent) ? 'browser' : 'none',
     description,
   });
   const { analysis_index: a, dev_index: d, test_index: t, total_stories: total, agile_status: status } = task;
@@ -180,13 +193,27 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
   if (task.resume_pending) {
     const agent = task.current_subagent!;
     if (['analyst-agent', 'dev-agent', 'test-agent'].includes(agent)) return null;
-    if (['backlog-agent', 'repro-agent'].includes(agent)) {
+    if (['idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent', 'backlog-agent', 'repro-agent'].includes(agent)) {
       return line('resume', agent, null, '读取人工输入，并安全恢复任务级流程');
     }
     // Delivery planning, feedback and review recover through their original
     // domain pipeline. They do not expose a generic `resume` command protocol.
     // Falling through also makes malformed legacy state self-healing at
     // dispatch time instead of producing an impossible agent/pipeline pair.
+  }
+  if (task.item_type === 'business-analysis') {
+    const agent = task.current_subagent || 'idea-context-agent';
+    const pipeline = agent === 'idea-context-agent' ? 'ba-intent'
+      : agent === 'business-design-agent' ? 'ba-design'
+        : agent === 'requirement-spec-agent' ? 'ba-spec'
+          : agent === 'spec-review-agent' ? 'ba-review'
+            : null;
+    if (!pipeline) throw new Error(`Business Analysis 当前 Agent 无效：${agent}`);
+    const description = agent === 'idea-context-agent' ? '确认需求意图并关闭目标歧义'
+      : agent === 'business-design-agent' ? '探索并确定唯一业务方案'
+        : agent === 'requirement-spec-agent' ? '编写并验证需求规格说明书'
+          : '独立审查需求规格并批准或分类回流';
+    return line(pipeline, agent, null, description);
   }
   // A task-level rewind can preserve `in dev` temporarily to retain the code
   // slot. In that state the Harness-selected control Agent is authoritative;

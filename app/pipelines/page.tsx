@@ -8,7 +8,27 @@ function stageTitle(key: string) {
 
 export default function PipelinesPage() {
   return <>
-    <header><h1>流水线</h1><p className="muted">功能需求和 BUG 的交付路径。</p></header>
+    <header><h1>流水线</h1><p className="muted">Business Analysis 负责从想法形成需求规格；功能需求和 BUG 负责从规格核对到代码交付。</p></header>
+    <section className="card pipeline-map">
+      <svg className="pipeline-map-desktop" viewBox="0 0 1000 110" role="img" aria-labelledby="ba-pipeline-title ba-pipeline-description">
+        <title id="ba-pipeline-title">Business Analysis 流水线</title>
+        <desc id="ba-pipeline-description">模糊想法依次经过需求意图确认、业务方案设计、需求规格编写、规格独立审查和阅读规格。</desc>
+        <path className="pipeline-map-line feature" d="M115 55 H155 M305 55 H345 M495 55 H535 M685 55 H725 M875 55 H910"/>
+        <path className="pipeline-map-arrow" d="M149 51 L156 55 L149 59 Z M339 51 L346 55 L339 59 Z M529 51 L536 55 L529 59 Z M719 51 L726 55 L719 59 Z M904 51 L911 55 L904 59 Z"/>
+        <rect className="pipeline-map-node pipeline-map-entry feature" x="15" y="33" width="100" height="44" rx="8"/>
+        <text className="pipeline-map-label" x="65" y="55">想法</text>
+        <rect className="pipeline-map-node" x="155" y="33" width="150" height="44" rx="8"/>
+        <text className="pipeline-map-label" x="230" y="55">{stageTitle('idea-context')}</text>
+        <rect className="pipeline-map-node" x="345" y="33" width="150" height="44" rx="8"/>
+        <text className="pipeline-map-label" x="420" y="55">{stageTitle('business-design')}</text>
+        <rect className="pipeline-map-node" x="535" y="33" width="150" height="44" rx="8"/>
+        <text className="pipeline-map-label" x="610" y="55">{stageTitle('requirement-spec')}</text>
+        <rect className="pipeline-map-node" x="725" y="33" width="150" height="44" rx="8"/>
+        <text className="pipeline-map-label" x="800" y="55">{stageTitle('spec-review')}</text>
+        <rect className="pipeline-map-node" x="910" y="33" width="75" height="44" rx="8"/>
+        <text className="pipeline-map-label" x="947" y="55">阅读规格</text>
+      </svg>
+    </section>
     <section className="card pipeline-map">
       <svg className="pipeline-map-desktop" viewBox="0 0 1000 190" role="img" aria-labelledby="pipeline-map-title pipeline-map-description">
         <title id="pipeline-map-title">功能需求与 BUG 流水线</title>

@@ -190,6 +190,12 @@ export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object
   rewindStory: z.number().int().positive().optional(),
   changedFiles: z.array(z.string().min(1).max(1000)).max(500).optional(),
   feedback: feedbackResultSchema.optional(),
+  businessAnalysis: z.object({
+    stage: z.enum(['intent', 'business_design', 'specification', 'review']),
+    disposition: z.enum(['advance', 'return_revision', 'approved']),
+    target: z.enum(['intent', 'business_design', 'specification']).optional(),
+    reason: z.string().min(1).max(4000).optional(),
+  }).optional(),
   feedbackResolutions: z.array(z.object({
     commentId: z.string().min(1).max(200),
     summary: z.string().min(1).max(4000),
@@ -304,7 +310,45 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
   const canAskAlignmentQuestions = agent === 'backlog-agent'
     || agent === 'analyst-agent'
     || agent === 'repro-agent'
-    || agent === 'feedback-agent';
+    || agent === 'feedback-agent'
+    || agent === 'idea-context-agent'
+    || agent === 'business-design-agent';
+  const businessAnalysisStage = ({
+    'idea-context-agent': 'intent',
+    'business-design-agent': 'business_design',
+    'requirement-spec-agent': 'specification',
+    'spec-review-agent': 'review',
+  } as Record<string, 'intent' | 'business_design' | 'specification' | 'review'>)[agent];
+  if (businessAnalysisStage) {
+    if (!result.businessAnalysis || result.businessAnalysis.stage !== businessAnalysisStage) {
+      throw new Error(`${agent} 结果缺少匹配的 Business Analysis 阶段契约`);
+    }
+    if (result.runtimeInputs.length) throw new Error('Business Analysis Agent 不使用运行信息请求');
+    if (result.questions.length) {
+      if (!canAskAlignmentQuestions || result.outcome !== 'needs_input') {
+        throw new Error(`${agent} 的意图或业务决策问题必须以 needs_input 提交`);
+      }
+      if (result.businessAnalysis.disposition !== 'advance') {
+        throw new Error('澄清请求不能同时回流或批准');
+      }
+      return;
+    }
+    if (result.outcome !== 'completed') throw new Error(`${agent} 无问题时必须完成当前阶段`);
+    if (result.businessAnalysis.disposition === 'return_revision') {
+      if (!result.businessAnalysis.target || !result.businessAnalysis.reason) {
+        throw new Error('Business Analysis 回流必须包含 target 和 reason');
+      }
+      return;
+    }
+    if (!result.artifact) throw new Error(`${agent} 完成结果缺少 artifact`);
+    if (agent === 'spec-review-agent' && result.businessAnalysis.disposition !== 'approved') {
+      throw new Error('规格审查通过必须使用 approved');
+    }
+    if (agent !== 'spec-review-agent' && result.businessAnalysis.disposition !== 'advance') {
+      throw new Error(`${agent} 正常完成必须使用 advance`);
+    }
+    return;
+  }
   if (agent === 'review-agent') {
     if (result.questions.length || result.runtimeInputs.length) {
       throw new Error('Review Agent 不得创建问题或运行信息请求；事实缺口必须使用 verdict=closure_gap');

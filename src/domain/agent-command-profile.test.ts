@@ -47,6 +47,10 @@ test('advertises a role-specific command guide for every progressive flow Agent'
   const development = agentCommandPrompt('/app', 'dev-agent', 'dev');
   const verification = agentCommandPrompt('/app', 'test-agent', 'test');
   const review = agentCommandPrompt('/app', 'review-agent', 'review');
+  const ideaContext = agentCommandPrompt('/app', 'idea-context-agent', 'ba-intent');
+  const businessDesign = agentCommandPrompt('/app', 'business-design-agent', 'ba-design');
+  const requirementSpec = agentCommandPrompt('/app', 'requirement-spec-agent', 'ba-spec');
+  const specReview = agentCommandPrompt('/app', 'spec-review-agent', 'ba-review');
   assert.match(backlog || '', /COMMAND RESULT.*NEXT WORK PACKET/);
   assert.match(backlog || '', /help <context\|assertion\|impact\|decision-proposal\|decision-resolution\|scope\|finish>/);
   assert.match(splitter || '', /help <context\|unit\|source\|dependency\|revision\|finish>/);
@@ -59,6 +63,14 @@ test('advertises a role-specific command guide for every progressive flow Agent'
   assert.match(review || '', /review 命令统一返回 `COMMAND RESULT`/);
   assert.match(review || '', /Review 不创建问题或运行信息请求/);
   assert.match(review || '', /review complete/);
+  for (const prompt of [ideaContext, businessDesign, requirementSpec, specReview]) {
+    assert.match(prompt || '', /help <context\|workflow\|artifact\|decision\|finish>/);
+    assert.match(prompt || '', /命令统一返回 `COMMAND RESULT`/);
+  }
+  assert.match(ideaContext || '', /idea-context request-clarification/);
+  assert.match(businessDesign || '', /business-design request-clarification/);
+  assert.match(requirementSpec || '', /requirement-spec return-gap/);
+  assert.match(specReview || '', /spec-review approve/);
   assert.doesNotMatch(review || '', /review request-input/);
   assert.match(verification || '', /verification complete/);
   assert.match(verification || '', /verification request-input/);
@@ -66,7 +78,7 @@ test('advertises a role-specific command guide for every progressive flow Agent'
   assert.doesNotMatch(development || '', /help <[^>]*handoff/);
   assert.match(development || '', /implementation fail --reason <原因与证据>/);
   assert.doesNotMatch(analyst || '', /--reason <原因与证据>/);
-  for (const prompt of [backlog, splitter, analyst, development, verification, review]) {
+  for (const prompt of [backlog, splitter, analyst, development, verification, review, ideaContext, businessDesign, requirementSpec, specReview]) {
     assert.doesNotMatch(prompt || '', /loop-agent\.mjs" help\n/);
   }
 });
