@@ -7,6 +7,13 @@ async function command(executionId: string, token: string, args: string[]) {
   return runAgentCommand({ executionId, token, args });
 }
 
+async function completeDeliveryAnswerReview(executionId: string, token: string) {
+  return command(executionId, token, [
+    'delivery-analysis', 'answer-review', 'complete',
+    '--artifact', '已复查全部决策答案、条件分支以及对开发和测试契约的组合后果，没有发现新的交付问题。',
+  ]);
+}
+
 async function begin(delegation: DelegationEnvelope, suffix: string) {
   const { beginExecutionAttempt } = await import('./executions');
   const { issueAgentCommandToken } = await import('./agent-command-drafts');
@@ -172,7 +179,7 @@ async function closeContractAndFinalize(executionId: string, token: string) {
   await command(executionId, token, ['delivery-analysis', 'complete']);
 }
 
-test('delivery analysis help separates proposal and resolution in the five-stage chain', async () => {
+test('delivery analysis help separates proposal, resolution, and answer review in the six-stage chain', async () => {
   const { taskId, delegation } = await deliveryAnalysisDelegation('交付分析命令帮助');
   const active = await begin(delegation, `${taskId}-help`);
 
@@ -199,20 +206,23 @@ test('delivery analysis help separates proposal and resolution in the five-stage
   const resolutionHelp = await command(active.executionId, active.token!, ['help', 'decision-resolution']);
   assert.match(resolutionHelp, /具体指令只出现在当前 DECISION TREE · RESOLVE 工作包/);
   assert.match(resolutionHelp, /impact resolve/);
+  const answerReviewHelp = await command(active.executionId, active.token!, ['help', 'answer-review']);
+  assert.match(answerReviewHelp, /HUMAN、Agent、上游或项目证据/);
+  assert.match(answerReviewHelp, /answer-review expand/);
 
   const contractHelp = await command(active.executionId, active.token!, ['help', 'contract']);
   assert.match(contractHelp, /共同依赖的冻结上游事实/);
   assert.match(contractHelp, /unit-acceptance 是 Application 自动注入/);
 
   const finishHelp = await command(active.executionId, active.token!, ['help', 'finish']);
-  assert.match(finishHelp, /AS-IS & IMPACT SCAN → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → DELIVERY CONTRACT → FINALIZE/);
+  assert.match(finishHelp, /AS-IS & IMPACT SCAN → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → ANSWER REVIEW → DELIVERY CONTRACT → FINALIZE/);
   assert.match(finishHelp, /impact-scan complete/);
   assert.match(finishHelp, /request-clarification/);
   assert.match(finishHelp, /validate 绑定当前草稿变更版本/);
 
   await assert.rejects(
     command(active.executionId, active.token!, ['help', 'unknown']),
-    /可用主题：context、impact、decision-proposal、decision-resolution、contract、finish/,
+    /可用主题：context、impact、decision-proposal、decision-resolution、answer-review、contract、finish/,
   );
 });
 
@@ -336,9 +346,12 @@ test('delivery analysis walks a conditional human decision tree and resumes the 
     '--disposition', 'change', '--finding', '结果以 CSV 下载入口交付',
     '--evidence', '用户明确选择下载 CSV',
   ]);
-  const contractPacket = await command(resumed.executionId, resumed.token!, [
+  const reviewPacket = await command(resumed.executionId, resumed.token!, [
     'delivery-analysis', 'decision-resolution', 'complete',
   ]);
+  assert.match(reviewPacket, /ANSWER REVIEW/);
+  assert.match(reviewPacket, /HUMAN、上游、项目证据与 Agent/);
+  const contractPacket = await completeDeliveryAnswerReview(resumed.executionId, resumed.token!);
   assert.match(contractPacket, /DELIVERY CONTRACT/);
   assert.doesNotMatch(contractPacket, /ANALYSIS DECISION POLICY|Mode: `balanced`/);
   await recordContract(resumed.executionId, resumed.token!);
@@ -395,7 +408,8 @@ test('delivery analysis walks a conditional human decision tree and resumes the 
   assert.deepEqual(transitions.map((item) => [item.from_phase, item.to_phase]), [
     ['impact_scan', 'decision_proposal'],
     ['decision_proposal', 'decision_resolution'],
-    ['decision_resolution', 'delivery_contract'],
+    ['decision_resolution', 'answer_review'],
+    ['answer_review', 'delivery_contract'],
     ['delivery_contract', 'finalize'],
     ['finalize', 'delivery_contract'],
     ['delivery_contract', 'finalize'],
@@ -415,6 +429,7 @@ test('delivery analysis completes the no-decision path through every phase', asy
   await command(active.executionId, active.token!, ['delivery-analysis', 'impact-scan', 'complete']);
   await command(active.executionId, active.token!, ['delivery-analysis', 'decision-proposal', 'complete']);
   await command(active.executionId, active.token!, ['delivery-analysis', 'decision-resolution', 'complete']);
+  await completeDeliveryAnswerReview(active.executionId, active.token!);
   await closeContractAndFinalize(active.executionId, active.token!);
   const completed = await readAgentCommandSubmission(active.executionId);
   assert.equal(completed?.outcome, 'completed');
@@ -467,6 +482,7 @@ test('resolved technical decisions are proposed with alternatives before project
     '--disposition', 'change', '--evidence', '项目数据模型唯一确定存储方式',
   ]);
   await command(active.executionId, active.token!, ['delivery-analysis', 'decision-resolution', 'complete']);
+  await completeDeliveryAnswerReview(active.executionId, active.token!);
   await closeContractAndFinalize(active.executionId, active.token!);
   const completed = await readAgentCommandSubmission(active.executionId);
   const decision = completed?.spec?.decisions[0];
@@ -593,6 +609,19 @@ test('fully autonomous analysis resolves product decisions without a HUMAN batch
   const resolved = await command(active.executionId, active.token!, ['delivery-analysis', 'status']);
   assert.match(resolved, /关键决策：1（已关闭 1 \/ 待确认 0）/);
   assert.match(resolved, /## SUBMIT[\s\S]*`delivery-analysis decision-resolution complete`/);
+  const reviewPacket = await command(active.executionId, active.token!, [
+    'delivery-analysis', 'decision-resolution', 'complete',
+  ]);
+  assert.match(reviewPacket, /ANSWER REVIEW/);
+  assert.match(reviewPacket, /HUMAN、上游、项目证据与 Agent/);
+  const reviewExpansionPacket = await command(active.executionId, active.token!, [
+    'delivery-analysis', 'answer-review', 'expand',
+    '--artifact', '组合答案暴露了说明内容层级的新分叉，需要增量提出一个新问题。',
+  ]);
+  assert.match(reviewExpansionPacket, /From: answer_review[\s\S]*To: decision_proposal/);
+  assert.match(reviewExpansionPacket, /LATEST ANSWER REVIEW[\s\S]*说明内容层级/);
+  const reopened = await command(active.executionId, active.token!, ['delivery-analysis', 'status']);
+  assert.match(reopened, /关键决策：1（已关闭 1 \/ 待确认 0）/);
 });
 
 test('delivery analysis work keys isolate delivery units while resume preserves one draft identity', async () => {

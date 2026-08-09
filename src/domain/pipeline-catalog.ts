@@ -1,4 +1,4 @@
-export type RequirementPipelineId = 'business-analysis' | 'feature' | 'bug';
+export type RequirementPipelineId = 'business-analysis' | 'end-to-end' | 'feature' | 'bug';
 
 export type RequirementPipelineStage = {
   key: string;
@@ -13,6 +13,14 @@ export type RequirementPipelineDefinition = {
   label: string;
   summary: string;
   stages: readonly RequirementPipelineStage[];
+};
+
+const requirementContext: RequirementPipelineStage = {
+  key: 'requirement-context',
+  title: '需求梳理',
+  owner: '需求梳理 Agent',
+  lane: '控制',
+  description: '确认 AS IS 与代码事实，校验既有需求规格或业务方案，并补齐 TO BE、SCOPE、真实影响与验收语义。',
 };
 
 const deliveryStages: readonly RequirementPipelineStage[] = [{
@@ -53,49 +61,48 @@ const deliveryStages: readonly RequirementPipelineStage[] = [{
   description: '阅读当前结卡报告并确认关闭需求。',
 }];
 
-const requirementContext: RequirementPipelineStage = {
-  key: 'requirement-context',
-  title: '需求梳理',
-  owner: '需求梳理 Agent',
+const businessAnalysisStages: readonly RequirementPipelineStage[] = [{
+  key: 'idea-context',
+  title: '需求意图确认',
+  owner: '需求意图 Agent',
   lane: '控制',
-  description: '确认 AS IS、决策树、TO BE、SCOPE、影响和验收语义。',
-};
+  description: '调查原始想法，批量关闭目标、参与者、成功结果、约束和权威资料中的歧义。',
+}, {
+  key: 'business-design',
+  title: '业务方案设计',
+  owner: '业务方案 Agent',
+  lane: '控制',
+  description: '探索业务场景，分离提出与回答决策树，并形成唯一业务方案。',
+}, {
+  key: 'requirement-spec',
+  title: '需求规格编写',
+  owner: '需求规格 Agent',
+  lane: '控制',
+  description: '把已确认意图和业务方案编译为完整、一致、可验证的需求规格说明书。',
+}, {
+  key: 'spec-review',
+  title: '规格独立审查',
+  owner: '规格审查 Agent',
+  lane: '控制',
+  description: '独立检查目标、决策、场景、规则、范围、验收和来源追踪，批准或结构化回流。',
+}];
 
 export const REQUIREMENT_PIPELINES: readonly RequirementPipelineDefinition[] = [{
   id: 'business-analysis',
   label: 'Business Analysis',
   summary: '用于把一个模糊想法发展为经过独立审查的需求规格说明书。',
-  stages: [{
-    key: 'idea-context',
-    title: '需求意图确认',
-    owner: '需求意图 Agent',
-    lane: '控制',
-    description: '调查原始想法，批量关闭目标、参与者、成功结果、约束和权威资料中的歧义。',
-  }, {
-    key: 'business-design',
-    title: '业务方案设计',
-    owner: '业务方案 Agent',
-    lane: '控制',
-    description: '探索业务场景，分离提出与回答决策树，并形成唯一业务方案。',
-  }, {
-    key: 'requirement-spec',
-    title: '需求规格编写',
-    owner: '需求规格 Agent',
-    lane: '控制',
-    description: '把已确认意图和业务方案编译为完整、一致、可验证的需求规格说明书。',
-  }, {
-    key: 'spec-review',
-    title: '规格独立审查',
-    owner: '规格审查 Agent',
-    lane: '控制',
-    description: '独立检查目标、决策、场景、规则、范围、验收和来源追踪，批准或结构化回流。',
-  }, {
+  stages: [...businessAnalysisStages, {
     key: 'spec-acknowledgement',
     title: '阅读规格',
     owner: '用户',
     lane: '人工',
     description: '阅读通过审查的需求规格说明书并结束本次 Business Analysis。',
   }],
+}, {
+  id: 'end-to-end',
+  label: 'End to End',
+  summary: '从模糊想法开始，自动完成 Business Analysis，并把批准后的需求规格直接交给 Develop 主干。',
+  stages: [...businessAnalysisStages, requirementContext, ...deliveryStages],
 }, {
   id: 'feature',
   label: 'Develop',
@@ -115,6 +122,6 @@ export const REQUIREMENT_PIPELINES: readonly RequirementPipelineDefinition[] = [
 }];
 
 export function requirementPipeline(input: unknown): RequirementPipelineId {
-  if (input === 'business-analysis' || input === 'feature' || input === 'bug') return input;
-  throw new Error('PIPELINE 只能选择 Business Analysis、Develop 或 Bug Fix');
+  if (input === 'business-analysis' || input === 'end-to-end' || input === 'feature' || input === 'bug') return input;
+  throw new Error('PIPELINE 只能选择 Business Analysis、End to End、Develop 或 Bug Fix');
 }

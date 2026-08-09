@@ -525,6 +525,16 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       if (!artifactDocumentId) throw new Error('规格审查批准缺少最终需求规格文档');
       const detail = await getTask(delegation.taskId);
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
+      if (detail.task.item_type === 'end-to-end') {
+        await updateTask(delegation.taskId, actor, {
+          agile_status: 'backlog',
+          current_subagent: 'backlog-agent',
+          run_state: 'runnable',
+          closure_status: 'none',
+          next_step: '需求规格已通过独立审查，自动进入 Develop 需求梳理',
+        });
+        return 'advanced';
+      }
       await updateTask(delegation.taskId, actor, {
         agile_status: 'ready_to_close',
         current_subagent: null,
@@ -544,10 +554,13 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       if (!result.classification || !result.route) throw new Error('backlog-agent 结果缺少 classification 或 route');
       const detail = await getTask(delegation.taskId);
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
+      if (detail.task.item_type === 'end-to-end' && (result.classification !== 'feature' || result.route !== 'plan')) {
+        throw new Error('End to End 在 Business Analysis 后必须保持 Develop 路由');
+      }
       const retainsCodeSlot = detail.task.agile_status === 'in dev' && detail.task.total_stories === 0;
       const nextRoute = result.route;
       await updateTask(delegation.taskId, actor, {
-        item_type: result.classification,
+        item_type: detail.task.item_type === 'end-to-end' ? 'end-to-end' : result.classification,
         ...(retainsCodeSlot ? {} : { agile_status: nextRoute === 'repro' ? 'in repro' as const : 'in plan' as const }),
         current_subagent: nextRoute === 'repro' ? 'repro-agent' : 'story-splitter-agent',
         next_step: result.summary,

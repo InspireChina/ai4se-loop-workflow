@@ -3,6 +3,7 @@ import { REQUIREMENT_PIPELINES, type RequirementPipelineStage } from '../../src/
 
 const pipelines = new Map(REQUIREMENT_PIPELINES.map((pipeline) => [pipeline.id, pipeline] as const));
 const businessAnalysis = pipelines.get('business-analysis')!;
+const endToEnd = pipelines.get('end-to-end')!;
 const feature = pipelines.get('feature')!;
 const bug = pipelines.get('bug')!;
 
@@ -16,14 +17,14 @@ const sharedStages = sharedStageSuffix(feature.stages, bug.stages);
 const featureEntryStages = feature.stages.slice(0, feature.stages.length - sharedStages.length);
 const bugEntryStages = bug.stages.slice(0, bug.stages.length - sharedStages.length);
 
-function StageNode({ stage, tone }: { stage: RequirementPipelineStage; tone?: 'feature' | 'bug' | 'analysis' }) {
+function StageNode({ stage, tone }: { stage: RequirementPipelineStage; tone?: 'feature' | 'bug' | 'analysis' | 'end-to-end' }) {
   return <article className={`pipeline-stage ${tone || ''}`} title={`${stage.owner}：${stage.description}`}>
     <strong>{stage.title}</strong>
     <small>{stage.owner}</small>
   </article>;
 }
 
-function StageSequence({ stages, tone }: { stages: readonly RequirementPipelineStage[]; tone?: 'feature' | 'bug' | 'analysis' }) {
+function StageSequence({ stages, tone }: { stages: readonly RequirementPipelineStage[]; tone?: 'feature' | 'bug' | 'analysis' | 'end-to-end' }) {
   return <div className="pipeline-stage-sequence">
     {stages.map((stage, index) => <div className="pipeline-stage-step" key={stage.key}>
       {index > 0 && <ArrowRight className="pipeline-arrow" size={17} aria-hidden="true"/>}
@@ -42,15 +43,26 @@ function EntryRoute({ label, summary, stages, tone }: { label: string; summary: 
 
 export default function PipelinesPage() {
   return <>
-    <header><p className="eyebrow">WORKFLOW CATALOG</p><h1>流水线</h1><p className="muted">三类入口共享一张流程地图：Business Analysis 产出经过审查的规格，{feature.label} 与 {bug.label} 汇入同一交付主干。</p></header>
+    <header><p className="eyebrow">WORKFLOW CATALOG</p><h1>流水线</h1><p className="muted">四类入口共享一张流程地图：End to End 自动贯通 Business Analysis 与 Develop，其他入口也可独立使用。</p></header>
     <section className="card pipeline-board" aria-labelledby="pipeline-board-title">
       <div className="pipeline-board-head">
         <div><span className="eyebrow">END-TO-END MAP</span><h2 id="pipeline-board-title">从想法到可信交付</h2></div>
-        <div className="pipeline-legend" aria-label="路线图例"><span className="analysis">{businessAnalysis.label}</span><span className="feature">{feature.label}</span><span className="bug">{bug.label}</span></div>
+        <div className="pipeline-legend" aria-label="路线图例"><span className="end-to-end">{endToEnd.label}</span><span className="analysis">{businessAnalysis.label}</span><span className="feature">{feature.label}</span><span className="bug">{bug.label}</span></div>
       </div>
 
+      <section className="pipeline-track pipeline-end-to-end-track">
+        <div className="pipeline-track-head"><div><span className="pipeline-track-index">01</span><strong>自动端到端</strong></div><p>{endToEnd.summary}</p></div>
+        <div className="pipeline-scroll-region">
+          <div className="pipeline-route-flow">
+            <div className="pipeline-route-label end-to-end"><strong>想法</strong><small>End to End</small></div>
+            <ArrowRight className="pipeline-arrow" size={17} aria-hidden="true"/>
+            <StageSequence stages={endToEnd.stages} tone="end-to-end"/>
+          </div>
+        </div>
+      </section>
+
       <section className="pipeline-track pipeline-analysis-track">
-        <div className="pipeline-track-head"><div><span className="pipeline-track-index">01</span><strong>需求定义</strong></div><p>{businessAnalysis.summary}</p></div>
+        <div className="pipeline-track-head"><div><span className="pipeline-track-index">02</span><strong>独立需求定义</strong></div><p>{businessAnalysis.summary}</p></div>
         <div className="pipeline-scroll-region">
           <div className="pipeline-route-flow">
             <div className="pipeline-route-label analysis"><strong>想法</strong><small>Business Analysis</small></div>
@@ -63,7 +75,7 @@ export default function PipelinesPage() {
       <div className="pipeline-handoff"><ArrowDown size={16}/><span>审查通过的规格成为后续需求梳理的权威输入</span></div>
 
       <section className="pipeline-track pipeline-delivery-track">
-        <div className="pipeline-track-head"><div><span className="pipeline-track-index">02</span><strong>交付执行</strong></div><p>不同入口先完成各自的事实准备，再汇入稳定的公共交付主干。</p></div>
+        <div className="pipeline-track-head"><div><span className="pipeline-track-index">03</span><strong>独立交付执行</strong></div><p>不同入口先完成各自的事实准备，再汇入稳定的公共交付主干。</p></div>
         <div className="pipeline-entry-lanes">
           <div className="pipeline-scroll-region"><EntryRoute label={feature.label} summary={feature.summary} stages={featureEntryStages} tone="feature"/></div>
           <div className="pipeline-scroll-region"><EntryRoute label={bug.label} summary={bug.summary} stages={bugEntryStages} tone="bug"/></div>

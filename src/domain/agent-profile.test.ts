@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
-test('ships rigorous V9 seed prompts for every flow Agent', () => {
-  assert.equal(AGENT_PROMPT_SEED_REVISION, 9);
+test('ships rigorous V10 seed prompts for every flow Agent', () => {
+  assert.equal(AGENT_PROMPT_SEED_REVISION, 10);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
     assert.ok(prompt.length >= 450, `${agentId} seed prompt is too small to define a reliable role contract`);
@@ -24,9 +24,10 @@ test('ships rigorous V9 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['requirement-spec-agent'].prompt, /AS IS、TO BE、ACTORS、SCENARIOS/);
   assert.match(AGENT_PROFILE_DEFINITIONS['spec-review-agent'].prompt, /intent、business_design 或 specification/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /现有实现已经满足承诺/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /AS-IS → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → TO-BE → Impact Scan → SCOPE → Acceptance → Finalize/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /AS-IS → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → ANSWER REVIEW → TO-BE → Impact Scan → SCOPE → Acceptance → Finalize/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /PROPOSE 与 RESOLVE 必须分开/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /自动决策强度处理 Agent 节点/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /每轮 HUMAN 或 Agent 答案全部关闭后必须进入 ANSWER REVIEW/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /request-clarification/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /第一条草稿命令必须是 requirement-context status/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /继续执行命令返回的下一工作包/);
@@ -67,6 +68,7 @@ test('ships rigorous V9 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /先提出、再回答/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /除非当前 RESOLVE 工作包明确给出完全自主权限.*不能代替产品决定权/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /自动决策策略只由 DECISION TREE · RESOLVE 工作包提供/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /ANSWER REVIEW：无论答案来自 HUMAN、上游、项目证据还是 Agent 权限/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /只有完全自主模式允许 Agent.*自行决定产品语义/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /任何会约束 Dev 或 Test 的方案必须先在决策树中登记/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /保持原决定的稳定语义身份/);

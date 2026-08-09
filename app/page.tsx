@@ -6,7 +6,11 @@ import { requirementPriorityLabel } from '../src/domain/requirement-priority';
 
 export const dynamic = 'force-dynamic';
 
-const phase = (task: { item_type: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number }) => task.item_type === 'business-analysis'
+const businessAnalysisAgents = ['idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent'];
+const inBusinessAnalysis = (task: { item_type: string; current_subagent: string | null }) => task.item_type === 'business-analysis'
+  || (task.item_type === 'end-to-end' && businessAnalysisAgents.includes(task.current_subagent || ''));
+
+const phase = (task: { item_type: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number }) => inBusinessAnalysis(task)
   ? task.current_subagent ? agentLabel(task.current_subagent) : '等待阅读需求规格'
   : `${task.analysis_index}/${task.total_stories} 交付分析 · ${task.dev_index}/${task.total_stories} 实现 · ${task.test_index}/${task.total_stories} 验证`;
 
@@ -40,7 +44,7 @@ export default async function Home() {
           : task.current_subagent === 'business-design-agent' ? '等待业务方案决策'
             : '等待需求澄清'
         : runtimeLane ? runtimeLane.current_agent === 'test-agent' ? '等待验证协助' : '等待运行信息' : answerLane ? '等待关键决策' : blockedLane ? `${blockedLane.lane === 'analysis' ? '交付分析' : '开发验证'}阻塞`
-          : task.item_type === 'business-analysis'
+          : inBusinessAnalysis(task)
             ? task.agile_status === 'ready_to_close' ? '等待阅读需求规格' : task.current_subagent ? agentLabel(task.current_subagent).replace(' Agent', '') : statusLabel(task.agile_status)
             : statusLabel(task.agile_status);
       return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}><span><strong>{task.title}</strong><small>{task.task_id} · 优先级 {requirementPriorityLabel(task.priority)}</small></span><span className={`badge ${task.agile_status === 'blocked' || needsAttention ? 'amber' : 'blue'}`}><CircleDot size={13}/>{label}</span><span>{phase(task)}</span><span>{terminologyText(task.next_step)}</span></Link>;

@@ -228,11 +228,11 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
   if (!profile) return null;
   const command = loopAgentCommandPrefix(appRoot);
   const helpTopics = profile.draftType === 'requirement_context'
-    ? 'context|assertion|impact|decision-proposal|decision-resolution|scope|finish'
+    ? 'context|assertion|impact|decision-proposal|decision-resolution|answer-review|scope|finish'
     : profile.draftType === 'delivery_plan'
       ? 'context|unit|source|dependency|revision|finish'
       : profile.draftType === 'analysis'
-        ? 'context|impact|decision-proposal|decision-resolution|contract|finish'
+        ? 'context|impact|decision-proposal|decision-resolution|answer-review|contract|finish'
         : profile.draftType === 'development'
           ? 'context|evidence|review|commit|input|finish'
           : profile.draftType === 'verification'

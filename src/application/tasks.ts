@@ -643,7 +643,7 @@ const createTaskSchema = z.object({
     key: z.string(),
     value: z.string(),
   })).optional().default([]),
-  itemType: z.enum(['business-analysis', 'feature', 'bug', 'tech', 'intake', 'other']).default('feature'),
+  itemType: z.enum(['business-analysis', 'end-to-end', 'feature', 'bug', 'tech', 'intake', 'other']).default('feature'),
   priority: z.string().trim().optional().nullable(),
   actor: z.enum(['human']).default('human'),
   status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'in feedback', 'ready_to_close', 'done', 'cancelled', 'blocked']).default('backlog'),
@@ -659,7 +659,7 @@ export async function createTask(input: unknown) {
   const requestedSubagent = value.currentSubagent || null;
   assertActorCanCreate(value.actor, value.status, requestedSubagent);
   const currentSubagent = requestedSubagent
-    || (value.itemType === 'business-analysis' ? 'idea-context-agent' : null);
+    || (['business-analysis', 'end-to-end'].includes(value.itemType) ? 'idea-context-agent' : null);
   const state: TaskState = {
     task_id: taskId,
     item_type: value.itemType,

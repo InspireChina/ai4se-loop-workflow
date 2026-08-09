@@ -48,6 +48,13 @@ async function command(executionId: string, token: string, args: string[]) {
   return runAgentCommand({ executionId, token, args });
 }
 
+async function completeBacklogAnswerReview(executionId: string, token: string) {
+  return command(executionId, token, [
+    'requirement-context', 'answer-review', 'complete',
+    '--artifact', '已复查全部决策答案、条件分支与组合后果，没有发现新的需求级问题。',
+  ]);
+}
+
 async function begin(taskId: string, pipeline = 'backlog') {
   const { beginExecutionAttempt } = await import('./executions');
   const { issueAgentCommandToken } = await import('./agent-command-drafts');
@@ -249,7 +256,11 @@ test('requires status first, accepts progressive edits, and submits a determinis
 
   await transition(['requirement-context', 'as-is', 'complete'], 'as_is', 'decision_proposal');
   await transition(['requirement-context', 'decision-proposal', 'complete'], 'decision_proposal', 'decision_resolution');
-  await transition(['requirement-context', 'decision-resolution', 'complete'], 'decision_resolution', 'to_be');
+  await transition(['requirement-context', 'decision-resolution', 'complete'], 'decision_resolution', 'answer_review');
+  await transition([
+    'requirement-context', 'answer-review', 'complete',
+    '--artifact', '全部答案与条件分支复查完成，没有新增问题。',
+  ], 'answer_review', 'to_be');
   await transition(['requirement-context', 'to-be', 'complete'], 'to_be', 'impact_scan');
   assert.match(
     await command(active.executionId, active.token!, [
@@ -259,7 +270,11 @@ test('requires status first, accepts progressive edits, and submits a determinis
     /Outcome: phase_completed.*From: impact_scan.*To: decision_proposal.*# NEXT WORK PACKET.*## PHASE\s+decision_proposal/s,
   );
   await transition(['requirement-context', 'decision-proposal', 'complete'], 'decision_proposal', 'decision_resolution');
-  await transition(['requirement-context', 'decision-resolution', 'complete'], 'decision_resolution', 'to_be');
+  await transition(['requirement-context', 'decision-resolution', 'complete'], 'decision_resolution', 'answer_review');
+  await transition([
+    'requirement-context', 'answer-review', 'complete',
+    '--artifact', '重新打开后的答案与条件分支复查完成，没有新增问题。',
+  ], 'answer_review', 'to_be');
   await transition(['requirement-context', 'to-be', 'complete'], 'to_be', 'impact_scan');
   await transition(['requirement-context', 'impact-scan', 'complete'], 'impact_scan', 'scope');
   await transition(['requirement-context', 'scope', 'complete'], 'scope', 'acceptance');
@@ -276,11 +291,13 @@ test('requires status first, accepts progressive edits, and submits a determinis
     [
       { from_phase: 'as_is', to_phase: 'decision_proposal' },
       { from_phase: 'decision_proposal', to_phase: 'decision_resolution' },
-      { from_phase: 'decision_resolution', to_phase: 'to_be' },
+      { from_phase: 'decision_resolution', to_phase: 'answer_review' },
+      { from_phase: 'answer_review', to_phase: 'to_be' },
       { from_phase: 'to_be', to_phase: 'impact_scan' },
       { from_phase: 'impact_scan', to_phase: 'decision_proposal' },
       { from_phase: 'decision_proposal', to_phase: 'decision_resolution' },
-      { from_phase: 'decision_resolution', to_phase: 'to_be' },
+      { from_phase: 'decision_resolution', to_phase: 'answer_review' },
+      { from_phase: 'answer_review', to_phase: 'to_be' },
       { from_phase: 'to_be', to_phase: 'impact_scan' },
       { from_phase: 'impact_scan', to_phase: 'scope' },
       { from_phase: 'scope', to_phase: 'acceptance' },
@@ -402,6 +419,7 @@ test('routes unresolved impact branches back to the decision tree instead of exp
     '--option', 'in-app', '--reason', '当前产品已有站内通知能力',
   ]);
   await command(active.executionId, active.token!, ['requirement-context', 'decision-resolution', 'complete']);
+  await completeBacklogAnswerReview(active.executionId, active.token!);
   await command(active.executionId, active.token!, ['requirement-context', 'to-be', 'complete']);
 
   const unresolvedImpact = await command(active.executionId, active.token!, [
@@ -543,6 +561,19 @@ test('fully autonomous backlog resolution closes every decision without a HUMAN 
   const resolved = await command(active.executionId, active.token!, ['requirement-context', 'status']);
   assert.match(resolved, /活动决策 1 个，已关闭 1 个，待人工回答 0 个/);
   assert.match(resolved, /## SUBMIT[\s\S]*`requirement-context decision-resolution complete`/);
+  const reviewPacket = await command(active.executionId, active.token!, [
+    'requirement-context', 'decision-resolution', 'complete',
+  ]);
+  assert.match(reviewPacket, /## PHASE\s+answer_review/);
+  assert.match(reviewPacket, /HUMAN 与 Agent/);
+  const reviewExpansionPacket = await command(active.executionId, active.token!, [
+    'requirement-context', 'answer-review', 'expand',
+    '--artifact', '组合答案显示通知对象还会影响代理借阅场景，需要增量提出一个新问题。',
+  ]);
+  assert.match(reviewExpansionPacket, /From: answer_review[\s\S]*To: decision_proposal/);
+  assert.match(reviewExpansionPacket, /LATEST ANSWER REVIEW[\s\S]*代理借阅场景/);
+  const reopened = await command(active.executionId, active.token!, ['requirement-context', 'status']);
+  assert.match(reopened, /活动决策 1 个，已关闭 1 个，待人工回答 0 个/);
 });
 
 test('requirement context migration exposes split decision phases and proposal audit fields', async () => {
@@ -553,6 +584,7 @@ test('requirement context migration exposes split decision phases and proposal a
   `).get() as { sql: string };
   assert.match(draftTable.sql, /decision_proposal/);
   assert.match(draftTable.sql, /decision_resolution/);
+  assert.match(draftTable.sql, /answer_review/);
   assert.doesNotMatch(draftTable.sql, /'decision_tree'/);
   const questionColumns = db.prepare('PRAGMA table_info(requirement_context_questions)').all() as { name: string }[];
   assert.equal(questionColumns.some((column) => column.name === 'proposed_authority'), true);
@@ -616,6 +648,7 @@ test('routes an evidence-backed Actual versus Expected deviation to reproduction
   await command(active.executionId, active.token!, ['requirement-context', 'as-is', 'complete']);
   await command(active.executionId, active.token!, ['requirement-context', 'decision-proposal', 'complete']);
   await command(active.executionId, active.token!, ['requirement-context', 'decision-resolution', 'complete']);
+  await completeBacklogAnswerReview(active.executionId, active.token!);
   await command(active.executionId, active.token!, ['requirement-context', 'to-be', 'complete']);
   await command(active.executionId, active.token!, ['requirement-context', 'impact-scan', 'complete']);
   await command(active.executionId, active.token!, ['requirement-context', 'scope', 'complete']);
@@ -912,6 +945,7 @@ test('inherits a persisted clarification draft after resume and forces status ag
   assert.match(revised, /约束：1/);
   assert.match(revised, /audience-must-be-confirmed：本轮导出能力只面向管理员/);
   await command(resumed.executionId, resumed.token!, ['requirement-context', 'decision-resolution', 'complete']);
+  await completeBacklogAnswerReview(resumed.executionId, resumed.token!);
   await command(resumed.executionId, resumed.token!, ['requirement-context', 'to-be', 'complete']);
   await command(resumed.executionId, resumed.token!, ['requirement-context', 'impact-scan', 'complete']);
   await command(resumed.executionId, resumed.token!, ['requirement-context', 'scope', 'complete']);
@@ -1028,7 +1062,7 @@ test('exposes only the new business-context protocol and rejects every legacy co
   const active = await begin(taskId);
   await assert.rejects(
     command(active.executionId, active.token!, ['help']),
-    /help 必须指定一个主题.*context\|assertion\|impact\|decision-proposal\|decision-resolution\|scope\|finish/s,
+    /help 必须指定一个主题.*context\|assertion\|impact\|decision-proposal\|decision-resolution\|answer-review\|scope\|finish/s,
   );
 
   const contextHelp = await command(active.executionId, active.token!, ['help', 'context']);
@@ -1062,6 +1096,9 @@ test('exposes only the new business-context protocol and rejects every legacy co
   assert.match(resolutionHelp, /只回答已经完整提出/);
   assert.match(resolutionHelp, /自动决策强度只出现在当前/);
   assert.match(resolutionHelp, /逐字复用原 decision key/);
+  const answerReviewHelp = await command(active.executionId, active.token!, ['help', 'answer-review']);
+  assert.match(answerReviewHelp, /HUMAN、Agent、上游或项目证据/);
+  assert.match(answerReviewHelp, /answer-review expand/);
 
   const scopeHelp = await command(active.executionId, active.token!, ['help', 'scope']);
   assert.match(scopeHelp, /bug\s+Actual 偏离已有明确 Expected/);
@@ -1069,19 +1106,19 @@ test('exposes only the new business-context protocol and rejects every legacy co
   assert.match(scopeHelp, /约束不用于提前记录技术设计/);
 
   const finishHelp = await command(active.executionId, active.token!, ['help', 'finish']);
-  assert.match(finishHelp, /as-is complete → decision-proposal complete → decision-resolution complete → to-be complete/);
+  assert.match(finishHelp, /as-is complete → decision-proposal complete → decision-resolution complete → answer-review complete → to-be complete/);
   assert.match(finishHelp, /影响扫描发现新的需求级业务分叉/);
   assert.match(finishHelp, /requirement-context request-clarification/);
   assert.match(finishHelp, /新的 resume execution 恢复 decision_resolution/);
 
-  const allTopicHelp = [contextHelp, assertionHelp, impactHelp, proposalHelp, resolutionHelp, scopeHelp, finishHelp].join('\n');
+  const allTopicHelp = [contextHelp, assertionHelp, impactHelp, proposalHelp, resolutionHelp, answerReviewHelp, scopeHelp, finishHelp].join('\n');
   assert.doesNotMatch(allTopicHelp, /requirement-context goal set/);
   assert.doesNotMatch(allTopicHelp, /requirement-context outcome set/);
   assert.doesNotMatch(allTopicHelp, /requirement-context fact /);
 
   await assert.rejects(
     command(active.executionId, active.token!, ['help', 'unknown']),
-    /可用主题：context、assertion、impact、decision-proposal、decision-resolution、scope、finish/,
+    /可用主题：context、assertion、impact、decision-proposal、decision-resolution、answer-review、scope、finish/,
   );
   await command(active.executionId, active.token!, ['requirement-context', 'status']);
   for (const args of [

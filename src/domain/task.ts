@@ -71,7 +71,7 @@ const agentPermissions: Partial<Record<Actor, string[]>> = {
   'idea-context-agent': ['idea-context-agent', 'business-design-agent'],
   'business-design-agent': ['idea-context-agent', 'business-design-agent', 'requirement-spec-agent'],
   'requirement-spec-agent': ['idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent'],
-  'spec-review-agent': ['idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent'],
+  'spec-review-agent': ['idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent', 'backlog-agent'],
   'backlog-agent': ['backlog-agent', 'story-splitter-agent', 'repro-agent'],
   'story-splitter-agent': ['story-splitter-agent', 'analyst-agent'],
   'analyst-agent': ['analyst-agent'],
@@ -201,7 +201,9 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
     // Falling through also makes malformed legacy state self-healing at
     // dispatch time instead of producing an impossible agent/pipeline pair.
   }
-  if (task.item_type === 'business-analysis') {
+  const businessAnalysisAgent = ['idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent']
+    .includes(task.current_subagent || '');
+  if (task.item_type === 'business-analysis' || (task.item_type === 'end-to-end' && businessAnalysisAgent)) {
     const agent = task.current_subagent || 'idea-context-agent';
     const pipeline = agent === 'idea-context-agent' ? 'ba-intent'
       : agent === 'business-design-agent' ? 'ba-design'

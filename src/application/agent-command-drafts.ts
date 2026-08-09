@@ -90,6 +90,7 @@ type ContextDraft = {
   intent: string | null;
   change_summary: string | null;
   classification: 'feature' | 'bug' | 'tech' | 'other' | null;
+  answer_review: string | null;
   workflow_phase: RequirementContextPhase;
   validated_change_seq: number | null;
 };
@@ -299,9 +300,9 @@ function cloneRequirementContextDraft(
 ) {
   db.prepare(`
     INSERT INTO requirement_context_drafts(
-      draft_id, intent, change_summary, classification, workflow_phase
+      draft_id, intent, change_summary, classification, answer_review, workflow_phase
     )
-    SELECT ?, intent, change_summary, classification, workflow_phase
+    SELECT ?, intent, change_summary, classification, answer_review, workflow_phase
     FROM requirement_context_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   for (const table of [
@@ -650,10 +651,10 @@ function cloneDeliveryAnalysisContract(
   db.prepare(`
     INSERT INTO delivery_analysis_drafts(
       draft_id, unit_key, title, actor, trigger_condition, observable_outcome,
-      acceptance, summary, implementation_guidance, workflow_phase
+      acceptance, summary, implementation_guidance, answer_review, workflow_phase
     )
     SELECT ?, unit_key, title, actor, trigger_condition, observable_outcome,
-           acceptance, summary, implementation_guidance, workflow_phase
+           acceptance, summary, implementation_guidance, answer_review, workflow_phase
     FROM delivery_analysis_drafts WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   for (const table of [
@@ -1334,6 +1335,10 @@ function phaseValidationErrors(
     return errors;
   }
 
+  if (phase === 'answer_review') {
+    return phaseValidationErrors(state, 'decision_resolution');
+  }
+
   if (phase === 'to_be') {
     if (!reliable('target')) errors.push('缺少由已关闭决策派生的可靠 TO-BE 陈述');
     if (state.questions.some((question) =>
@@ -1501,6 +1506,15 @@ function renderRequirementContextReadiness(
     '',
     `\`${readiness.nextCommand}\``,
   );
+  if (phase === 'answer_review') {
+    lines.push(
+      '',
+      '## REVIEW OUTCOME',
+      '',
+      '- 没有新增问题：`requirement-context answer-review complete --artifact-file <答案审查>`',
+      '- 发现新增问题：`requirement-context answer-review expand --artifact-file <答案审查与新增问题依据>`',
+    );
+  }
   return lines;
 }
 
@@ -1537,6 +1551,9 @@ function renderRequirementContextWorkPacket(
       return `活动决策 ${active.length} 个，已关闭 ${answered} 个，待人工回答 ${pending} 个。`;
     })()
     : null;
+  const latestAnswerReview = state.context.answer_review && phase !== 'answer_review'
+    ? ['', '## LATEST ANSWER REVIEW', '', state.context.answer_review]
+    : [];
   return [
     '# NEXT WORK PACKET',
     '',
@@ -1548,6 +1565,7 @@ function renderRequirementContextWorkPacket(
     '',
     definition.objective,
     ...(current ? ['', '## CURRENT', '', current] : []),
+    ...latestAnswerReview,
     '',
     '## REQUIRED',
     '',
@@ -2793,6 +2811,18 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
       '用户自定义答案产生此前未知分支时，显式 reopen-proposals，只补充受影响子树，不重复已关闭节点。',
     ];
   }
+  if (topic === 'answer-review') {
+    return [
+      '本阶段必须重新分析全部已关闭答案，不区分 HUMAN、Agent、上游或项目证据来源。审查对象是答案及其组合后果，不是再次批准原推荐。',
+      '',
+      '  requirement-context answer-review complete --artifact-file <答案审查>',
+      '  requirement-context answer-review expand --artifact-file <答案审查与新增问题依据>',
+      '',
+      '答案审查至少说明：全部活动答案、被激活或剪除的条件分支、答案组合对规格/代码冲突解释及 TO-BE/SCOPE 的影响，以及是否出现当前问题树之外的新语义。',
+      '没有新增问题才 complete；发现新增问题必须 expand 回到 PROPOSE，只新增受影响节点。已关闭节点继续复用原 decision key 和答案，不得重问、删除、改名或转交决定权。',
+      '即使当前没有 HUMAN 节点、所有节点都由 Agent 自主关闭，或决策树为空，也必须完成本阶段后才能进入 TO-BE。',
+    ];
+  }
   if (topic === 'scope') {
     return [
       '约束与范围是按当前需求确有必要时才填写的可选边界，不应为了表单完整制造条目。',
@@ -2824,7 +2854,7 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
       '阶段路径：',
       `  status → ${normalPath.map((command) => command.replace(/^requirement-context /, '')).join(' → ')}`,
       '  若影响扫描发现新的需求级业务分叉，使用 impact-scan reopen-decisions 返回决策树；这会形成可审计的阶段转换。',
-      '  PROPOSE 只登记完整决策树；RESOLVE 才按决定权关闭节点或组成完整 HUMAN 批次。',
+      '  PROPOSE 只登记完整决策树；RESOLVE 才按决定权关闭节点或组成完整 HUMAN 批次；所有答案随后统一进入 ANSWER REVIEW。',
       '',
       '最终校验与提交：',
       '  requirement-context validate',
@@ -2833,13 +2863,13 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
       '澄清路径：',
       '  完成 AS-IS → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → 批量 ask → validate → request-clarification',
       `  ${terminalActions.find((action) => action.endsWith(' request-clarification')) || 'requirement-context request-clarification'}`,
-      '  用户回答后由新的 resume execution 恢复 decision_resolution，逐字复用原 decision key，关闭适用分支后继续阶段调用链。',
+      '  用户回答后由新的 resume execution 恢复 decision_resolution，逐字复用原 decision key，关闭适用分支后必须进入 ANSWER REVIEW。',
       '',
       '普通最终文本、Markdown 或手写 JSON 都不会结束 execution。',
     ];
   }
   if (topic) {
-    throw new Error(`需求上下文 help 不支持主题：${topic}。可用主题：context、assertion、impact、decision-proposal、decision-resolution、scope、finish`);
+    throw new Error(`需求上下文 help 不支持主题：${topic}。可用主题：context、assertion、impact、decision-proposal、decision-resolution、answer-review、scope、finish`);
   }
   return [
     '需求上下文通过内层阶段调用链完成。每次 status 会恢复当前阶段并返回这一阶段的目标、必需产物、禁止事项、可用命令和提交命令。',
@@ -2856,9 +2886,9 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
     '  已回答 question → DECISIONS；未回答 question 只在澄清态进入 OPEN QUESTIONS',
     '',
     '标准路径：',
-    '  正常完成：status → AS-IS → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → TO-BE → Impact Scan → SCOPE → Acceptance → complete',
+    '  正常完成：status → AS-IS → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → ANSWER REVIEW → TO-BE → Impact Scan → SCOPE → Acceptance → complete',
     '  用户澄清：PROPOSE 批量建树 → RESOLVE 批量 ask → validate → request-clarification',
-    '  恢复处理：status → 在 RESOLVE 中复用原 decision key 消费回答 → 继续调用链',
+    '  恢复处理：status → 在 RESOLVE 中复用原 decision key 消费回答 → ANSWER REVIEW → 继续调用链',
     '',
     '命令索引：',
     ...requirementContextCommandIndex,
@@ -2872,6 +2902,7 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
     '  help impact     业务影响与 disposition 含义',
     '  help decision-proposal  提出完整决策树、推荐和建议决定权',
     '  help decision-resolution  自动决策强度、关闭决策与 HUMAN 批次',
+    '  help answer-review  复查 HUMAN/Agent 答案组合并决定继续或增量补问',
     '  help scope      约束、范围与分类',
     '  help finish     必填项、校验与终止命令',
   ];
@@ -3043,7 +3074,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         ...requirementContextHelp(profile.terminalActions, topic),
         '',
         ...LONG_TEXT_FILE_HELP,
-        `  其他主题：${command} help <context|assertion|impact|question|scope|finish>`,
+        `  其他主题：${command} help <context|assertion|impact|decision-proposal|decision-resolution|answer-review|scope|finish>`,
       ].join('\n');
     }
     if (profile.draftType === 'delivery_plan') {
@@ -3065,7 +3096,7 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
         ...deliveryAnalysisHelp(profile.terminalActions, topic),
         '',
         ...LONG_TEXT_FILE_HELP,
-        `  其他主题：${command} help <context|impact|decision|contract|finish>`,
+        `  其他主题：${command} help <context|impact|decision-proposal|decision-resolution|answer-review|contract|finish>`,
       ].join('\n');
     }
     if (profile.draftType === 'development') {
@@ -3686,11 +3717,11 @@ export async function runAgentCommand(input: {
     if (positionals.length > 2) throw new Error('help 最多接受一个主题');
     if (['requirement_context', 'delivery_plan', 'analysis', 'development', 'verification', 'review', 'business_analysis'].includes(profile.draftType) && !positionals[1]) {
       const topics = profile.draftType === 'requirement_context'
-        ? 'context|assertion|impact|decision-proposal|decision-resolution|scope|finish'
+        ? 'context|assertion|impact|decision-proposal|decision-resolution|answer-review|scope|finish'
         : profile.draftType === 'delivery_plan'
           ? 'context|unit|source|dependency|revision|finish'
           : profile.draftType === 'analysis'
-            ? 'context|impact|decision|contract|finish'
+            ? 'context|impact|decision-proposal|decision-resolution|answer-review|contract|finish'
             : profile.draftType === 'development'
               ? 'context|evidence|review|commit|input|finish'
             : profile.draftType === 'verification'
@@ -3770,6 +3801,48 @@ export async function runAgentCommand(input: {
       throw new Error(`命令 ${command} 不属于当前 ${phase} 工作包；允许阶段：${allowed.join('、')}`);
     }
   };
+
+  if (
+    command === 'requirement-context answer-review complete'
+    || command === 'requirement-context answer-review expand'
+  ) {
+    assertPhase('answer_review');
+    const current = draftState(db, draft);
+    const errors = phaseValidationErrors(current, 'answer_review');
+    if (errors.length) {
+      throw new Error(`answer_review 阶段不能完成：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+    }
+    const review = bounded(required(flags, 'artifact'), '答案审查', 20_000);
+    const expands = command.endsWith(' expand');
+    const next: RequirementContextPhase = expands ? 'decision_proposal' : 'to_be';
+    db.transaction(() => {
+      db.prepare(`
+        UPDATE requirement_context_drafts
+        SET answer_review = ?, workflow_phase = ?, validated_change_seq = NULL
+        WHERE draft_id = ?
+      `).run(review, next, draft.draft_id);
+      db.prepare(`
+        INSERT INTO requirement_context_phase_transitions(
+          draft_id, from_phase, to_phase, reason, execution_id
+        ) VALUES(?, 'answer_review', ?, ?, ?)
+      `).run(
+        draft.draft_id,
+        next,
+        expands ? '答案审查发现新增问题，增量返回决策提出阶段' : '答案审查确认当前问题树在全部答案后仍完整闭合',
+        execution.execution_id,
+      );
+      touchDraft(db, draft.draft_id);
+    })();
+    return [
+      renderRequirementContextResult({
+        command,
+        outcome: 'phase_completed',
+        details: ['From: answer_review', `To: ${next}`],
+      }),
+      '',
+      renderRequirementContextWorkPacket(next, draftState(db, draft)),
+    ].join('\n');
+  }
 
   const phaseCompletion = new Map<string, RequirementContextPhase>(
     REQUIREMENT_CONTEXT_PHASE_ORDER

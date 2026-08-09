@@ -83,7 +83,7 @@ function assertViewed(draft: DeliveryAnalysisDraftRow, executionId: string) {
 function state(db: Db, draft: DeliveryAnalysisDraftRow) {
   const contract = db.prepare(`
     SELECT unit_key, title, actor, trigger_condition, observable_outcome,
-           acceptance, summary, implementation_guidance, workflow_phase,
+           acceptance, summary, implementation_guidance, answer_review, workflow_phase,
            validated_change_seq
     FROM delivery_analysis_drafts WHERE draft_id = ?
   `).get(draft.draft_id) as {
@@ -95,6 +95,7 @@ function state(db: Db, draft: DeliveryAnalysisDraftRow) {
     acceptance: string;
     summary: string | null;
     implementation_guidance: string | null;
+    answer_review: string | null;
     workflow_phase: DeliveryAnalysisPhase;
     validated_change_seq: number | null;
   };
@@ -486,6 +487,15 @@ function deliveryAnalysisReadiness(
       nextCommand: DELIVERY_ANALYSIS_WORKFLOW.decision_resolution.submit,
     };
   }
+  if (phase === 'answer_review') {
+    const remaining = decisionTreeCompletionErrors(current);
+    if (remaining.length) return { status: 'not_ready', remaining, nextCommand: null };
+    return {
+      status: 'structurally_ready',
+      remaining: [],
+      nextCommand: DELIVERY_ANALYSIS_WORKFLOW.answer_review.submit,
+    };
+  }
   const remaining = phase === 'impact_scan'
     ? impactScanErrors(current)
     : phase === 'delivery_contract'
@@ -526,6 +536,15 @@ function renderReadiness(current: DeliveryAnalysisState, phase: DeliveryAnalysis
     '',
     `\`${readiness.nextCommand}\``,
   );
+  if (phase === 'answer_review') {
+    lines.push(
+      '',
+      '## REVIEW OUTCOME',
+      '',
+      '- 没有新增问题：`delivery-analysis answer-review complete --artifact-file <答案审查>`',
+      '- 发现新增问题：`delivery-analysis answer-review expand --artifact-file <答案审查与新增问题依据>`',
+    );
+  }
   return lines;
 }
 
@@ -551,6 +570,9 @@ function renderWorkPacket(current: DeliveryAnalysisState, phase: DeliveryAnalysi
         ],
       }[current.analysisDecisionMode]
     : null;
+  const latestAnswerReview = current.contract.answer_review && phase !== 'answer_review'
+    ? ['', '## LATEST ANSWER REVIEW', '', current.contract.answer_review]
+    : [];
   return [
     '# NEXT WORK PACKET',
     '',
@@ -561,6 +583,7 @@ function renderWorkPacket(current: DeliveryAnalysisState, phase: DeliveryAnalysi
     '## OBJECTIVE',
     '',
     definition.objective,
+    ...latestAnswerReview,
     '',
     '## REQUIRED',
     '',
@@ -1034,6 +1057,8 @@ const deliveryAnalysisCommandIndex = [
   '  delivery-analysis impact-scan complete',
   '  delivery-analysis decision-proposal complete',
   '  delivery-analysis decision-resolution complete',
+  '  delivery-analysis answer-review complete --artifact-file <答案审查>',
+  '  delivery-analysis answer-review expand --artifact-file <答案审查与新增问题依据>',
   '  delivery-analysis contract complete',
   '  delivery-analysis decision-proposal reopen-impacts --reason <原因>',
   '  delivery-analysis decision-resolution reopen-proposals --reason <原因>',
@@ -1131,6 +1156,18 @@ export function deliveryAnalysisHelp(terminalActions: string[], topic?: string |
       '  已有用户回答的 key 不得删除、改名或重新打开；恢复轮必须在原 key 上以 user 权限关闭。',
     ];
   }
+  if (topic === 'answer-review') {
+    return [
+      '本阶段必须重新分析全部已关闭答案，不区分 HUMAN、Agent、上游或项目证据来源。审查重点是答案组合是否产生新的交付影响或让 Dev/Test 仍可推导出不同结果。',
+      '',
+      '  delivery-analysis answer-review complete --artifact-file <答案审查>',
+      '  delivery-analysis answer-review expand --artifact-file <答案审查与新增问题依据>',
+      '',
+      '答案审查至少说明：全部活动答案、被激活或剪除的条件分支、答案组合对影响 disposition 和交付 Oracle 的后果，以及是否出现当前决策树之外的新问题。',
+      '没有新增问题才 complete；发现新增问题必须 expand 回到 PROPOSE，只新增受影响节点。已关闭 decision key、答案和决定权保持不变。',
+      '即使当前没有 HUMAN 节点、全部节点由 Agent 自主关闭，或决策树为空，也必须完成本阶段后才能进入 DELIVERY CONTRACT。',
+    ];
+  }
   if (topic === 'contract') {
     return [
       '交付契约是 Dev 与 Test 共同依赖的冻结上游事实，不是两个 Agent 之间的信息交接，也不保存 Do It Twice 的中间推演。',
@@ -1153,7 +1190,7 @@ export function deliveryAnalysisHelp(terminalActions: string[], topic?: string |
   if (topic === 'finish') {
     const normalPath = deliveryAnalysisNormalCommandPath();
     return [
-      '交付分析采用五段调用链；每个阶段完成命令都会校验当前产物、记录转换并返回下一工作包。',
+      '交付分析采用六段调用链；每个阶段完成命令都会校验当前产物、记录转换并返回下一工作包。',
       '',
       '阶段路径：',
       `  ${DELIVERY_ANALYSIS_PHASE_SEQUENCE}`,
@@ -1162,7 +1199,7 @@ export function deliveryAnalysisHelp(terminalActions: string[], topic?: string |
       '人工决策路径：',
       '  DECISION TREE · RESOLVE structurally complete → delivery-analysis validate',
       `  ${terminalActions.find((action) => action.endsWith(' request-clarification')) || 'delivery-analysis request-clarification'}`,
-      '  恢复后仍处于 DECISION TREE · RESOLVE，必须在原 decision key 上消费答案。',
+      '  恢复后仍处于 DECISION TREE · RESOLVE，必须在原 decision key 上消费答案，然后进入 ANSWER REVIEW。',
       '',
       '最终校验与提交：',
       '  delivery-analysis validate',
@@ -1173,7 +1210,7 @@ export function deliveryAnalysisHelp(terminalActions: string[], topic?: string |
     ];
   }
   if (topic) {
-    throw new Error(`交付分析 help 不支持主题：${topic}。可用主题：context、impact、decision-proposal、decision-resolution、contract、finish`);
+    throw new Error(`交付分析 help 不支持主题：${topic}。可用主题：context、impact、decision-proposal、decision-resolution、answer-review、contract、finish`);
   }
   return [
     `阶段路径：${DELIVERY_ANALYSIS_PHASE_SEQUENCE}`,
@@ -1190,6 +1227,7 @@ export function deliveryAnalysisHelp(terminalActions: string[], topic?: string |
     '  help impact    实际影响与 disposition 含义',
     '  help decision-proposal  提出决策树、候选结果、推荐和建议决定权',
     '  help decision-resolution  自动决策强度、关闭决策与 HUMAN 批次',
+    '  help answer-review  复查 HUMAN/Agent 答案组合并决定继续或增量补问',
     '  help contract  交付契约、保护约束与验证关注点',
     '  help finish    校验、完成与请求用户确认',
   ];
@@ -1262,6 +1300,49 @@ export function runDeliveryAnalysisCommand(input: {
       throw new Error(`命令 ${command} 不属于当前 ${phase} 工作包；允许阶段：${allowed.join('、')}`);
     }
   };
+
+  if (
+    command === 'delivery-analysis answer-review complete'
+    || command === 'delivery-analysis answer-review expand'
+  ) {
+    assertPhase('answer_review');
+    const currentState = current();
+    const errors = decisionTreeCompletionErrors(currentState);
+    if (errors.length) {
+      throw new Error(`answer_review 阶段不能完成：\n${errors.map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
+    }
+    const review = bounded(required(flags, 'artifact'), '答案审查', 20_000);
+    const expands = command.endsWith(' expand');
+    const next: DeliveryAnalysisPhase = expands ? 'decision_proposal' : 'delivery_contract';
+    db.transaction(() => {
+      db.prepare(`
+        UPDATE delivery_analysis_drafts
+        SET answer_review = ?, workflow_phase = ?, validated_change_seq = NULL
+        WHERE draft_id = ?
+      `).run(review, next, draft.draft_id);
+      db.prepare(`
+        INSERT INTO delivery_analysis_phase_transitions(
+          draft_id, from_phase, to_phase, reason, execution_id
+        ) VALUES(?, 'answer_review', ?, ?, ?)
+      `).run(
+        draft.draft_id,
+        next,
+        expands ? '答案审查发现新增问题，增量返回决策提出阶段' : '答案审查确认当前交付决策在全部答案后仍完整闭合',
+        execution.execution_id,
+      );
+      touchDraft(db, draft.draft_id);
+    })();
+    const nextState = current();
+    return [
+      renderCommandResult({
+        command,
+        outcome: 'phase_completed',
+        details: ['From: answer_review', `To: ${next}`],
+      }),
+      '',
+      renderWorkPacket(nextState, next),
+    ].join('\n');
+  }
 
   const phaseCompletion = new Map<string, DeliveryAnalysisPhase>(
     DELIVERY_ANALYSIS_PHASE_ORDER

@@ -2,6 +2,7 @@ export const DELIVERY_ANALYSIS_PHASE_ORDER = [
   'impact_scan',
   'decision_proposal',
   'decision_resolution',
+  'answer_review',
   'delivery_contract',
   'finalize',
 ] as const;
@@ -85,6 +86,24 @@ export const DELIVERY_ANALYSIS_WORKFLOW: Record<DeliveryAnalysisPhase, DeliveryA
     ],
     submit: 'delivery-analysis decision-resolution complete',
   },
+  answer_review: {
+    title: 'ANSWER REVIEW',
+    objective: '重新分析全部 HUMAN、上游、项目证据与 Agent 决策答案及其组合后果，确认当前交付单元是否出现新的影响或关键问题。',
+    required: '一份聚合答案审查，覆盖全部活动答案、条件分支、组合后果和对 Dev/Test 契约的影响；必须明确选择继续或增量补问。',
+    prohibited: '不要直接改写答案、影响或契约；不要因为答案由 Agent 给出就跳过审查。发现新问题时回到 PROPOSE，并保持已关闭 decision key 与答案不变。',
+    commands: [
+      'delivery-analysis answer-review complete --artifact-file <答案审查>',
+      'delivery-analysis answer-review expand --artifact-file <答案审查与新增问题依据>',
+      'help answer-review',
+    ],
+    reviewBeforeSubmit: [
+      'HUMAN、上游、项目证据与 Agent 权限形成的答案均已逐项复查。',
+      '已检查答案组合是否激活条件子树、改变影响处置，或让 Dev/Test 仍可能推导出不同结果。',
+      '若出现新语义，只增量提出新节点，不重问、改名、删除或覆盖已关闭决策。',
+      '只有当前决策树在答案后仍完整闭合，才能进入 DELIVERY CONTRACT。',
+    ],
+    submit: 'delivery-analysis answer-review complete',
+  },
   delivery_contract: {
     title: 'DELIVERY CONTRACT',
     objective: '将已收敛的影响和决策压缩成 Dev 与 Test 共同依赖、又不剥夺两者专业自主性的冻结交付契约。',
@@ -130,7 +149,7 @@ export const DELIVERY_ANALYSIS_WORKFLOW: Record<DeliveryAnalysisPhase, DeliveryA
 };
 
 export const DELIVERY_ANALYSIS_PHASE_SEQUENCE =
-  'AS-IS & IMPACT SCAN → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → DELIVERY CONTRACT → FINALIZE';
+  'AS-IS & IMPACT SCAN → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → ANSWER REVIEW → DELIVERY CONTRACT → FINALIZE';
 
 export function deliveryAnalysisNormalCommandPath() {
   return DELIVERY_ANALYSIS_PHASE_ORDER.flatMap((phase) => {

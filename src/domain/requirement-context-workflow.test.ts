@@ -12,6 +12,7 @@ test('defines the Backlog phase order, work packets, and normal command path in 
     'as_is',
     'decision_proposal',
     'decision_resolution',
+    'answer_review',
     'to_be',
     'impact_scan',
     'scope',
@@ -20,7 +21,7 @@ test('defines the Backlog phase order, work packets, and normal command path in 
   ]);
   assert.equal(
     REQUIREMENT_CONTEXT_PHASE_SEQUENCE,
-    'AS-IS → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → TO-BE → Impact Scan → SCOPE → Acceptance → Finalize',
+    'AS-IS → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → ANSWER REVIEW → TO-BE → Impact Scan → SCOPE → Acceptance → Finalize',
   );
 
   for (const phase of REQUIREMENT_CONTEXT_PHASE_ORDER) {
@@ -36,6 +37,7 @@ test('defines the Backlog phase order, work packets, and normal command path in 
     'requirement-context as-is complete',
     'requirement-context decision-proposal complete',
     'requirement-context decision-resolution complete',
+    'requirement-context answer-review complete',
     'requirement-context to-be complete',
     'requirement-context impact-scan complete',
     'requirement-context scope complete',
@@ -47,6 +49,8 @@ test('defines the Backlog phase order, work packets, and normal command path in 
     REQUIREMENT_CONTEXT_WORKFLOW.decision_resolution.pendingHumanSubmit,
     'requirement-context request-clarification',
   );
+  assert.match(REQUIREMENT_CONTEXT_WORKFLOW.answer_review.objective, /HUMAN 与 Agent/);
+  assert.match(REQUIREMENT_CONTEXT_WORKFLOW.answer_review.prohibited, /回到 PROPOSE/);
   assert.match(REQUIREMENT_CONTEXT_WORKFLOW.decision_proposal.objective, /输入业务方案.*规格和代码现状冲突.*遗漏影响/);
   assert.match(REQUIREMENT_CONTEXT_WORKFLOW.decision_proposal.prohibited, /不要主动改良、替换或扩展输入业务方案/);
   assert.match(REQUIREMENT_CONTEXT_WORKFLOW.to_be.objective, /输入业务方案.*AS-IS 与影响核对的 TO-BE/);

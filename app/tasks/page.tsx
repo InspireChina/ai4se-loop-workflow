@@ -21,6 +21,13 @@ const laneStatusLabels: Record<string, string> = {
   completed: '已完成',
 };
 
+const businessAnalysisAgents = ['idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent'];
+
+function inBusinessAnalysis(task: { item_type: string; current_subagent: string | null }) {
+  return task.item_type === 'business-analysis'
+    || (task.item_type === 'end-to-end' && businessAnalysisAgents.includes(task.current_subagent || ''));
+}
+
 export default async function TasksPage({ searchParams }: TasksPageProps) {
   const { view } = await searchParams;
   const completedView = view === 'completed';
@@ -36,6 +43,7 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
       <div className="card table task-table">
         <div className="row heading"><span>标题</span><span>PIPELINE</span><span>状态</span><span>{completedView ? '时间' : '当前 Agent'}</span></div>
         {tasks.map((task) => {
+          const businessAnalysisActive = inBusinessAnalysis(task);
           const hasCompletedAt = Boolean(task.completed_at);
           const timeLabel = hasCompletedAt ? '完成时间' : '更新时间';
           const timeValue = task.completed_at ?? task.updated_at;
@@ -43,10 +51,10 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
             && ['idea-context-agent', 'business-design-agent', 'backlog-agent'].includes(task.current_subagent || '');
           const laneSummary = completedView ? '' : waitingForRequirementAnswers
             ? `${agentLabel(task.current_subagent)}（等待用户回答）`
-            : task.item_type === 'business-analysis'
+            : businessAnalysisActive
               ? task.current_subagent ? agentLabel(task.current_subagent) : '等待用户阅读需求规格'
             : (task as TaskWithLanes).lanes.map((lane) => `${lane.lane === 'analysis' ? '交付分析' : '开发验证'}：${agentLabel(lane.current_agent)}（${laneStatusLabels[lane.status] || lane.status}）`).join(' · ');
-          const businessAnalysisStatus = task.item_type === 'business-analysis'
+          const businessAnalysisStatus = businessAnalysisActive
             ? task.agile_status === 'ready_to_close' ? '等待阅读规格'
               : task.current_subagent ? agentLabel(task.current_subagent).replace(' Agent', '')
                 : task.agile_status === 'backlog' ? '等待需求意图确认' : statusLabel(task.agile_status)

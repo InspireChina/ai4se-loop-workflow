@@ -19,7 +19,7 @@ test('injects the complete read-only context and submission contract before Agen
   assert.match(prompt, /Required Context Refs/);
   assert.match(prompt, /实时项目事实（只读调查）/);
   assert.match(prompt, /只有完成冻结上下文读取和实时调查后仍无法从证据唯一确定/);
-  assert.match(prompt, /help <context\|impact\|decision-proposal\|decision-resolution\|contract\|finish>/);
+  assert.match(prompt, /help <context\|impact\|decision-proposal\|decision-resolution\|answer-review\|contract\|finish>/);
   assert.match(prompt, /delivery-analysis complete/);
   assert.match(prompt, /\*\*首次必须执行：\*\*\n\n```bash/);
   assert.match(prompt, /- `npm --prefix/);
@@ -52,9 +52,9 @@ test('advertises a role-specific command guide for every progressive flow Agent'
   const requirementSpec = agentCommandPrompt('/app', 'requirement-spec-agent', 'ba-spec');
   const specReview = agentCommandPrompt('/app', 'spec-review-agent', 'ba-review');
   assert.match(backlog || '', /COMMAND RESULT.*NEXT WORK PACKET/);
-  assert.match(backlog || '', /help <context\|assertion\|impact\|decision-proposal\|decision-resolution\|scope\|finish>/);
+  assert.match(backlog || '', /help <context\|assertion\|impact\|decision-proposal\|decision-resolution\|answer-review\|scope\|finish>/);
   assert.match(splitter || '', /help <context\|unit\|source\|dependency\|revision\|finish>/);
-  assert.match(analyst || '', /help <context\|impact\|decision-proposal\|decision-resolution\|contract\|finish>/);
+  assert.match(analyst || '', /help <context\|impact\|decision-proposal\|decision-resolution\|answer-review\|contract\|finish>/);
   assert.match(development || '', /help <context\|evidence\|review\|commit\|input\|finish>/);
   assert.match(development || '', /implementation 命令统一返回 `COMMAND RESULT`/);
   assert.match(verification || '', /help <context\|plan\|execute\|evidence\|input\|finish>/);

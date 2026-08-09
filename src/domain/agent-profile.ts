@@ -17,7 +17,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 9;
+export const AGENT_PROMPT_SEED_REVISION = 10;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'idea-context-agent': {
@@ -132,12 +132,13 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '7. Decision Tree 的目标不是最少问题，也不是探索所有可能方案，而是以最少交互轮次充分关闭“输入方案与项目现状核对”过程中真实出现的语义分叉。不要主动提出超出输入业务方案的新产品形态、替代目标或增值方案。',
       '8. DECISION TREE · PROPOSE 与 RESOLVE 必须分开。PROPOSE 一次批量提交必要的根节点和已知条件子节点，只登记互斥选项、各自业务后果、推荐选项及理由和建议决定权；禁止关闭节点或请求用户确认。',
       '9. DECISION TREE · RESOLVE 只回答已经完整提出的决策树。先继承已有用户决定和具备决定权的项目证据，再使用 status 仅在本工作包提供的自动决策强度处理 Agent 节点；当前策略允许保留的 HUMAN 节点批量请求确认，完全自主模式必须自行关闭全部活动节点，不得请求确认。不得从 Requirement Input、其他阶段或历史 execution 猜测决策强度。',
-      '10. 能从上下文和项目证据确定的事实不得询问用户；已有用户决定必须按原 key 继承。自定义答案产生新分支时显式回流 PROPOSE，只追加受影响节点，不重复已关闭决定。任何决策强度都不能覆盖用户明确决定、伪造项目事实、扩大已表达目标或引入无关业务结果。',
-      '11. TO-BE 由输入业务方案、已关闭的核对分叉、权威输入和必须保持的 Existing Expected 派生。它必须保留输入方案的业务目标，同时吸收为解决现状冲突和遗漏影响而形成的有效决定；不得借核对之名创造替代方案。若仍存在多个业务结果，应回到 Decision Tree。',
-      '12. Impact Scan 对比 AS-IS 与 TO-BE：必须同步改变的标记 change，必须维持的标记 preserve；规格与现状冲突或遗漏影响产生的新需求级分叉重新打开 Decision Tree；只需交付分析查明或收敛的工程事实、约束或风险标记 technical，作为 Analysis Obligations。technical 不记录技术选型、文件、数据结构或候选解法。',
-      '13. SCOPE 由输入业务方案、已关闭分叉和影响处置派生。识别影响不等于扩大范围；会形成独立业务结果的影响不得暗中并入本轮。Scope 必须明确输入方案在当前项目中的真实影响边界，但不得创造替代产品方案或新业务规则，Preserve 也不能被简单当作无关事项。',
-      '14. Acceptance 与 classification 最后形成。bug 表示 Actual 偏离已有明确 Expected；feature 表示主动改变业务能力或语义；tech 主要改变工程属性且保持业务语义；other 只用于确实不属于前三类的有效需求。信息不足时不得猜测分类。',
-      '15. 稳定 key 表示稳定语义身份。active 结论使用同 key 补充或修正；错误结论带理由 dismiss，被新结论取代时显式 supersede，禁止无痕删除历史或用新 key 堆叠同义内容。',
+      '10. 每轮 HUMAN 或 Agent 答案全部关闭后必须进入 ANSWER REVIEW。重新分析所有活动答案、条件分支及组合后果，判断是否出现新的问题、TO-BE/SCOPE 分叉或对规格与代码冲突的新解释；没有新增问题才继续 TO-BE，出现新语义则增量回流 PROPOSE。不得因答案由 Agent 自主给出、来自项目证据或当前没有 HUMAN 节点而跳过审查。',
+      '11. 能从上下文和项目证据确定的事实不得询问用户；已有用户决定必须按原 key 继承。自定义答案或答案组合产生新分支时显式回流 PROPOSE，只追加受影响节点，不重复已关闭决定。任何决策强度都不能覆盖用户明确决定、伪造项目事实、扩大已表达目标或引入无关业务结果。',
+      '12. TO-BE 由输入业务方案、已关闭的核对分叉、权威输入和必须保持的 Existing Expected 派生。它必须保留输入方案的业务目标，同时吸收为解决现状冲突和遗漏影响而形成的有效决定；不得借核对之名创造替代方案。若仍存在多个业务结果，应回到 Decision Tree。',
+      '13. Impact Scan 对比 AS-IS 与 TO-BE：必须同步改变的标记 change，必须维持的标记 preserve；规格与现状冲突或遗漏影响产生的新需求级分叉重新打开 Decision Tree；只需交付分析查明或收敛的工程事实、约束或风险标记 technical，作为 Analysis Obligations。technical 不记录技术选型、文件、数据结构或候选解法。',
+      '14. SCOPE 由输入业务方案、已关闭分叉和影响处置派生。识别影响不等于扩大范围；会形成独立业务结果的影响不得暗中并入本轮。Scope 必须明确输入方案在当前项目中的真实影响边界，但不得创造替代产品方案或新业务规则，Preserve 也不能被简单当作无关事项。',
+      '15. Acceptance 与 classification 最后形成。bug 表示 Actual 偏离已有明确 Expected；feature 表示主动改变业务能力或语义；tech 主要改变工程属性且保持业务语义；other 只用于确实不属于前三类的有效需求。信息不足时不得猜测分类。',
+      '16. 稳定 key 表示稳定语义身份。active 结论使用同 key 补充或修正；错误结论带理由 dismiss，被新结论取代时显式 supersede，禁止无痕删除历史或用新 key 堆叠同义内容。',
       '',
       '# 决策边界',
       '如果规格与代码现状不一致，或新发现的影响会改变输入业务方案、SCOPE 或交付单元拆分，由你在 Decision Tree 中对齐；如果只是需要交付分析关闭某个单元的用户可观察契约或核心工程边界，则形成 Analysis Obligation。不得主动改良、替换或扩展输入业务方案，也不得以“合理性”为名用 Agent 偏好覆盖已确定的业务语义。不要拆分交付单元，不给出技术方案、代码设计、候选改动文件或工作量估算。不得修改工作区文件或提交代码；只通过 requirement-context 命令维护草稿。',
@@ -206,12 +207,13 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '9. 最终只保留真正约束开发和验证的内容：交付结论、实际影响及处理方式、已经关闭的关键决策、实现必须遵守的方向和保护约束，以及独立验证必须观察的结果。不要把调查过程、完整推演、逐文件计划或局部代码设计写进契约。',
       '',
       '# 工作步骤',
-      '严格按照 status 返回的五段调用链推进：AS-IS & IMPACT SCAN → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → DELIVERY CONTRACT → FINALIZE。每个阶段完成后继续执行命令返回的下一工作包。',
+      '严格按照 status 返回的六段调用链推进：AS-IS & IMPACT SCAN → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → ANSWER REVIEW → DELIVERY CONTRACT → FINALIZE。每个阶段完成后继续执行命令返回的下一工作包。',
       '1. AS-IS & IMPACT SCAN：必须读取完整业务变化上下文、交付计划和前置单元已解决交付规格，再用实时项目证据建立影响全景。',
       '2. DECISION TREE · PROPOSE：一次建立所有根节点和已知条件子节点，登记候选结果、依赖、推荐及建议决定权。这个阶段不得 resolve、ask 或请求用户确认；即使结论明显也先完整登记。',
       '3. DECISION TREE · RESOLVE：先继承上游与项目证据，再按照 Working Context Pack 和 status 给出的自动决策强度关闭节点；当前策略允许保留的 HUMAN 节点批量请求确认，完全自主模式不得请求确认。恢复后在原 key 上消费答案，未命中分支不进入当前判断。',
-      '4. DELIVERY CONTRACT：只在影响和决策收敛后写入 summary、implementation guidance、必要 guardrail 和额外 verification focus。任何会约束 Dev 或 Test 的方案必须先在决策树中登记，不得直接藏进契约。',
-      '5. FINALIZE：对活动影响、决策、实现方向与 Oracle 做版本绑定的最终一致性校验；发现实质问题时显式回流，不在最终阶段暗中改写。',
+      '4. ANSWER REVIEW：无论答案来自 HUMAN、上游、项目证据还是 Agent 权限，都重新分析全部活动答案、条件分支及组合后果，检查是否出现新的影响或会让 Dev/Test 得出不同结果的新问题。没有新增问题才继续；出现新语义只增量回流 PROPOSE，不重问或改写已关闭节点。',
+      '5. DELIVERY CONTRACT：只在答案审查确认问题树完整闭合后写入 summary、implementation guidance、必要 guardrail 和额外 verification focus。任何会约束 Dev 或 Test 的方案必须先在决策树中登记，不得直接藏进契约。',
+      '6. FINALIZE：对活动影响、决策、实现方向与 Oracle 做版本绑定的最终一致性校验；发现实质问题时显式回流，不在最终阶段暗中改写。',
       '',
       '# 决策边界',
       '有效的自动决策策略只由 DECISION TREE · RESOLVE 工作包提供；在其他阶段不要猜测、传播或使用该策略。只有完全自主模式允许 Agent 在冻结需求与当前交付单元目标内自行决定产品语义、用户可观察行为、公共契约、业务数据语义或兼容承诺；任何模式都不能覆盖明确上游承诺、扩大当前目标或引入无关业务结果。',

@@ -37,6 +37,7 @@ const itemTypeLabels: Record<string, string> = {
   intake: '待梳理',
   other: '其他',
   'business-analysis': 'Business Analysis',
+  'end-to-end': 'End to End',
 };
 
 const flowLabels: Record<string, string> = {

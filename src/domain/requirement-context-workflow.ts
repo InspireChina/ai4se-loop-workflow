@@ -2,6 +2,7 @@ export const REQUIREMENT_CONTEXT_PHASE_ORDER = [
   'as_is',
   'decision_proposal',
   'decision_resolution',
+  'answer_review',
   'to_be',
   'impact_scan',
   'scope',
@@ -88,6 +89,23 @@ export const REQUIREMENT_CONTEXT_WORKFLOW: Record<RequirementContextPhase, Requi
     ],
     submit: 'requirement-context decision-resolution complete',
     pendingHumanSubmit: 'requirement-context request-clarification',
+  },
+  answer_review: {
+    objective: '重新阅读全部 HUMAN 与 Agent 决策答案、活动条件分支及其组合后果，确认它们是否引入了尚未提出的新问题。',
+    required: '一份聚合答案审查，覆盖全部活动答案、组合后果、被激活的子分支和潜在新语义；必须明确选择继续或增量补问。',
+    prohibited: '不要在审查中直接新增或回答决策，也不要跳过 Agent 自主答案；发现新问题时回到 PROPOSE，并保留所有已关闭节点的稳定 key 和答案。',
+    commands: [
+      'requirement-context answer-review complete --artifact-file <答案审查>',
+      'requirement-context answer-review expand --artifact-file <答案审查与新增问题依据>',
+      'help answer-review',
+    ],
+    reviewBeforeSubmit: [
+      'HUMAN 与 Agent 的答案均已逐项复查，没有因决定权来源不同而跳过任何节点。',
+      '已检查答案组合是否激活条件子树、改变规格与代码现状冲突的解释，或产生新的 TO-BE/SCOPE 分叉。',
+      '若出现新语义，只回流新增问题，不重问、改名、删除或覆盖已关闭节点。',
+      '只有确认当前问题树在答案后仍完整闭合，才能继续 TO-BE。',
+    ],
+    submit: 'requirement-context answer-review complete',
   },
   to_be: {
     objective: '把输入业务方案、Active Decision Path 和必须保持的 Existing Expected 投影成经过 AS-IS 与影响核对的 TO-BE。',
@@ -178,7 +196,7 @@ export const REQUIREMENT_CONTEXT_WORKFLOW: Record<RequirementContextPhase, Requi
 };
 
 export const REQUIREMENT_CONTEXT_PHASE_SEQUENCE =
-  'AS-IS → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → TO-BE → Impact Scan → SCOPE → Acceptance → Finalize';
+  'AS-IS → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → ANSWER REVIEW → TO-BE → Impact Scan → SCOPE → Acceptance → Finalize';
 
 export function requirementContextNormalCommandPath() {
   return REQUIREMENT_CONTEXT_PHASE_ORDER.flatMap((phase) => {

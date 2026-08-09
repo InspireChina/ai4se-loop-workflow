@@ -98,6 +98,66 @@ test('runs Business Analysis from a raw idea to an independently approved requir
   assert.equal((await getTask(taskId))?.task.agile_status, 'done');
 });
 
+test('hands an approved End to End specification directly to Develop without human acknowledgement', async () => {
+  const { createTask, getTask, pipelineForTask } = await import('./tasks');
+  const taskId = await createTask({
+    title: '从想法自动交付项目体检能力',
+    description: '从模糊想法开始完成业务分析，并自动进入开发交付。',
+    itemType: 'end-to-end',
+    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
+  });
+
+  let delegation = (await pipelineForTask(taskId))[0];
+  assert.equal(delegation.agent, 'idea-context-agent');
+  await executeBusinessAnalysisAgent(delegation, [
+    ['idea-context', 'discovery', 'complete', '--artifact', '# 调查\n\n团队需要更早识别项目健康风险。'],
+    ['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify({ summary: '目标可以唯一归纳', questions: [] })],
+    ['idea-context', 'synthesis', 'complete', '--artifact', '# 需求意图简报\n\n帮助项目团队在风险扩大前识别健康异常。'],
+    ['idea-context', 'complete'],
+  ], `${taskId}-intent`);
+
+  delegation = (await pipelineForTask(taskId))[0];
+  assert.equal(delegation.agent, 'business-design-agent');
+  await executeBusinessAnalysisAgent(delegation, [
+    ['business-design', 'exploration', 'complete', '--artifact', '# 探索\n\n覆盖状态、风险依据和建议行动。'],
+    ['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify({ summary: '没有必须分叉的决定', questions: [] })],
+    ['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify({ notes: '没有活动决策节点', agentDecisions: [], humanDecisionKeys: [] })],
+    ['business-design', 'decision-resolution', 'audit-complete', '--artifact', '# 答案审查\n\n没有新增业务语义。'],
+    ['business-design', 'solution', 'complete', '--artifact', '# 业务方案\n\n项目成员可发起体检并查看风险依据和建议行动。'],
+    ['business-design', 'complete'],
+  ], `${taskId}-design`);
+
+  const specification = '# AS IS\n\n缺少统一健康风险视图。\n\n# TO BE\n\n项目成员可查看体检结果。\n\n# ACTORS\n\n项目成员。\n\n# SCENARIOS\n\n发起并阅读体检。\n\n# BUSINESS RULES\n\n风险必须展示依据。\n\n# SCOPE\n\n项目级体检。\n\n# OUT OF SCOPE\n\n自动修复。\n\n# ACCEPTANCE\n\n展示状态、依据和建议行动。\n\n# DEPENDENCIES\n\n无。\n\n# ASSUMPTIONS\n\n用户可访问项目。';
+  delegation = (await pipelineForTask(taskId))[0];
+  assert.equal(delegation.agent, 'requirement-spec-agent');
+  await executeBusinessAnalysisAgent(delegation, [
+    ['requirement-spec', 'composition', 'complete', '--artifact', specification],
+    ['requirement-spec', 'verification', 'complete', '--artifact', specification],
+    ['requirement-spec', 'complete'],
+  ], `${taskId}-spec`);
+
+  delegation = (await pipelineForTask(taskId))[0];
+  assert.equal(delegation.agent, 'spec-review-agent');
+  await executeBusinessAnalysisAgent(delegation, [
+    ['spec-review', 'inspection', 'complete', '--artifact', '# 独立审查\n\n规格完整继承需求意图和业务方案。'],
+    ['spec-review', 'classification', 'complete', '--artifact', JSON.stringify({ summary: '没有阻断缺口', gaps: [] })],
+    ['spec-review', 'approve', '--artifact', specification],
+  ], `${taskId}-review`);
+
+  const handedOff = await getTask(taskId);
+  assert.equal(handedOff?.task.item_type, 'end-to-end');
+  assert.equal(handedOff?.task.agile_status, 'backlog');
+  assert.equal(handedOff?.task.current_subagent, 'backlog-agent');
+  assert.equal(handedOff?.task.run_state, 'runnable');
+  assert.equal(handedOff?.task.closure_status, 'none');
+  assert.equal(handedOff?.task.review_document_id, null);
+  assert.match(handedOff?.documents.find((document) => document.kind === 'ba_review')?.content || '', /# ACCEPTANCE/);
+
+  const developEntry = (await pipelineForTask(taskId))[0];
+  assert.equal(developEntry.pipeline, 'backlog');
+  assert.equal(developEntry.agent, 'backlog-agent');
+});
+
 test('dynamically inserts Research for intent and business design and requires current web-search evidence', async () => {
   const { createTask, pipelineForTask } = await import('./tasks');
   const { beginExecutionAttempt, completeExecution, recordExecutionReceipt } = await import('./executions');
