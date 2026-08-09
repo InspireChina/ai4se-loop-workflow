@@ -38,6 +38,15 @@ test('normalizes Codex tool completion and Claude tool results', () => {
   assert.equal(claude?.exitCode, null);
 });
 
+test('treats a completed Codex web search without an explicit status as successful', () => {
+  const event = parseAgentTelemetryStdout('codex', JSON.stringify({
+    type: 'item.completed', item: { id: 'search-1', type: 'web_search', query: 'current industry standard' },
+  }));
+  assert.equal(event?.tool, 'web_search');
+  assert.equal(event?.phase, 'completed');
+  assert.equal(event?.success, true);
+});
+
 test('marks a non-zero Cursor shell receipt as failed even when Cursor wraps it as a success result', () => {
   const event = parseAgentTelemetryStdout('cursor', JSON.stringify({
     type: 'tool_call',
@@ -441,22 +450,23 @@ test('captures aggregate Codex and Claude run metrics without inventing zero usa
   assert.deepEqual(createAgentRunMetricsAccumulator('cursor').value(), {});
 });
 
-test('passes Codex model and reasoning effort as explicit CLI overrides', () => {
+test('passes Codex web search, model and reasoning effort as explicit CLI overrides', () => {
   const executor = getAgentExecutor('codex');
-  const args = executor.buildArgs('prompt', '/workspace', { model: 'gpt-5.6-terra', reasoningEffort: 'high' });
+  const args = executor.buildArgs('prompt', '/workspace', { model: 'gpt-5.6-terra', reasoningEffort: 'high', webSearch: true });
   assert.deepEqual(args, [
-    'exec', '--json', '--dangerously-bypass-approvals-and-sandbox',
+    '--search', 'exec', '--json', '--dangerously-bypass-approvals-and-sandbox',
     '--model', 'gpt-5.6-terra',
     '--config', 'model_reasoning_effort="high"',
     '-C', '/workspace', '-',
   ]);
-  assert.match(executor.formatCommand('/workspace', { model: 'gpt-5.6-terra', reasoningEffort: 'high' }), /--model gpt-5\.6-terra --config model_reasoning_effort=high/);
+  assert.match(executor.formatCommand('/workspace', { model: 'gpt-5.6-terra', reasoningEffort: 'high', webSearch: true }), /^codex --search exec --json .*--model gpt-5\.6-terra --config model_reasoning_effort=high/);
 });
 
 test('leaves Codex model defaults untouched when no override is configured', () => {
   const args = getAgentExecutor('codex').buildArgs('prompt', '/workspace');
   assert.equal(args.includes('--model'), false);
   assert.equal(args.includes('--config'), false);
+  assert.equal(args.includes('--search'), false);
 });
 
 test('passes the configured Claude model as an explicit CLI override', () => {

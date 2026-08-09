@@ -98,12 +98,12 @@ export const REQUIREMENT_PIPELINES: readonly RequirementPipelineDefinition[] = [
   }],
 }, {
   id: 'feature',
-  label: '功能需求',
+  label: 'Develop',
   summary: '用于新增或主动改变业务能力与用户可观察行为。',
   stages: [requirementContext, ...deliveryStages],
 }, {
   id: 'bug',
-  label: 'BUG',
+  label: 'Bug Fix',
   summary: '用于 Actual 偏离已有明确 Expected 的问题修复。',
   stages: [requirementContext, {
     key: 'reproduction',
@@ -116,5 +116,5 @@ export const REQUIREMENT_PIPELINES: readonly RequirementPipelineDefinition[] = [
 
 export function requirementPipeline(input: unknown): RequirementPipelineId {
   if (input === 'business-analysis' || input === 'feature' || input === 'bug') return input;
-  throw new Error('PIPELINE 只能选择 Business Analysis、功能需求或 BUG');
+  throw new Error('PIPELINE 只能选择 Business Analysis、Develop 或 Bug Fix');
 }

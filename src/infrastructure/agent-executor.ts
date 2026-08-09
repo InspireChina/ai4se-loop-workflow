@@ -14,6 +14,7 @@ export type AgentExecutionContext = {
 export type AgentExecutionOptions = {
   model?: string;
   reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  webSearch?: boolean;
 };
 
 export type AgentRunMetrics = {
@@ -592,7 +593,9 @@ export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: strin
         const explicitSuccess = completed
           ? itemType === 'command_execution'
             ? exitCode === 0 && status !== 'failed'
-            : ['completed', 'success', 'succeeded'].includes(status)
+            : status
+              ? ['completed', 'success', 'succeeded'].includes(status)
+              : !failed
           : undefined;
         return {
           name: 'loop.agent.tool', executor, tool, toolClass,
@@ -719,13 +722,14 @@ const executors: Omit<Record<AgentExecutorId, AgentExecutor>, 'cursor'> = {
   codex: {
     id: 'codex', label: 'Codex', command: process.env.CODEX_CLI || 'codex', promptMode: 'stdin',
     buildArgs: (_prompt, workspace, options) => [
+      ...(options?.webSearch ? ['--search'] : []),
       'exec', '--json', '--dangerously-bypass-approvals-and-sandbox',
       ...(options?.model ? ['--model', options.model] : []),
       ...(options?.reasoningEffort ? ['--config', `model_reasoning_effort="${options.reasoningEffort}"`] : []),
       '-C', workspace, '-',
     ],
     formatCommand: (workspace, options) => [
-      'codex exec --json',
+      `codex${options?.webSearch ? ' --search' : ''} exec --json`,
       options?.model ? `--model ${options.model}` : '',
       options?.reasoningEffort ? `--config model_reasoning_effort=${options.reasoningEffort}` : '',
       `-C ${workspace}`,

@@ -157,9 +157,10 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
       ...(input.executionOptions.model ? ['--model', input.executionOptions.model] : []),
       ...(input.executionOptions.reasoningEffort ? ['--config', `model_reasoning_effort="${input.executionOptions.reasoningEffort}"`] : []),
     ];
+    const search = input.executionOptions.webSearch ? ['--search'] : [];
     result = firstTurn
-      ? await runProcess(process.env.CODEX_CLI || 'codex', ['exec', ...common, '-C', paths.root, '-'], prompt, 10 * 60 * 1000, chatCommandEnv)
-      : await runProcess(process.env.CODEX_CLI || 'codex', ['exec', 'resume', ...common, providerSessionId, '-'], prompt, 10 * 60 * 1000, chatCommandEnv);
+      ? await runProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', ...common, '-C', paths.root, '-'], prompt, 10 * 60 * 1000, chatCommandEnv)
+      : await runProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', 'resume', ...common, providerSessionId, '-'], prompt, 10 * 60 * 1000, chatCommandEnv);
     if (firstTurn) providerSessionId = codexSessionId(result.stdout);
   }
 

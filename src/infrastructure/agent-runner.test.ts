@@ -23,7 +23,7 @@ test('persists normalized business execution events as ordered execution receipt
   assert.match(source, /durableToolEvent\(event\)/);
   assert.match(source, /'tool_event'/);
   assert.match(source, /String\(event\.sequence\)\.padStart\(8,\s*'0'\)/);
-  assert.match(source, /toolClass === 'shell' && event\.success === true/);
+  assert.match(source, /isCompleted && event\.success === true/);
   assert.match(source, /success:\s*event\.success === true/);
   assert.match(source, /exitCode:\s*event\.exitCode \?\? null/);
   assert.match(source, /createHash\('sha256'\)\.update\(command\)\.digest\('hex'\)/);

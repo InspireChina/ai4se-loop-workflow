@@ -10,7 +10,7 @@ export default async function AgentsPage() {
   const [profiles, runtimes] = await Promise.all([listAgentProfiles(), listAgentRuntimeSettings()]);
   const runtimeByAgent = new Map(runtimes.map((runtime) => [runtime.agentId, runtime]));
   return <>
-    <header><p className="eyebrow">AGENT RUNTIME</p><h1>Agent 配置</h1><p className="muted">管理当前项目各 Agent 的 Runtime、完整 Prompt、长期记忆和自动演化状态。每个项目独立保存自己的配置，不进入目标仓库 Git。</p></header>
+    <header><p className="eyebrow">AGENT RUNTIME</p><h1>Agent 配置</h1><p className="muted">管理当前项目各 Agent 的 Runtime、完整 Prompt、长期记忆和自动演化状态。Runtime 默认继承项目设置，也可以按 Agent 独立覆盖。</p></header>
     <section className="agent-grid">
       {profiles.map((profile) => {
         const definition = AGENT_PROFILE_DEFINITIONS[profile.agent_id as FlowAgentId];
@@ -21,7 +21,7 @@ export default async function AgentsPage() {
           : runtime?.executorId === 'claude'
             ? runtime.claudeModel || 'CLI 默认'
             : 'CLI 默认';
-        const runtimeLabel = `${executorLabel} · ${modelLabel}`;
+        const runtimeLabel = `${executorLabel} · ${modelLabel} · ${runtime?.source === 'agent_override' ? '独立' : '项目默认'}`;
         return <Link href={`/agents/${profile.agent_id}`} className="card agent-card" key={profile.agent_id}>
           <div className="agent-card-head"><span className="executor-icon"><Bot size={18}/></span><span className="agent-card-badges"><span className="badge">{runtimeLabel}</span><span className={`badge ${profile.candidate_prompt_version ? 'amber' : profile.auto_evolve ? 'green' : 'blue'}`}>{profile.candidate_prompt_version ? `Canary · ${profile.canary_remaining}` : profile.auto_evolve ? '自动演化' : '仅手工'}</span></span></div>
           <div><h2>{definition.label}</h2><p className="muted">{definition.description}</p></div>

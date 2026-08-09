@@ -211,6 +211,7 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .metadata-add{justify-self:start;display:flex;align-items:center;gap:6px;border:0;background:transparent;color:var(--blue);font:600 12px inherit;padding:3px 0;cursor:pointer}
 .metadata-add:disabled{color:#9ba4b4;cursor:not-allowed}
 .dialog-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:4px}
+.form-actions{display:flex;flex-wrap:wrap;align-items:center;gap:9px}
 .settings-stack{display:grid;gap:14px}
 .settings-description{font-size:12px;margin-top:5px}
 .settings-section-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:start}

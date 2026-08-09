@@ -98,6 +98,97 @@ test('runs Business Analysis from a raw idea to an independently approved requir
   assert.equal((await getTask(taskId))?.task.agile_status, 'done');
 });
 
+test('dynamically inserts Research for intent and business design and requires current web-search evidence', async () => {
+  const { createTask, pipelineForTask } = await import('./tasks');
+  const { beginExecutionAttempt, completeExecution, recordExecutionReceipt } = await import('./executions');
+  const { issueAgentCommandToken, readAgentCommandSubmission, runAgentCommand } = await import('./agent-command-drafts');
+  const { applyAgentResult } = await import('./agent-results');
+  const taskId = await createTask({
+    title: '定义对 Agent 友好的项目',
+    description: '希望识别项目是否适合由 Agent 持续开发。',
+    itemType: 'business-analysis',
+    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
+  });
+  const research = JSON.stringify({
+    summary: '官方资料强调可定位指令、可运行验证和明确项目上下文。',
+    questions: [{ question: '什么条件让项目更适合由编码 Agent 持续处理？', reason: '该定义会影响需求目标和方案评价标准。' }],
+    findings: [{
+      claim: '项目应向 Agent 提供可定位的持久指令和可执行验证路径。',
+      sourceTitle: 'OpenAI Codex documentation',
+      sourceUrl: 'https://developers.openai.com/codex/',
+      sourceType: 'official',
+      applicability: '可用于定义项目对 Agent 友好的外部背景，但不能替代用户对成功结果的决定。',
+      limitations: '官方文档不定义当前产品必须采用的具体体检规则。',
+      confidence: 'high',
+    }],
+    unresolved: [],
+  });
+
+  let delegation = (await pipelineForTask(taskId))[0];
+  const intent = await beginExecutionAttempt({
+    runId: `RUN-ba-research-${taskId}-intent`,
+    delegation,
+    prompt: 'Intent research',
+    executorId: 'codex',
+    webSearchEnabled: true,
+  });
+  const intentToken = await issueAgentCommandToken(intent.attempt.execution_id);
+  assert.ok(intentToken);
+  const runIntent = (args: string[]) => runAgentCommand({ executionId: intent.attempt.execution_id, token: intentToken, args });
+  const intentStatus = await runIntent(['idea-context', 'status']);
+  assert.match(intentStatus, /Live Research: enabled/);
+  const intentResearchPacket = await runIntent(['idea-context', 'discovery', 'complete', '--artifact', '# DISCOVERY\n\n需要定义 Agent 友好的项目条件。']);
+  assert.match(intentResearchPacket, /Phase: RESEARCH/);
+  await assert.rejects(
+    runIntent(['idea-context', 'research', 'complete', '--artifact', research]),
+    /必须至少成功完成一次 Web Search/,
+  );
+  await recordExecutionReceipt(intent.attempt.execution_id, 'tool_event', '00000001', {
+    name: 'loop.agent.tool', phase: 'completed', executor: 'codex', tool: 'web_search', success: true,
+  });
+  const intentProposal = await runIntent(['idea-context', 'research', 'complete', '--artifact', research]);
+  assert.match(intentProposal, /Phase: CLARIFICATION PROPOSAL/);
+  await runIntent(['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify({ summary: '没有目标歧义', questions: [] })]);
+  await assert.rejects(
+    runIntent(['idea-context', 'synthesis', 'complete', '--artifact', '# 需求意图简报\n\n定义项目对 Agent 的友好程度。']),
+    /必须包含 RESEARCH BASIS/,
+  );
+  await runIntent(['idea-context', 'synthesis', 'complete', '--artifact', '# 需求意图简报\n\n定义项目对 Agent 的友好程度。\n\n# RESEARCH BASIS\n\n采用官方资料作为外部背景，同时保留用户目标决定权：https://developers.openai.com/codex/']);
+  await runIntent(['idea-context', 'complete']);
+  const intentResult = await readAgentCommandSubmission(intent.attempt.execution_id);
+  await applyAgentResult(`RUN-ba-research-${taskId}-intent`, delegation, intentResult!, { executionId: intent.attempt.execution_id });
+  await completeExecution(intent.attempt.execution_id);
+
+  delegation = (await pipelineForTask(taskId))[0];
+  assert.equal(delegation.agent, 'business-design-agent');
+  const design = await beginExecutionAttempt({
+    runId: `RUN-ba-research-${taskId}-design`,
+    delegation,
+    prompt: 'Business design research',
+    executorId: 'codex',
+    webSearchEnabled: true,
+  });
+  const designToken = await issueAgentCommandToken(design.attempt.execution_id);
+  assert.ok(designToken);
+  const runDesign = (args: string[]) => runAgentCommand({ executionId: design.attempt.execution_id, token: designToken, args });
+  await runDesign(['business-design', 'status']);
+  const designResearchPacket = await runDesign(['business-design', 'exploration', 'complete', '--artifact', '# EXPLORATION\n\n探索项目上下文、验证路径和持续维护模式。']);
+  assert.match(designResearchPacket, /Phase: RESEARCH/);
+  await recordExecutionReceipt(design.attempt.execution_id, 'tool_event', '00000001', {
+    name: 'loop.agent.tool', phase: 'completed', executor: 'codex', tool: 'web_search', success: true,
+  });
+  await runDesign(['business-design', 'research', 'complete', '--artifact', research]);
+  await runDesign(['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify({ summary: '当前没有必须分叉的业务决定', questions: [] })]);
+  await runDesign(['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify({ notes: '没有活动节点', agentDecisions: [], humanDecisionKeys: [] })]);
+  await runDesign(['business-design', 'decision-resolution', 'audit-complete', '--artifact', '# 答案审查\n\n没有新增语义。']);
+  await runDesign(['business-design', 'solution', 'complete', '--artifact', '# 业务方案\n\n从项目上下文、验证能力和维护反馈三个方面形成体检结果。\n\n# RESEARCH BASIS\n\n外部资料用于补充评价维度，不替代产品决定：https://developers.openai.com/codex/']);
+  await runDesign(['business-design', 'complete']);
+  const designResult = await readAgentCommandSubmission(design.attempt.execution_id);
+  await applyAgentResult(`RUN-ba-research-${taskId}-design`, delegation, designResult!, { executionId: design.attempt.execution_id });
+  await completeExecution(design.attempt.execution_id);
+  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'requirement-spec-agent');
+});
+
 test('injects decision strength only while Idea Context answers and audits fully autonomous decisions before synthesis', async () => {
   const { createTask, getTask, pipelineForTask } = await import('./tasks');
   const { beginExecutionAttempt, completeExecution } = await import('./executions');

@@ -1,25 +1,59 @@
 import Link from 'next/link';
 import { paths } from '../../src/infrastructure/database';
 import { Activity, ArrowRight, Bot, Check } from 'lucide-react';
-import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, getAgentExecutorSettings, getLangfuseSettings } from '../../src/application/project-settings';
-import { changeWorkspaceRootAction, saveAgentExecutorAction, saveLangfuseSettingsAction } from '../actions';
+import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, getAgentExecutorSettings, getFlowAgentDefaultRuntimeSettings, getLangfuseSettings } from '../../src/application/project-settings';
+import { changeWorkspaceRootAction, saveAgentExecutorAction, saveFlowAgentDefaultRuntimeAction, saveLangfuseSettingsAction } from '../actions';
 
 export const dynamic = 'force-dynamic';
 
 export default async function SettingsPage() {
-  const settings = await getAgentExecutorSettings();
-  const langfuse = await getLangfuseSettings();
+  const [settings, flowDefaults, langfuse] = await Promise.all([
+    getAgentExecutorSettings(),
+    getFlowAgentDefaultRuntimeSettings(),
+    getLangfuseSettings(),
+  ]);
   return <>
-    <header><p className="eyebrow">PROJECT SETTINGS</p><h1>项目设置</h1><p className="muted">设置当前项目、系统辅助 Agent 和可观测性。流程 Agent 的 Runtime 在各自配置页独立管理。</p></header>
+    <header><p className="eyebrow">PROJECT SETTINGS</p><h1>项目设置</h1><p className="muted">设置流程 Agent 的项目默认 Runtime、系统辅助 Agent 和可观测性；单个流程 Agent 可以选择继承默认值或独立覆盖。</p></header>
     <section className="settings-stack">
     <form action={changeWorkspaceRootAction} className="card settings">
       <div><strong>当前项目</strong><p className="muted settings-description">切换后，需求、运行记录和项目设置会自动使用该代码库对应的独立数据库。</p></div>
       <div className="workspace-switch"><label>工作区根目录<input name="workspaceRoot" required defaultValue={paths.root} spellCheck={false}/></label><button className="button" type="submit">切换项目</button></div>
     </form>
-    <section className="card settings">
-      <div className="settings-section-head"><span className="executor-icon"><Bot size={18}/></span><div><strong>流程 Agent Runtime</strong><p className="muted settings-description">需求梳理、分析、开发、测试等流程 Agent 已改为逐个配置 CLI、模型和思考强度。</p></div></div>
-      <Link className="button secondary" href="/agents">前往 Agent 配置 <ArrowRight size={14}/></Link>
-    </section>
+    <form action={saveFlowAgentDefaultRuntimeAction} className="card settings">
+      <div className="settings-section-head"><span className="executor-icon"><Bot size={18}/></span><div><strong>流程 Agent Runtime · 项目默认</strong><p className="muted settings-description">所有选择“跟随项目默认”的流程 Agent 会立即继承这里的 CLI、模型、思考强度和网页搜索设置。</p></div><Link className="button secondary" href="/agents">Agent 独立配置 <ArrowRight size={14}/></Link></div>
+      <fieldset className="executor-settings">
+        <legend>默认执行器</legend>
+        <div className="executor-options">
+          {AGENT_EXECUTOR_OPTIONS.map((option) => <label className="executor-option" key={option.id}>
+            <input type="radio" name="agentExecutor" value={option.id} defaultChecked={flowDefaults.executorId === option.id}/>
+            <span className="executor-icon"><Bot size={18}/></span>
+            <span><strong>{option.label}</strong><small>{option.description}</small></span>
+            <Check className="executor-check" size={17}/>
+          </label>)}
+        </div>
+      </fieldset>
+      <fieldset className="codex-settings">
+        <legend>默认 Codex 执行参数</legend>
+        <div className="fields">
+          <label>模型
+            <select name="codexModel" defaultValue={flowDefaults.codexModel}>
+              {CODEX_MODEL_OPTIONS.map((model) => <option value={model.id} key={model.id}>{model.label}</option>)}
+            </select>
+          </label>
+          <label>思考强度
+            <select name="codexReasoningEffort" defaultValue={flowDefaults.codexReasoningEffort}>
+              {CODEX_REASONING_EFFORTS.map((effort) => <option value={effort} key={effort}>{effort === 'default' ? '跟随 Codex 默认值' : effort}</option>)}
+            </select>
+          </label>
+        </div>
+        <label className="checkbox"><input type="checkbox" name="codexWebSearch" defaultChecked={flowDefaults.codexWebSearch}/>启用 Codex 实时网页搜索（启动参数 <code>--search</code>）</label>
+      </fieldset>
+      <fieldset className="claude-settings">
+        <legend>默认 Claude 执行参数</legend>
+        <div className="fields"><label>模型<input name="claudeModel" defaultValue={flowDefaults.claudeModel} placeholder="例如 sonnet、opus 或完整模型 ID" spellCheck={false}/><small className="muted">留空时跟随 Claude CLI 默认模型。</small></label></div>
+      </fieldset>
+      <button className="button" type="submit">保存流程 Agent 默认 Runtime</button>
+    </form>
     <form action={saveAgentExecutorAction} className="card settings">
       <fieldset className="executor-settings">
         <legend>系统辅助 Agent Runtime</legend>
@@ -50,6 +84,7 @@ export default async function SettingsPage() {
           </label>
         </div>
         <small className="muted">可选值：minimal、low、medium、high、xhigh。部分模型不支持所有强度。</small>
+        <label className="checkbox"><input type="checkbox" name="codexWebSearch" defaultChecked={settings.codexWebSearch}/>启用 Codex 实时网页搜索（启动参数 <code>--search</code>）</label>
       </fieldset>
       <fieldset className="claude-settings">
         <legend>Claude 执行参数</legend>

@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { Activity, Bot, BrainCircuit, Check, FolderCog, Gauge, MemoryStick, RotateCcw, Sparkles } from 'lucide-react';
 import { getAgentProfile } from '../../../src/application/agent-profiles';
-import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, getAgentRuntimeSettings } from '../../../src/application/project-settings';
+import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, getAgentRuntimeSettings, getFlowAgentDefaultRuntimeSettings } from '../../../src/application/project-settings';
 import { AGENT_PROMPT_SEED_REVISION, isFlowAgentId } from '../../../src/domain/agent-profile';
 import { resetAgentPromptAction, saveAgentMemoryAction, saveAgentPromptAction, saveAgentRuntimeAction, setAgentAutoEvolutionAction } from '../../actions';
 
@@ -23,14 +23,22 @@ function selectedSection(input: string | string[] | undefined): AgentSection {
   return agentSections.some((section) => section.id === value) ? value as AgentSection : 'runtime';
 }
 
-export default async function AgentDetailPage({ params, searchParams }: { params: Promise<{ agentId: string }>; searchParams: Promise<{ section?: string | string[] }> }) {
+export default async function AgentDetailPage({ params, searchParams }: { params: Promise<{ agentId: string }>; searchParams: Promise<{ section?: string | string[]; runtimeMode?: string | string[] }> }) {
   const [{ agentId }, query] = await Promise.all([params, searchParams]);
   if (!isFlowAgentId(agentId)) notFound();
-  const [detail, runtimeSettings] = await Promise.all([
+  const [detail, runtimeSettings, flowDefaults] = await Promise.all([
     getAgentProfile(agentId),
     getAgentRuntimeSettings(agentId),
+    getFlowAgentDefaultRuntimeSettings(),
   ]);
   const section = selectedSection(query.section);
+  const runtimeMode = Array.isArray(query.runtimeMode) ? query.runtimeMode[0] : query.runtimeMode;
+  const editingIndependentRuntime = runtimeSettings.source === 'agent_override' || runtimeMode === 'override';
+  const flowRuntimeSummary = flowDefaults.executorId === 'codex'
+    ? `${flowDefaults.executorId} · ${flowDefaults.codexModel} · ${flowDefaults.codexReasoningEffort}${flowDefaults.codexWebSearch ? ' · 实时网页搜索' : ''}`
+    : flowDefaults.executorId === 'claude'
+      ? `${flowDefaults.executorId} · ${flowDefaults.claudeModel || 'CLI 默认模型'}`
+      : `${flowDefaults.executorId} · CLI 默认模型`;
   const usesLatestSystemTemplate = detail.currentPrompt.content.trim() === detail.definition.prompt.trim()
     && detail.currentPrompt.template_version === AGENT_PROMPT_SEED_REVISION
     && !detail.candidatePrompt;
@@ -50,7 +58,7 @@ export default async function AgentDetailPage({ params, searchParams }: { params
     <header className="page-header agent-page-header"><div><Link className="crumb" href="/agents">Agent 配置</Link><p className="eyebrow">{agentId}</p><h1>{detail.definition.label}</h1><p className="muted">{detail.definition.description}</p></div><span className={`badge ${detail.candidatePrompt ? 'amber' : detail.profile.auto_evolve ? 'green' : 'blue'}`}>{detail.candidatePrompt ? `Prompt Canary r${detail.candidatePrompt.revision}` : detail.profile.auto_evolve ? '自动演化已开启' : '自动演化已关闭'}</span></header>
 
     <section className="agent-profile-summary" aria-label="Agent 配置摘要">
-      <div><span>Runtime</span><strong>{runtimeSettings.executorId}</strong><small>{runtimeSettings.codexModel}</small></div>
+      <div><span>Runtime</span><strong>{runtimeSettings.executorId}</strong><small>{runtimeSettings.source === 'project_default' ? '跟随项目默认' : 'Agent 独立覆盖'}</small></div>
       <div><span>Project Prompt</span><strong>r{detail.currentPrompt.version}</strong><small>{detail.candidatePrompt ? `Canary r${detail.candidatePrompt.revision}` : '当前生效版本'}</small></div>
       <div><span>Durable Memory</span><strong>r{detail.currentMemory.revision}</strong><small>{detail.dailyFiles.length} 个 daily 文件</small></div>
       <div><span>演化证据</span><strong>{detail.observations.length}</strong><small>条可复用观察</small></div>
@@ -66,9 +74,15 @@ export default async function AgentDetailPage({ params, searchParams }: { params
     </nav>
 
     <div className="agent-workspace">
-      {section === 'runtime' && <form action={saveAgentRuntimeAction} className="card settings agent-section-card">
+      {section === 'runtime' && !editingIndependentRuntime && <section className="card settings agent-section-card">
+        <div className="settings-section-head"><span className="executor-icon"><Bot size={18}/></span><div><strong>Agent Runtime</strong><p className="muted settings-description">当前 Agent 跟随项目默认 Runtime；项目默认值发生变化时会自动生效。</p></div><span className="badge green">项目默认</span></div>
+        <div><strong>当前生效配置</strong><p className="path-line">{flowRuntimeSummary}</p></div>
+        <div className="form-actions"><Link className="button" href={`/agents/${agentId}?section=runtime&runtimeMode=override`}>改为独立配置</Link><Link className="button secondary" href="/settings">修改项目默认</Link></div>
+      </section>}
+
+      {section === 'runtime' && editingIndependentRuntime && <form action={saveAgentRuntimeAction} className="card settings agent-section-card">
         <input type="hidden" name="agentId" value={agentId}/><input type="hidden" name="section" value="runtime"/>
-        <div className="settings-section-head"><span className="executor-icon"><Bot size={18}/></span><div><strong>Agent Runtime</strong><p className="muted settings-description">只控制当前 Agent 的执行 CLI 和模型参数。该 Agent 产生的 Prompt 演化评估也沿用这组配置。</p></div><span className="badge">{runtimeSettings.executorId}</span></div>
+        <div className="settings-section-head"><span className="executor-icon"><Bot size={18}/></span><div><strong>Agent 独立 Runtime</strong><p className="muted settings-description">下面的配置只影响当前 Agent，不再随项目默认值变化。</p></div><span className="badge amber">{runtimeSettings.source === 'agent_override' ? '独立覆盖' : '准备独立配置'}</span></div>
         <fieldset className="executor-settings">
           <legend>执行器</legend>
           <p className="muted">所选 CLI 需要已在本机登录；修改只影响此后新启动的执行。</p>
@@ -95,12 +109,18 @@ export default async function AgentDetailPage({ params, searchParams }: { params
               </select>
             </label>
           </div>
+          <label className="checkbox"><input type="checkbox" name="codexWebSearch" defaultChecked={runtimeSettings.codexWebSearch}/>启用实时网页搜索（启动参数 <code>--search</code>）</label>
         </fieldset>
         <fieldset className="claude-settings">
           <legend>Claude 执行参数</legend>
           <div className="fields"><label>模型<input name="claudeModel" defaultValue={runtimeSettings.claudeModel} placeholder="例如 sonnet、opus 或完整模型 ID" spellCheck={false}/><small className="muted">留空时跟随 Claude CLI 默认模型。</small></label></div>
         </fieldset>
-        <button className="button" type="submit">保存运行参数</button>
+        <div className="form-actions">
+          <button className="button" type="submit">保存独立 Runtime</button>
+          {runtimeSettings.source === 'agent_override'
+            ? <button className="button secondary" type="submit" name="inheritProjectDefault" value="on">恢复跟随项目默认</button>
+            : <Link className="button secondary" href={`/agents/${agentId}?section=runtime`}>取消</Link>}
+        </div>
       </form>}
 
       {section === 'prompt' && <div className="agent-section-layout">

@@ -45,6 +45,7 @@ export type ExecutionAttempt = {
   executor_id: string | null;
   configured_model: string | null;
   reasoning_effort: string | null;
+  web_search_enabled: number;
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
@@ -197,6 +198,7 @@ export async function beginExecutionAttempt(input: {
   executorId?: string;
   configuredModel?: string;
   reasoningEffort?: string;
+  webSearchEnabled?: boolean;
   contextSnapshot?: AgentContextSnapshot;
 }) {
   const db = await databaseConnection();
@@ -208,6 +210,7 @@ export async function beginExecutionAttempt(input: {
       executorId: input.executorId,
       configuredModel: input.configuredModel,
       reasoningEffort: input.reasoningEffort,
+      webSearchEnabled: Boolean(input.webSearchEnabled),
     },
   });
   const inputHash = hash(inputJson);
@@ -270,9 +273,9 @@ export async function beginExecutionAttempt(input: {
         execution_id, run_id, task_id, story_index, agent, pipeline, lane,
         delegation_key, attempt, status, input_hash, input_json, base_commit,
         prompt_version, prompt_template_version, prompt_hash, memory_revision, memory_hash, evolution_candidate_id,
-        executor_id, configured_model, reasoning_effort,
+        executor_id, configured_model, reasoning_effort, web_search_enabled,
         heartbeat_at, started_at
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
     `).run(
       executionId,
       input.runId,
@@ -295,6 +298,7 @@ export async function beginExecutionAttempt(input: {
       input.executorId || null,
       input.configuredModel || null,
       input.reasoningEffort || null,
+      input.webSearchEnabled ? 1 : 0,
     );
     const attempt = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(executionId) as ExecutionAttempt;
     return { attempt, recovered: false };

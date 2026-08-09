@@ -31,6 +31,13 @@ export const BUSINESS_ANALYSIS_WORKFLOWS: Record<BusinessAnalysisAgentId, {
         prohibited: ['设计业务方案', '询问可调查事实', '编写最终需求规格'],
         submit: 'idea-context discovery complete',
       },
+      research: {
+        label: 'RESEARCH',
+        objective: '使用实时网页搜索调查领域事实、术语、标准、法规、参考资料和会改变需求意图的问题背景，并明确证据边界。',
+        required: ['结构化 Research 工作包', '至少一个调研问题', '来源、适用性、局限和置信度', '没有可信发现时记录未解决事实'],
+        prohibited: ['设计或选择业务方案', '把行业惯例自动提升为用户目标', '伪造来源或只复述搜索摘要'],
+        submit: 'idea-context research complete',
+      },
       clarification_proposal: {
         label: 'CLARIFICATION PROPOSAL',
         objective: '批量提出当前活动层级中会改变需求意图的全部问题；没有实质歧义时提交空 questions。',
@@ -72,6 +79,13 @@ export const BUSINESS_ANALYSIS_WORKFLOWS: Record<BusinessAnalysisAgentId, {
         prohibited: ['关闭决策', '写技术方案', '改变需求意图'],
         submit: 'business-design exploration complete',
       },
+      research: {
+        label: 'RESEARCH',
+        objective: '使用实时网页搜索调查可借鉴的业务模式、候选流程、规则、异常和失败模式，为决策树提供更完整的选项与后果。',
+        required: ['结构化 Research 工作包', '至少一个调研问题', '来源、适用性、局限和置信度', '与当前业务方案分叉的关联'],
+        prohibited: ['关闭业务决定', '把最佳实践直接写成用户要求', '调查代码实现或输出技术架构'],
+        submit: 'business-design research complete',
+      },
       decision_proposal: {
         label: 'DECISION PROPOSAL',
         objective: '一次建立完整业务决策树，只提出不回答。',
@@ -109,7 +123,7 @@ export const BUSINESS_ANALYSIS_WORKFLOWS: Record<BusinessAnalysisAgentId, {
       composition: {
         label: 'COMPOSITION',
         objective: '一次编写完整需求规格说明书。',
-        required: ['AS IS、TO BE、ACTORS、SCENARIOS、BUSINESS RULES', 'SCOPE、OUT OF SCOPE、ACCEPTANCE、DEPENDENCIES、ASSUMPTIONS'],
+        required: ['AS IS、TO BE、ACTORS、SCENARIOS、BUSINESS RULES', 'SCOPE、OUT OF SCOPE、ACCEPTANCE、DEPENDENCIES、ASSUMPTIONS', '上游存在外部调研时保留 RESEARCH BASIS/SOURCES'],
         prohibited: ['重新设计方案', '加入未决定规则', '写技术实现'],
         submit: 'requirement-spec composition complete',
       },
@@ -162,8 +176,16 @@ export function businessAnalysisWorkflow(agent: string) {
   return BUSINESS_ANALYSIS_WORKFLOWS[agent as BusinessAnalysisAgentId] || null;
 }
 
-export function businessAnalysisPhaseSequence(agent: BusinessAnalysisAgentId) {
-  return BUSINESS_ANALYSIS_WORKFLOWS[agent].phases
+export function businessAnalysisPhases(agent: BusinessAnalysisAgentId, researchEnabled: boolean) {
+  const phases = [...BUSINESS_ANALYSIS_WORKFLOWS[agent].phases];
+  if (!researchEnabled || !['idea-context-agent', 'business-design-agent'].includes(agent)) return phases;
+  const anchor = agent === 'idea-context-agent' ? 'discovery' : 'exploration';
+  phases.splice(phases.indexOf(anchor) + 1, 0, 'research');
+  return phases;
+}
+
+export function businessAnalysisPhaseSequence(agent: BusinessAnalysisAgentId, researchEnabled = false) {
+  return businessAnalysisPhases(agent, researchEnabled)
     .map((phase) => BUSINESS_ANALYSIS_WORKFLOWS[agent].definitions[phase].label)
     .join(' → ');
 }

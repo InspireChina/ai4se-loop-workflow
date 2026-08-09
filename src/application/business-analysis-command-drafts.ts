@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type Database from 'better-sqlite3';
 import { agentResultSchema } from '../domain/agent-result';
 import {
+  businessAnalysisPhases,
   businessAnalysisWorkflow,
   type BusinessAnalysisAgentId,
 } from '../domain/business-analysis-workflow';
@@ -92,6 +93,29 @@ const reviewClassificationSchema = z.object({
   })).max(100),
 });
 
+const researchSchema = z.object({
+  summary: z.string().min(1).max(10000),
+  questions: z.array(z.object({
+    question: z.string().min(1).max(2000),
+    reason: z.string().min(1).max(2000),
+  })).min(1).max(50),
+  findings: z.array(z.object({
+    claim: z.string().min(1).max(4000),
+    sourceTitle: z.string().min(1).max(500),
+    sourceUrl: z.string().url().max(2000).refine((value) => /^https?:\/\//i.test(value), '来源必须使用 HTTP(S) URL'),
+    sourceType: z.enum(['official', 'standard', 'research', 'product', 'secondary']),
+    publishedOrUpdatedAt: z.string().min(1).max(100).optional(),
+    applicability: z.string().min(1).max(4000),
+    limitations: z.string().min(1).max(4000),
+    confidence: z.enum(['high', 'medium', 'low']),
+  })).max(100).default([]),
+  unresolved: z.array(z.string().min(1).max(2000)).max(100).default([]),
+}).superRefine((value, context) => {
+  if (!value.findings.length && !value.unresolved.length) {
+    context.addIssue({ code: 'custom', path: ['unresolved'], message: '没有可信发现时必须记录至少一个未解决事实' });
+  }
+});
+
 function required(flags: Map<string, string>, name: string) {
   const value = flags.get(name)?.trim();
   if (!value) throw new Error(`缺少 --${name}`);
@@ -122,9 +146,9 @@ function workflowFor(execution: Execution) {
 
 function state(db: Db, draftId: string) {
   const draft = db.prepare(`
-    SELECT workflow_phase, validated_change_seq
+    SELECT workflow_phase, validated_change_seq, research_enabled
     FROM business_analysis_drafts WHERE draft_id = ?
-  `).get(draftId) as { workflow_phase: string; validated_change_seq: number | null } | undefined;
+  `).get(draftId) as { workflow_phase: string; validated_change_seq: number | null; research_enabled: number } | undefined;
   if (!draft) throw new Error('Business Analysis 草稿不存在');
   const artifacts = db.prepare(`
     SELECT phase, content, updated_at
@@ -132,6 +156,35 @@ function state(db: Db, draftId: string) {
     WHERE draft_id = ? ORDER BY updated_at, phase
   `).all(draftId) as { phase: string; content: string; updated_at: string }[];
   return { draft, artifacts };
+}
+
+function successfulWebSearchRecorded(db: Db, executionId: string) {
+  const rows = db.prepare(`
+    SELECT payload_json FROM execution_receipts
+    WHERE execution_id = ? AND kind = 'tool_event'
+    ORDER BY receipt_key
+  `).all(executionId) as { payload_json: string }[];
+  return rows.some((row) => {
+    try {
+      const event = JSON.parse(row.payload_json) as { name?: string; phase?: string; tool?: string; success?: boolean };
+      return event.name === 'loop.agent.tool'
+        && event.phase === 'completed'
+        && event.tool === 'web_search'
+        && event.success === true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+function assertResearchBasisIncluded(db: Db, draftId: string, content: string) {
+  const research = parseJson(researchSchema, artifactFor(db, draftId, 'research') || '', 'Research 工作包');
+  if (!/(?:RESEARCH BASIS|调研依据|外部调研)/i.test(content)) {
+    throw new Error('启用 Research 时，正式产物必须包含 RESEARCH BASIS（调研依据）章节');
+  }
+  if (research.findings.length && !research.findings.some((finding) => content.includes(finding.sourceUrl))) {
+    throw new Error('正式产物的 RESEARCH BASIS 必须引用至少一个已登记来源 URL');
+  }
 }
 
 function artifactFor(db: Db, draftId: string, phase: string) {
@@ -205,6 +258,7 @@ function workPacket(db: Db, execution: Execution, draft: Draft) {
     '# NEXT WORK PACKET', '',
     `- Phase: ${definition.label}`,
     `- Objective: ${definition.objective}`,
+    `- Live Research: ${current.draft.research_enabled ? 'enabled（本草稿已冻结）' : 'disabled（本草稿已冻结）'}`,
     ...(mode ? [`- Decision Mode: ${mode}`] : []),
     ...(decisionPolicy ? [`- Decision Policy: ${decisionPolicy}`, `- Policy Scope: 仅在当前 ${definition.label} 工作包生效。`] : []),
     '', '# REQUIRED OUTPUT', '',
@@ -212,6 +266,26 @@ function workPacket(db: Db, execution: Execution, draft: Draft) {
     '', '# PROHIBITED', '',
     ...definition.prohibited.map((item) => `- ${item}`),
   ];
+  if (current.draft.workflow_phase === 'research') {
+    lines.push(
+      '',
+      '# RESEARCH ARTIFACT SCHEMA',
+      '',
+      '`{ summary, questions: [{ question, reason }], findings: [{ claim, sourceTitle, sourceUrl, sourceType, publishedOrUpdatedAt?, applicability, limitations, confidence }], unresolved: [] }`',
+      '',
+      '必须在当前 execution 中实际完成至少一次 Web Search。优先采用官方、标准组织和原始研究；搜索摘要不能代替来源页面。外部事实可以改善问题与选项，但不能替代用户目标或业务决定。',
+    );
+  }
+  if (current.draft.research_enabled && ['synthesis', 'solution'].includes(current.draft.workflow_phase)) {
+    lines.push(
+      '',
+      '# RESEARCH INHERITANCE',
+      '',
+      '- 正式产物必须包含 `RESEARCH BASIS`（调研依据）章节。',
+      '- 说明采用了哪些发现、适用性和局限；有可信发现时至少引用一个 Research 工作包中的来源 URL。',
+      '- 外部惯例不得伪装成用户决定，未解决事实必须继续标注为未知或假设。',
+    );
+  }
   if (definition.submit) {
     const needsArtifact = definition.submit === `${workflow.namespace} complete`
       ? ''
@@ -227,6 +301,7 @@ function workPacket(db: Db, execution: Execution, draft: Draft) {
         '',
         `- 无新增分支：\`${workflow.namespace} ${phaseCommand} audit-complete --artifact-file <答案审查>\``,
         `- 需要增量补问：\`${workflow.namespace} ${phaseCommand} expand --artifact-file <答案审查与新增分支依据>\``,
+        ...(current.draft.research_enabled ? [`- 新增外部事实缺口：\`${workflow.namespace} ${phaseCommand} research --artifact-file <答案审查与新增调研问题>\``] : []),
       );
     }
   } else {
@@ -457,13 +532,15 @@ export function businessAnalysisHelp(agent: string, topic?: string | null) {
   if (topic && !['context', 'workflow', 'artifact', 'decision', 'finish'].includes(topic)) {
     throw new Error(`Business Analysis help 不支持主题：${topic}`);
   }
-  const commands = workflow.phases
+  const supportsResearch = agent === 'idea-context-agent' || agent === 'business-design-agent';
+  const phases = businessAnalysisPhases(agent as BusinessAnalysisAgentId, supportsResearch);
+  const commands = phases
     .map((phase) => workflow.definitions[phase].submit)
     .filter((command): command is string => Boolean(command));
   return [
     `${agent} 使用聚合工作包命令链；一个 --artifact-file 承载当前阶段的完整产物，不逐字段提交。`,
     '',
-    `阶段：${workflow.phases.map((phase) => workflow.definitions[phase].label).join(' → ')}`,
+    `阶段：${phases.map((phase) => phase === 'research' ? '[RESEARCH · 仅实时搜索开启时]' : workflow.definitions[phase].label).join(' → ')}`,
     '',
     '命令：',
     `  ${workflow.namespace} status`,
@@ -472,10 +549,12 @@ export function businessAnalysisHelp(agent: string, topic?: string | null) {
     ...(agent === 'idea-context-agent' ? [
       '  idea-context clarification-resolution audit-complete --artifact-file <答案审查>',
       '  idea-context clarification-resolution expand --artifact-file <答案审查与新增分支依据>',
+      '  idea-context clarification-resolution research --artifact-file <答案审查与新增调研问题>（仅 Research 开启时）',
     ] : []),
     ...(agent === 'business-design-agent' ? [
       '  business-design decision-resolution audit-complete --artifact-file <答案审查>',
       '  business-design decision-resolution expand --artifact-file <答案审查与新增分支依据>',
+      '  business-design decision-resolution research --artifact-file <答案审查与新增调研问题>（仅 Research 开启时）',
     ] : []),
     ...(agent === 'business-design-agent' ? ['  business-design return-gap --reason-file <需求意图缺口> [--artifact-file <缺口报告>]'] : []),
     ...(agent === 'requirement-spec-agent' ? ['  requirement-spec return-gap --target <intent|business_design> --reason-file <理由> [--artifact-file <缺口报告>]'] : []),
@@ -486,18 +565,22 @@ export function businessAnalysisHelp(agent: string, topic?: string | null) {
     '',
     '问题树文件使用 JSON：{ summary, questions: [{ key, title, question, impact, options, recommendationOption, recommendationReason, proposedAuthority, activation }] }。',
     '决策解决文件使用 JSON：{ notes, agentDecisions: [{ key, optionId, reason }], humanDecisionKeys: [] }。',
+    ...(supportsResearch ? ['Research 文件使用 JSON：{ summary, questions: [{ question, reason }], findings: [{ claim, sourceTitle, sourceUrl, sourceType, publishedOrUpdatedAt?, applicability, limitations, confidence }], unresolved: [] }。'] : []),
     '规格审查分类文件使用 JSON：{ summary, gaps: [{ key, target, affectedSections, evidence, reason }] }。',
   ];
 }
 
-export function cloneBusinessAnalysisDraft(db: Db, source: Draft, target: Draft, agent: string) {
+export function cloneBusinessAnalysisDraft(db: Db, source: Draft, target: Draft, agent: string, executionResearchEnabled: boolean) {
   const workflow = businessAnalysisWorkflow(agent);
   if (!workflow) throw new Error(`未知 Business Analysis Agent：${agent}`);
   const sourceState = state(db, source.draft_id);
   const resumeClarification = source.status === 'waiting_for_answers';
-  const phase = resumeClarification ? sourceState.draft.workflow_phase : workflow.phases[0];
-  db.prepare(`INSERT INTO business_analysis_drafts(draft_id, workflow_phase) VALUES(?, ?)`)
-    .run(target.draft_id, phase);
+  const researchEnabled = resumeClarification ? Boolean(sourceState.draft.research_enabled) : executionResearchEnabled;
+  const phase = resumeClarification
+    ? sourceState.draft.workflow_phase
+    : businessAnalysisPhases(agent as BusinessAnalysisAgentId, researchEnabled)[0];
+  db.prepare(`INSERT INTO business_analysis_drafts(draft_id, workflow_phase, research_enabled) VALUES(?, ?, ?)`)
+    .run(target.draft_id, phase, researchEnabled ? 1 : 0);
   db.prepare(`
     INSERT INTO business_analysis_phase_artifacts(draft_id, phase, content, updated_at)
     SELECT ?, phase, content, updated_at
@@ -505,11 +588,11 @@ export function cloneBusinessAnalysisDraft(db: Db, source: Draft, target: Draft,
   `).run(target.draft_id, source.draft_id);
 }
 
-export function initializeBusinessAnalysisDraft(db: Db, draft: Draft, agent: string) {
+export function initializeBusinessAnalysisDraft(db: Db, draft: Draft, agent: string, researchEnabled: boolean) {
   const workflow = businessAnalysisWorkflow(agent);
   if (!workflow) throw new Error(`未知 Business Analysis Agent：${agent}`);
-  db.prepare(`INSERT INTO business_analysis_drafts(draft_id, workflow_phase) VALUES(?, ?)`)
-    .run(draft.draft_id, workflow.phases[0]);
+  db.prepare(`INSERT INTO business_analysis_drafts(draft_id, workflow_phase, research_enabled) VALUES(?, ?, ?)`)
+    .run(draft.draft_id, businessAnalysisPhases(agent as BusinessAnalysisAgentId, researchEnabled)[0], researchEnabled ? 1 : 0);
 }
 
 export function runBusinessAnalysisCommand(input: Input) {
@@ -559,11 +642,25 @@ export function runBusinessAnalysisCommand(input: Input) {
     : execution.agent === 'business-design-agent'
       ? 'business-design decision-resolution'
       : null;
-  if (answerAuditPrefix && (command === `${answerAuditPrefix} audit-complete` || command === `${answerAuditPrefix} expand`)) {
+  if (answerAuditPrefix && (
+    command === `${answerAuditPrefix} audit-complete`
+    || command === `${answerAuditPrefix} expand`
+    || command === `${answerAuditPrefix} research`
+  )) {
     const expectedPhase = execution.agent === 'idea-context-agent' ? 'clarification_resolution' : 'decision_resolution';
     if (phase !== expectedPhase) throw new Error(`${command} 只允许在 ${expectedPhase}`);
     assertAnswerAuditReady(db, execution, draft.draft_id, expectedPhase);
     const audit = bounded(required(flags, 'artifact'), '答案审查', 100_000);
+    if (command.endsWith(' research')) {
+      if (!current.draft.research_enabled) throw new Error('当前草稿未启用实时 Research，不能进入 RESEARCH 工作包');
+      return transition(
+        input,
+        phase,
+        'research',
+        audit,
+        '答案审查发现新的外部事实缺口，先增量调研再返回问题提出阶段',
+      );
+    }
     if (command.endsWith(' expand')) {
       return transition(
         input,
@@ -635,6 +732,18 @@ export function runBusinessAnalysisCommand(input: Input) {
   }
   const artifact = bounded(required(flags, 'artifact'), `${definition.label} 工作包`);
 
+  if (phase === 'research') {
+    if (!current.draft.research_enabled) throw new Error('当前草稿没有启用实时 Research');
+    if (!successfulWebSearchRecorded(db, execution.execution_id)) {
+      throw new Error('RESEARCH 完成前，当前 execution 必须至少成功完成一次 Web Search');
+    }
+    parseJson(researchSchema, artifact, 'Research 工作包');
+  }
+
+  if (current.draft.research_enabled && ['synthesis', 'solution'].includes(phase)) {
+    assertResearchBasisIncluded(db, draft.draft_id, artifact);
+  }
+
   if (phase === 'clarification_proposal') {
     const proposal = parseJson(proposalSchema, artifact, '需求意图问题树');
     validateProposalRound(db, execution, proposal);
@@ -704,6 +813,7 @@ export function runBusinessAnalysisCommand(input: Input) {
         '',
         `- No New Branch: \`${namespace} ${intentResolution ? 'clarification-resolution' : 'decision-resolution'} audit-complete --artifact-file <答案审查>\``,
         `- New Branch Required: \`${namespace} ${intentResolution ? 'clarification-resolution' : 'decision-resolution'} expand --artifact-file <答案审查与新增分支依据>\``,
+        ...(current.draft.research_enabled ? [`- New External Fact Gap: \`${namespace} ${intentResolution ? 'clarification-resolution' : 'decision-resolution'} research --artifact-file <答案审查与新增调研问题>\``] : []),
       ].join('\n');
     }
     recomputeTaskQuestionApplicabilityInDb(db, execution.task_id, execution.agent, null);
@@ -723,6 +833,7 @@ export function runBusinessAnalysisCommand(input: Input) {
       '',
       `- No New Branch: \`${namespace} ${intentResolution ? 'clarification-resolution' : 'decision-resolution'} audit-complete --artifact-file <答案审查>\``,
       `- New Branch Required: \`${namespace} ${intentResolution ? 'clarification-resolution' : 'decision-resolution'} expand --artifact-file <答案审查与新增分支依据>\``,
+      ...(current.draft.research_enabled ? [`- New External Fact Gap: \`${namespace} ${intentResolution ? 'clarification-resolution' : 'decision-resolution'} research --artifact-file <答案审查与新增调研问题>\``] : []),
     ].join('\n');
   }
 
@@ -730,8 +841,9 @@ export function runBusinessAnalysisCommand(input: Input) {
     parseJson(reviewClassificationSchema, artifact, '规格缺口分类');
   }
 
-  const phaseIndex = workflow.phases.indexOf(phase);
-  const next = workflow.phases[phaseIndex + 1];
+  const phases = businessAnalysisPhases(execution.agent as BusinessAnalysisAgentId, Boolean(current.draft.research_enabled));
+  const phaseIndex = phases.indexOf(phase);
+  const next = phases[phaseIndex + 1];
   if (!next) throw new Error(`${phase} 没有下一工作包`);
   return transition(input, phase, next, artifact, `${definition.label} 工作包完成`);
 }

@@ -42,11 +42,11 @@ function EntryRoute({ label, summary, stages, tone }: { label: string; summary: 
 
 export default function PipelinesPage() {
   return <>
-    <header><p className="eyebrow">WORKFLOW CATALOG</p><h1>流水线</h1><p className="muted">三类入口共享一张流程地图：Business Analysis 产出经过审查的规格，功能需求与 BUG 汇入同一交付主干。</p></header>
+    <header><p className="eyebrow">WORKFLOW CATALOG</p><h1>流水线</h1><p className="muted">三类入口共享一张流程地图：Business Analysis 产出经过审查的规格，{feature.label} 与 {bug.label} 汇入同一交付主干。</p></header>
     <section className="card pipeline-board" aria-labelledby="pipeline-board-title">
       <div className="pipeline-board-head">
         <div><span className="eyebrow">END-TO-END MAP</span><h2 id="pipeline-board-title">从想法到可信交付</h2></div>
-        <div className="pipeline-legend" aria-label="路线图例"><span className="analysis">Business Analysis</span><span className="feature">功能需求</span><span className="bug">BUG</span></div>
+        <div className="pipeline-legend" aria-label="路线图例"><span className="analysis">{businessAnalysis.label}</span><span className="feature">{feature.label}</span><span className="bug">{bug.label}</span></div>
       </div>
 
       <section className="pipeline-track pipeline-analysis-track">

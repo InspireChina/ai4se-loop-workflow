@@ -65,6 +65,7 @@ type ExecutionRow = {
   status: string;
   command_token_hash: string | null;
   base_commit: string | null;
+  web_search_enabled: number;
 };
 
 type DraftRow = {
@@ -231,7 +232,7 @@ function parseArgs(args: string[]) {
 function executionInDb(db: Awaited<ReturnType<typeof databaseConnection>>, executionId: string) {
   return db.prepare(`
     SELECT execution_id, task_id, story_index, agent, pipeline, delegation_key, input_json,
-           status, command_token_hash, base_commit
+           status, command_token_hash, base_commit, web_search_enabled
     FROM execution_attempts WHERE execution_id = ?
   `).get(executionId) as ExecutionRow | undefined;
 }
@@ -941,8 +942,8 @@ function createDraft(
           );
       }
     } else if (profile.draftType === 'business_analysis') {
-      if (source) cloneBusinessAnalysisDraft(db, source, created, execution.agent);
-      else initializeBusinessAnalysisDraft(db, created, execution.agent);
+      if (source) cloneBusinessAnalysisDraft(db, source, created, execution.agent, Boolean(execution.web_search_enabled));
+      else initializeBusinessAnalysisDraft(db, created, execution.agent, Boolean(execution.web_search_enabled));
     }
     return created;
   })();

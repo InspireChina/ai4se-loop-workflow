@@ -21,6 +21,14 @@ test('defines one aggregated command chain for every Business Analysis role', ()
     businessAnalysisPhaseSequence('business-design-agent'),
     'EXPLORATION → DECISION PROPOSAL → DECISION RESOLUTION → SOLUTION → FINALIZE',
   );
+  assert.equal(
+    businessAnalysisPhaseSequence('idea-context-agent', true),
+    'DISCOVERY → RESEARCH → CLARIFICATION PROPOSAL → CLARIFICATION RESOLUTION → SYNTHESIS → FINALIZE',
+  );
+  assert.equal(
+    businessAnalysisPhaseSequence('business-design-agent', true),
+    'EXPLORATION → RESEARCH → DECISION PROPOSAL → DECISION RESOLUTION → SOLUTION → FINALIZE',
+  );
   for (const agent of BUSINESS_ANALYSIS_AGENT_IDS) {
     const workflow = BUSINESS_ANALYSIS_WORKFLOWS[agent];
     assert.ok(workflow.phases.length >= 3);

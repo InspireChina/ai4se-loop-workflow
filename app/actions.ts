@@ -1,7 +1,7 @@
 'use server';
 
 import { redirect } from 'next/navigation';
-import { normalizeWorkspaceRoot, setAgentExecutorSettings, setAgentRuntimeSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
+import { normalizeWorkspaceRoot, setAgentExecutorSettings, setAgentRuntimeSettings, setFlowAgentDefaultRuntimeSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
 import { resetAgentPromptToSystemTemplate, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
 import { setSoftwareMaintenanceSettings } from '../src/application/software-maintenance';
 import {
@@ -115,6 +115,18 @@ export async function saveAgentExecutorAction(formData: FormData) {
     executorId: formData.get('agentExecutor'),
     codexModel: formData.get('codexModel'),
     codexReasoningEffort: formData.get('codexReasoningEffort'),
+    codexWebSearch: formData.get('codexWebSearch'),
+    claudeModel: formData.get('claudeModel'),
+  });
+  redirect('/settings');
+}
+
+export async function saveFlowAgentDefaultRuntimeAction(formData: FormData) {
+  await setFlowAgentDefaultRuntimeSettings({
+    executorId: formData.get('agentExecutor'),
+    codexModel: formData.get('codexModel'),
+    codexReasoningEffort: formData.get('codexReasoningEffort'),
+    codexWebSearch: formData.get('codexWebSearch'),
     claudeModel: formData.get('claudeModel'),
   });
   redirect('/settings');
@@ -129,9 +141,11 @@ function redirectToAgentSection(agentId: string, sectionInput: FormDataEntryValu
 export async function saveAgentRuntimeAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
   await setAgentRuntimeSettings(agentId, {
+    inheritProjectDefault: formData.get('inheritProjectDefault'),
     executorId: formData.get('agentExecutor'),
     codexModel: formData.get('codexModel'),
     codexReasoningEffort: formData.get('codexReasoningEffort'),
+    codexWebSearch: formData.get('codexWebSearch'),
     claudeModel: formData.get('claudeModel'),
   });
   redirectToAgentSection(agentId, formData.get('section'));

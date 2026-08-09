@@ -263,7 +263,7 @@ function createDurableToolEventNormalizer() {
       : eventToolClass;
     const command = eventCommand ?? started?.command;
     const isCompleted = event.phase === 'completed';
-    const acceptedCheck = isCompleted && toolClass === 'shell' && event.success === true;
+    const acceptedCheck = isCompleted && event.success === true;
     return sanitizeLangfuseValue({
       name: event.name,
       phase: event.phase,
@@ -290,7 +290,7 @@ async function runDelegation(
   executionId: string,
   commandToken: string,
   executor: AgentExecutor,
-  executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' },
+  executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'; webSearch?: boolean },
 ) {
   const { maxRuntimeMs, idleTimeoutMs } = resolveAgentExecutionLimits(process.env);
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
@@ -381,7 +381,7 @@ async function processDurableResult(attempt: ExecutionAttempt, delegation: Deleg
 async function runEvolutionEvaluator(
   evidence: EvolutionEvidence,
   executor: AgentExecutor,
-  executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' },
+  executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'; webSearch?: boolean },
 ) {
   const evolution = await beginEvolutionRun(evidence);
   if (!evolution?.prompt || !evolution.evaluatorDirectory) return;
@@ -457,7 +457,7 @@ async function executeDelegationStep(
     const runtimeSettings = await getAgentRuntimeSettings(delegation.agent);
     const executor = getAgentExecutor(runtimeSettings.executorId);
     const executionOptions = agentExecutionOptions(runtimeSettings);
-    await appendLoopRunLog(runId, `[Runtime] requirement=${delegation.taskId} agent=${delegation.agent} executor=${executor.id} model=${executionOptions.model || 'default'} reasoning=${executionOptions.reasoningEffort || 'default'}`);
+    await appendLoopRunLog(runId, `[Runtime] requirement=${delegation.taskId} agent=${delegation.agent} executor=${executor.id} model=${executionOptions.model || 'default'} reasoning=${executionOptions.reasoningEffort || 'default'} web_search=${executionOptions.webSearch ? 'enabled' : 'disabled'}`);
     const headBefore = gitHead(paths.root);
     const builtPrompt = await buildPrompt(delegation, headBefore || null);
     const durable = await beginExecutionAttempt({
@@ -474,6 +474,7 @@ async function executeDelegationStep(
       executorId: runtimeSettings.executorId,
       configuredModel: executionOptions.model,
       reasoningEffort: executionOptions.reasoningEffort,
+      webSearchEnabled: Boolean(executionOptions.webSearch),
       contextSnapshot: builtPrompt.contextSnapshot,
     });
     attempt = durable.attempt;
