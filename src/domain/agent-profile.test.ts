@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
-test('ships rigorous V10 seed prompts for every flow Agent', () => {
-  assert.equal(AGENT_PROMPT_SEED_REVISION, 10);
+test('ships rigorous V11 seed prompts for every flow Agent', () => {
+  assert.equal(AGENT_PROMPT_SEED_REVISION, 11);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
     assert.ok(prompt.length >= 450, `${agentId} seed prompt is too small to define a reliable role contract`);
@@ -15,12 +15,18 @@ test('ships rigorous V10 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /必须实际使用 Web Search/);
   assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /CLARIFICATION RESOLUTION 才读取.*自动决策强度/);
   assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /提出和回答必须分开/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /无论答案来自 HUMAN 还是 Agent.*必须继续分析.*答案审查.*audit-complete.*expand/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /HUMAN 与 Agent 答案、空问题树和完全自主模式.*穷尽性审查/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /Frontier.*整个 frontier.*下一轮/s);
+  assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /不是只判断.*答案有没有引出新问题.*主动寻找仍未确认/s);
+  assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /frontier 为空/);
   assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /DECISION PROPOSAL.*DECISION RESOLUTION/);
   assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /EXPLORATION → \[RESEARCH\].*DECISION PROPOSAL/);
   assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /RESEARCH BASIS/);
   assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /自动决策强度/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /无论答案来自 HUMAN 还是 Agent.*必须继续分析.*答案审查.*audit-complete.*expand/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /Agent 自主答案或空问题树.*完成标准/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /拷问标准.*反例/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /当前 frontier.*同一批次.*下一轮/s);
+  assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /不是只判断.*所有需要确认/s);
   assert.match(AGENT_PROFILE_DEFINITIONS['requirement-spec-agent'].prompt, /AS IS、TO BE、ACTORS、SCENARIOS/);
   assert.match(AGENT_PROFILE_DEFINITIONS['spec-review-agent'].prompt, /intent、business_design 或 specification/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /现有实现已经满足承诺/);
@@ -28,6 +34,9 @@ test('ships rigorous V10 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /PROPOSE 与 RESOLVE 必须分开/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /自动决策强度处理 Agent 节点/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /每轮 HUMAN 或 Agent 答案全部关闭后必须进入 ANSWER REVIEW/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /拷问标准.*静默假设.*反例/s);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /当前 frontier.*下一轮/s);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /不是只判断.*所有需要确认/s);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /request-clarification/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /第一条草稿命令必须是 requirement-context status/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /继续执行命令返回的下一工作包/);
@@ -39,8 +48,8 @@ test('ships rigorous V10 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /代码是获取知识的手段，不是需求上下文的表达语言/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /需求规格与代码呈现不同业务逻辑时，必须同时记录 Expected 与 Actual/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /technical.*作为 Analysis Obligations/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /目标不是最少问题，也不是探索所有可能方案.*以最少交互轮次/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /一次批量提交必要的根节点和已知条件子节点/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /目标不是问题越少越好.*穷尽职责内真实语义分叉/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /批量处理当前 frontier.*节点同轮提出.*下一轮/s);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /互斥选项、各自业务后果、推荐选项及理由/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /输入的需求规格和业务方案与当前项目的真实业务行为进行核对/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /规格与代码或运行中的业务逻辑冲突/);
@@ -69,6 +78,9 @@ test('ships rigorous V10 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /除非当前 RESOLVE 工作包明确给出完全自主权限.*不能代替产品决定权/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /自动决策策略只由 DECISION TREE · RESOLVE 工作包提供/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /ANSWER REVIEW：无论答案来自 HUMAN、上游、项目证据还是 Agent 权限/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /拷问标准.*静默假设.*唯一验证 Oracle/s);
+  assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /Frontier.*整个 frontier.*下一轮/s);
+  assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /不是只判断.*所有交付前必须确认/s);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /只有完全自主模式允许 Agent.*自行决定产品语义/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /任何会约束 Dev 或 Test 的方案必须先在决策树中登记/);
   assert.match(AGENT_PROFILE_DEFINITIONS['analyst-agent'].prompt, /保持原决定的稳定语义身份/);
