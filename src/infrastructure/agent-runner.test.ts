@@ -69,14 +69,16 @@ test('runner resolves runtime settings for each delegated agent instead of once 
   assert.doesNotMatch(source, /const settings = await getAgentExecutorSettings\(\)/);
 });
 
-test('shares execution-scoped .tmp directories for the Loop lifetime and cleans them at Runner exit', () => {
+test('shares execution-scoped .tmp directories within one dispatch cycle and cleans them before the next cycle', () => {
   const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
 
   assert.match(source, /createAgentWorkspaceTempDirectory\(paths\.root, runId\)/);
   assert.match(source, /createAgentExecutionTempDirectory\(loopTemporary, executionId\)/);
   assert.match(source, /LOOP_AGENT_TMP_DIR:\s*agentTemporaryDirectory/);
-  assert.match(source, /loopEnded = !\(await isRunActive\(\)\)/);
-  assert.match(source, /if \(loopEnded\)\s*{[\s\S]*removeAgentWorkspaceTempDirectory\(loopTemporary\)/);
+  assert.match(source, /await Promise\.allSettled\(cycleExecutions\.values\(\)\)/);
+  assert.match(source, /finally\s*{\s*await finishDispatchCycleTemporaryDirectory\(cycleExecutions\.size\)/);
+  assert.match(source, /finishDispatchCycleTemporaryDirectory[\s\S]*removeAgentWorkspaceTempDirectory\(temporary\)/);
+  assert.match(source, /本轮派发临时目录清理失败/);
 
   const waiterSource = readFileSync(resolve(process.cwd(), 'scripts/loop/dispatch-waiter.ts'), 'utf8');
   assert.match(waiterSource, /agentWorkspaceTempDirectoryFor\(paths\.root, runId\)/);

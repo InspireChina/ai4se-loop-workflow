@@ -47,12 +47,12 @@ test('cleanup preserves files and concurrent Loop directories it does not own', 
   }
 });
 
-test('restarting a Runner for the same Loop preserves temporary files until the Loop ends', () => {
+test('opening the same run-owned directory does not erase files before explicit cycle cleanup', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'loopwork-agent-temp-resume-'));
   try {
     const first = createAgentWorkspaceTempDirectory(workspace, 'RUN-resume');
-    const marker = join(first.directory, 'keep-across-runner-handoff.txt');
-    writeFileSync(marker, 'preserve until Loop ends', 'utf8');
+    const marker = join(first.directory, 'keep-until-cycle-cleanup.txt');
+    writeFileSync(marker, 'preserve until explicit cleanup', 'utf8');
 
     const resumed = createAgentWorkspaceTempDirectory(workspace, 'RUN-resume');
     assert.deepEqual(resumed, agentWorkspaceTempDirectoryFor(workspace, 'RUN-resume'));

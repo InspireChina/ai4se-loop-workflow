@@ -65,6 +65,22 @@ if (!runId) throw new Error('missing run id');
 const backgroundEvaluations = new Set<Promise<void>>();
 let loopTemporary: ReturnType<typeof createAgentWorkspaceTempDirectory> | null = null;
 
+function beginDispatchCycleTemporaryDirectory() {
+  if (loopTemporary) throw new Error('上一轮派发的临时目录尚未清理');
+  loopTemporary = createAgentWorkspaceTempDirectory(paths.root, runId);
+}
+
+async function finishDispatchCycleTemporaryDirectory(agentCount: number) {
+  const temporary = loopTemporary;
+  const cleanup = removeAgentWorkspaceTempDirectory(temporary);
+  if (!cleanup.ok) {
+    try { await appendLoopRunLog(runId, `[临时文件] 本轮派发清理失败：${cleanup.error}`); } catch { /* Preserve the cleanup failure as the primary error. */ }
+    throw new Error(`本轮派发临时目录清理失败：${cleanup.error}`);
+  }
+  loopTemporary = null;
+  try { await appendLoopRunLog(runId, `[临时文件] 本轮 ${agentCount} 个 Agent 已结束，临时目录已清理`); } catch { /* Cleanup has already completed. */ }
+}
+
 function scheduleEvolution(evaluation: Promise<void>) {
   const tracked = evaluation.finally(() => { backgroundEvaluations.delete(tracked); });
   backgroundEvaluations.add(tracked);
@@ -654,28 +670,30 @@ async function main() {
     recoverable = await recoverNextExecutionAttempt();
   }
 
-  const active = new Map<string, Promise<void>>();
   let firstDispatch = true;
   while (await isRunActive()) {
     const queuedWaiting = await drainQueuedAgentResults();
     const dispatch = await createLoopDispatch(runId, { includeRunHeader: false, logDelegations: firstDispatch });
     firstDispatch = false;
-    let started = 0;
+    const cycleExecutions = new Map<string, Promise<void>>();
     for (const rawDelegation of dispatch.delegations) {
       const delegation = normalizeDelegation(rawDelegation);
       const key = `${delegation.taskId}:${delegation.lane}`;
-      if (active.has(key)) continue;
+      if (cycleExecutions.has(key)) continue;
+      if (!cycleExecutions.size) beginDispatchCycleTemporaryDirectory();
       const execution = executeDelegationStep(delegation)
         .catch(async (error) => {
           await appendLoopRunLog(runId, `[错误] requirement=${delegation.taskId} lane=${delegation.lane} agent=${delegation.agent} 执行器退出：${error instanceof Error ? error.message : String(error)}`);
-        })
-        .finally(() => { active.delete(key); });
-      active.set(key, execution);
-      started += 1;
+        });
+      cycleExecutions.set(key, execution);
     }
-    if (started) await appendLoopRunLog(runId, `[运行] 新启动 ${started} 个 Lane Agent；各 Agent 使用独立 Runtime 配置，已有 ${active.size - started} 个继续运行`);
-    if (active.size) {
-      await Promise.race(active.values());
+    if (cycleExecutions.size) {
+      await appendLoopRunLog(runId, `[运行] 本轮启动 ${cycleExecutions.size} 个 Lane Agent；等待本轮全部结束后清理临时目录`);
+      try {
+        await Promise.allSettled(cycleExecutions.values());
+      } finally {
+        await finishDispatchCycleTemporaryDirectory(cycleExecutions.size);
+      }
       continue;
     }
     if (backgroundEvaluations.size) {
@@ -689,13 +707,11 @@ async function main() {
     await startDispatchRetryRun(runId);
     return;
   }
-  await Promise.allSettled(active.values());
 }
 
 async function run() {
   let stopHeartbeat: (() => void) | undefined;
   try {
-    loopTemporary = createAgentWorkspaceTempDirectory(paths.root, runId);
     stopHeartbeat = await startRunHeartbeat(runId, 'agent-runner');
     await main();
   } catch (error) {
@@ -704,13 +720,9 @@ async function run() {
     await enqueueRunnerFailureMaintenance(error);
   } finally {
     stopHeartbeat?.();
-    let loopEnded = false;
-    try { loopEnded = !(await isRunActive()); } catch { /* Preserve files when Run state cannot be confirmed. */ }
-    if (loopEnded) {
-      const cleanup = removeAgentWorkspaceTempDirectory(loopTemporary);
-      if (!cleanup.ok) {
-        try { await appendLoopRunLog(runId, `[临时文件] Loop Run 清理失败：${cleanup.error}`); } catch { /* Runner is already terminating. */ }
-      }
+    const cleanup = removeAgentWorkspaceTempDirectory(loopTemporary);
+    if (!cleanup.ok) {
+      try { await appendLoopRunLog(runId, `[临时文件] Runner 收尾清理失败：${cleanup.error}`); } catch { /* Runner is already terminating. */ }
     }
     loopTemporary = null;
   }
