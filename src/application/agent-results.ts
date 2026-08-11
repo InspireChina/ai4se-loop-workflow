@@ -284,10 +284,11 @@ async function ensureCodeSlotForDelegation(delegation: DelegationEnvelope, resul
     FROM tasks
     WHERE task_id != ?
       AND (
-        agile_status = 'in dev'
-        OR (agile_status = 'in feedback' AND dev_index > test_index)
+        (code_slot_released = 0 AND (
+          agile_status = 'in dev'
+          OR (agile_status = 'in feedback' AND dev_index > test_index)
+        ))
         OR (agile_status = 'blocked' AND resume_status = 'in dev')
-        OR (run_state = 'waiting_for_runtime_input' AND current_subagent = 'dev-agent')
       )
     LIMIT 1
   `).get(delegation.taskId) as { task_id: string } | undefined;
@@ -686,6 +687,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         agile_status: detail.task.agile_status === 'in feedback' ? 'in feedback' : 'in dev',
         current_subagent: 'dev-agent',
         dev_index: delegation.storyIndex,
+        code_slot_released: 0,
         next_step: result.summary,
       });
       await recordRecoveryClaims({

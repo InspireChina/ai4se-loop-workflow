@@ -258,7 +258,7 @@ const taskSelect = `
   SELECT task_id, title, description, link, external_id, external_status, item_type, priority,
          agile_status, current_subagent, analysis_index, dev_index, test_index,
          total_stories, spec_resolved_index, resume_status,
-         resume_pending, next_step, blocked_reason, run_state, closure_status,
+         resume_pending, code_slot_released, next_step, blocked_reason, run_state, closure_status,
          review_revision, review_document_id, closure_acknowledged_at,
          last_actor, owner, evidence, risk, created_at, updated_at, completed_at
   FROM tasks
@@ -677,6 +677,7 @@ export async function createTask(input: unknown) {
     closure_acknowledged_at: null,
     resume_status: null,
     resume_pending: 0,
+    code_slot_released: 0,
     blocked_reason: value.status === 'blocked' ? '系统异常暂停' : null,
   };
   assertState(state);
@@ -1099,11 +1100,12 @@ export async function addRuntimeInputRequest(input: unknown) {
     db.prepare(`
       UPDATE tasks
       SET run_state = 'waiting_for_runtime_input', current_subagent = ?,
-          resume_pending = 0, blocked_reason = ?, next_step = ?, last_actor = ?,
+          resume_pending = 0, code_slot_released = ?, blocked_reason = ?, next_step = ?, last_actor = ?,
           updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(
       value.sourceAgent,
+      ['dev-agent', 'test-agent'].includes(value.sourceAgent) ? 1 : 0,
       value.title,
       `等待补充运行信息：${value.title}`,
       value.sourceAgent,
@@ -1501,10 +1503,11 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
   const active = db.prepare(`
     ${taskSelect}
     WHERE task_id != ? AND (
-      agile_status = 'in dev'
-      OR (agile_status = 'in feedback' AND dev_index > test_index)
+      (code_slot_released = 0 AND (
+        agile_status = 'in dev'
+        OR (agile_status = 'in feedback' AND dev_index > test_index)
+      ))
       OR (agile_status = 'blocked' AND resume_status = 'in dev')
-      OR (run_state = 'waiting_for_runtime_input' AND current_subagent = 'dev-agent')
     )
     LIMIT 1
   `).get(taskId) as Task | undefined;
@@ -1615,16 +1618,17 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
     const active = db.prepare(`
       ${taskSelect}
       WHERE task_id != ? AND (
-        agile_status = 'in dev'
-        OR (agile_status = 'in feedback' AND dev_index > test_index)
+        (code_slot_released = 0 AND (
+          agile_status = 'in dev'
+          OR (agile_status = 'in feedback' AND dev_index > test_index)
+        ))
         OR (agile_status='blocked' AND resume_status = 'in dev')
-        OR (run_state = 'waiting_for_runtime_input' AND current_subagent = 'dev-agent')
       )
       LIMIT 1
     `).get(taskId) as Task | undefined;
     if (active) throw new CodeSlotBusyError(active.task_id);
   }
-  const allowed = ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'spec_resolved_index', 'blocked_reason', 'next_step', 'item_type', 'priority', 'title', 'resume_status', 'run_state', 'closure_status', 'review_revision', 'review_document_id', 'closure_acknowledged_at'];
+  const allowed = ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'spec_resolved_index', 'resume_status', 'code_slot_released', 'blocked_reason', 'next_step', 'item_type', 'priority', 'title', 'run_state', 'closure_status', 'review_revision', 'review_document_id', 'closure_acknowledged_at'];
   const keys = allowed.filter((key) => key in changes);
   if (!keys.length) throw new Error('没有需要更新的字段');
   const fields = keys.map((key) => `${key} = ?`);
@@ -1766,10 +1770,11 @@ export async function rewindTask(input: unknown) {
   const otherCodeOwner = db.prepare(`
     ${taskSelect}
     WHERE task_id != ? AND (
-      agile_status = 'in dev'
-      OR (agile_status = 'in feedback' AND dev_index > test_index)
+      (code_slot_released = 0 AND (
+        agile_status = 'in dev'
+        OR (agile_status = 'in feedback' AND dev_index > test_index)
+      ))
       OR (agile_status = 'blocked' AND resume_status = 'in dev')
-      OR (run_state = 'waiting_for_runtime_input' AND current_subagent = 'dev-agent')
     )
     LIMIT 1
   `).get(value.taskId) as Task | undefined;
@@ -2088,6 +2093,12 @@ export async function markDelegationLaneRunning(delegation: DelegationEnvelope) 
     agent: delegation.agent,
     storyIndex: delegation.storyIndex,
   });
+  if (delegation.agent === 'dev-agent') {
+    db.prepare(`
+      UPDATE tasks SET code_slot_released = 0, updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ?
+    `).run(delegation.taskId);
+  }
   refreshPages('/', `/tasks/${delegation.taskId}`);
 }
 
@@ -2202,7 +2213,6 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
   const activeKeys = new Set(active.map((item) => `${item.task_id}:${item.lane}`));
   let analysisSlots = Math.max(0, 4 - active.filter((item) => item.lane === 'analysis').length);
   let codeAvailable = !tasks.some(occupiesCodeSlot) && !active.some((item) => item.agent === 'dev-agent');
-  const readyDev = !codeAvailable ? null : tasks.find((task) => task.agile_status === 'ready for dev' && task.dev_index < task.analysis_index)?.task_id || null;
   let browserUsed = active.some((item) => ['idea-context-agent', 'backlog-agent', 'repro-agent', 'test-agent'].includes(item.agent));
   const lines: DelegationEnvelope[] = [];
   const analysisCandidates: { task: Task; lane: TaskLane }[] = [];
@@ -2210,7 +2220,7 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
     const deliveryTaskAvailable = true;
     refreshTaskLaneStatesInDb(db, task);
     const lanes = taskLanesInDb(db, task);
-    const taskCodeAvailable = occupiesCodeSlot(task) || (codeAvailable && (!readyDev || task.task_id === readyDev));
+    const taskCodeAvailable = occupiesCodeSlot(task) || codeAvailable;
     const feedback = taskContextChatTurnIsRunning(db, task.task_id)
       ? undefined
       : nextFeedbackDispatchInDb(db, task.task_id);

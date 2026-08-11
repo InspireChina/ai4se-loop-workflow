@@ -751,6 +751,8 @@ test('lets Dev and Test request runtime information and resume the same delivery
   const {
     answerRuntimeInput,
     getTask,
+    markDelegationLaneRunning,
+    pipelineAllEnvelopes,
     pipelineForTask,
     submitRuntimeInputs,
   } = await import('./tasks');
@@ -828,11 +830,30 @@ test('lets Dev and Test request runtime information and resume the same delivery
   assert.equal(detail?.task.agile_status, 'ready for dev');
   assert.equal(detail?.task.run_state, 'waiting_for_runtime_input');
   assert.equal(detail?.task.current_subagent, 'dev-agent');
+  assert.equal(detail?.task.code_slot_released, 1);
   assert.equal(detail?.runtimeInputs[0]?.status, 'pending');
+
+  const competingTaskId = 'TASK-runtime-input-competitor';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index,
+      run_state, work_dir
+    ) VALUES(?, 'Competing development', 'feature', 'ready for dev', 'analyst-agent', 1, 0, 0, 1, 1, 'runnable', '')
+  `).run(competingTaskId);
+  const competingDev = (await pipelineAllEnvelopes()).find((item) => item.taskId === competingTaskId);
+  assert.equal(competingDev?.agent, 'dev-agent');
+  db.prepare("UPDATE tasks SET agile_status = 'in dev', current_subagent = 'dev-agent' WHERE task_id = ?").run(competingTaskId);
+
   await answerRuntimeInput({ taskId, requestId: detail!.runtimeInputs[0].request_id, answer: '#N/A' });
   await submitRuntimeInputs(taskId);
   assert.equal((await getTask(taskId))?.task.resume_pending, 0);
-  assert.deepEqual((await pipelineForTask(taskId))[0], {
+  assert.equal((await getTask(taskId))?.task.code_slot_released, 1);
+  assert.deepEqual(await pipelineForTask(taskId), []);
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id = ?").run(competingTaskId);
+
+  const devResume = (await pipelineForTask(taskId))[0];
+  assert.deepEqual(devResume, {
     taskId,
     lane: 'delivery',
     pipeline: 'resume',
@@ -841,6 +862,8 @@ test('lets Dev and Test request runtime information and resume the same delivery
     resource: 'none',
         description: '读取人工输入，并恢复开发验证通道',
   });
+  await markDelegationLaneRunning(envelope('dev-agent', 'resume'));
+  assert.equal((await getTask(taskId))?.task.code_slot_released, 0);
 
   addExecution('execution-runtime-dev-resume', 'dev-agent', 'resume');
   await applyAgentResult('run-runtime-input', envelope('dev-agent', 'resume'), parseAgentResult(JSON.stringify({

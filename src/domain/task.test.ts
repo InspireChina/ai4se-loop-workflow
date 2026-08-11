@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertState, assertUpdate, nextDelegation, type TaskState } from './task';
+import { assertState, assertUpdate, nextDelegation, occupiesCodeSlot, type TaskState } from './task';
 
 function resumedDevTask(): TaskState {
   return {
@@ -50,6 +50,24 @@ test('Agents cannot create system blocks, while the Harness can record one', () 
   const state = resumedDevTask();
   assert.throws(() => assertUpdate(state, 'dev-agent', { agile_status: 'blocked' }, ['agile_status']), /无权设置状态 blocked/);
   assert.doesNotThrow(() => assertUpdate(state, 'system', { agile_status: 'blocked' }, ['agile_status']));
+});
+
+test('releases the code slot while Dev or Test waits for runtime input', () => {
+  const task = resumedDevTask();
+  task.agile_status = 'in dev';
+  task.run_state = 'waiting_for_runtime_input';
+  task.code_slot_released = 1;
+  task.current_subagent = 'test-agent';
+  assert.equal(occupiesCodeSlot(task), false);
+
+  task.current_subagent = 'dev-agent';
+  assert.equal(occupiesCodeSlot(task), false);
+
+  task.run_state = 'runnable';
+  assert.equal(occupiesCodeSlot(task), false);
+
+  task.code_slot_released = 0;
+  assert.equal(occupiesCodeSlot(task), true);
 });
 
 test('dispatches the Harness-selected task-level Agent after a rewind that retains the code slot', () => {

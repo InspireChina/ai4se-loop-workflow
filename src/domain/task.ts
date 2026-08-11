@@ -22,6 +22,7 @@ export type TaskState = {
   closure_acknowledged_at: string | null;
   resume_status: TaskStatus | null;
   resume_pending: number;
+  code_slot_released?: number;
   blocked_reason: string | null;
 };
 
@@ -48,7 +49,7 @@ const fieldPermissions: Partial<Record<Actor, string[]>> = {
   'story-splitter-agent': ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'next_step'],
   'analyst-agent': ['agile_status', 'current_subagent', 'analysis_index', 'spec_resolved_index', 'next_step'],
   'repro-agent': ['agile_status', 'current_subagent', 'next_step'],
-  'dev-agent': ['agile_status', 'current_subagent', 'dev_index', 'next_step'],
+  'dev-agent': ['agile_status', 'current_subagent', 'dev_index', 'code_slot_released', 'next_step'],
   'test-agent': ['agile_status', 'current_subagent', 'test_index', 'next_step'],
   'review-agent': ['agile_status', 'current_subagent', 'next_step', 'run_state', 'closure_status', 'review_revision', 'review_document_id'],
 };
@@ -158,8 +159,8 @@ export function assertActorCanCreate(actor: Actor, status: TaskStatus, currentSu
 }
 
 export function occupiesCodeSlot(task: TaskState) {
-  return (task.run_state === 'waiting_for_runtime_input' && task.current_subagent === 'dev-agent')
-    || task.agile_status === 'in dev'
+  if (task.code_slot_released) return false;
+  return task.agile_status === 'in dev'
     || (task.agile_status === 'in feedback' && task.dev_index > task.test_index)
     || (task.agile_status === 'blocked' && task.resume_status === 'in dev');
 }

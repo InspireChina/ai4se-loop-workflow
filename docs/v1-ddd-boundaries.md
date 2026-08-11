@@ -202,7 +202,7 @@ classDiagram
 8. 需求完成前必须存在当前报告版本的阅读记录，且当前报告不能有开放评论。
 9. 逆向流程只能通过统一回退命令，不能直接减少进度值。
 10. 提交关键决策回答后，第一次执行必须交回问题来源 Agent：需求级交回需求梳理 Agent，交付级交回交付分析 Agent。
-11. 代码槽繁忙时自动排队，不能生成人工问题；等待运行信息的 Dev 继续占用代码槽。
+11. 代码槽繁忙时自动排队，不能生成人工问题；Dev 或 Test 等待运行信息或验证协助时持久标记已释放代码槽。人工回答不会让原需求立即抢回槽位；若代码槽已被其他需求占用，恢复的 Dev 自动排队，只在真正重新获派时恢复占用。
 12. 同一任务最多同时运行一个 Analysis Agent 和一个 Delivery Agent；Delivery 严格执行 `Dev(N) → Test(N)`，且 `dev_index <= analysis_index`。该顺序只约束仓库状态形成的先后，不授权 Test 读取 Dev 的结果叙事。Test 场景受阻属于可协作补齐的验证事实，不是系统阻塞；系统阻塞只用于 Runner、CLI、浏览器控制或 Application 自身异常。
 13. 全局最多派发四个 Analysis Agent、一个 Dev Agent 和一个需要独占浏览器的 Agent；同优先级 Analysis 按 Lane 等待时间调度。
 14. 同一个 execution attempt 的 Agent Commit（如有）、验证和 Agent Result 必须幂等记录。
