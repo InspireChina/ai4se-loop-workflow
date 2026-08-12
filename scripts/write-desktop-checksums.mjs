@@ -1,9 +1,11 @@
 import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { readdir, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, join, resolve } from 'node:path';
 
 const outputRoot = resolve(import.meta.dirname, '..', 'dist-desktop');
+const checksumName = process.argv[2] || 'SHA256SUMS.txt';
+if (basename(checksumName) !== checksumName) throw new Error('Checksum filename must not contain a path');
 const extensions = ['.exe', '.dmg', '.zip', '.AppImage', '.deb', '.rpm', '.tar.gz'];
 const names = (await readdir(outputRoot))
   .filter((name) => extensions.some((extension) => name.endsWith(extension)))
@@ -19,5 +21,5 @@ async function sha256(path) {
 
 const lines = [];
 for (const name of names) lines.push(`${await sha256(join(outputRoot, name))}  ${name}`);
-await writeFile(join(outputRoot, 'SHA256SUMS.txt'), `${lines.join('\n')}\n`, 'ascii');
+await writeFile(join(outputRoot, checksumName), `${lines.join('\n')}\n`, 'ascii');
 console.log(`Wrote checksums for ${names.length} artifact(s)`);

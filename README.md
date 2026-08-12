@@ -145,9 +145,9 @@ npm run desktop:dist:linux
 1. 将代码推送到 GitHub 的 `release` 分支；每次推送都会自动触发构建。
 2. 构建结束后进入 GitHub 仓库的 **Actions → Build Desktop Artifacts → 对应运行记录**。
 3. 在页面底部按系统下载 `LoopWork-windows-x64-*`、`LoopWork-macos-arm64-*`、`LoopWork-macos-x64-*` 或 `LoopWork-linux-x64-*`。
-4. 每个 Artifact 都附带 `SHA256SUMS.txt`。Windows 解压后可以运行带 `Setup` 的 EXE 安装；不想安装时可以运行 portable EXE。
+4. 每个 Artifact 都附带按平台命名的 `SHA256SUMS-<platform>.txt`。Windows 解压后可以运行带 `Setup` 的 EXE 安装；不想安装时可以运行 portable EXE。
 
-也可以在 Actions 页面点击 **Run workflow** 随时手动构建。版本标签 `v*` 同样会触发构建。当前 Windows 产物没有代码签名，Windows SmartScreen 可能显示“未知发布者”；正式公开分发前需要配置 Windows 代码签名证书。
+也可以在 Actions 页面点击 **Run workflow** 随时手动构建。推送版本标签（例如 `v0.1.0`）会在所有平台构建成功后自动创建 GitHub Release，并把 EXE、DMG、ZIP、AppImage、DEB、RPM、tar.gz 和校验文件作为 Release Assets 长期保存。当前 Windows 和 macOS 产物没有代码签名，安装时可能显示未知发布者或无法验证开发者；正式公开分发前需要配置平台签名证书。
 
 ## 技术文档
 
