@@ -1,0 +1,43 @@
+{
+  "name": "loopwork-desktop",
+  "version": "0.1.0",
+  "description": "LoopWork desktop application",
+  "author": "LoopWork",
+  "private": true,
+  "type": "module",
+  "main": "main.mjs",
+  "build": {
+    "appId": "com.loopwork.desktop",
+    "productName": "LoopWork",
+    "electronVersion": "43.4.0",
+    "npmRebuild": false,
+    "afterPack": "desktop/after-pack.mjs",
+    "directories": {
+      "output": "../dist-desktop"
+    },
+    "files": [
+      "main.mjs",
+      "package.json"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "dmg": {
+      "title": "LoopWork ${version}"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
+  }
+}

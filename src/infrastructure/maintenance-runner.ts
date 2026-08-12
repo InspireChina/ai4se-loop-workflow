@@ -4,6 +4,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { paths } from './database';
 import { isProcessAlive } from './run-process';
+import { isDesktopRuntime, runtimeNodeEnvironment, runtimeNodeExecutable, runtimeScript } from './runtime-entry';
 
 export function maintenancePidPath() {
   return join(paths.dataDir, 'software-maintenance', 'runner.pid');
@@ -38,15 +39,16 @@ export async function startMaintenanceRunner() {
   try {
     const current = await currentMaintenancePid();
     if (isProcessAlive(current)) return { started: false, pid: current };
-    const requireFromApp = createRequire(join(paths.appRoot, 'package.json'));
-    const tsxCli = requireFromApp.resolve('tsx/cli');
-    const script = join(paths.appRoot, 'scripts/loop/maintenance-runner.ts');
-    const child = spawn(process.execPath, [tsxCli, script], {
+    const script = runtimeScript('maintenance-runner');
+    const args = isDesktopRuntime()
+      ? [script]
+      : [createRequire(join(paths.appRoot, 'package.json')).resolve('tsx/cli'), script];
+    const child = spawn(runtimeNodeExecutable(), args, {
       cwd: paths.appRoot,
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
-      env: { ...process.env, LOOP_APP_ROOT: paths.appRoot, LOOP_WORKSPACE_ROOT_OVERRIDE: paths.root },
+      env: { ...process.env, ...runtimeNodeEnvironment(), LOOP_APP_ROOT: paths.appRoot, LOOP_WORKSPACE_ROOT_OVERRIDE: paths.root },
     });
     await new Promise<void>((resolve, reject) => {
       child.once('spawn', resolve);

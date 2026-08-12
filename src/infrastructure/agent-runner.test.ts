@@ -15,6 +15,30 @@ test('starts TypeScript runners through Node and the local tsx CLI', () => {
   assert.ok(!launch.args.includes('npx'));
 });
 
+test('starts bundled desktop runners through Electron in Node mode', () => {
+  const previous = {
+    desktop: process.env.LOOP_DESKTOP,
+    node: process.env.LOOP_DESKTOP_NODE,
+    root: process.env.LOOP_APP_ROOT,
+  };
+  process.env.LOOP_DESKTOP = '1';
+  process.env.LOOP_DESKTOP_NODE = '/Applications/LoopWork.app/Contents/MacOS/LoopWork';
+  process.env.LOOP_APP_ROOT = '/Applications/LoopWork.app/Contents/Resources/app-server';
+  try {
+    const launch = resolveRunnerCommand('RUN-123', 'dispatch-waiter.ts');
+    assert.equal(launch.command, process.env.LOOP_DESKTOP_NODE);
+    assert.equal(basename(launch.args[0]), 'dispatch-waiter.cjs');
+    assert.equal(launch.args[1], 'RUN-123');
+  } finally {
+    if (previous.desktop === undefined) delete process.env.LOOP_DESKTOP;
+    else process.env.LOOP_DESKTOP = previous.desktop;
+    if (previous.node === undefined) delete process.env.LOOP_DESKTOP_NODE;
+    else process.env.LOOP_DESKTOP_NODE = previous.node;
+    if (previous.root === undefined) delete process.env.LOOP_APP_ROOT;
+    else process.env.LOOP_APP_ROOT = previous.root;
+  }
+});
+
 test('persists normalized business execution events as ordered execution receipts', () => {
   const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
 

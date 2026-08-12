@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { appendLoopRunLog, registerRunProcess } from '../application/tasks';
 import { paths } from './database';
 import { readRunPid, runPidPath } from './run-process';
+import { isDesktopRuntime, runtimeNodeEnvironment, runtimeNodeExecutable, runtimeScript } from './runtime-entry';
 
 function waitForProcessExit(pid: number, timeoutMs: number) {
   return new Promise<boolean>((resolve) => {
@@ -27,7 +28,11 @@ function waitForProcessExit(pid: number, timeoutMs: number) {
 }
 
 export function resolveRunnerCommand(runId: string, scriptName: string) {
-  const script = join(paths.appRoot, 'scripts/loop', scriptName);
+  const name = scriptName.replace(/\.ts$/, '');
+  if (isDesktopRuntime()) {
+    return { command: runtimeNodeExecutable(), args: [runtimeScript(name), runId] };
+  }
+  const script = runtimeScript(name);
   const requireFromApp = createRequire(join(paths.appRoot, 'package.json'));
   const tsxCli = requireFromApp.resolve('tsx/cli');
   return { command: process.execPath, args: [tsxCli, script, runId] };
@@ -49,6 +54,7 @@ async function startDetachedRunner(runId: string, scriptName: string) {
     windowsHide: true,
     env: {
       ...process.env,
+      ...runtimeNodeEnvironment(),
       LOOP_APP_ROOT: paths.appRoot,
       LOOP_WORKSPACE_ROOT_OVERRIDE: paths.root,
     },

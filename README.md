@@ -110,6 +110,37 @@ npm run loopctl -- status
 npm run loopctl -- paths
 ```
 
+## 桌面应用
+
+桌面版使用 Electron 承载 Next.js standalone 服务，并把 SQLite 数据保存到操作系统的用户数据目录。Agent CLI 和 Git 仍从本机环境中发现，因此使用前需要安装并登录至少一种受支持的 Agent CLI。
+
+```bash
+# 本机开发运行
+npm run desktop:dev
+
+# macOS ARM64 未签名 DMG / ZIP（本机验证）
+npm run desktop:dist:mac
+
+# macOS 已签名构建（需要 Developer ID 和公证配置）
+npm run desktop:dist:mac:signed
+
+# Windows NSIS 安装器和 portable EXE（在 Windows 构建机运行）
+npm run desktop:dist:win
+```
+
+产物位于 `dist-desktop/`。`better-sqlite3` 会在准备桌面 runtime 时针对当前 Electron、操作系统和 CPU 架构重新编译，所以 Windows 和 macOS 产物应分别在对应平台构建，不能复用另一平台生成的 `desktop-runtime/`。
+
+### 通过 GitHub Actions 构建 Windows 安装包
+
+仓库中的 `Build Windows Desktop` 工作流会在 Windows x64 Runner 上生成 NSIS 安装版和 portable 版 EXE：
+
+1. 将代码推送到 GitHub 的 `release` 分支；每次推送都会自动触发构建。
+2. 构建结束后进入 GitHub 仓库的 **Actions → Build Windows Desktop → 对应运行记录**。
+3. 在页面底部的 **Artifacts** 下载 `LoopWork-Windows-x64-<run number>`。
+4. 解压 Artifact，在 Windows 电脑上运行带 `Setup` 的 EXE 安装；不想安装时可以运行 portable EXE。
+
+也可以在 Actions 页面点击 **Run workflow** 随时手动构建。版本标签 `v*` 同样会触发构建。当前 Windows 产物没有代码签名，Windows SmartScreen 可能显示“未知发布者”；正式公开分发前需要配置 Windows 代码签名证书。
+
 ## 技术文档
 
 - [L4 LOOP 工作手册](./docs/l4-loop-handbook.md)：WHY、设计原则、Development / Delivery / End-to-End 与统一 Infra。
