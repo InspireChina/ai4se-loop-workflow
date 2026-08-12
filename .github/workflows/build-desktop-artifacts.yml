@@ -1,0 +1,111 @@
+name: Build Desktop Artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - release
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-artifacts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+  build:
+    name: Build ${{ matrix.label }}
+    needs: test
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: windows-x64
+            label: Windows x64
+            os: windows-latest
+            command: npm run desktop:dist:win -- --x64
+            artifact_paths: |
+              dist-desktop/*.exe
+              dist-desktop/SHA256SUMS.txt
+          - id: macos-arm64
+            label: macOS Apple Silicon
+            os: macos-15
+            command: npm run desktop:dist:mac -- --arm64
+            artifact_paths: |
+              dist-desktop/*.dmg
+              dist-desktop/*.zip
+              dist-desktop/SHA256SUMS.txt
+          - id: macos-x64
+            label: macOS Intel
+            os: macos-15-intel
+            command: npm run desktop:dist:mac -- --x64
+            artifact_paths: |
+              dist-desktop/*.dmg
+              dist-desktop/*.zip
+              dist-desktop/SHA256SUMS.txt
+          - id: linux-x64
+            label: Linux x64
+            os: ubuntu-latest
+            command: npm run desktop:dist:linux -- --x64
+            artifact_paths: |
+              dist-desktop/*.AppImage
+              dist-desktop/*.deb
+              dist-desktop/*.rpm
+              dist-desktop/*.tar.gz
+              dist-desktop/SHA256SUMS.txt
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build desktop artifacts
+        run: ${{ matrix.command }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Generate SHA-256 checksums
+        run: node scripts/write-desktop-checksums.mjs
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v6
+        with:
+          name: LoopWork-${{ matrix.id }}-${{ github.run_number }}
+          path: ${{ matrix.artifact_paths }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

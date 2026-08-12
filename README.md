@@ -126,18 +126,26 @@ npm run desktop:dist:mac:signed
 
 # Windows NSIS 安装器和 portable EXE（在 Windows 构建机运行）
 npm run desktop:dist:win
+
+# Linux AppImage、DEB、RPM 和 tar.gz（在 Linux 构建机运行）
+npm run desktop:dist:linux
 ```
 
 产物位于 `dist-desktop/`。`better-sqlite3` 会在准备桌面 runtime 时针对当前 Electron、操作系统和 CPU 架构重新编译，所以 Windows 和 macOS 产物应分别在对应平台构建，不能复用另一平台生成的 `desktop-runtime/`。
 
-### 通过 GitHub Actions 构建 Windows 安装包
+### 通过 GitHub Actions 构建跨平台安装包
 
-仓库中的 `Build Windows Desktop` 工作流会在 Windows x64 Runner 上生成 NSIS 安装版和 portable 版 EXE：
+仓库中的 `Build Desktop Artifacts` 工作流会在各平台的原生 Runner 上生成：
+
+- Windows x64：NSIS 安装版 EXE、portable EXE。
+- macOS Apple Silicon：ARM64 DMG、ZIP。
+- macOS Intel：x64 DMG、ZIP。
+- Linux x64：AppImage、DEB、RPM、tar.gz。
 
 1. 将代码推送到 GitHub 的 `release` 分支；每次推送都会自动触发构建。
-2. 构建结束后进入 GitHub 仓库的 **Actions → Build Windows Desktop → 对应运行记录**。
-3. 在页面底部的 **Artifacts** 下载 `LoopWork-Windows-x64-<run number>`。
-4. 解压 Artifact，在 Windows 电脑上运行带 `Setup` 的 EXE 安装；不想安装时可以运行 portable EXE。
+2. 构建结束后进入 GitHub 仓库的 **Actions → Build Desktop Artifacts → 对应运行记录**。
+3. 在页面底部按系统下载 `LoopWork-windows-x64-*`、`LoopWork-macos-arm64-*`、`LoopWork-macos-x64-*` 或 `LoopWork-linux-x64-*`。
+4. 每个 Artifact 都附带 `SHA256SUMS.txt`。Windows 解压后可以运行带 `Setup` 的 EXE 安装；不想安装时可以运行 portable EXE。
 
 也可以在 Actions 页面点击 **Run workflow** 随时手动构建。版本标签 `v*` 同样会触发构建。当前 Windows 产物没有代码签名，Windows SmartScreen 可能显示“未知发布者”；正式公开分发前需要配置 Windows 代码签名证书。
 

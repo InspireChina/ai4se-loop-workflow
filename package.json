@@ -13,6 +13,7 @@
     "desktop:dist:mac": "npm run desktop:prepare && electron-builder --projectDir desktop --mac -c.mac.identity=null",
     "desktop:dist:mac:signed": "npm run desktop:prepare && electron-builder --projectDir desktop --mac",
     "desktop:dist:win": "npm run desktop:prepare && electron-builder --projectDir desktop --win",
+    "desktop:dist:linux": "npm run desktop:prepare && electron-builder --projectDir desktop --linux",
     "start": "next start",
     "test": "tsx --test --import ./src/test/setup.ts src/**/*.test.ts",
     "db:migrate": "tsx scripts/migrate.ts",

@@ -2,7 +2,10 @@
   "name": "loopwork-desktop",
   "version": "0.1.0",
   "description": "LoopWork desktop application",
-  "author": "LoopWork",
+  "author": {
+    "name": "InspireChina",
+    "email": "InspireChina@users.noreply.github.com"
+  },
   "private": true,
   "type": "module",
   "main": "main.mjs",
@@ -33,6 +36,16 @@
       "target": [
         "nsis",
         "portable"
+      ]
+    },
+    "linux": {
+      "category": "Development",
+      "synopsis": "AI software development workflow infrastructure",
+      "target": [
+        "AppImage",
+        "deb",
+        "rpm",
+        "tar.gz"
       ]
     },
     "nsis": {
