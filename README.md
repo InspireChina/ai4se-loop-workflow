@@ -118,17 +118,14 @@ npm run loopctl -- paths
 # 本机开发运行
 npm run desktop:dev
 
-# macOS ARM64 未签名 DMG / ZIP（本机验证）
+# macOS 未签名 DMG（本机架构验证）
 npm run desktop:dist:mac
 
 # macOS 已签名构建（需要 Developer ID 和公证配置）
 npm run desktop:dist:mac:signed
 
-# Windows NSIS 安装器和 portable EXE（在 Windows 构建机运行）
+# Windows NSIS 安装器（在 Windows 构建机运行）
 npm run desktop:dist:win
-
-# Linux AppImage、DEB、RPM 和 tar.gz（在 Linux 构建机运行）
-npm run desktop:dist:linux
 ```
 
 产物位于 `dist-desktop/`。`better-sqlite3` 会在准备桌面 runtime 时针对当前 Electron、操作系统和 CPU 架构重新编译，所以 Windows 和 macOS 产物应分别在对应平台构建，不能复用另一平台生成的 `desktop-runtime/`。
@@ -137,17 +134,16 @@ npm run desktop:dist:linux
 
 仓库中的 `Build Desktop Artifacts` 工作流会在各平台的原生 Runner 上生成：
 
-- Windows x64：NSIS 安装版 EXE、portable EXE。
-- macOS Apple Silicon：ARM64 DMG、ZIP。
-- macOS Intel：x64 DMG、ZIP。
-- Linux x64：AppImage、DEB、RPM、tar.gz。
+- Windows x64：NSIS 安装版 EXE。
+- macOS Apple Silicon：ARM64 DMG。
+- macOS Intel：x64 DMG。
 
 1. 将代码推送到 GitHub 的 `release` 分支；每次推送都会自动触发构建。
 2. 构建结束后进入 GitHub 仓库的 **Actions → Build Desktop Artifacts → 对应运行记录**。
-3. 在页面底部按系统下载 `LoopWork-windows-x64-*`、`LoopWork-macos-arm64-*`、`LoopWork-macos-x64-*` 或 `LoopWork-linux-x64-*`。
-4. 每个 Artifact 都附带按平台命名的 `SHA256SUMS-<platform>.txt`。Windows 解压后可以运行带 `Setup` 的 EXE 安装；不想安装时可以运行 portable EXE。
+3. 在页面底部按系统下载 `LoopWork-windows-x64-*`、`LoopWork-macos-arm64-*` 或 `LoopWork-macos-x64-*`。
+4. 每个 Artifact 都附带按平台命名的 `SHA256SUMS-<platform>.txt`。Windows 下载后运行带 `Setup` 的 EXE 安装。
 
-也可以在 Actions 页面点击 **Run workflow** 随时手动构建。推送版本标签（例如 `v0.1.0`）会在所有平台构建成功后自动创建 GitHub Release，并把 EXE、DMG、ZIP、AppImage、DEB、RPM、tar.gz 和校验文件作为 Release Assets 长期保存。当前 Windows 和 macOS 产物没有代码签名，安装时可能显示未知发布者或无法验证开发者；正式公开分发前需要配置平台签名证书。
+也可以在 Actions 页面点击 **Run workflow** 随时手动构建。推送版本标签（例如 `v0.1.1`）会在所有平台构建成功后自动创建 GitHub Release，并上传 Windows 安装版 EXE、两个架构的 macOS DMG 和统一校验文件。GitHub 会为标签自动附带无法隐藏的 Source code ZIP / tar.gz。当前 Windows 和 macOS 产物没有代码签名，安装时可能显示未知发布者或无法验证开发者；正式公开分发前需要配置平台签名证书。
 
 ## 技术文档
 

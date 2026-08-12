@@ -1,7 +1,8 @@
 import { build } from 'esbuild';
 import { rebuild } from '@electron/rebuild';
 import { copyFile, cp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { builtinModules, createRequire } from 'node:module';
+import { isAbsolute, join, relative, resolve } from 'node:path';
 
 const projectRoot = resolve(import.meta.dirname, '..');
 const outputRoot = join(projectRoot, 'desktop-runtime');
@@ -45,24 +46,53 @@ await mkdir(join(outputRoot, '.next'), { recursive: true });
 await cp(join(projectRoot, '.next', 'static'), join(outputRoot, '.next', 'static'), { recursive: true });
 await cp(join(projectRoot, 'migrations'), join(outputRoot, 'migrations'), { recursive: true });
 await cp(join(projectRoot, 'app-migrations'), join(outputRoot, 'app-migrations'), { recursive: true });
+// Next standalone traces the cache implementation but omits this public
+// package entrypoint, which bundled runners import for best-effort revalidation.
+await copyFile(join(projectRoot, 'node_modules', 'next', 'cache.js'), join(outputRoot, 'node_modules', 'next', 'cache.js'));
+// fdir checks require.resolve('picomatch') before using the picomatch code that
+// esbuild already bundled. Keep the tiny package present so that capability
+// check behaves the same in the isolated installed runtime.
+await rm(join(outputRoot, 'node_modules', 'picomatch'), { recursive: true, force: true });
+await cp(join(projectRoot, 'node_modules', 'picomatch'), join(outputRoot, 'node_modules', 'picomatch'), { recursive: true });
 await mkdir(runnerOutput, { recursive: true });
 
-await build({
-  entryPoints: {
-    'agent-runner': join(projectRoot, 'scripts', 'loop', 'agent-runner.ts'),
-    'dispatch-waiter': join(projectRoot, 'scripts', 'loop', 'dispatch-waiter.ts'),
-    'maintenance-runner': join(projectRoot, 'scripts', 'loop', 'maintenance-runner.ts'),
-    'loop-agent': join(projectRoot, 'scripts', 'loop', 'loop-agent-entry.ts'),
-    loopctl: join(projectRoot, 'scripts', 'loop', 'loopctl.ts'),
-  },
+const runnerEntries = {
+  'agent-runner': join(projectRoot, 'scripts', 'loop', 'agent-runner.ts'),
+  'dispatch-waiter': join(projectRoot, 'scripts', 'loop', 'dispatch-waiter.ts'),
+  'maintenance-runner': join(projectRoot, 'scripts', 'loop', 'maintenance-runner.ts'),
+  'loop-agent': join(projectRoot, 'scripts', 'loop', 'loop-agent-entry.ts'),
+  loopctl: join(projectRoot, 'scripts', 'loop', 'loopctl.ts'),
+};
+
+const runnerBuild = await build({
+  entryPoints: runnerEntries,
   outdir: runnerOutput,
   outExtension: { '.js': '.cjs' },
   bundle: true,
-  packages: 'external',
+  // The packaged app does not ship the repository-level node_modules tree.
+  // Bundle ordinary JavaScript dependencies into each runner and keep only
+  // modules that are deliberately present in the standalone runtime external.
+  external: ['better-sqlite3', 'next/cache'],
   platform: 'node',
   format: 'cjs',
   target: 'node22',
   sourcemap: true,
+  metafile: true,
 });
+
+const builtins = new Set([...builtinModules, ...builtinModules.map((name) => `node:${name}`)]);
+for (const [output, metadata] of Object.entries(runnerBuild.metafile.outputs)) {
+  if (!output.endsWith('.cjs')) continue;
+  const runner = resolve(projectRoot, output);
+  const requireFromRunner = createRequire(runner);
+  for (const specifier of new Set(metadata.imports.filter((item) => item.external).map((item) => item.path))) {
+    if (builtins.has(specifier) || specifier.startsWith('.') || isAbsolute(specifier)) continue;
+    const resolvedImport = requireFromRunner.resolve(specifier);
+    const relation = relative(outputRoot, resolvedImport);
+    if (relation.startsWith('..') || isAbsolute(relation)) {
+      throw new Error(`Desktop runner ${output} resolves ${specifier} outside the packaged runtime: ${resolvedImport}`);
+    }
+  }
+}
 
 console.log(`Desktop runtime created at ${outputRoot}`);

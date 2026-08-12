@@ -1,6 +1,6 @@
 {
   "name": "loopwork-desktop",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "LoopWork desktop application",
   "homepage": "https://github.com/InspireChina/ai4se-loop-workflow",
   "repository": {
@@ -31,8 +31,7 @@
       "category": "public.app-category.developer-tools",
       "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
       "target": [
-        "dmg",
-        "zip"
+        "dmg"
       ]
     },
     "dmg": {
@@ -40,18 +39,7 @@
     },
     "win": {
       "target": [
-        "nsis",
-        "portable"
-      ]
-    },
-    "linux": {
-      "category": "Development",
-      "synopsis": "AI software development workflow infrastructure",
-      "target": [
-        "AppImage",
-        "deb",
-        "rpm",
-        "tar.gz"
+        "nsis"
       ]
     },
     "nsis": {
