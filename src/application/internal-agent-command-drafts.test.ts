@@ -12,7 +12,7 @@ function backlogDelegation(taskId: string): DelegationEnvelope {
     pipeline: 'backlog',
     agent: 'backlog-agent',
     storyIndex: null,
-    resource: 'browser',
+    resources: ['browser:exclusive'],
     description: '测试演化来源',
     title: '渐进式 Prompt 演化测试',
     taskDescription: null,

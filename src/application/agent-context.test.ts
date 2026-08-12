@@ -10,7 +10,7 @@ function delegation(taskId: string, overrides: Partial<DelegationEnvelope> = {})
     pipeline: 'resume',
     agent: 'dev-agent',
     storyIndex: 1,
-    resource: 'none',
+    resources: ['code:workspace', 'browser:exclusive'],
     description: '继续实现当前交付单元',
     title: 'Context engineering',
     taskDescription: 'Implement one delivery unit.',
@@ -504,7 +504,7 @@ test('hard-isolates Test context from Dev narratives while preserving the frozen
     delegation: delegation(taskId, {
       agent: 'test-agent',
       pipeline: 'test',
-      resource: 'browser',
+      resources: ['code:workspace', 'browser:exclusive'],
       currentSubagent: 'test-agent',
       devIndex: 1,
     }),
@@ -530,7 +530,7 @@ test('hard-isolates Test context from Dev narratives while preserving the frozen
     delegation: delegation(taskId, {
       agent: 'test-agent',
       pipeline: 'test',
-      resource: 'browser',
+      resources: ['code:workspace', 'browser:exclusive'],
       currentSubagent: 'test-agent',
       devIndex: 1,
     }),

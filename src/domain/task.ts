@@ -1,3 +1,5 @@
+import { resourcesForAgent, type ResourceKey } from './resource';
+
 export const ACTORS = ['human', 'system', 'idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent', 'feedback-agent'] as const;
 export const TASK_STATUSES = ['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'in feedback', 'ready_to_close', 'done', 'cancelled', 'blocked'] as const;
 export const RUN_STATES = ['runnable', 'waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked', 'idle'] as const;
@@ -22,7 +24,6 @@ export type TaskState = {
   closure_acknowledged_at: string | null;
   resume_status: TaskStatus | null;
   resume_pending: number;
-  code_slot_released?: number;
   blocked_reason: string | null;
 };
 
@@ -49,7 +50,7 @@ const fieldPermissions: Partial<Record<Actor, string[]>> = {
   'story-splitter-agent': ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'next_step'],
   'analyst-agent': ['agile_status', 'current_subagent', 'analysis_index', 'spec_resolved_index', 'next_step'],
   'repro-agent': ['agile_status', 'current_subagent', 'next_step'],
-  'dev-agent': ['agile_status', 'current_subagent', 'dev_index', 'code_slot_released', 'next_step'],
+  'dev-agent': ['agile_status', 'current_subagent', 'dev_index', 'next_step'],
   'test-agent': ['agile_status', 'current_subagent', 'test_index', 'next_step'],
   'review-agent': ['agile_status', 'current_subagent', 'next_step', 'run_state', 'closure_status', 'review_revision', 'review_document_id'],
 };
@@ -158,20 +159,13 @@ export function assertActorCanCreate(actor: Actor, status: TaskStatus, currentSu
   if (status !== 'backlog' || currentSubagent) throw new Error('Web 新建需求只能进入待梳理状态且不预先分配 Agent');
 }
 
-export function occupiesCodeSlot(task: TaskState) {
-  if (task.code_slot_released) return false;
-  return task.agile_status === 'in dev'
-    || (task.agile_status === 'in feedback' && task.dev_index > task.test_index)
-    || (task.agile_status === 'blocked' && task.resume_status === 'in dev');
-}
-
 export type Delegation = {
   taskId: string;
   lane: 'control' | 'analysis' | 'delivery';
   pipeline: string;
   agent: string;
   storyIndex: number | null;
-  resource: 'none' | 'browser';
+  resources: ResourceKey[];
   description: string;
   feedbackId?: string | null;
   feedbackIds?: string[] | null;
@@ -186,7 +180,7 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
     pipeline,
     agent,
     storyIndex,
-    resource: ['idea-context-agent', 'backlog-agent', 'repro-agent', 'test-agent'].includes(agent) ? 'browser' : 'none',
+    resources: resourcesForAgent(agent),
     description,
   });
   const { analysis_index: a, dev_index: d, test_index: t, total_stories: total, agile_status: status } = task;
@@ -218,9 +212,8 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
           : '独立审查需求规格并批准或分类回流';
     return line(pipeline, agent, null, description);
   }
-  // A task-level rewind can preserve `in dev` temporarily to retain the code
-  // slot. In that state the Harness-selected control Agent is authoritative;
-  // routing from agile_status alone would incorrectly fall through to Plan.
+  // After a task-level rewind, the Harness-selected control Agent is
+  // authoritative; routing from agile_status alone could fall through to Plan.
   if (total === 0 && task.current_subagent === 'backlog-agent') {
     return line('backlog', 'backlog-agent', null, '重新澄清业务变化上下文');
   }

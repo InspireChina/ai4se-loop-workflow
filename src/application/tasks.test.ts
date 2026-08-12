@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { deliverySpecFixture } from '../test/delivery-spec-fixture';
+import { resourcesForAgent } from '../domain/resource';
 import type { DelegationEnvelope } from './tasks';
 
 test('updates an existing task-level document instead of inserting a duplicate NULL-story row', async () => {
@@ -757,6 +758,13 @@ test('lets Dev and Test request runtime information and resume the same delivery
     submitRuntimeInputs,
   } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
+  const {
+    BROWSER_EXCLUSIVE_RESOURCE,
+    CODE_WORKSPACE_RESOURCE,
+    releaseExecutionResourceClaimsInDb,
+    releaseResourceClaimInDb,
+    resourceClaimInDb,
+  } = await import('./resource-claims');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   const taskId = 'TASK-runtime-input-resume';
@@ -784,7 +792,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
     pipeline,
     agent,
     storyIndex: 1,
-    resource: agent === 'test-agent' ? 'browser' as const : 'none' as const,
+    resources: resourcesForAgent(agent),
     description: 'runtime input test',
     title: 'Runtime input resume',
     taskDescription: null,
@@ -814,6 +822,8 @@ test('lets Dev and Test request runtime information and resume the same delivery
   });
 
   addExecution('execution-runtime-dev-request', 'dev-agent', 'dev');
+  await markDelegationLaneRunning(envelope('dev-agent', 'dev'), 'execution-runtime-dev-request');
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, 'execution-runtime-dev-request');
   await applyAgentResult('run-runtime-input', envelope('dev-agent', 'dev'), parseAgentResult(JSON.stringify({
     outcome: 'needs_input',
     summary: 'Commit hook requires a delivery card number.',
@@ -830,7 +840,8 @@ test('lets Dev and Test request runtime information and resume the same delivery
   assert.equal(detail?.task.agile_status, 'ready for dev');
   assert.equal(detail?.task.run_state, 'waiting_for_runtime_input');
   assert.equal(detail?.task.current_subagent, 'dev-agent');
-  assert.equal(detail?.task.code_slot_released, 1);
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE), undefined);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   assert.equal(detail?.runtimeInputs[0]?.status, 'pending');
 
   const competingTaskId = 'TASK-runtime-input-competitor';
@@ -843,14 +854,26 @@ test('lets Dev and Test request runtime information and resume the same delivery
   `).run(competingTaskId);
   const competingDev = (await pipelineAllEnvelopes()).find((item) => item.taskId === competingTaskId);
   assert.equal(competingDev?.agent, 'dev-agent');
+  const competingExecutionId = 'execution-runtime-competing-dev';
+  db.prepare(`
+    INSERT INTO execution_attempts(
+      execution_id, run_id, task_id, story_index, agent, pipeline, lane, delegation_key,
+      attempt, status, input_hash, input_json
+    ) VALUES(?, 'run-runtime-input', ?, 1, 'dev-agent', 'dev', 'delivery', ?, 1, 'running', ?, '{}')
+  `).run(competingExecutionId, competingTaskId, `key-${competingExecutionId}`, `hash-${competingExecutionId}`);
+  await markDelegationLaneRunning(competingDev!, competingExecutionId);
   db.prepare("UPDATE tasks SET agile_status = 'in dev', current_subagent = 'dev-agent' WHERE task_id = ?").run(competingTaskId);
 
   await answerRuntimeInput({ taskId, requestId: detail!.runtimeInputs[0].request_id, answer: '#N/A' });
   await submitRuntimeInputs(taskId);
   assert.equal((await getTask(taskId))?.task.resume_pending, 0);
-  assert.equal((await getTask(taskId))?.task.code_slot_released, 1);
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, competingTaskId);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, competingExecutionId);
   assert.deepEqual(await pipelineForTask(taskId), []);
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id = ?").run(competingTaskId);
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE execution_id = ?").run(competingExecutionId);
+  releaseExecutionResourceClaimsInDb(db, competingExecutionId);
+  releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, competingTaskId);
 
   const devResume = (await pipelineForTask(taskId))[0];
   assert.deepEqual(devResume, {
@@ -859,13 +882,13 @@ test('lets Dev and Test request runtime information and resume the same delivery
     pipeline: 'resume',
     agent: 'dev-agent',
     storyIndex: 1,
-    resource: 'none',
-        description: '读取人工输入，并恢复开发验证通道',
+    resources: ['code:workspace', 'browser:exclusive'],
+    description: '读取人工输入，并恢复开发验证通道',
   });
-  await markDelegationLaneRunning(envelope('dev-agent', 'resume'));
-  assert.equal((await getTask(taskId))?.task.code_slot_released, 0);
-
   addExecution('execution-runtime-dev-resume', 'dev-agent', 'resume');
+  await markDelegationLaneRunning(envelope('dev-agent', 'resume'), 'execution-runtime-dev-resume');
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, taskId);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, 'execution-runtime-dev-resume');
   await applyAgentResult('run-runtime-input', envelope('dev-agent', 'resume'), parseAgentResult(JSON.stringify({
     outcome: 'completed',
     summary: 'Implementation completed using the supplied repository metadata.',
@@ -874,6 +897,8 @@ test('lets Dev and Test request runtime information and resume the same delivery
   await completeExecution('execution-runtime-dev-resume');
   detail = await getTask(taskId);
   assert.equal(detail?.task.dev_index, 1);
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, taskId);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   assert.equal(detail?.runtimeInputs[0]?.status, 'resolved');
   assert.equal(detail?.runtimeInputs[0]?.resolved_execution_id, 'execution-runtime-dev-resume');
   const evolution = await beginEvolutionRun({
@@ -891,15 +916,19 @@ test('lets Dev and Test request runtime information and resume the same delivery
   assert.match(evolution?.prompt || '', /#N\/A/);
 
   addExecution('execution-runtime-test-request', 'test-agent', 'test');
+  await markDelegationLaneRunning(envelope('test-agent', 'test'), 'execution-runtime-test-request');
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, 'execution-runtime-test-request');
   await applyAgentResult('run-runtime-input', envelope('test-agent', 'test'), parseAgentResult(JSON.stringify({
     outcome: 'needs_input',
     summary: 'A target test environment is required.',
     runtimeInputs: [{ title: '测试环境', question: '应在哪个已配置环境执行黑盒验证？' }],
   })), { executionId: 'execution-runtime-test-request' });
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   await completeExecution('execution-runtime-test-request');
   detail = await getTask(taskId);
   const testInput = detail!.runtimeInputs.find((input) => input.source_agent === 'test-agent')!;
   assert.equal(detail?.task.run_state, 'waiting_for_runtime_input');
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE), undefined);
   await answerRuntimeInput({ taskId, requestId: testInput.request_id, answer: '使用本地预览环境。' });
   await submitRuntimeInputs(taskId);
   assert.equal((await getTask(taskId))?.task.resume_pending, 0);
@@ -907,6 +936,8 @@ test('lets Dev and Test request runtime information and resume the same delivery
   assert.equal((await pipelineForTask(taskId))[0]?.pipeline, 'resume');
 
   addExecution('execution-runtime-test-resume', 'test-agent', 'resume');
+  await markDelegationLaneRunning(envelope('test-agent', 'resume'), 'execution-runtime-test-resume');
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, 'execution-runtime-test-resume');
   await applyAgentResult('run-runtime-input', envelope('test-agent', 'resume'), parseAgentResult(JSON.stringify({
     outcome: 'completed',
     summary: 'Black-box verification passed.',
@@ -917,6 +948,8 @@ test('lets Dev and Test request runtime information and resume the same delivery
   detail = await getTask(taskId);
   assert.equal(detail?.task.test_index, 1);
   assert.equal(detail?.task.agile_status, 'in review');
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE), undefined);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   assert.equal(detail?.runtimeInputs.find((input) => input.source_agent === 'test-agent')?.status, 'resolved');
 });
 
@@ -1042,13 +1075,19 @@ test('records a late Agent result after cancellation without reopening task lane
   assert.deepEqual(recorded, { application_status: 'applied', effect_outcome: 'discarded' });
 });
 
-test('cancels an active Dev requirement and automatically releases its execution code slot', async () => {
+test('cancels an active Dev requirement and automatically releases both of its resources', async () => {
   const {
     beginExecutionAttempt,
     cancelExecution,
     executionCancellationRequested,
   } = await import('./executions');
   const { cancelTask, getTask, pipelineAllEnvelopes } = await import('./tasks');
+  const {
+    acquireResourceClaimsInDb,
+    BROWSER_EXCLUSIVE_RESOURCE,
+    CODE_WORKSPACE_RESOURCE,
+    resourceClaimInDb,
+  } = await import('./resource-claims');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
@@ -1068,7 +1107,7 @@ test('cancels an active Dev requirement and automatically releases its execution
     pipeline: 'dev',
     agent: 'dev-agent',
     storyIndex: 1,
-    resource: 'none' as const,
+    resources: resourcesForAgent('dev-agent'),
     description: 'Implement cancelable unit',
     title: 'Cancel active Dev',
     taskDescription: null,
@@ -1101,6 +1140,15 @@ test('cancels an active Dev requirement and automatically releases its execution
     delegation,
     prompt: 'Implement until cancelled.',
   });
+  acquireResourceClaimsInDb(db, {
+    resourceKeys: resourcesForAgent('dev-agent'),
+    taskId,
+    lane: 'delivery',
+    storyIndex: 1,
+    executionId: execution.attempt.execution_id,
+  });
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, taskId);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, execution.attempt.execution_id);
   db.prepare(`
     INSERT INTO agent_results(
       result_id, run_id, task_id, story_index, agent, pipeline, outcome,
@@ -1117,6 +1165,8 @@ test('cancels an active Dev requirement and automatically releases its execution
   assert.equal(detail?.task.agile_status, 'cancelled');
   assert.equal(detail?.task.run_state, 'idle');
   assert.deepEqual(detail?.lanes.map((lane) => lane.status), ['completed', 'completed']);
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE), undefined);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   assert.equal(await executionCancellationRequested(execution.attempt.execution_id), true);
   const pending = db.prepare(`
     SELECT application_status, effect_outcome FROM agent_results WHERE result_id = 'RESULT-cancel-active-dev'
@@ -1247,6 +1297,117 @@ test('keeps Delivery runnable while Analysis waits for human clarification', asy
   assert.deepEqual(whileDeliveryBlocked.map((item) => [item.lane, item.agent, item.storyIndex]), [['analysis', 'analyst-agent', 2]]);
 });
 
+test('does not infer code-slot ownership from an Analysis task status', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { getTask, pipelineAllEnvelopes, setTaskLaneState } = await import('./tasks');
+  const { CODE_WORKSPACE_RESOURCE } = await import('./resource-claims');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+  db.prepare('DELETE FROM resource_claims WHERE resource_key = ?').run(CODE_WORKSPACE_RESOURCE);
+
+  const waitingTaskId = 'TASK-analysis-wait-without-code-claim';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index,
+      run_state, work_dir
+    ) VALUES(?, 'Waiting analysis', 'feature', 'in dev', 'analyst-agent', 1, 1, 1, 2, 1, 'waiting_for_answers', '')
+  `).run(waitingTaskId);
+  await getTask(waitingTaskId);
+  await setTaskLaneState({
+    taskId: waitingTaskId,
+    lane: 'analysis',
+    status: 'waiting_for_answers',
+    currentAgent: 'analyst-agent',
+    currentStoryIndex: 2,
+    blockedReason: 'Need a product decision',
+  });
+
+  const competingTaskId = 'TASK-analysis-wait-independent-dev';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index,
+      run_state, work_dir
+    ) VALUES(?, 'Independent development', 'feature', 'ready for dev', 'analyst-agent', 1, 0, 0, 1, 1, 'runnable', '')
+  `).run(competingTaskId);
+
+  const competingDev = (await pipelineAllEnvelopes()).find((item) => item.taskId === competingTaskId);
+  assert.equal(competingDev?.agent, 'dev-agent');
+});
+
+test('blocks browser-dependent Dev and Backlog while Idea Context continues without browser', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { pipelineAllEnvelopes, pipelineForTask } = await import('./tasks');
+  const {
+    BROWSER_EXCLUSIVE_RESOURCE,
+    CODE_WORKSPACE_RESOURCE,
+    acquireResourceClaimInDb,
+    releaseExecutionResourceClaimsInDb,
+  } = await import('./resource-claims');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+  db.prepare('DELETE FROM resource_claims').run();
+
+  const ownerTaskId = 'TASK-browser-claim-owner';
+  const waitingBrowserTaskId = 'TASK-browser-claim-waiter';
+  const devTaskId = 'TASK-browser-independent-dev';
+  const ideaTaskId = 'TASK-browser-independent-idea-context';
+  db.prepare(`
+    INSERT INTO tasks(task_id, title, item_type, agile_status, current_subagent, work_dir)
+    VALUES(?, 'Browser owner', 'feature', 'backlog', 'backlog-agent', '')
+  `).run(ownerTaskId);
+  db.prepare(`
+    INSERT INTO tasks(task_id, title, item_type, agile_status, current_subagent, work_dir)
+    VALUES(?, 'Browser waiter', 'feature', 'backlog', 'backlog-agent', '')
+  `).run(waitingBrowserTaskId);
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+    ) VALUES(?, 'Independent Dev', 'feature', 'ready for dev', 'analyst-agent', 1, 0, 0, 1, 1, '')
+  `).run(devTaskId);
+  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Independent unit', 'unit-001')").run(devTaskId);
+  db.prepare(`
+    INSERT INTO tasks(task_id, title, item_type, agile_status, current_subagent, work_dir)
+    VALUES(?, 'Idea context without browser', 'business-analysis', 'backlog', 'idea-context-agent', '')
+  `).run(ideaTaskId);
+  db.prepare(`
+    INSERT INTO execution_attempts(
+      execution_id, run_id, task_id, agent, pipeline, lane, delegation_key,
+      attempt, status, input_hash, input_json
+    ) VALUES('EXEC-browser-claim-owner', 'RUN-browser-claim', ?, 'backlog-agent', 'backlog', 'control',
+      'key-browser-claim-owner', 1, 'running', 'hash-browser-claim-owner', '{}')
+  `).run(ownerTaskId);
+  acquireResourceClaimInDb(db, {
+    resourceKey: BROWSER_EXCLUSIVE_RESOURCE,
+    taskId: ownerTaskId,
+    lane: 'control',
+    executionId: 'EXEC-browser-claim-owner',
+  });
+
+  const whileClaimed = await pipelineAllEnvelopes();
+  assert.equal(whileClaimed.some((item) => item.resources.includes(BROWSER_EXCLUSIVE_RESOURCE)), false);
+  assert.equal(whileClaimed.some((item) => item.taskId === devTaskId && item.agent === 'dev-agent'), false);
+  assert.equal(whileClaimed.some((item) => item.taskId === waitingBrowserTaskId && item.agent === 'backlog-agent'), false);
+  const ideaContext = whileClaimed.find((item) => item.taskId === ideaTaskId);
+  assert.equal(ideaContext?.agent, 'idea-context-agent');
+  assert.deepEqual(ideaContext?.resources, []);
+
+  releaseExecutionResourceClaimsInDb(db, 'EXEC-browser-claim-owner');
+  const afterRelease = await pipelineAllEnvelopes();
+  assert.equal(afterRelease.filter((item) => item.resources.includes(BROWSER_EXCLUSIVE_RESOURCE)).length, 1);
+  assert.equal(afterRelease.some((item) => item.taskId === waitingBrowserTaskId && item.agent === 'backlog-agent'), true);
+  assert.deepEqual((await pipelineForTask(devTaskId))[0]?.resources, [
+    CODE_WORKSPACE_RESOURCE,
+    BROWSER_EXCLUSIVE_RESOURCE,
+  ]);
+});
+
 test('caps Analysis concurrency at four and preserves existing task cursors when lanes are materialized', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { getTask, pipelineAllEnvelopes } = await import('./tasks');
@@ -1293,6 +1454,11 @@ test('caps Analysis concurrency at four and preserves existing task cursors when
 test('releases only the requested blocked lane and resumes its persisted delivery unit', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { getTask, pipelineForTask, releaseBlock, setTaskLaneState } = await import('./tasks');
+  const {
+    acquireResourceClaimInDb,
+    CODE_WORKSPACE_RESOURCE,
+    resourceClaimInDb,
+  } = await import('./resource-claims');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   const taskId = 'TASK-two-blocked-lanes';
@@ -1303,8 +1469,16 @@ test('releases only the requested blocked lane and resumes its persisted deliver
     ) VALUES(?, 'Two blocked lanes', 'feature', 'ready for dev', 'analyst-agent', 0, 0, 0, 2, 0, '')
   `).run(taskId);
   await getTask(taskId);
+  acquireResourceClaimInDb(db, {
+    resourceKey: CODE_WORKSPACE_RESOURCE,
+    taskId,
+    lane: 'delivery',
+    storyIndex: 1,
+  });
   await setTaskLaneState({ taskId, lane: 'analysis', status: 'system_blocked', currentAgent: 'analyst-agent', currentStoryIndex: 1, blockedReason: 'analysis failed' });
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, taskId);
   await setTaskLaneState({ taskId, lane: 'delivery', status: 'system_blocked', currentAgent: 'dev-agent', currentStoryIndex: 1, blockedReason: 'delivery failed' });
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE), undefined);
 
   await releaseBlock(taskId, 'analysis');
 
@@ -1667,7 +1841,7 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
     pipeline: 'dev',
     agent: 'dev-agent',
     storyIndex: 1,
-    resource: 'none',
+    resources: ['code:workspace', 'browser:exclusive'],
     description: '验证 Prompt Canary 串行执行',
     title: 'Prompt Canary',
     taskDescription: null,

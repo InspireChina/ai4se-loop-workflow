@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { assertState, assertUpdate, nextDelegation, occupiesCodeSlot, type TaskState } from './task';
+import {
+  BROWSER_EXCLUSIVE_RESOURCE,
+  CODE_WORKSPACE_RESOURCE,
+  resourcesForAgent,
+} from './resource';
+import { assertState, assertUpdate, nextDelegation, type TaskState } from './task';
+
+test('declares browser and code requirements independently for each Agent', () => {
+  assert.deepEqual(resourcesForAgent('dev-agent'), [CODE_WORKSPACE_RESOURCE, BROWSER_EXCLUSIVE_RESOURCE]);
+  assert.deepEqual(resourcesForAgent('test-agent'), [CODE_WORKSPACE_RESOURCE, BROWSER_EXCLUSIVE_RESOURCE]);
+  assert.deepEqual(resourcesForAgent('backlog-agent'), [BROWSER_EXCLUSIVE_RESOURCE]);
+  assert.deepEqual(resourcesForAgent('repro-agent'), [BROWSER_EXCLUSIVE_RESOURCE]);
+  assert.deepEqual(resourcesForAgent('idea-context-agent'), []);
+});
 
 function resumedDevTask(): TaskState {
   return {
@@ -52,25 +65,7 @@ test('Agents cannot create system blocks, while the Harness can record one', () 
   assert.doesNotThrow(() => assertUpdate(state, 'system', { agile_status: 'blocked' }, ['agile_status']));
 });
 
-test('releases the code slot while Dev or Test waits for runtime input', () => {
-  const task = resumedDevTask();
-  task.agile_status = 'in dev';
-  task.run_state = 'waiting_for_runtime_input';
-  task.code_slot_released = 1;
-  task.current_subagent = 'test-agent';
-  assert.equal(occupiesCodeSlot(task), false);
-
-  task.current_subagent = 'dev-agent';
-  assert.equal(occupiesCodeSlot(task), false);
-
-  task.run_state = 'runnable';
-  assert.equal(occupiesCodeSlot(task), false);
-
-  task.code_slot_released = 0;
-  assert.equal(occupiesCodeSlot(task), true);
-});
-
-test('dispatches the Harness-selected task-level Agent after a rewind that retains the code slot', () => {
+test('dispatches the Harness-selected task-level Agent after a task-level rewind', () => {
   const task = resumedDevTask();
   task.resume_pending = 0;
   task.analysis_index = 0;

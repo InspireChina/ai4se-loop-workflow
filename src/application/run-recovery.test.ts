@@ -3,6 +3,12 @@ import test from 'node:test';
 import { databaseConnection } from '../infrastructure/database';
 import { reconcileInterruptedExecutions } from './executions';
 import { beginRun, createTask, endRun, getRunStatus, heartbeatRun, registerRunProcess } from './tasks';
+import {
+  BROWSER_EXCLUSIVE_RESOURCE,
+  CODE_WORKSPACE_RESOURCE,
+  releaseResourceClaimInDb,
+  resourceClaimInDb,
+} from './resource-claims';
 
 test('recovers interrupted executions by durable checkpoint instead of a lease', async () => {
   const db = await databaseConnection();
@@ -16,6 +22,14 @@ test('recovers interrupted executions by durable checkpoint instead of a lease',
   insertAttempt.run('execution-no-output', taskId, 'backlog-agent', 'backlog', 'control', 'key-no-output', 'running', 'hash-no-output', null);
   insertAttempt.run('execution-verifying', taskId, 'dev-agent', 'dev', 'delivery', 'key-verifying', 'verifying', 'hash-verifying', '{"outcome":"completed"}');
   insertAttempt.run('execution-queued-output', taskId, 'backlog-agent', 'backlog', 'control', 'key-queued-output', 'running', 'hash-queued-output', null);
+  db.prepare(`
+    INSERT INTO resource_claims(resource_key, owner_task_id, owner_lane, owner_execution_id)
+    VALUES(?, ?, 'control', 'execution-no-output')
+  `).run(BROWSER_EXCLUSIVE_RESOURCE, taskId);
+  db.prepare(`
+    INSERT INTO resource_claims(resource_key, owner_task_id, owner_lane, owner_execution_id)
+    VALUES(?, ?, 'delivery', 'execution-verifying')
+  `).run(CODE_WORKSPACE_RESOURCE, taskId);
   db.prepare(`
     INSERT INTO agent_results(
       result_id, run_id, task_id, agent, pipeline, outcome, result_json,
@@ -35,6 +49,9 @@ test('recovers interrupted executions by durable checkpoint instead of a lease',
     { execution_id: 'execution-queued-output', status: 'running' },
     { execution_id: 'execution-verifying', status: 'verifying' },
   ]);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, taskId);
+  releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, taskId);
 });
 
 test('releases a cancelled requirement execution when its runner has already exited', async () => {

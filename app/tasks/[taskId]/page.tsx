@@ -516,7 +516,9 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             <GitBranch size={16}/>
             <div>
               <strong>{item.lane === 'analysis' ? '交付分析' : item.lane === 'delivery' ? '开发验证' : '控制'} · {flowLabel(item.pipeline)} · {agentLabel(item.agent)}</strong>
-              <small>{deliveryUnitLabel(item.storyIndex)} · {item.resource === 'browser' ? '浏览器' : '无需独占资源'}</small>
+              <small>{deliveryUnitLabel(item.storyIndex)} · {item.resources.length
+                ? item.resources.map((resource) => resource === 'code:workspace' ? '代码工作区' : '浏览器').join(' + ')
+                : '无需独占资源'}</small>
               <p>{item.description}</p>
             </div>
           </div>)}

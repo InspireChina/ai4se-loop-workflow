@@ -4,6 +4,10 @@ import { databaseConnection } from '../infrastructure/database';
 import type { DelegationEnvelope } from './tasks';
 import type { AgentContextSnapshot } from './agent-context';
 import { laneForAgent } from './task-lanes';
+import {
+  releaseExecutionResourceClaimsInDb,
+  releaseRunExecutionResourceClaimsInDb,
+} from './resource-claims';
 
 export type ExecutionStatus =
   | 'planned'
@@ -181,6 +185,7 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
       AND result_json IS NOT NULL
       ${scope}
   `).get(...(runId ? [runId] : [])) as { count: number }).count;
+  releaseRunExecutionResourceClaimsInDb(db, runId);
   return { failedCount, recoverableCount, pendingResultCount };
 }
 
@@ -357,6 +362,12 @@ export async function completeExecution(executionId: string) {
     SET status = 'applied', finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
     WHERE execution_id = ?
   `).run(executionId);
+  releaseExecutionResourceClaimsInDb(db, executionId);
+}
+
+export async function releaseExecutionResources(executionId: string) {
+  const db = await databaseConnection();
+  return releaseExecutionResourceClaimsInDb(db, executionId);
 }
 
 export async function executionCancellationRequested(executionId: string) {
@@ -378,6 +389,7 @@ export async function cancelExecution(executionId: string, reason = '需求已�
         heartbeat_at = CURRENT_TIMESTAMP
     WHERE execution_id = ? AND status != 'applied'
   `).run(reason, executionId);
+  releaseExecutionResourceClaimsInDb(db, executionId);
 }
 
 export async function failExecution(executionId: string, error: string, blocked = false) {
@@ -388,4 +400,5 @@ export async function failExecution(executionId: string, error: string, blocked 
         heartbeat_at = CURRENT_TIMESTAMP
     WHERE execution_id = ? AND status NOT IN ('cancelled', 'applied')
   `).run(blocked ? 'system_blocked' : 'retryable_failed', error, executionId);
+  releaseExecutionResourceClaimsInDb(db, executionId);
 }

@@ -123,12 +123,12 @@ Runner 的控制循环：
 - 交付拆分前与 Review 阶段：每个任务只运行一个 Control Agent。
 - 需求级产品澄清未完成：暂停该任务的 Control 流程；回答提交后只恢复需求梳理 Agent，完成需求边界后才允许交付拆分。
 - 单元推进阶段：每个任务最多同时运行一个 Analysis Agent 和一个 Delivery Agent；Analysis 串行向前，Delivery 串行执行 Dev/Test。
-- 全局容量：最多 4 个 Analysis、1 个 Dev、1 个浏览器型 Agent；同优先级 Analysis 按等待最久者优先。
+- 全局容量：最多 4 个 Analysis；代码工作区与浏览器的独占容量由 Resource Claim 保证，同优先级 Analysis 按等待最久者优先。
 - 任一 Lane 完成后立即继续调度，不等待其他 Agent 形成批次屏障。
 - 无可执行 Agent：不启动 CLI，输出 0 个 Agent，5 分钟后重试。
 - 代码槽繁忙：步骤在应用内排队，释放后继续，不生成用户确认事项。
 - 交付级关键决策未完成：只暂停交付分析通道；开发验证通道继续消费已有已收敛规格。
-- 运行信息未补充：只暂停发起请求的 Lane；提交后交回原 Agent 和交付单元。Dev 等待时继续占用代码槽。
+- 运行信息未补充：只暂停发起请求的 Lane；提交后交回原 Agent 和交付单元。Dev/Test 等待时释放代码槽，恢复前重新申请。
 - 执行异常：最多自动尝试三次，耗尽后只阻塞失败 Lane。
 - 系统阻塞解除：只对声明了 `resume` 协议的角色恢复原草稿；交付规划、反馈处理和 Review 等无 `resume` 协议的角色，由调度器重新选择原 pipeline 与反馈工作组等业务作用域，不能统一改派为 `resume`。
 
@@ -230,7 +230,9 @@ Agent
 
 Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。Agent 不得绕过仓库规则；若失败只缺少无法推导的非敏感元数据，则通过 `runtimeInputs` 请求补充并从 Dev 阶段恢复，否则按普通执行失败处理。Runner 不提供 Git 专项恢复状态。
 
-单代码槽用于避免两个写代码步骤同时修改同一工作区。它是本地串行队列，不是需要用户解除的租约或阻塞原因。
+单代码槽用于避免两个需要稳定工作区的 Dev/Test 步骤并发修改或验证同一工作区。它是 `resource_claims` 中的 `code:workspace` 资源，占用者是任务、交付单元与 execution，不由 Agile 状态、Agent 或游标组合反推。它是本地串行队列，不是需要用户解除的业务阻塞。
+
+独占浏览器是同一表中的 `browser:exclusive` execution 级资源。Delegation 通过 `resources[]` 显式声明所需资源；Dev 与 Test 同时申请代码工作区和浏览器，Backlog 与 Repro 只申请浏览器，Idea Context 不申请浏览器。任一资源不可用时整笔申请回滚并自动排队。浏览器在 Agent 进程退出、失败、取消或 Runner 崩溃恢复时按 execution 幂等释放，调度器不再通过 Agent 名称或活跃 execution 推断占用。
 
 ## 11. 页面能力
 
@@ -266,7 +268,7 @@ Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。A
 - finally 不同步运行维护 Agent；主 Runner 即使维护入队失败也能正常结束或继续派发。
 - runtime event 必须关联 run/execution 并在落库前脱敏 secret；原始异常不得泄露到维护 Prompt。
 - 软件修复只在独立 worktree 发生，保护边界、变更预算、test/build 或 clean-baseline 任一失败都不得自动落地主仓库。
-- Review 生成报告后释放代码槽并进入 `ready_to_close`；阅读动作不产生 approve/reject。
+- Review 生成报告后进入 `ready_to_close`；代码槽已在最后一个 Test 通过时释放，阅读动作不产生 approve/reject。
 - 当前报告有未验证反馈或活动反馈批次时，关闭动作被服务端拒绝。系统对同一需求一次只执行一个冻结反馈批次；直接回复类反馈就地闭环，工程类反馈追加交付单元，报告类反馈生成新版本。反馈在新增工作通过 Test 和 Feedback 独立验证前保持开放，验证未通过会创建新批次而不会回退旧单元。
 - 开发实现有代码变化时由 Dev Agent 按仓库规范创建独立 Git commit；Application 不使用 Git 历史建立完成门禁，也不推断本轮文件归属，代码槽繁忙会自动排队。
 - 运行面板能观察 Agent、工具调用、辅助 subagent、警告和错误。

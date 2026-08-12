@@ -2,6 +2,12 @@ import { randomUUID } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { deliveryUnitContractSchema } from '../domain/delivery-unit';
+import {
+  CODE_WORKSPACE_RESOURCE,
+  RESOURCE_DEFINITIONS,
+  resourcesForAgent,
+  type ResourceKey,
+} from '../domain/resource';
 import { parseRequirementMetadata, type RequirementMetadataKey } from '../domain/requirement-metadata';
 import { AgentResultContractError, assertDeliverySpecDecisionCoverage, deliverySpecSchema } from '../domain/agent-result';
 import { agentCommandProfile } from '../domain/agent-command-profile';
@@ -25,11 +31,19 @@ import {
 import { taskContextChatTurnIsRunning } from './task-context-chat';
 import { insertDeliveryUnitContractsInDb } from './delivery-units';
 import {
+  activeResourceClaimInDb,
+  acquireResourceClaimsInDb,
+  releaseResourceClaimInDb,
+  releaseExecutionResourceClaimsInDb,
+  releaseLaneExecutionResourceClaimsInDb,
+  releaseTaskResourceClaimsInDb,
+  type ResourceClaim,
+} from './resource-claims';
+import {
   assertActorCanCreate,
   assertState,
   assertUpdate,
   nextDelegation,
-  occupiesCodeSlot,
   type Actor,
   type Delegation,
   type TaskState,
@@ -258,7 +272,7 @@ const taskSelect = `
   SELECT task_id, title, description, link, external_id, external_status, item_type, priority,
          agile_status, current_subagent, analysis_index, dev_index, test_index,
          total_stories, spec_resolved_index, resume_status,
-         resume_pending, code_slot_released, next_step, blocked_reason, run_state, closure_status,
+         resume_pending, next_step, blocked_reason, run_state, closure_status,
          review_revision, review_document_id, closure_acknowledged_at,
          last_actor, owner, evidence, risk, created_at, updated_at, completed_at
   FROM tasks
@@ -677,7 +691,6 @@ export async function createTask(input: unknown) {
     closure_acknowledged_at: null,
     resume_status: null,
     resume_pending: 0,
-    code_slot_released: 0,
     blocked_reason: value.status === 'blocked' ? '系统异常暂停' : null,
   };
   assertState(state);
@@ -1100,17 +1113,22 @@ export async function addRuntimeInputRequest(input: unknown) {
     db.prepare(`
       UPDATE tasks
       SET run_state = 'waiting_for_runtime_input', current_subagent = ?,
-          resume_pending = 0, code_slot_released = ?, blocked_reason = ?, next_step = ?, last_actor = ?,
+          resume_pending = 0, blocked_reason = ?, next_step = ?, last_actor = ?,
           updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(
       value.sourceAgent,
-      ['dev-agent', 'test-agent'].includes(value.sourceAgent) ? 1 : 0,
       value.title,
       `等待补充运行信息：${value.title}`,
       value.sourceAgent,
       value.taskId,
     );
+    if (['dev-agent', 'test-agent'].includes(value.sourceAgent)) {
+      releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, value.taskId);
+    }
+    if (value.sourceExecutionId) {
+      releaseExecutionResourceClaimsInDb(db, value.sourceExecutionId);
+    }
     const lane = laneForAgent(value.sourceAgent);
     if (lane !== 'control') {
       setTaskLaneStateInDb(db, {
@@ -1450,11 +1468,6 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
       ? (db.prepare("SELECT COUNT(*) AS count FROM questions WHERE task_id = ? AND status = 'pending'").get(taskId) as { count: number }).count
       : 0;
     if (pendingQuestions) throw new Error('业务或交付决策必须通过提交回答恢复，不能用系统恢复命令绕过');
-    if (lane.lane === 'delivery' && lane.current_agent === 'dev-agent') {
-      const active = db.prepare(`${taskSelect} WHERE task_id != ?`).all(taskId) as Task[];
-      const owner = active.find(occupiesCodeSlot);
-      if (owner) throw new Error(`代码槽已被 ${owner.task_id} 占用`);
-    }
     db.exec('BEGIN');
     try {
       setTaskLaneStateInDb(db, {
@@ -1500,21 +1513,6 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
 
   const prospective = { ...task, agile_status: resumeStatus, run_state: 'runnable' as const };
   assertState(prospective);
-  const active = db.prepare(`
-    ${taskSelect}
-    WHERE task_id != ? AND (
-      (code_slot_released = 0 AND (
-        agile_status = 'in dev'
-        OR (agile_status = 'in feedback' AND dev_index > test_index)
-      ))
-      OR (agile_status = 'blocked' AND resume_status = 'in dev')
-    )
-    LIMIT 1
-  `).get(taskId) as Task | undefined;
-  if (active && (resumeStatus === 'in dev' || (resumeStatus === 'in feedback' && task.dev_index > task.test_index))) {
-    throw new Error(`代码槽已被 ${active.task_id} 占用`);
-  }
-
   db.exec('BEGIN');
   try {
     db.prepare(`
@@ -1613,22 +1611,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
     if (!resolvedSpec) throw new Error(`交付单元 ${changes.dev_index} 缺少已收敛的交付规格`);
   }
   if (changes.agile_status === 'done' && before.closure_status !== 'acknowledged') throw new Error('当前版本的结卡报告尚未阅读');
-  if (prospective.agile_status === 'in dev'
-    || (prospective.agile_status === 'in feedback' && prospective.dev_index > prospective.test_index)) {
-    const active = db.prepare(`
-      ${taskSelect}
-      WHERE task_id != ? AND (
-        (code_slot_released = 0 AND (
-          agile_status = 'in dev'
-          OR (agile_status = 'in feedback' AND dev_index > test_index)
-        ))
-        OR (agile_status='blocked' AND resume_status = 'in dev')
-      )
-      LIMIT 1
-    `).get(taskId) as Task | undefined;
-    if (active) throw new CodeSlotBusyError(active.task_id);
-  }
-  const allowed = ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'spec_resolved_index', 'resume_status', 'code_slot_released', 'blocked_reason', 'next_step', 'item_type', 'priority', 'title', 'run_state', 'closure_status', 'review_revision', 'review_document_id', 'closure_acknowledged_at'];
+  const allowed = ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'spec_resolved_index', 'resume_status', 'blocked_reason', 'next_step', 'item_type', 'priority', 'title', 'run_state', 'closure_status', 'review_revision', 'review_document_id', 'closure_acknowledged_at'];
   const keys = allowed.filter((key) => key in changes);
   if (!keys.length) throw new Error('没有需要更新的字段');
   const fields = keys.map((key) => `${key} = ?`);
@@ -1767,18 +1750,6 @@ export async function rewindTask(input: unknown) {
     'test-agent': ['analysis', 'dev'],
   };
   if (value.actor !== 'human' && value.actor !== 'system' && !permissions[value.actor]?.includes(value.to)) throw new Error(`${value.actor} 无权 rewind 到 ${value.to}`);
-  const otherCodeOwner = db.prepare(`
-    ${taskSelect}
-    WHERE task_id != ? AND (
-      (code_slot_released = 0 AND (
-        agile_status = 'in dev'
-        OR (agile_status = 'in feedback' AND dev_index > test_index)
-      ))
-      OR (agile_status = 'blocked' AND resume_status = 'in dev')
-    )
-    LIMIT 1
-  `).get(value.taskId) as Task | undefined;
-  const occupied = occupiesCodeSlot(task) || (task.dev_index > 0 && !otherCodeOwner);
   const targetAgent = REWIND_STAGE_AGENTS[value.to];
   let analysisIndex = task.analysis_index;
   let devIndex = task.dev_index;
@@ -1795,7 +1766,7 @@ export async function rewindTask(input: unknown) {
     totalStories = 0;
     resolvedSpecIndex = 0;
     const targetStatus: TaskStatus = value.to === 'context' ? 'backlog' : value.to === 'repro' ? 'in repro' : 'in plan';
-    nextStatus = occupied ? 'in dev' : targetStatus;
+    nextStatus = targetStatus;
     storyLabel = '全部交付单元';
   } else {
     if (task.total_stories <= 0) throw new Error('交付拆分完成前不能回退到单元阶段');
@@ -1814,7 +1785,7 @@ export async function rewindTask(input: unknown) {
     }
     nextStatus = task.agile_status === 'in feedback'
       ? 'in feedback'
-      : occupied || devIndex > 0 ? 'in dev' : 'ready for dev';
+      : devIndex > 0 ? 'in dev' : 'ready for dev';
     storyLabel = `交付单元 ${value.story}`;
   }
   const prospective = { ...task, agile_status: nextStatus, analysis_index: analysisIndex, dev_index: devIndex, test_index: testIndex, total_stories: totalStories, spec_resolved_index: resolvedSpecIndex };
@@ -1822,6 +1793,7 @@ export async function rewindTask(input: unknown) {
   db.exec('BEGIN');
   try {
     if (taskLevelRewind) {
+      releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, value.taskId);
       db.prepare(`
         UPDATE questions
         SET status = 'superseded', updated_at = CURRENT_TIMESTAMP
@@ -1849,6 +1821,7 @@ export async function rewindTask(input: unknown) {
       setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'analysis', status: 'pending' });
       setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'delivery', status: 'pending' });
     } else if (value.to === 'analysis') {
+      releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, value.taskId);
       setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'analysis', status: 'runnable' });
       const deliveryStatus = testIndex < devIndex || devIndex < analysisIndex ? 'runnable' : 'pending';
       setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'delivery', status: deliveryStatus });
@@ -1901,6 +1874,7 @@ export async function cancelTask(input: unknown) {
       WHERE task_id = ?
         AND status IN ('planned', 'output_received', 'verifying', 'applying', 'retryable_failed', 'system_blocked')
     `).run(value.taskId);
+    releaseTaskResourceClaimsInDb(db, value.taskId);
     addEvent(db, value.taskId, 'human', 'TaskCancelled', value.reason);
     db.exec('COMMIT');
     await cancelFeedbackForTask(value.taskId);
@@ -1935,7 +1909,7 @@ function feedbackDelegation(task: Task, work: FeedbackDispatch): DelegationEnvel
       pipeline,
       agent,
       storyIndex: null,
-      resource: work.kind === 'repro' ? 'browser' : 'none',
+      resources: resourcesForAgent(agent),
       feedbackId: work.feedbackId,
       feedbackIds: work.commentIds,
       feedbackBatchId: work.batchId,
@@ -1976,38 +1950,37 @@ function activeLaneExecutions(db: Awaited<ReturnType<typeof databaseConnection>>
 }
 
 function laneLine(task: Task, lane: TaskLane, codeSlotAvailable: boolean, deliveryTaskAvailable = true): Delegation | null {
-  const line = (pipeline: string, agent: string, storyIndex: number | null, resource: 'none' | 'browser', description: string): Delegation => ({
+  const line = (pipeline: string, agent: string, storyIndex: number | null, description: string): Delegation => ({
     taskId: task.task_id,
     lane: lane.lane,
     pipeline,
     agent,
     storyIndex,
-    resource,
+    resources: resourcesForAgent(agent),
     description,
   });
   if (!laneCanDispatch(lane)) return null;
   if (lane.lane === 'analysis') {
     if (lane.resume_pending && lane.current_agent) {
       const storyIndex = lane.current_story_index || Math.min(task.total_stories, task.analysis_index + 1);
-      return line('resume', lane.current_agent, storyIndex, 'none', '读取人工输入或恢复信息，并继续交付分析通道');
+      return line('resume', lane.current_agent, storyIndex, '读取人工输入或恢复信息，并继续交付分析通道');
     }
     if (task.analysis_index >= task.total_stories) return null;
     return line(
       'analysis',
       'analyst-agent',
       task.analysis_index + 1,
-      'none',
       `收敛交付单元 ${task.analysis_index + 1} 的实际影响、关键决策与冻结交付契约`,
     );
   }
   if (!deliveryTaskAvailable) return null;
   if (lane.resume_pending && lane.current_agent) {
     const storyIndex = lane.current_story_index || (lane.current_agent === 'test-agent' ? task.test_index + 1 : task.dev_index + 1);
-    if (lane.current_agent === 'dev-agent' && !codeSlotAvailable) return null;
-    return line('resume', lane.current_agent, storyIndex, lane.current_agent === 'test-agent' ? 'browser' : 'none', '读取人工输入，并恢复开发验证通道');
+    if (['dev-agent', 'test-agent'].includes(lane.current_agent) && !codeSlotAvailable) return null;
+    return line('resume', lane.current_agent, storyIndex, '读取人工输入，并恢复开发验证通道');
   }
-  if (task.test_index < task.dev_index) return line('test', 'test-agent', task.test_index + 1, 'browser', `验证交付单元 ${task.test_index + 1}`);
-  if (task.dev_index < task.analysis_index && codeSlotAvailable) return line('dev', 'dev-agent', task.dev_index + 1, 'none', `实现交付单元 ${task.dev_index + 1}`);
+  if (task.test_index < task.dev_index && codeSlotAvailable) return line('test', 'test-agent', task.test_index + 1, `验证交付单元 ${task.test_index + 1}`);
+  if (task.dev_index < task.analysis_index && codeSlotAvailable) return line('dev', 'dev-agent', task.dev_index + 1, `实现交付单元 ${task.dev_index + 1}`);
   return null;
 }
 
@@ -2026,7 +1999,7 @@ function controlLine(task: Task, codeSlotAvailable: boolean, lanes: TaskLane[]) 
         pipeline: 'review',
         agent: 'review-agent',
         storyIndex: null,
-        resource: 'none',
+        resources: resourcesForAgent('review-agent'),
         description: '全部交付单元已完成，进入整体验收',
       } satisfies Delegation;
     }
@@ -2055,6 +2028,34 @@ function compareAnalysisCandidates(a: { task: Task; lane: TaskLane }, b: { task:
   return left.rank - right.rank || left.readyAt.localeCompare(right.readyAt) || left.taskId.localeCompare(right.taskId);
 }
 
+function schedulingResourceClaims(db: Awaited<ReturnType<typeof databaseConnection>>) {
+  const claims = new Map<ResourceKey, ResourceClaim>();
+  for (const resourceKey of Object.keys(RESOURCE_DEFINITIONS) as ResourceKey[]) {
+    const claim = activeResourceClaimInDb(db, resourceKey);
+    if (claim) claims.set(resourceKey, claim);
+  }
+  return claims;
+}
+
+function resourcesAvailableForDelegation(
+  delegation: Delegation,
+  claims: Map<ResourceKey, ResourceClaim>,
+  reserved: Set<ResourceKey> = new Set(),
+) {
+  return delegation.resources.every((resourceKey) => {
+    const claim = claims.get(resourceKey);
+    if (claim) {
+      return RESOURCE_DEFINITIONS[resourceKey].ownerScope === 'task'
+        && claim.owner_task_id === delegation.taskId;
+    }
+    return !reserved.has(resourceKey);
+  });
+}
+
+function reserveDelegationResources(delegation: Delegation, reserved: Set<ResourceKey>) {
+  for (const resourceKey of delegation.resources) reserved.add(resourceKey);
+}
+
 export async function pipelineForTask(taskId: string): Promise<Delegation[]> {
   const db = await databaseConnection();
   const task = fetchTask(db, taskId);
@@ -2063,18 +2064,23 @@ export async function pipelineForTask(taskId: string): Promise<Delegation[]> {
   const allActive = activeLaneExecutions(db);
   const active = allActive.filter((item) => item.task_id === taskId);
   const lanes = taskLanesInDb(db, task);
+  const resourceClaims = schedulingResourceClaims(db);
   const feedback = taskContextChatTurnIsRunning(db, taskId) ? undefined : nextFeedbackDispatchInDb(db, taskId);
-  if (feedback && feedbackCanDispatch(task, lanes)) return active.length ? [] : [feedbackDelegation(task, feedback)];
+  if (feedback && feedbackCanDispatch(task, lanes)) {
+    const delegation = feedbackDelegation(task, feedback);
+    return active.length || !resourcesAvailableForDelegation(delegation, resourceClaims) ? [] : [delegation];
+  }
   if (task.agile_status === 'blocked') return [];
-  const otherActive = db.prepare(`${taskSelect} WHERE task_id != ?`).all(taskId) as Task[];
   const deliveryTaskAvailable = true;
-  const codeSlotAvailable = !otherActive.some(occupiesCodeSlot) && !allActive.some((item) => item.task_id !== taskId && item.agent === 'dev-agent');
+  const codeClaim = resourceClaims.get(CODE_WORKSPACE_RESOURCE);
+  const codeSlotAvailable = !codeClaim || codeClaim.owner_task_id === taskId;
   const control = controlLine(task, codeSlotAvailable, lanes);
-  if (control) return active.length ? [] : [control];
+  if (control) return active.length || !resourcesAvailableForDelegation(control, resourceClaims) ? [] : [control];
   const lines = lanes
     .filter((lane) => !active.some((item) => item.lane === lane.lane))
     .map((lane) => laneLine(task, lane, codeSlotAvailable, deliveryTaskAvailable))
-    .filter((line): line is Delegation => Boolean(line));
+    .filter((line): line is Delegation => Boolean(line))
+    .filter((line) => resourcesAvailableForDelegation(line, resourceClaims));
   return lines;
 }
 
@@ -2082,23 +2088,27 @@ export async function pipelineAll(): Promise<Delegation[]> {
   return pipelineAllEnvelopes();
 }
 
-export async function markDelegationLaneRunning(delegation: DelegationEnvelope) {
-  if (delegation.lane === 'control') return;
+export async function markDelegationLaneRunning(delegation: DelegationEnvelope, executionId?: string) {
   const db = await databaseConnection();
   const task = fetchTask(db, delegation.taskId);
   if (!task || task.agile_status === 'cancelled' || task.agile_status === 'done') return;
-  markTaskLaneRunningInDb(db, {
-    taskId: delegation.taskId,
-    lane: delegation.lane,
-    agent: delegation.agent,
-    storyIndex: delegation.storyIndex,
-  });
-  if (delegation.agent === 'dev-agent') {
-    db.prepare(`
-      UPDATE tasks SET code_slot_released = 0, updated_at = CURRENT_TIMESTAMP
-      WHERE task_id = ?
-    `).run(delegation.taskId);
-  }
+  db.transaction(() => {
+    acquireResourceClaimsInDb(db, {
+      resourceKeys: delegation.resources,
+      taskId: delegation.taskId,
+      lane: delegation.lane,
+      storyIndex: delegation.storyIndex,
+      executionId: executionId || null,
+    });
+    if (delegation.lane !== 'control') {
+      markTaskLaneRunningInDb(db, {
+        taskId: delegation.taskId,
+        lane: delegation.lane,
+        agent: delegation.agent,
+        storyIndex: delegation.storyIndex,
+      });
+    }
+  })();
   refreshPages('/', `/tasks/${delegation.taskId}`);
 }
 
@@ -2150,6 +2160,10 @@ export async function setTaskLaneState(input: {
   db.transaction(() => {
     setTaskLaneStateInDb(db, input);
     if (input.status === 'system_blocked') {
+      releaseLaneExecutionResourceClaimsInDb(db, input.taskId, input.lane);
+      if (input.lane === 'delivery' && ['dev-agent', 'test-agent'].includes(input.currentAgent || '')) {
+        releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, input.taskId);
+      }
       db.prepare(`
         UPDATE tasks SET current_subagent = ?, blocked_reason = ?, next_step = ?,
           resume_pending = 0, last_actor = 'system', updated_at = CURRENT_TIMESTAMP
@@ -2212,29 +2226,35 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
   const active = activeLaneExecutions(db);
   const activeKeys = new Set(active.map((item) => `${item.task_id}:${item.lane}`));
   let analysisSlots = Math.max(0, 4 - active.filter((item) => item.lane === 'analysis').length);
-  let codeAvailable = !tasks.some(occupiesCodeSlot) && !active.some((item) => item.agent === 'dev-agent');
-  let browserUsed = active.some((item) => ['idea-context-agent', 'backlog-agent', 'repro-agent', 'test-agent'].includes(item.agent));
+  const resourceClaims = schedulingResourceClaims(db);
+  const codeClaim = resourceClaims.get(CODE_WORKSPACE_RESOURCE);
+  const reservedResources = new Set<ResourceKey>();
   const lines: DelegationEnvelope[] = [];
   const analysisCandidates: { task: Task; lane: TaskLane }[] = [];
   for (const task of tasks) {
     const deliveryTaskAvailable = true;
     refreshTaskLaneStatesInDb(db, task);
     const lanes = taskLanesInDb(db, task);
-    const taskCodeAvailable = occupiesCodeSlot(task) || codeAvailable;
+    const taskCodeAvailable = codeClaim?.owner_task_id === task.task_id
+      || (!codeClaim && !reservedResources.has(CODE_WORKSPACE_RESOURCE));
     const feedback = taskContextChatTurnIsRunning(db, task.task_id)
       ? undefined
       : nextFeedbackDispatchInDb(db, task.task_id);
     const taskHasActive = active.some((item) => item.task_id === task.task_id);
     if (feedback && feedbackCanDispatch(task, lanes)) {
-      if (!taskHasActive) lines.push(feedbackDelegation(task, feedback));
+      const delegation = feedbackDelegation(task, feedback);
+      if (!taskHasActive && resourcesAvailableForDelegation(delegation, resourceClaims, reservedResources)) {
+        reserveDelegationResources(delegation, reservedResources);
+        lines.push(delegation);
+      }
       continue;
     }
     if (task.agile_status === 'blocked') continue;
     const control = controlLine(task, taskCodeAvailable, lanes);
     if (control) {
       if (taskHasActive) continue;
-      if (control.resource === 'browser' && browserUsed) continue;
-      if (control.resource === 'browser') browserUsed = true;
+      if (!resourcesAvailableForDelegation(control, resourceClaims, reservedResources)) continue;
+      reserveDelegationResources(control, reservedResources);
       lines.push(toEnvelope(task, control));
       continue;
     }
@@ -2244,9 +2264,8 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
     if (!delivery || activeKeys.has(`${task.task_id}:delivery`)) continue;
     const deliveryLine = laneLine(task, delivery, taskCodeAvailable, deliveryTaskAvailable);
     if (!deliveryLine) continue;
-    if (deliveryLine.resource === 'browser' && browserUsed) continue;
-    if (deliveryLine.resource === 'browser') browserUsed = true;
-    if (deliveryLine.pipeline === 'dev' || (deliveryLine.pipeline === 'resume' && deliveryLine.agent === 'dev-agent')) codeAvailable = false;
+    if (!resourcesAvailableForDelegation(deliveryLine, resourceClaims, reservedResources)) continue;
+    reserveDelegationResources(deliveryLine, reservedResources);
     lines.push(toEnvelope(task, deliveryLine));
   }
   for (const candidate of analysisCandidates.sort(compareAnalysisCandidates)) {
@@ -2254,6 +2273,8 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
     const deliveryTaskAvailable = true;
     const line = laneLine(candidate.task, candidate.lane, true, deliveryTaskAvailable);
     if (!line) continue;
+    if (!resourcesAvailableForDelegation(line, resourceClaims, reservedResources)) continue;
+    reserveDelegationResources(line, reservedResources);
     lines.push(toEnvelope(candidate.task, line));
     analysisSlots -= 1;
   }
@@ -2432,7 +2453,7 @@ export async function createLoopDispatch(runId: string, options: { includeRunHea
   if (options.logDelegations !== false) {
     await appendLoopRunLog(runId, `[派发] 本轮生成 ${lines.length} 个 agent`);
     for (const [index, line] of lines.entries()) {
-      await appendLoopRunLog(runId, `[派发] #${index + 1} lane=${line.lane} agent=${line.agent} flow=${line.pipeline} requirement=${line.taskId} unit=${line.storyIndex ?? '-'} resource=${line.resource}`);
+      await appendLoopRunLog(runId, `[派发] #${index + 1} lane=${line.lane} agent=${line.agent} flow=${line.pipeline} requirement=${line.taskId} unit=${line.storyIndex ?? '-'} resources=${line.resources.join(',') || 'none'}`);
       await appendLoopRunLog(runId, `[派发]      ${line.description}`);
     }
     if (!lines.length) await appendLoopRunLog(runId, '[派发] 当前没有可执行步骤，等待新需求或状态变化');
@@ -2454,7 +2475,7 @@ export function toJsonlEnvelope(item: DelegationEnvelope) {
     agile_status: item.agileStatus,
     pipeline: item.pipeline,
     agent: item.agent,
-    resource: item.resource,
+    resources: item.resources,
     current_subagent: item.currentSubagent,
     resume_pending: item.resumePending,
     spec_resolved_index: item.specResolvedIndex,

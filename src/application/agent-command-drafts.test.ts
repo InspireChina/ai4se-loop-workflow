@@ -13,7 +13,7 @@ function backlogDelegation(taskId: string, pipeline = 'backlog'): DelegationEnve
     pipeline,
     agent: 'backlog-agent',
     storyIndex: null,
-    resource: 'browser',
+    resources: ['browser:exclusive'],
     description: pipeline === 'resume' ? '根据用户回答继续需求梳理' : '收集需求上下文并完成分类',
     title: '渐进式需求上下文',
     taskDescription: '支持将筛选结果导出。',

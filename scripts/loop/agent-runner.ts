@@ -33,11 +33,13 @@ import {
   markExecutionStage,
   recordExecutionReceipt,
   recoverNextExecutionAttempt,
+  releaseExecutionResources,
   shouldRecordDevCodeCommit,
   PromptCanaryDeferredError,
   type ExecutionAttempt,
 } from '../../src/application/executions';
 import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTask, getTaskContext, markDelegationLaneRunning, reconcileStaleTaskLanes, recordRuntimeEventWithFallback, settleDelegationLane, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
+import { ResourceBusyError } from '../../src/application/resource-claims';
 import { laneForAgent } from '../../src/application/task-lanes';
 import {
   listRecoveryItemsForStage,
@@ -45,6 +47,7 @@ import {
 } from '../../src/application/recovery-items';
 import { AgentResultContractError, parseAgentResult } from '../../src/domain/agent-result';
 import { agentCommandPrompt } from '../../src/domain/agent-command-profile';
+import { resourcesForAgent } from '../../src/domain/resource';
 import { agentLabel, deliveryUnitLabel } from '../../src/domain/terminology';
 import { getAgentExecutor, type AgentExecutor, type AgentToolClass } from '../../src/infrastructure/agent-executor';
 import { executeDelegation } from '../../src/infrastructure/delegation-execution';
@@ -497,17 +500,16 @@ async function executeDelegationStep(
     await appendLoopRunLog(runId, `[上下文] requirement=${delegation.taskId} execution=${durable.attempt.execution_id} snapshot=${builtPrompt.contextSnapshot.snapshotId} resources=${builtPrompt.contextSnapshot.resourceCount} startup_index=${builtPrompt.contextSnapshot.startupIndex.length}`);
     if (await executionCancellationRequested(durable.attempt.execution_id)) {
       await cancelExecution(durable.attempt.execution_id);
-      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 已取消，跳过尚未启动的 ${agentLabel(delegation.agent)}，代码槽已释放`);
+      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 已取消，跳过尚未启动的 ${agentLabel(delegation.agent)}，执行资源已释放`);
       return;
     }
-    await markDelegationLaneRunning(delegation);
-    maintenance = await activateMaintenanceContext(durable.attempt, delegation);
-
     if (durable.recovered && durable.attempt.status === 'applied') {
+      maintenance = await activateMaintenanceContext(durable.attempt, delegation);
       await appendLoopRunLog(runId, `[恢复] requirement=${delegation.taskId} execution attempt ${durable.attempt.execution_id} 已应用，跳过重复执行`);
       return;
     }
     if (durable.recovered && durable.attempt.result_json) {
+      maintenance = await activateMaintenanceContext(durable.attempt, delegation);
       try {
         await processDurableResult(durable.attempt, delegation, parseAgentResult(durable.attempt.result_json));
       } catch (error) {
@@ -520,6 +522,17 @@ async function executeDelegationStep(
       }
       return;
     }
+    try {
+      await markDelegationLaneRunning(delegation, durable.attempt.execution_id);
+    } catch (error) {
+      if (error instanceof ResourceBusyError) {
+        await failExecution(durable.attempt.execution_id, error.message, false);
+        await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 等待 ${error.ownerTaskId} 释放资源 ${error.resourceKey}`);
+        return;
+      }
+      throw error;
+    }
+    maintenance = await activateMaintenanceContext(durable.attempt, delegation);
 
     const commandToken = await issueAgentCommandToken(durable.attempt.execution_id);
     if (!commandToken) {
@@ -533,9 +546,10 @@ async function executeDelegationStep(
       executor,
       executionOptions,
     );
+    await releaseExecutionResources(durable.attempt.execution_id);
     if (execution.cancelled) {
       await cancelExecution(durable.attempt.execution_id);
-      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 已随需求取消，代码槽已释放`);
+      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 已随需求取消，执行资源已释放`);
       return;
     }
     if (execution.evidencePersistenceError) {
@@ -604,13 +618,18 @@ async function executeDelegationStep(
       await blockDelegation(delegation, reason);
     }
   } finally {
+    if (attempt) await releaseExecutionResources(attempt.execution_id);
     await settleDelegationLane(delegation);
     if (maintenance) await enqueueExecutionMaintenance(maintenance, unexpectedFailure);
   }
 }
 
 function normalizeDelegation(delegation: DelegationEnvelope) {
-  return { ...delegation, lane: delegation.lane || laneForAgent(delegation.agent) } as DelegationEnvelope;
+  return {
+    ...delegation,
+    lane: delegation.lane || laneForAgent(delegation.agent),
+    resources: Array.isArray(delegation.resources) ? delegation.resources : resourcesForAgent(delegation.agent),
+  } as DelegationEnvelope;
 }
 
 async function drainQueuedAgentResults() {

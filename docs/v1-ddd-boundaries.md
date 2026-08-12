@@ -100,10 +100,10 @@ Application 从 Agent 的结构化结果写入文档，UI 直接读取数据库�
 
 负责解释并校验本地运行约束。
 
-- 模型：`CodeSlot`、`BrowserReservation`
+- 模型：`ResourceClaim`
 - 关键规则：同一时间一个代码槽、一个浏览器独占步骤和最多四个 Analysis Agent
 
-代码槽繁忙不是设计澄清。需要写代码的步骤进入内部等待队列，释放后自动继续。开发实现 Agent 直接使用当前工作区：每次执行都以仓库当下状态重新检查功能完整性；本轮有代码改动时由 Agent 按仓库规范提交相关文件，走查确认现有实现已满足规格时不制造 Commit。Application 不比较 execution Commit 与当前 HEAD，不推断本轮文件归属，也不因换分支、改写历史、其他 Commit 或未提交变化阻塞开发完成。Runner 不创建 checkpoint，也不代理提交。
+代码槽和浏览器分别是 `resource_claims` 中的 `code:workspace` 与 `browser:exclusive` Claim，不从 Task 状态、进度、Agent 名称或活跃 execution 反推。代码槽繁忙不是设计澄清；需要资源的步骤在应用内排队，释放后自动继续。开发实现 Agent 直接使用当前工作区：每次执行都以仓库当下状态重新检查功能完整性；本轮有代码改动时由 Agent 按仓库规范提交相关文件，走查确认现有实现已满足规格时不制造 Commit。Application 不比较 execution Commit 与当前 HEAD，不推断本轮文件归属，也不因换分支、改写历史、其他 Commit 或未提交变化阻塞开发完成。Runner 不创建 checkpoint，也不代理提交。
 
 ### 2.7 Agent 配置与演化（Agent Configuration and Evolution）
 
@@ -202,9 +202,9 @@ classDiagram
 8. 需求完成前必须存在当前报告版本的阅读记录，且当前报告不能有开放评论。
 9. 逆向流程只能通过统一回退命令，不能直接减少进度值。
 10. 提交关键决策回答后，第一次执行必须交回问题来源 Agent：需求级交回需求梳理 Agent，交付级交回交付分析 Agent。
-11. 代码槽繁忙时自动排队，不能生成人工问题；Dev 或 Test 等待运行信息或验证协助时持久标记已释放代码槽。人工回答不会让原需求立即抢回槽位；若代码槽已被其他需求占用，恢复的 Dev 自动排队，只在真正重新获派时恢复占用。
+11. 代码槽繁忙时自动排队，不能生成人工问题。Dev 执行前原子获取 `code:workspace`，Dev 完成后保留给同一交付单元的 Test；Test 通过、Dev/Test 等待人工输入、系统阻塞、取消或回退到 Analysis 时显式释放。Task 状态与进度不得作为资源占用事实。
 12. 同一任务最多同时运行一个 Analysis Agent 和一个 Delivery Agent；Delivery 严格执行 `Dev(N) → Test(N)`，且 `dev_index <= analysis_index`。该顺序只约束仓库状态形成的先后，不授权 Test 读取 Dev 的结果叙事。Test 场景受阻属于可协作补齐的验证事实，不是系统阻塞；系统阻塞只用于 Runner、CLI、浏览器控制或 Application 自身异常。
-13. 全局最多派发四个 Analysis Agent、一个 Dev Agent 和一个需要独占浏览器的 Agent；同优先级 Analysis 按 Lane 等待时间调度。
+13. 全局最多派发四个 Analysis Agent；`browser:exclusive` 同时只能属于一个 execution。Dev/Test 声明代码工作区和浏览器，Backlog/Repro 只声明浏览器，Idea Context 不声明资源。所有 Delegation 显式声明资源集合，多个资源必须在同一事务中全部取得；同优先级 Analysis 按 Lane 等待时间调度。
 14. 同一个 execution attempt 的 Agent Commit（如有）、验证和 Agent Result 必须幂等记录。
 15. execution attempt 必须记录实际发送给模型的完整 Prompt snapshot、execution input hash、项目 Prompt revision、初始模板 version、Prompt hash 和 Memory revision/hash；配置变化不得改写审计快照。
 16. 每个项目的每个 Agent 必须且只能有一条完整 Current Prompt，并且至多有一个临时 Prompt candidate。系统模板只在首次初始化时复制，应用升级不得覆盖项目 Prompt。自动提升必须满足证据阈值并通过三次真实 Canary，全部成功且原 revision 未变化后替换 Current Prompt，任一次失败或用户编辑则丢弃 candidate。配置域不得保存 Prompt 历史或提供恢复能力。

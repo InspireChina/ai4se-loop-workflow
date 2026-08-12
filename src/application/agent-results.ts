@@ -1,8 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { parseAgentResult, type AgentResult } from '../domain/agent-result';
 import type { Actor } from '../domain/task';
+import { resourcesForAgent } from '../domain/resource';
 import { databaseConnection } from '../infrastructure/database';
 import { laneForAgent, settleTaskLaneInDb } from './task-lanes';
+import {
+  CODE_WORKSPACE_RESOURCE,
+  acquireResourceClaimInDb,
+  activeResourceClaimInDb,
+  releaseResourceClaimInDb,
+  releaseExecutionResourceClaimsInDb,
+  releaseLaneExecutionResourceClaimsInDb,
+} from './resource-claims';
 import {
   createOrReopenRecoveryItem,
   recordRecoveryClaims,
@@ -188,7 +197,7 @@ function envelopeFromTask(row: QueuedAgentResult, detail: NonNullable<Awaited<Re
     pipeline: row.pipeline,
     agent: row.agent,
     storyIndex: row.story_index,
-    resource: ['idea-context-agent', 'backlog-agent', 'repro-agent', 'test-agent'].includes(row.agent) ? 'browser' : 'none',
+    resources: resourcesForAgent(row.agent),
     description: '应用排队中的 Agent 结果',
     title: task.title,
     taskDescription: task.description,
@@ -279,20 +288,16 @@ function requireArtifact(result: AgentResult, agent: string) {
 async function ensureCodeSlotForDelegation(delegation: DelegationEnvelope, result: AgentResult) {
   if (result.outcome !== 'completed' || delegation.agent !== 'dev-agent') return;
   const db = await databaseConnection();
-  const active = db.prepare(`
-    SELECT task_id
-    FROM tasks
-    WHERE task_id != ?
-      AND (
-        (code_slot_released = 0 AND (
-          agile_status = 'in dev'
-          OR (agile_status = 'in feedback' AND dev_index > test_index)
-        ))
-        OR (agile_status = 'blocked' AND resume_status = 'in dev')
-      )
-    LIMIT 1
-  `).get(delegation.taskId) as { task_id: string } | undefined;
-  if (active) throw new CodeSlotBusyError(active.task_id);
+  const claim = activeResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE);
+  if (claim && claim.owner_task_id !== delegation.taskId) throw new CodeSlotBusyError(claim.owner_task_id);
+  if (!claim) {
+    acquireResourceClaimInDb(db, {
+      resourceKey: CODE_WORKSPACE_RESOURCE,
+      taskId: delegation.taskId,
+      lane: delegation.lane,
+      storyIndex: delegation.storyIndex,
+    });
+  }
 }
 
 export async function blockDelegation(delegation: DelegationEnvelope, reason: string) {
@@ -307,6 +312,8 @@ export async function blockDelegation(delegation: DelegationEnvelope, reason: st
     });
     return;
   }
+  const db = await databaseConnection();
+  releaseLaneExecutionResourceClaimsInDb(db, delegation.taskId, delegation.lane);
   await updateTask(delegation.taskId, 'system', {
     agile_status: 'blocked',
     current_subagent: delegation.agent,
@@ -687,7 +694,6 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         agile_status: detail.task.agile_status === 'in feedback' ? 'in feedback' : 'in dev',
         current_subagent: 'dev-agent',
         dev_index: delegation.storyIndex,
-        code_slot_released: 0,
         next_step: result.summary,
       });
       await recordRecoveryClaims({
@@ -727,6 +733,8 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
           executionId: sourceExecutionId,
           summary: result.summary,
         });
+        const db = await databaseConnection();
+        releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, delegation.taskId);
         return 'advanced' as const;
       }
       const failureKind = result.failureKind
@@ -943,6 +951,7 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
         SET status = 'applied', finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
         WHERE execution_id = ?
       `).run(execution.execution_id);
+      releaseExecutionResourceClaimsInDb(db, execution.execution_id);
       db.prepare(`
         INSERT INTO execution_receipts(receipt_id, execution_id, kind, receipt_key, payload_json)
         VALUES(?, ?, 'application', ?, ?)
