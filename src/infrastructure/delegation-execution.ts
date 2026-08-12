@@ -2,6 +2,7 @@ import type { ChildProcess } from 'node:child_process';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import crossSpawn from 'cross-spawn';
 import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, parseAgentTelemetryStderr, parseAgentTelemetryStdoutEvents, type AgentEnvironment, type AgentExecutionContext, type AgentExecutionOptions, type AgentExecutor, type AgentTelemetryEvent } from './agent-executor';
 import { agentResultChannelEnv, createAgentResultChannel, readAgentResultChannel, removeAgentResultChannel, type AgentResultChannel, type AgentResultKind } from './agent-result-channel';
@@ -145,9 +146,11 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
 
     let stdoutBuffer = '';
     let stderrBuffer = '';
+    const stdoutDecoder = new StringDecoder('utf8');
+    const stderrDecoder = new StringDecoder('utf8');
     child.stdout?.on('data', (chunk: Buffer) => {
       lastOutputAt = Date.now();
-      stdoutBuffer += chunk.toString('utf8');
+      stdoutBuffer += stdoutDecoder.write(chunk);
       const lines = stdoutBuffer.split(/\r?\n/);
       stdoutBuffer = lines.pop() || '';
       for (const line of lines.filter(Boolean)) {
@@ -159,7 +162,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     });
     child.stderr?.on('data', (chunk: Buffer) => {
       lastOutputAt = Date.now();
-      stderrBuffer += chunk.toString('utf8');
+      stderrBuffer += stderrDecoder.write(chunk);
       const lines = stderrBuffer.split(/\r?\n/);
       stderrBuffer = lines.pop() || '';
       for (const line of lines.filter(Boolean)) {
@@ -211,6 +214,8 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       clearInterval(idleTimer);
       if (cancellationTimer) clearInterval(cancellationTimer);
     }
+    stdoutBuffer += stdoutDecoder.end();
+    stderrBuffer += stderrDecoder.end();
     if (stdoutBuffer.trim()) {
       enqueueLog(executor.parseStdout(stdoutBuffer, context));
       for (const event of parseAgentTelemetryStdoutEvents(executor.id, stdoutBuffer)) enqueueTelemetry(event);
