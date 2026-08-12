@@ -3037,7 +3037,7 @@ function deliveryPlanHelp(terminalActions: string[], topic?: string | null) {
 
 const LONG_TEXT_FILE_HELP = [
   '长文本参数：',
-  '  长文本必须写入 $LOOP_AGENT_TMP_DIR 指向的工作区 .tmp/loop-<run-id>/agent-<execution-id> 目录，再使用对应的 --*-file 参数读取 UTF-8 文件。',
+  '  长文本必须写入 $LOOP_AGENT_TMP_DIR 指向的工作区 .tmp/agent-<execution-id> 目录，再使用对应的 --*-file 参数读取 UTF-8 文件；不要自行拼接路径。',
   '  本次 Loop Run 结束后 Harness 会统一清理整个 Run 临时目录；不要把临时文件写入源码目录或提交到 Git。',
 ];
 

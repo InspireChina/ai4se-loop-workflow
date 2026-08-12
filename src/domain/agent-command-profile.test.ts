@@ -25,7 +25,7 @@ test('injects the complete read-only context and submission contract before Agen
   assert.match(prompt, /- `npm --prefix/);
   assert.match(prompt, /\*\*编辑与提交规则：\*\*/);
   assert.match(prompt, /\$LOOP_AGENT_TMP_DIR/);
-  assert.match(prompt, /本轮派发的全部 Agent 结束后，Harness 会先统一清理整个 Run 临时目录，再开始下一轮派发/);
+  assert.match(prompt, /当前 execution 结束后 Harness 会清理该目录/);
   assert.doesNotMatch(prompt, /## 工具选择顺序|## 命令行为/);
   assert.doesNotMatch(prompt, /implementation complete/);
 });

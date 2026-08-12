@@ -4,24 +4,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import {
-  agentWorkspaceTempDirectoryFor,
+  agentExecutionTempDirectoryFor,
   createAgentExecutionTempDirectory,
-  createAgentWorkspaceTempDirectory,
-  removeAgentWorkspaceTempDirectory,
+  removeAgentExecutionTempDirectory,
 } from './agent-workspace-temp';
 
-test('creates one Loop-owned directory under the workspace .tmp folder', () => {
+test('creates one execution-owned directory directly under the workspace .tmp folder', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'loopwork-agent-temp-'));
   try {
-    const temporary = createAgentWorkspaceTempDirectory(workspace, 'RUN-123');
+    const temporary = createAgentExecutionTempDirectory(workspace, 'EXEC-123');
     assert.equal(temporary.root, join(workspace, '.tmp'));
-    assert.equal(temporary.directory, join(workspace, '.tmp', 'loop-RUN-123'));
+    assert.equal(temporary.directory, join(workspace, '.tmp', 'agent-EXEC-123'));
     assert.equal(existsSync(temporary.directory), true);
-    const agentDirectory = createAgentExecutionTempDirectory(temporary, 'EXEC-123');
-    assert.equal(agentDirectory, join(temporary.directory, 'agent-EXEC-123'));
-    writeFileSync(join(agentDirectory, 'statement.md'), 'long command input', 'utf8');
+    writeFileSync(join(temporary.directory, 'statement.md'), 'long command input', 'utf8');
 
-    assert.deepEqual(removeAgentWorkspaceTempDirectory(temporary), { ok: true });
+    assert.deepEqual(removeAgentExecutionTempDirectory(temporary), { ok: true });
     assert.equal(existsSync(temporary.directory), false);
     assert.equal(existsSync(temporary.root), false);
   } finally {
@@ -32,13 +29,13 @@ test('creates one Loop-owned directory under the workspace .tmp folder', () => {
 test('cleanup preserves files and concurrent Loop directories it does not own', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'loopwork-agent-temp-shared-'));
   try {
-    const first = createAgentWorkspaceTempDirectory(workspace, 'RUN-A');
-    const second = createAgentWorkspaceTempDirectory(workspace, 'RUN-B');
+    const first = createAgentExecutionTempDirectory(workspace, 'EXEC-A');
+    const second = createAgentExecutionTempDirectory(workspace, 'EXEC-B');
     const retained = join(workspace, '.tmp', 'user-owned.txt');
     writeFileSync(retained, 'preserve', 'utf8');
     mkdirSync(second.directory, { recursive: true });
 
-    assert.deepEqual(removeAgentWorkspaceTempDirectory(first), { ok: true });
+    assert.deepEqual(removeAgentExecutionTempDirectory(first), { ok: true });
     assert.equal(existsSync(first.directory), false);
     assert.equal(existsSync(second.directory), true);
     assert.equal(existsSync(retained), true);
@@ -47,31 +44,26 @@ test('cleanup preserves files and concurrent Loop directories it does not own', 
   }
 });
 
-test('opening the same run-owned directory does not erase files before explicit cycle cleanup', () => {
+test('opening the same execution-owned directory does not erase files before explicit cleanup', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'loopwork-agent-temp-resume-'));
   try {
-    const first = createAgentWorkspaceTempDirectory(workspace, 'RUN-resume');
-    const marker = join(first.directory, 'keep-until-cycle-cleanup.txt');
+    const first = createAgentExecutionTempDirectory(workspace, 'EXEC-resume');
+    const marker = join(first.directory, 'keep-until-execution-cleanup.txt');
     writeFileSync(marker, 'preserve until explicit cleanup', 'utf8');
 
-    const resumed = createAgentWorkspaceTempDirectory(workspace, 'RUN-resume');
-    assert.deepEqual(resumed, agentWorkspaceTempDirectoryFor(workspace, 'RUN-resume'));
+    const resumed = createAgentExecutionTempDirectory(workspace, 'EXEC-resume');
+    assert.deepEqual(resumed, agentExecutionTempDirectoryFor(workspace, 'EXEC-resume'));
     assert.equal(existsSync(marker), true);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
 });
 
-test('rejects run ids that could escape the run-owned directory', () => {
+test('rejects execution ids that could escape the workspace temporary directory', () => {
   const workspace = mkdtempSync(join(tmpdir(), 'loopwork-agent-temp-invalid-'));
   try {
     assert.throws(
-      () => createAgentWorkspaceTempDirectory(workspace, '../outside'),
-      /不能用于临时目录/,
-    );
-    const temporary = createAgentWorkspaceTempDirectory(workspace, 'RUN-valid');
-    assert.throws(
-      () => createAgentExecutionTempDirectory(temporary, '../outside'),
+      () => createAgentExecutionTempDirectory(workspace, '../outside'),
       /不能用于临时目录/,
     );
   } finally {

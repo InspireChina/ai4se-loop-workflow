@@ -4,11 +4,6 @@ import { appendLoopRunLog, getRunStatus, recordRuntimeEventWithFallback, startRu
 import { enqueueSoftwareMaintenance } from '../../src/application/software-maintenance';
 import { recordRuntimeException } from '../../src/application/runtime-events';
 import { startAgentRun } from '../../src/infrastructure/agent-runner';
-import {
-  agentWorkspaceTempDirectoryFor,
-  removeAgentWorkspaceTempDirectory,
-} from '../../src/infrastructure/agent-workspace-temp';
-import { paths } from '../../src/infrastructure/database';
 import { startMaintenanceRunner } from '../../src/infrastructure/maintenance-runner';
 
 const runId = process.argv[2];
@@ -51,16 +46,6 @@ async function run() {
     await appendLoopRunLog(runId, `[错误] 空队列重试 runner 退出：${error instanceof Error ? error.message : String(error)}`);
   } finally {
     stopHeartbeat?.();
-    let loopEnded = false;
-    try { loopEnded = !(await isRunActive()); } catch { /* Preserve files when Run state cannot be confirmed. */ }
-    if (loopEnded) {
-      const cleanup = removeAgentWorkspaceTempDirectory(
-        agentWorkspaceTempDirectoryFor(paths.root, runId),
-      );
-      if (!cleanup.ok) {
-        try { await appendLoopRunLog(runId, `[临时文件] Loop Run 清理失败：${cleanup.error}`); } catch { /* Waiter is already terminating. */ }
-      }
-    }
     if (!failure) return;
     try {
       const eventId = await recordRuntimeEventWithFallback(

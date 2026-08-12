@@ -69,18 +69,14 @@ test('runner resolves runtime settings for each delegated agent instead of once 
   assert.doesNotMatch(source, /const settings = await getAgentExecutorSettings\(\)/);
 });
 
-test('shares execution-scoped .tmp directories within one dispatch cycle and cleans them before the next cycle', () => {
+test('continuously refills completed lanes and cleans each execution temporary directory independently', () => {
   const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
 
-  assert.match(source, /createAgentWorkspaceTempDirectory\(paths\.root, runId\)/);
-  assert.match(source, /createAgentExecutionTempDirectory\(loopTemporary, executionId\)/);
-  assert.match(source, /LOOP_AGENT_TMP_DIR:\s*agentTemporaryDirectory/);
-  assert.match(source, /await Promise\.allSettled\(cycleExecutions\.values\(\)\)/);
-  assert.match(source, /finally\s*{\s*await finishDispatchCycleTemporaryDirectory\(cycleExecutions\.size\)/);
-  assert.match(source, /finishDispatchCycleTemporaryDirectory[\s\S]*removeAgentWorkspaceTempDirectory\(temporary\)/);
-  assert.match(source, /本轮派发临时目录清理失败/);
-
-  const waiterSource = readFileSync(resolve(process.cwd(), 'scripts/loop/dispatch-waiter.ts'), 'utf8');
-  assert.match(waiterSource, /agentWorkspaceTempDirectoryFor\(paths\.root, runId\)/);
-  assert.match(waiterSource, /removeAgentWorkspaceTempDirectory/);
+  assert.match(source, /new InFlightWork<DelegationEnvelope>\(\)/);
+  assert.match(source, /inFlightExecutions\.waitForNextCompletion\(completionRevision\)/);
+  assert.doesNotMatch(source, /Promise\.allSettled\(cycleExecutions\.values\(\)\)/);
+  assert.match(source, /createAgentExecutionTempDirectory\(paths\.root, executionId\)/);
+  assert.match(source, /LOOP_AGENT_TMP_DIR:\s*temporary\.directory/);
+  assert.match(source, /removeAgentExecutionTempDirectory\(temporary\)/);
+  assert.match(source, /Lane execution 已结束，立即重新计算可执行步骤/);
 });

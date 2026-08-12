@@ -53,8 +53,8 @@ import { getAgentExecutor, type AgentExecutor, type AgentToolClass } from '../..
 import { executeDelegation } from '../../src/infrastructure/delegation-execution';
 import {
   createAgentExecutionTempDirectory,
-  createAgentWorkspaceTempDirectory,
-  removeAgentWorkspaceTempDirectory,
+  removeAgentExecutionTempDirectory,
+  type AgentExecutionTempDirectory,
 } from '../../src/infrastructure/agent-workspace-temp';
 import { startDispatchRetryRun } from '../../src/infrastructure/agent-runner';
 import { resolveAgentExecutionLimits } from '../../src/infrastructure/agent-execution-limits';
@@ -62,27 +62,12 @@ import { paths } from '../../src/infrastructure/database';
 import { gitHead } from '../../src/infrastructure/git';
 import { createLangfuseTelemetry, sanitizeLangfuseValue } from '../../src/infrastructure/langfuse';
 import { startMaintenanceRunner } from '../../src/infrastructure/maintenance-runner';
+import { InFlightWork } from '../../src/infrastructure/in-flight-work';
 
 const runId = process.argv[2];
 if (!runId) throw new Error('missing run id');
 const backgroundEvaluations = new Set<Promise<void>>();
-let loopTemporary: ReturnType<typeof createAgentWorkspaceTempDirectory> | null = null;
-
-function beginDispatchCycleTemporaryDirectory() {
-  if (loopTemporary) throw new Error('上一轮派发的临时目录尚未清理');
-  loopTemporary = createAgentWorkspaceTempDirectory(paths.root, runId);
-}
-
-async function finishDispatchCycleTemporaryDirectory(agentCount: number) {
-  const temporary = loopTemporary;
-  const cleanup = removeAgentWorkspaceTempDirectory(temporary);
-  if (!cleanup.ok) {
-    try { await appendLoopRunLog(runId, `[临时文件] 本轮派发清理失败：${cleanup.error}`); } catch { /* Preserve the cleanup failure as the primary error. */ }
-    throw new Error(`本轮派发临时目录清理失败：${cleanup.error}`);
-  }
-  loopTemporary = null;
-  try { await appendLoopRunLog(runId, `[临时文件] 本轮 ${agentCount} 个 Agent 已结束，临时目录已清理`); } catch { /* Cleanup has already completed. */ }
-}
+const activeExecutionTemporaries = new Map<string, AgentExecutionTempDirectory>();
 
 function scheduleEvolution(evaluation: Promise<void>) {
   const tracked = evaluation.finally(() => { backgroundEvaluations.delete(tracked); });
@@ -315,49 +300,57 @@ async function runDelegation(
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
   const durableToolEvent = createDurableToolEventNormalizer();
   const diagnostics: string[] = [];
-  if (!loopTemporary) throw new Error('Loop 临时目录尚未初始化');
-  const agentTemporaryDirectory = createAgentExecutionTempDirectory(loopTemporary, executionId);
-  const execution = await executeDelegation({
-    runId,
-    prompt,
-    workspaceRoot: paths.root,
-    executor,
-    executionOptions,
-    context: {
-      agent: delegation.agent,
-      taskId: delegation.taskId,
-      storyIndex: delegation.storyIndex,
-      pipeline: delegation.pipeline,
-      lane: delegation.lane,
-    },
-    description: delegation.description,
-    telemetry,
-    appendLog: async (message) => {
-      if (/(?:错误|失败|warning|warn|error|timeout|timed out|not found)/i.test(message) && diagnostics.length < 30) diagnostics.push(message.slice(0, 1000));
-      return appendLoopRunLog(runId, message);
-    },
-    recordTelemetryEvent: async (event) => {
-      const receipt = durableToolEvent(event);
-      if (!receipt) return;
-      await recordExecutionReceipt(
-        executionId,
-        'tool_event',
-        String(event.sequence).padStart(8, '0'),
-        receipt,
-      );
-    },
-    maxRuntimeMs,
-    idleTimeoutMs,
-    environment: {
-      LOOP_EXECUTION_ID: executionId,
-      LOOP_APP_ROOT: paths.appRoot,
-      LOOP_DATA_ROOT: paths.dataRoot,
-      LOOP_EXECUTION_TOKEN: commandToken,
-      LOOP_AGENT_TMP_DIR: agentTemporaryDirectory,
-    },
-    cancellationRequested: () => executionCancellationRequested(executionId),
-  });
-  return { ...execution, diagnostics };
+  const temporary = createAgentExecutionTempDirectory(paths.root, executionId);
+  activeExecutionTemporaries.set(executionId, temporary);
+  try {
+    const execution = await executeDelegation({
+      runId,
+      prompt,
+      workspaceRoot: paths.root,
+      executor,
+      executionOptions,
+      context: {
+        agent: delegation.agent,
+        taskId: delegation.taskId,
+        storyIndex: delegation.storyIndex,
+        pipeline: delegation.pipeline,
+        lane: delegation.lane,
+      },
+      description: delegation.description,
+      telemetry,
+      appendLog: async (message) => {
+        if (/(?:错误|失败|warning|warn|error|timeout|timed out|not found)/i.test(message) && diagnostics.length < 30) diagnostics.push(message.slice(0, 1000));
+        return appendLoopRunLog(runId, message);
+      },
+      recordTelemetryEvent: async (event) => {
+        const receipt = durableToolEvent(event);
+        if (!receipt) return;
+        await recordExecutionReceipt(
+          executionId,
+          'tool_event',
+          String(event.sequence).padStart(8, '0'),
+          receipt,
+        );
+      },
+      maxRuntimeMs,
+      idleTimeoutMs,
+      environment: {
+        LOOP_EXECUTION_ID: executionId,
+        LOOP_APP_ROOT: paths.appRoot,
+        LOOP_DATA_ROOT: paths.dataRoot,
+        LOOP_EXECUTION_TOKEN: commandToken,
+        LOOP_AGENT_TMP_DIR: temporary.directory,
+      },
+      cancellationRequested: () => executionCancellationRequested(executionId),
+    });
+    return { ...execution, diagnostics };
+  } finally {
+    activeExecutionTemporaries.delete(executionId);
+    const cleanup = removeAgentExecutionTempDirectory(temporary);
+    if (!cleanup.ok) {
+      try { await appendLoopRunLog(runId, `[临时文件] execution=${executionId} 临时目录清理失败：${cleanup.error}`); } catch { /* Execution result remains primary. */ }
+    }
+  }
 }
 
 async function processDurableResult(attempt: ExecutionAttempt, delegation: DelegationEnvelope, result: ReturnType<typeof parseAgentResult>) {
@@ -632,6 +625,27 @@ function normalizeDelegation(delegation: DelegationEnvelope) {
   } as DelegationEnvelope;
 }
 
+function delegationLaneKey(delegation: DelegationEnvelope) {
+  return `${delegation.taskId}:${delegation.lane}`;
+}
+
+function launchDelegation(
+  delegation: DelegationEnvelope,
+  inFlightExecutions: InFlightWork<DelegationEnvelope>,
+) {
+  const key = delegationLaneKey(delegation);
+  return inFlightExecutions.launch(
+    key,
+    delegation,
+    () => executeDelegationStep(delegation),
+    async (error) => {
+      try {
+        await appendLoopRunLog(runId, `[错误] requirement=${delegation.taskId} lane=${delegation.lane} agent=${delegation.agent} 执行器退出：${error instanceof Error ? error.message : String(error)}`);
+      } catch { /* An execution failure must not reject the scheduler promise. */ }
+    },
+  );
+}
+
 async function drainQueuedAgentResults() {
   let waiting = false;
   while (true) {
@@ -690,31 +704,37 @@ async function main() {
   }
 
   let firstDispatch = true;
+  const inFlightExecutions = new InFlightWork<DelegationEnvelope>();
   while (await isRunActive()) {
+    const completionRevision = inFlightExecutions.revision();
     const queuedWaiting = await drainQueuedAgentResults();
-    const dispatch = await createLoopDispatch(runId, { includeRunHeader: false, logDelegations: firstDispatch });
+    const dispatch = await createLoopDispatch(runId, {
+      includeRunHeader: false,
+      logDelegations: firstDispatch,
+      locallyActive: inFlightExecutions.values(),
+    });
     firstDispatch = false;
-    const cycleExecutions = new Map<string, Promise<void>>();
+    let launched = 0;
     for (const rawDelegation of dispatch.delegations) {
       const delegation = normalizeDelegation(rawDelegation);
-      const key = `${delegation.taskId}:${delegation.lane}`;
-      if (cycleExecutions.has(key)) continue;
-      if (!cycleExecutions.size) beginDispatchCycleTemporaryDirectory();
-      const execution = executeDelegationStep(delegation)
-        .catch(async (error) => {
-          await appendLoopRunLog(runId, `[错误] requirement=${delegation.taskId} lane=${delegation.lane} agent=${delegation.agent} 执行器退出：${error instanceof Error ? error.message : String(error)}`);
-        });
-      cycleExecutions.set(key, execution);
-    }
-    if (cycleExecutions.size) {
-      await appendLoopRunLog(runId, `[运行] 本轮启动 ${cycleExecutions.size} 个 Lane Agent；等待本轮全部结束后清理临时目录`);
-      try {
-        await Promise.allSettled(cycleExecutions.values());
-      } finally {
-        await finishDispatchCycleTemporaryDirectory(cycleExecutions.size);
+      if (launchDelegation(delegation, inFlightExecutions)) {
+        launched += 1;
+        await appendLoopRunLog(runId, `[调度] 启动 Lane Agent：requirement=${delegation.taskId} lane=${delegation.lane} agent=${delegation.agent} resources=${delegation.resources.join(',') || 'none'}`);
       }
+    }
+    if (launched) {
+      await appendLoopRunLog(runId, `[调度] 当前运行 ${inFlightExecutions.size} 个 Lane Agent`);
+    }
+    if (inFlightExecutions.revision() !== completionRevision) {
+      await appendLoopRunLog(runId, '[调度] Lane execution 已结束，立即重新计算可执行步骤');
       continue;
     }
+    if (inFlightExecutions.size) {
+      await inFlightExecutions.waitForNextCompletion(completionRevision);
+      await appendLoopRunLog(runId, '[调度] Lane execution 已结束，立即重新计算可执行步骤');
+      continue;
+    }
+    if (launched) continue;
     if (backgroundEvaluations.size) {
       await Promise.race(backgroundEvaluations);
       continue;
@@ -739,11 +759,13 @@ async function run() {
     await enqueueRunnerFailureMaintenance(error);
   } finally {
     stopHeartbeat?.();
-    const cleanup = removeAgentWorkspaceTempDirectory(loopTemporary);
-    if (!cleanup.ok) {
-      try { await appendLoopRunLog(runId, `[临时文件] Runner 收尾清理失败：${cleanup.error}`); } catch { /* Runner is already terminating. */ }
+    for (const temporary of activeExecutionTemporaries.values()) {
+      const cleanup = removeAgentExecutionTempDirectory(temporary);
+      if (!cleanup.ok) {
+        try { await appendLoopRunLog(runId, `[临时文件] Runner 收尾清理 execution=${temporary.executionId} 失败：${cleanup.error}`); } catch { /* Runner is already terminating. */ }
+      }
     }
-    loopTemporary = null;
+    activeExecutionTemporaries.clear();
   }
 }
 

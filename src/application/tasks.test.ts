@@ -1408,6 +1408,44 @@ test('blocks browser-dependent Dev and Backlog while Idea Context continues with
   ]);
 });
 
+test('reserves resources and lane capacity for locally launched work before database claims are visible', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { pipelineAllEnvelopes, pipelineForTask } = await import('./tasks');
+  const {
+    BROWSER_EXCLUSIVE_RESOURCE,
+    CODE_WORKSPACE_RESOURCE,
+  } = await import('./resource-claims');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+  db.prepare('DELETE FROM resource_claims').run();
+
+  const devTaskId = 'TASK-local-reservation-dev';
+  const backlogTaskId = 'TASK-local-reservation-backlog';
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, item_type, agile_status, current_subagent,
+      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+    ) VALUES(?, 'Locally launched Dev', 'feature', 'ready for dev', 'analyst-agent', 1, 0, 0, 1, 1, '')
+  `).run(devTaskId);
+  db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Reserved unit', 'unit-001')").run(devTaskId);
+  db.prepare(`
+    INSERT INTO tasks(task_id, title, item_type, agile_status, current_subagent, work_dir)
+    VALUES(?, 'Browser contender', 'feature', 'backlog', 'backlog-agent', '')
+  `).run(backlogTaskId);
+
+  const dev = (await pipelineForTask(devTaskId))[0];
+  assert.deepEqual(dev.resources, [CODE_WORKSPACE_RESOURCE, BROWSER_EXCLUSIVE_RESOURCE]);
+  assert.equal((db.prepare('SELECT COUNT(*) AS count FROM resource_claims').get() as { count: number }).count, 0);
+
+  const refill = await pipelineAllEnvelopes({ locallyActive: [dev] });
+  assert.equal(refill.some((item) => item.taskId === devTaskId), false);
+  assert.equal(refill.some((item) => item.taskId === backlogTaskId), false);
+  assert.equal(refill.some((item) => item.resources.includes(CODE_WORKSPACE_RESOURCE)), false);
+  assert.equal(refill.some((item) => item.resources.includes(BROWSER_EXCLUSIVE_RESOURCE)), false);
+});
+
 test('caps Analysis concurrency at four and preserves existing task cursors when lanes are materialized', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { getTask, pipelineAllEnvelopes } = await import('./tasks');

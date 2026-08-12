@@ -1,54 +1,38 @@
 import { chmodSync, mkdirSync, rmSync, rmdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 
-export type AgentWorkspaceTempDirectory = {
+export type AgentExecutionTempDirectory = {
   root: string;
   directory: string;
+  executionId: string;
 };
 
-export function agentWorkspaceTempDirectoryFor(
+export function agentExecutionTempDirectoryFor(
   workspaceRoot: string,
-  runId: string,
-): AgentWorkspaceTempDirectory {
-  if (!/^[A-Za-z0-9._-]+$/.test(runId)) {
-    throw new Error(`run id 不能用于临时目录：${runId}`);
+  executionId: string,
+): AgentExecutionTempDirectory {
+  if (!/^[A-Za-z0-9._-]+$/.test(executionId)) {
+    throw new Error(`execution id 不能用于临时目录：${executionId}`);
   }
   const root = resolve(workspaceRoot, '.tmp');
-  const directory = resolve(join(root, `loop-${runId}`));
-  if (dirname(directory) !== root) throw new Error('Loop 临时目录越过工作区 .tmp 边界');
-  return { root, directory };
+  const directory = resolve(join(root, `agent-${executionId}`));
+  if (dirname(directory) !== root) throw new Error('Agent 临时目录越过工作区 .tmp 边界');
+  return { root, directory, executionId };
 }
 
-export function createAgentWorkspaceTempDirectory(
+export function createAgentExecutionTempDirectory(
   workspaceRoot: string,
-  runId: string,
-): AgentWorkspaceTempDirectory {
-  const temporary = agentWorkspaceTempDirectoryFor(workspaceRoot, runId);
+  executionId: string,
+) {
+  const temporary = agentExecutionTempDirectoryFor(workspaceRoot, executionId);
   mkdirSync(temporary.directory, { recursive: true, mode: 0o700 });
   try { chmodSync(temporary.directory, 0o700); } catch { /* Windows ACLs are managed by the user profile. */ }
   return temporary;
 }
 
-export function createAgentExecutionTempDirectory(
-  loopTemporary: AgentWorkspaceTempDirectory,
-  executionId: string,
-) {
-  if (!/^[A-Za-z0-9._-]+$/.test(executionId)) {
-    throw new Error(`execution id 不能用于临时目录：${executionId}`);
-  }
-  const directory = resolve(join(loopTemporary.directory, `agent-${executionId}`));
-  if (dirname(directory) !== loopTemporary.directory) {
-    throw new Error('Agent 临时目录越过当前 Loop .tmp 边界');
-  }
-  mkdirSync(directory, { recursive: true, mode: 0o700 });
-  try { chmodSync(directory, 0o700); } catch { /* Windows ACLs are managed by the user profile. */ }
-  return directory;
-}
-
-export function removeAgentWorkspaceTempDirectory(
-  temporary: AgentWorkspaceTempDirectory | null,
+export function removeAgentExecutionTempDirectory(
+  temporary: AgentExecutionTempDirectory,
 ): { ok: true } | { ok: false; error: string } {
-  if (!temporary) return { ok: true };
   try {
     rmSync(temporary.directory, { recursive: true, force: true });
     try { rmdirSync(temporary.root); } catch { /* Keep a non-empty shared .tmp root. */ }

@@ -2211,7 +2211,11 @@ function toEnvelope(task: Task, delegation: Delegation): DelegationEnvelope {
   };
 }
 
-export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
+type LocallyActiveDelegation = Pick<Delegation, 'taskId' | 'lane' | 'resources'>;
+
+export async function pipelineAllEnvelopes(options: {
+  locallyActive?: LocallyActiveDelegation[];
+} = {}): Promise<DelegationEnvelope[]> {
   const db = await databaseConnection();
   const tasks = db.prepare(`${taskSelect} WHERE agile_status NOT IN ('done', 'cancelled') ORDER BY
     CASE agile_status
@@ -2225,10 +2229,14 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
     updated_at DESC`).all() as Task[];
   const active = activeLaneExecutions(db);
   const activeKeys = new Set(active.map((item) => `${item.task_id}:${item.lane}`));
-  let analysisSlots = Math.max(0, 4 - active.filter((item) => item.lane === 'analysis').length);
+  for (const item of options.locallyActive || []) activeKeys.add(`${item.taskId}:${item.lane}`);
+  let analysisSlots = Math.max(0, 4 - [...activeKeys].filter((key) => key.endsWith(':analysis')).length);
   const resourceClaims = schedulingResourceClaims(db);
   const codeClaim = resourceClaims.get(CODE_WORKSPACE_RESOURCE);
-  const reservedResources = new Set<ResourceKey>();
+  const reservedResources = new Set<ResourceKey>(
+    (options.locallyActive || []).flatMap((item) => item.resources),
+  );
+  const locallyActiveTasks = new Set((options.locallyActive || []).map((item) => item.taskId));
   const lines: DelegationEnvelope[] = [];
   const analysisCandidates: { task: Task; lane: TaskLane }[] = [];
   for (const task of tasks) {
@@ -2240,7 +2248,8 @@ export async function pipelineAllEnvelopes(): Promise<DelegationEnvelope[]> {
     const feedback = taskContextChatTurnIsRunning(db, task.task_id)
       ? undefined
       : nextFeedbackDispatchInDb(db, task.task_id);
-    const taskHasActive = active.some((item) => item.task_id === task.task_id);
+    const taskHasActive = locallyActiveTasks.has(task.task_id)
+      || active.some((item) => item.task_id === task.task_id);
     if (feedback && feedbackCanDispatch(task, lanes)) {
       const delegation = feedbackDelegation(task, feedback);
       if (!taskHasActive && resourcesAvailableForDelegation(delegation, resourceClaims, reservedResources)) {
@@ -2442,14 +2451,18 @@ export async function ensureLoopRuntimeFiles() {
   await databaseConnection();
 }
 
-export async function createLoopDispatch(runId: string, options: { includeRunHeader?: boolean; logDelegations?: boolean } = {}) {
+export async function createLoopDispatch(runId: string, options: {
+  includeRunHeader?: boolean;
+  logDelegations?: boolean;
+  locallyActive?: LocallyActiveDelegation[];
+} = {}) {
   await requireActiveRun(runId);
   if (options.includeRunHeader !== false) {
     await appendLoopRunLog(runId, `[运行] 开始运行 run=${runId}`);
     await appendLoopRunLog(runId, `[运行] 工作区=${paths.root}`);
     await appendLoopRunLog(runId, `[运行] 数据目录=${paths.dataDir}`);
   }
-  const lines = await pipelineAllEnvelopes();
+  const lines = await pipelineAllEnvelopes({ locallyActive: options.locallyActive });
   if (options.logDelegations !== false) {
     await appendLoopRunLog(runId, `[派发] 本轮生成 ${lines.length} 个 agent`);
     for (const [index, line] of lines.entries()) {
