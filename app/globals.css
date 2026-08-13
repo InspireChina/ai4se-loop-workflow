@@ -201,6 +201,26 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .timeline span{width:8px;height:8px;background:#7295d8;border-radius:50%;margin-top:5px}
 .timeline p{margin:0}
 .settings{padding:20px;display:grid;gap:16px}
+.about-grid{display:grid;gap:14px;max-width:900px}
+.about-product{display:flex;align-items:center;gap:18px;padding:22px}
+.about-mark{display:grid;place-items:center;flex:none;width:58px;height:58px;border-radius:14px;background:#2768d8;color:#fff;font-size:18px;font-weight:800;letter-spacing:.04em}
+.about-product h2{margin:0 0 6px;font-size:20px}
+.about-product p{margin:0 0 4px;color:#364154}
+.about-links{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:12px;padding:18px 20px}
+.update-card{padding:20px;display:grid;gap:17px}
+.update-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px}
+.update-head .badge{max-width:320px;text-align:right}
+.update-progress{display:grid;gap:7px;padding:13px;border:1px solid var(--line);border-radius:8px;background:#fafbfc}
+.update-progress>div{display:flex;justify-content:space-between;align-items:center;color:#526075;font-size:12px}
+.update-progress progress{width:100%;height:8px;accent-color:var(--blue)}
+.update-progress small{margin:0}
+.update-warning{display:flex;align-items:flex-start;gap:9px;border:1px solid #f2d9a2;border-radius:8px;background:#fff8e8;color:#785518;padding:11px 12px;line-height:1.45}
+.update-warning svg{flex:none;margin-top:1px}
+.update-actions{display:flex;align-items:center;gap:12px;min-height:36px}
+.update-ok{display:flex;align-items:center;gap:6px;color:var(--green);font-weight:650}
+.update-signing-note{margin:0;padding-top:13px;border-top:1px solid var(--line);line-height:1.5}
+.spin{animation:spin .9s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 .task-create-dialog{width:min(620px,calc(100vw - 32px));max-height:calc(100vh - 48px);padding:0;border:0;border-radius:10px;background:#fff;color:var(--ink);box-shadow:0 24px 70px rgba(15,23,42,.28);overflow:auto}
 .task-create-dialog::backdrop{background:rgba(13,19,31,.5);backdrop-filter:blur(2px)}
 .dialog-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:20px 20px 16px;border-bottom:1px solid var(--line)}

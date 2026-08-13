@@ -1,13 +1,14 @@
 {
   "name": "loop-engineering",
   "private": true,
-  "version": "0.1.1",
+  "version": "0.1.2",
   "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "build:desktop-runtime": "node scripts/build-desktop-runtime.mjs",
-    "desktop:prepare": "npm run build && npm run build:desktop-runtime",
+    "desktop:install": "npm ci --prefix desktop --omit=dev --ignore-scripts",
+    "desktop:prepare": "npm run desktop:install && npm run build && npm run build:desktop-runtime",
     "desktop:dev": "npm run desktop:prepare && electron desktop",
     "desktop:dist": "npm run desktop:prepare && electron-builder --projectDir desktop --publish never",
     "desktop:dist:mac": "npm run desktop:prepare && electron-builder --projectDir desktop --mac -c.mac.identity=null --publish never",

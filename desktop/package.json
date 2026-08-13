@@ -1,6 +1,6 @@
 {
   "name": "loopwork-desktop",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "LoopWork desktop application",
   "homepage": "https://github.com/InspireChina/ai4se-loop-workflow",
   "repository": {
@@ -25,19 +25,30 @@
     },
     "files": [
       "main.mjs",
+      "preload.cjs",
+      "updater.mjs",
       "package.json"
+    ],
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "InspireChina",
+        "repo": "ai4se-loop-workflow"
+      }
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
       "artifactName": "${productName}-${version}-mac-${arch}.${ext}",
       "target": [
-        "dmg"
+        "dmg",
+        "zip"
       ]
     },
     "dmg": {
       "title": "LoopWork ${version}"
     },
     "win": {
+      "artifactName": "${productName}-${version}-windows-${arch}-Setup.${ext}",
       "target": [
         "nsis"
       ]
@@ -46,5 +57,8 @@
       "oneClick": false,
       "allowToChangeInstallationDirectory": true
     }
+  },
+  "dependencies": {
+    "electron-updater": "6.8.9"
   }
 }

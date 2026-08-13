@@ -3,6 +3,7 @@ import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { configureUpdater, detachUpdaterWindow } from './updater.mjs';
 
 let mainWindow;
 let serverProcess;
@@ -90,7 +91,7 @@ function stopServer() {
 
 async function createWindow() {
   const url = await startServer();
-  mainWindow = new BrowserWindow({
+  const window = new BrowserWindow({
     width: 1440,
     height: 960,
     minWidth: 1000,
@@ -102,14 +103,21 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      preload: join(app.getAppPath(), 'preload.cjs'),
     },
   });
-  mainWindow.webContents.setWindowOpenHandler(({ url: target }) => {
+  mainWindow = window;
+  configureUpdater(window);
+  window.once('closed', () => {
+    detachUpdaterWindow(window);
+    if (mainWindow === window) mainWindow = undefined;
+  });
+  window.webContents.setWindowOpenHandler(({ url: target }) => {
     if (/^https?:\/\//.test(target)) void shell.openExternal(target);
     return { action: 'deny' };
   });
-  mainWindow.once('ready-to-show', () => mainWindow?.show());
-  await mainWindow.loadURL(url);
+  window.once('ready-to-show', () => window.show());
+  await window.loadURL(url);
 }
 
 const hasLock = app.requestSingleInstanceLock();

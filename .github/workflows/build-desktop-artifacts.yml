@@ -59,6 +59,7 @@ jobs:
             command: npm run desktop:dist:mac -- --arm64
             artifact_paths: |
               dist-desktop/*.dmg
+              dist-desktop/*.zip
               dist-desktop/SHA256SUMS-macos-arm64.txt
           - id: macos-x64
             label: macOS Intel
@@ -66,6 +67,7 @@ jobs:
             command: npm run desktop:dist:mac -- --x64
             artifact_paths: |
               dist-desktop/*.dmg
+              dist-desktop/*.zip
               dist-desktop/SHA256SUMS-macos-x64.txt
 
     steps:
@@ -108,6 +110,9 @@ jobs:
       contents: write
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
       - name: Download desktop artifacts
         uses: actions/download-artifact@v6
         with:
@@ -120,9 +125,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          mapfile -d '' packages < <(find release-artifacts -type f \( -name '*.exe' -o -name '*.dmg' \) -print0)
-          if (( ${#packages[@]} != 3 )); then
-            printf 'Expected 3 release packages, found %s\n' "${#packages[@]}" >&2
+          mapfile -d '' packages < <(find release-artifacts -type f \( -name '*.exe' -o -name '*.dmg' -o -name '*.zip' \) -print0 | sort -z)
+          if (( ${#packages[@]} != 5 )); then
+            printf 'Expected 5 release packages, found %s\n' "${#packages[@]}" >&2
             printf '%s\n' "${packages[@]}" >&2
             exit 1
           fi
@@ -132,7 +137,8 @@ jobs:
             exit 1
           fi
           cat "${checksum_files[@]}" | sort -k2 > release-artifacts/SHA256SUMS.txt
-          gh release create "$GITHUB_REF_NAME" "${packages[@]}" release-artifacts/SHA256SUMS.txt \
+          node scripts/write-release-update-manifests.mjs release-artifacts "$GITHUB_REF_NAME"
+          gh release create "$GITHUB_REF_NAME" "${packages[@]}" release-artifacts/latest.yml release-artifacts/latest-mac.yml release-artifacts/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
             --title "LoopWork $GITHUB_REF_NAME" \
             --generate-notes \
