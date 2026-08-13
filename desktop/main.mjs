@@ -11,6 +11,7 @@ let serverProcess;
 let supervisorTimer;
 let supervisorRequestRunning = false;
 let quitting = false;
+let updatePreparation;
 
 function runtimeRoot() {
   return app.isPackaged
@@ -118,10 +119,75 @@ function stopLoopSupervisor() {
   supervisorTimer = undefined;
 }
 
-function stopServer() {
+function waitForChildExit(child, timeoutMs) {
+  if (child.exitCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out waiting for child process ${child.pid} to exit`));
+    }, timeoutMs);
+    const onExit = () => {
+      cleanup();
+      resolve();
+    };
+    const cleanup = () => {
+      clearTimeout(timer);
+      child.removeListener('exit', onExit);
+    };
+    child.once('exit', onExit);
+  });
+}
+
+async function stopServerForUpdate() {
+  const child = serverProcess;
+  if (!child || child.exitCode !== null) {
+    serverProcess = undefined;
+    return;
+  }
+  if (process.platform === 'win32' && child.pid) {
+    await new Promise((resolve, reject) => {
+      const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+      // A non-zero status can simply mean the server exited between our
+      // snapshot and taskkill. The child exit check below is authoritative.
+      killer.once('close', () => resolve());
+      killer.once('error', reject);
+    });
+  } else {
+    child.kill('SIGTERM');
+  }
+  await waitForChildExit(child, 10_000);
+  if (serverProcess === child) serverProcess = undefined;
+}
+
+function stopServerOnQuit() {
   if (!serverProcess || serverProcess.exitCode !== null) return;
   serverProcess.kill('SIGTERM');
   serverProcess = undefined;
+}
+
+function prepareForUpdate(url, token) {
+  if (updatePreparation) return updatePreparation;
+  updatePreparation = (async () => {
+    quitting = true;
+    stopLoopSupervisor();
+    const response = await fetch(`${url}/api/loop/prepare-update`, {
+      method: 'POST',
+      headers: { 'x-loopwork-supervisor': token },
+      signal: AbortSignal.timeout(60_000),
+    });
+    if (!response.ok) throw new Error(`update preparation endpoint returned ${response.status}`);
+    await response.json();
+    await stopServerForUpdate();
+  })().catch((error) => {
+    quitting = false;
+    updatePreparation = undefined;
+    startLoopSupervisor(url, token);
+    throw error;
+  });
+  return updatePreparation;
 }
 
 async function createWindow() {
@@ -143,7 +209,7 @@ async function createWindow() {
     },
   });
   mainWindow = window;
-  configureUpdater(window);
+  configureUpdater(window, () => prepareForUpdate(url, supervisorToken));
   window.once('closed', () => {
     detachUpdaterWindow(window);
     if (mainWindow === window) mainWindow = undefined;
@@ -182,7 +248,7 @@ app.on('activate', () => {
 app.on('before-quit', () => {
   quitting = true;
   stopLoopSupervisor();
-  stopServer();
+  stopServerOnQuit();
 });
 
 app.on('window-all-closed', () => {

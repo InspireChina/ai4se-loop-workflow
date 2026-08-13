@@ -1,6 +1,7 @@
 import { appendLoopRunLog, beginRun, endRun, getRunStatus } from './tasks';
 import { databaseConnection } from '../infrastructure/database';
 import { startAgentRun } from '../infrastructure/agent-runner';
+import { stopMaintenanceRunner } from '../infrastructure/maintenance-runner';
 
 export type LoopRunIntent = {
   enabledAt: string;
@@ -21,6 +22,12 @@ export type SupervisorResult = {
 const INTENT_KEY = 'loop_run_intent';
 const STABLE_RUN_RESET_MS = 2 * 60 * 1000;
 let supervising: Promise<SupervisorResult> | undefined;
+let preparingDesktopUpdate: Promise<DesktopUpdatePreparation> | undefined;
+
+export type DesktopUpdatePreparation = {
+  stoppedRunId?: string;
+  runIntentPreserved: boolean;
+};
 
 type SupervisionDecision =
   | { action: 'disabled' }
@@ -119,4 +126,34 @@ export function superviseLoopRun(now = new Date()) {
     supervising = undefined;
   });
   return supervising;
+}
+
+async function prepareDesktopUpdateOnce(): Promise<DesktopUpdatePreparation> {
+  // An already-dispatched health check may still be starting a replacement
+  // runner. Let it settle before taking the update shutdown snapshot.
+  if (supervising) {
+    try { await supervising; } catch { /* shutdown below is still authoritative */ }
+  }
+  const run = await getRunStatus();
+  if (run?.runId) {
+    await appendLoopRunLog(run.runId, '[更新] 正在安全停止 Runner；安装完成后将自动继续运行');
+    await endRun(run.runId, false, {
+      preserveRunIntent: true,
+      reason: '桌面应用更新',
+    });
+  }
+  await stopMaintenanceRunner();
+  const db = await databaseConnection();
+  return {
+    stoppedRunId: run?.runId,
+    runIntentPreserved: Boolean(readLoopRunIntent(db)),
+  };
+}
+
+export function prepareLoopForDesktopUpdate() {
+  if (preparingDesktopUpdate) return preparingDesktopUpdate;
+  preparingDesktopUpdate = prepareDesktopUpdateOnce().finally(() => {
+    preparingDesktopUpdate = undefined;
+  });
+  return preparingDesktopUpdate;
 }

@@ -3,7 +3,7 @@
 import { CheckCircle2, Download, LoaderCircle, RefreshCw, RotateCcw, ShieldAlert } from 'lucide-react';
 import { useEffect, useState } from 'react';
 
-type UpdateStatus = 'idle' | 'checking' | 'available' | 'up-to-date' | 'downloading' | 'downloaded' | 'error';
+type UpdateStatus = 'idle' | 'checking' | 'available' | 'up-to-date' | 'downloading' | 'downloaded' | 'installing' | 'error';
 
 type UpdaterState = {
   supported: boolean;
@@ -60,6 +60,7 @@ function statusText(state: UpdaterState) {
     case 'up-to-date': return '当前已经是最新版本';
     case 'downloading': return `正在下载 ${state.latestVersion ?? '新版本'}…`;
     case 'downloaded': return `版本 ${state.latestVersion ?? ''} 已下载，重启后完成安装`;
+    case 'installing': return '正在安全停止后台任务并准备安装…';
     case 'error': return '更新失败';
     default: return '可以手动检查是否有新版本';
   }
@@ -78,6 +79,7 @@ export function UpdatePanel() {
   const updater = typeof window === 'undefined' ? undefined : window.loopworkUpdater;
   const checking = state.status === 'checking';
   const downloading = state.status === 'downloading';
+  const installing = state.status === 'installing';
   const progress = Math.round(state.percent ?? 0);
 
   return <div className="card update-card">
@@ -92,7 +94,7 @@ export function UpdatePanel() {
       <small>{bytes(state.transferred)} / {bytes(state.total)}{state.bytesPerSecond ? ` · ${bytes(state.bytesPerSecond)}/s` : ''}</small>
     </div>}
 
-    {state.status === 'error' && <div className="update-warning"><ShieldAlert size={17}/><span>{state.error || '无法完成更新，请稍后重试或从 Releases 手动下载安装包。'}</span></div>}
+    {state.error && <div className="update-warning"><ShieldAlert size={17}/><span>{state.error}</span></div>}
     {!state.supported && <div className="update-warning"><ShieldAlert size={17}/><span>{state.packaged ? '当前系统不支持应用内自动升级。' : '浏览器和开发模式不执行自动升级；请在安装后的桌面应用中使用。'}</span></div>}
 
     <div className="update-actions">
@@ -101,6 +103,7 @@ export function UpdatePanel() {
       {state.status === 'available' && <button className="button" type="button" onClick={() => void updater?.downloadUpdate()}><Download size={15}/>下载 v{state.latestVersion}</button>}
       {downloading && <button className="button" type="button" disabled><LoaderCircle className="spin" size={15}/>下载中</button>}
       {state.status === 'downloaded' && <button className="button success" type="button" onClick={() => void updater?.installUpdate()}><RotateCcw size={15}/>重启并安装</button>}
+      {installing && <button className="button success" type="button" disabled><LoaderCircle className="spin" size={15}/>正在关闭后台任务</button>}
       {state.status === 'up-to-date' && <span className="update-ok"><CheckCircle2 size={16}/>无需更新</span>}
     </div>
 

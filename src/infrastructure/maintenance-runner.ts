@@ -3,6 +3,7 @@ import { mkdir, open, readFile, stat, unlink, writeFile } from 'node:fs/promises
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { paths } from './database';
+import { terminateProcessTree } from './process-tree';
 import { isProcessAlive } from './run-process';
 import { isDesktopRuntime, runtimeNodeEnvironment, runtimeNodeExecutable, runtimeScript } from './runtime-entry';
 
@@ -62,4 +63,21 @@ export async function startMaintenanceRunner() {
     await lock.close();
     try { await unlink(launchLockPath()); } catch { /* lock already cleared */ }
   }
+}
+
+export async function stopMaintenanceRunner() {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const pid = await currentMaintenancePid();
+    if (!pid) break;
+    if (!await terminateProcessTree(pid)) {
+      throw new Error(`无法停止 software maintenance 进程树 pid=${pid}`);
+    }
+    try { await unlink(maintenancePidPath()); } catch { /* runner already removed its PID */ }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  const remainingPid = await currentMaintenancePid();
+  if (isProcessAlive(remainingPid)) {
+    throw new Error(`software maintenance 进程在停止后重新启动 pid=${remainingPid}`);
+  }
+  try { await unlink(maintenancePidPath()); } catch { /* no maintenance runner is active */ }
 }

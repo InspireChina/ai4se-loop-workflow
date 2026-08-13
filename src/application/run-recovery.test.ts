@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { databaseConnection } from '../infrastructure/database';
 import { reconcileInterruptedExecutions } from './executions';
-import { readLoopRunIntent } from './run-supervisor';
+import { prepareLoopForDesktopUpdate, readLoopRunIntent } from './run-supervisor';
 import { beginRun, createTask, endRun, getRunStatus, heartbeatRun, registerRunProcess } from './tasks';
 import {
   BROWSER_EXCLUSIVE_RESOURCE,
@@ -153,4 +153,22 @@ test('persists continuous-run intent across a crash but clears it before a user 
   const recoveredRunId = await beginRun('desktop-supervisor', { preserveRunIntent: true });
   await endRun(recoveredRunId, false, { stopRunner: false });
   assert.equal(readLoopRunIntent(db), null);
+});
+
+test('stops the active runner for a desktop update while preserving continuous-run intent', async () => {
+  const db = await databaseConnection();
+  const runId = await beginRun('agent-runner');
+
+  const prepared = await prepareLoopForDesktopUpdate();
+
+  assert.deepEqual(prepared, { stoppedRunId: runId, runIntentPreserved: true });
+  assert.equal(await getRunStatus(), null);
+  assert.ok(readLoopRunIntent(db));
+  assert.equal(
+    (db.prepare('SELECT status FROM loop_runs WHERE run_id = ?').get(runId) as { status: string }).status,
+    'stopped',
+  );
+
+  const resumedRunId = await beginRun('desktop-supervisor', { preserveRunIntent: true });
+  await endRun(resumedRunId, false, { stopRunner: false });
 });

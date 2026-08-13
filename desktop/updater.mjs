@@ -7,6 +7,8 @@ const { autoUpdater } = require('electron-updater');
 let targetWindow;
 let initialized = false;
 let state = initialState();
+let prepareToInstall = async () => {};
+let installRequest;
 
 function initialState() {
   return {
@@ -69,12 +71,25 @@ function installHandlers() {
     }
     return state;
   });
-  ipcMain.handle('loopwork:updater:install', (event) => {
+  ipcMain.handle('loopwork:updater:install', async (event) => {
     assertTrustedSender(event);
     assertSupported();
-    if (state.status !== 'downloaded') return false;
-    setImmediate(() => autoUpdater.quitAndInstall(false, true));
-    return true;
+    if (state.status !== 'downloaded' && state.status !== 'installing') return false;
+    if (installRequest) return installRequest;
+    updateState({ status: 'installing', error: undefined });
+    installRequest = (async () => {
+      try {
+        await prepareToInstall();
+        setImmediate(() => autoUpdater.quitAndInstall(false, true));
+        return true;
+      } catch (error) {
+        updateState({ status: 'downloaded', error: `无法关闭后台进程：${publicError(error)}` });
+        return false;
+      } finally {
+        installRequest = undefined;
+      }
+    })();
+    return installRequest;
   });
 }
 
@@ -110,13 +125,16 @@ function installUpdaterEvents() {
   autoUpdater.on('error', (error) => updateState({ status: 'error', error: publicError(error) }));
 }
 
-export function configureUpdater(window) {
+export function configureUpdater(window, prepare) {
   targetWindow = window;
+  prepareToInstall = typeof prepare === 'function' ? prepare : async () => {};
   state = { ...state, currentVersion: app.getVersion(), packaged: app.isPackaged };
   if (initialized) return;
   initialized = true;
   autoUpdater.autoDownload = false;
-  autoUpdater.autoInstallOnAppQuit = true;
+  // Installing on an ordinary app quit bypasses the coordinated shutdown of
+  // the detached Runner and can leave LoopWork.exe locked on Windows.
+  autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.allowPrerelease = false;
   autoUpdater.allowDowngrade = false;
   autoUpdater.logger = console;

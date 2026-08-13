@@ -4,28 +4,9 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { appendLoopRunLog, registerRunProcess } from '../application/tasks';
 import { paths } from './database';
+import { terminateProcessTree } from './process-tree';
 import { readRunPid, runPidPath } from './run-process';
 import { isDesktopRuntime, runtimeNodeEnvironment, runtimeNodeExecutable, runtimeScript } from './runtime-entry';
-
-function waitForProcessExit(pid: number, timeoutMs: number) {
-  return new Promise<boolean>((resolve) => {
-    const deadline = Date.now() + timeoutMs;
-    const poll = () => {
-      try {
-        process.kill(pid, 0);
-      } catch {
-        resolve(true);
-        return;
-      }
-      if (Date.now() >= deadline) {
-        resolve(false);
-        return;
-      }
-      setTimeout(poll, 50);
-    };
-    poll();
-  });
-}
 
 export function resolveRunnerCommand(runId: string, scriptName: string) {
   const name = scriptName.replace(/\.ts$/, '');
@@ -87,34 +68,7 @@ export async function startDispatchRetryRun(runId: string) {
 export async function stopAgentRun(runId: string) {
   const pid = readRunPid(runId) || 0;
   if (!pid || pid === process.pid) return;
-  if (process.platform === 'win32') {
-    await new Promise<void>((resolve) => {
-      const killer = spawn('taskkill.exe', ['/PID', String(pid), '/T', '/F'], {
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-      killer.once('close', () => resolve());
-      killer.once('error', () => {
-        try { process.kill(pid, 'SIGTERM'); } catch { /* process already stopped */ }
-        resolve();
-      });
-    });
-    return;
+  if (!await terminateProcessTree(pid)) {
+    throw new Error(`无法停止 Runner 进程树 pid=${pid}`);
   }
-  try {
-    process.kill(-pid, 'SIGTERM');
-  } catch {
-    try {
-      process.kill(pid, 'SIGTERM');
-    } catch {
-      return;
-    }
-  }
-  if (await waitForProcessExit(pid, 3_000)) return;
-  try {
-    process.kill(-pid, 'SIGKILL');
-  } catch {
-    try { process.kill(pid, 'SIGKILL'); } catch { /* process already stopped */ }
-  }
-  await waitForProcessExit(pid, 2_000);
 }
