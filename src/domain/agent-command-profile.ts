@@ -184,10 +184,18 @@ export function agentCommandWorkKey(
 }
 
 export function loopAgentCommandPrefix(appRoot: string) {
+  if (process.env.LOOP_DESKTOP === '1') {
+    const node = process.env.LOOP_DESKTOP_NODE || process.execPath;
+    return `${JSON.stringify(node)} ${JSON.stringify(`${appRoot}/desktop-runners/loop-agent.cjs`)}`;
+  }
   return `node ${JSON.stringify(`${appRoot}/scripts/loop/loop-agent.mjs`)}`;
 }
 
 export function agentContextCommandPrefix(appRoot: string) {
+  if (process.env.LOOP_DESKTOP === '1') {
+    const node = process.env.LOOP_DESKTOP_NODE || process.execPath;
+    return `${JSON.stringify(node)} ${JSON.stringify(`${appRoot}/desktop-runners/loopctl.cjs`)} agent-context`;
+  }
   return `npm --prefix ${JSON.stringify(appRoot)} run loopctl -- agent-context`;
 }
 

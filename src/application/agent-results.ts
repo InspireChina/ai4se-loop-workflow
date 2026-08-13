@@ -802,7 +802,7 @@ export async function applyAgentResult(runId: string, delegation: DelegationEnve
   if (recorded.applicationStatus === 'failed') throw new Error('该 execution attempt 的 Agent 结果此前应用失败，拒绝重复产生副作用');
   const resultId = recorded.resultId;
   const current = await getTask(delegation.taskId);
-  if (!current || ['done', 'cancelled'].includes(current.task.agile_status)) {
+  if (!current || current.task.is_paused || ['done', 'cancelled'].includes(current.task.agile_status)) {
     await markApplication(resultId, 'applied', null, 'discarded');
     return 'discarded' as const;
   }
@@ -908,6 +908,7 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
     JOIN tasks t ON t.task_id = ar.task_id
     WHERE ar.application_status = 'pending'
       AND t.agile_status != 'blocked'
+      AND t.is_paused = 0
     ORDER BY ar.created_at, ar.result_id
     LIMIT 1
   `).get() as QueuedAgentResult | undefined;

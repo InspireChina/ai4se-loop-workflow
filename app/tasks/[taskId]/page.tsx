@@ -1,23 +1,25 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { AlertTriangle, ArrowRight, Check, CheckCircle2, Clock3, FileText, GitBranch } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Bot, Check, CheckCircle2, Clock3, ExternalLink, FileText, GitBranch, Hash, Link2, PauseCircle, Play, Tag } from 'lucide-react';
 import { decisionAlignmentQuestions } from '../../../src/application/decision-alignment';
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
 import { getTaskContextChat } from '../../../src/application/task-context-chat';
 import { deliverySpecSchema } from '../../../src/domain/agent-result';
 import { agentLabel, deliveryUnitLabel, documentKindLabel, feedbackBatchStatusLabel, feedbackWorkTypeLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
-import { requirementPriorityLabel } from '../../../src/domain/requirement-priority';
 import { requirementMetadataDefinition, requirementMetadataValueLabel } from '../../../src/domain/requirement-metadata';
 import { ArtifactDocument } from './artifact-document';
 import { TaskAutoRefresh } from './task-auto-refresh';
 import { TaskContextChat } from './task-context-chat';
+import { TaskPriorityControl } from './task-priority-control';
 import {
   acknowledgeClosureAction,
   addStoryAction,
   answerRuntimeInputAction,
   cancelTaskAction,
+  pauseTaskAction,
   releaseBlockAction,
+  resumeTaskAction,
   submitRuntimeInputsAction,
 } from '../../actions';
 
@@ -61,7 +63,8 @@ const businessAnalysisAgentIds = businessAnalysisSteps
   .filter((agent): agent is NonNullable<typeof agent> => Boolean(agent));
 const endToEndSteps = [...businessAnalysisSteps.slice(0, 4), ...standardTaskSteps];
 
-function stepDetail(task: { agile_status: string; run_state: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number }, lanes: { lane: string; status: string; current_agent: string | null }[]) {
+function stepDetail(task: { agile_status: string; run_state: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number; is_paused: number; paused_reason: string | null }, lanes: { lane: string; status: string; current_agent: string | null }[]) {
+  if (task.is_paused) return `已暂停推进 · ${task.paused_reason || '暂缓推进'}`;
   const laneAttention = lanes.filter((lane) => ['waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked'].includes(lane.status));
   if (laneAttention.length) return laneAttention.map((lane) => {
     const laneName = lane.lane === 'analysis' ? '交付分析' : '开发验证';
@@ -120,6 +123,21 @@ function feedbackGroupStatusLabel(group: { status: string; work_type: string; de
   } as Record<string, string>)[group.status] || group.status;
 }
 
+function metadataIcon(key: string) {
+  if (key === 'source.reference_url') return <Link2 size={15}/>;
+  if (key === 'tracking.requirement_card_id') return <Hash size={15}/>;
+  if (key === 'workflow.analysis_decision_mode') return <Bot size={15}/>;
+  return <Tag size={15}/>;
+}
+
+function referenceHostname(value: string) {
+  try {
+    return new URL(value).hostname.replace(/^www\./, '');
+  } catch {
+    return value;
+  }
+}
+
 export default async function TaskDetail({ params }: { params: Promise<{ taskId: string }> }) {
   const { taskId } = await params;
   const detail = await getTask(taskId);
@@ -141,10 +159,14 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const waitingForControlAnswers = task.run_state === 'waiting_for_answers'
     && ['idea-context-agent', 'business-design-agent', 'backlog-agent', 'repro-agent', 'feedback-agent'].includes(task.current_subagent || '');
   const waitingForAnswers = waitingForControlAnswers || analysisLane.status === 'waiting_for_answers';
-  const nextStepText = waitingForAnswers && unansweredQuestions.length === 0
+  const nextStepText = task.is_paused
+    ? `暂停期间不会派发 Agent；恢复后继续：${terminologyText(task.next_step) || '等待重新调度'}`
+    : waitingForAnswers && unansweredQuestions.length === 0
     ? `回答已保存，提交后交回 ${agentLabel(waitingForControlAnswers ? task.current_subagent : 'analyst-agent')}`
     : terminologyText(task.next_step) || '—';
-  const currentStepDetail = waitingForAnswers && unansweredQuestions.length === 0
+  const currentStepDetail = task.is_paused
+    ? `已暂停推进 · ${task.paused_reason || '暂缓推进'}`
+    : waitingForAnswers && unansweredQuestions.length === 0
     ? `回答已保存，等待提交 · ${agentLabel(waitingForControlAnswers ? task.current_subagent : 'analyst-agent')}`
     : inBusinessAnalysisStage
       ? task.agile_status === 'ready_to_close' ? '需求规格已通过独立审查，等待阅读'
@@ -191,22 +213,34 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           <p className="eyebrow">{task.task_id}</p>
           <h1>{task.title}</h1>
         </div>
-        <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : inBusinessAnalysisStage ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status)}</span>
+        <span className={`badge ${task.is_paused || task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{task.is_paused ? '已暂停' : waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : inBusinessAnalysisStage ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status)}</span>
       </div>
-      <div className="chips">
+      <div className="chips" aria-label="需求运行上下文">
         <TaskAutoRefresh/>
         <span>PIPELINE · {itemTypeLabel(task.item_type)}</span>
-        <span>优先级 · {requirementPriorityLabel(task.priority)}</span>
+        <TaskPriorityControl taskId={task.task_id} priority={task.priority}/>
         {!inBusinessAnalysisStage && <span>交付分析 · {agentLabel(analysisLane.current_agent)}</span>}
         {!inBusinessAnalysisStage && <span>开发验证 · {agentLabel(deliveryLane.current_agent)}</span>}
+      </div>
+      {metadata.length > 0 && <dl className={`task-metadata count-${Math.min(metadata.length, 3)}`} aria-label="需求属性">
         {metadata.map((item) => {
           const definition = requirementMetadataDefinition(item.metadata_key);
           if (!definition) return null;
-          return definition.inputType === 'url'
-            ? <a href={item.metadata_value} target="_blank" rel="noreferrer" key={item.metadata_key}>{definition.label} · {item.metadata_value}</a>
-            : <span key={item.metadata_key}>{definition.label} · {requirementMetadataValueLabel(item.metadata_key, item.metadata_value)}</span>;
+          return <div className="task-metadata-item" key={item.metadata_key}>
+            <span className="task-metadata-icon" aria-hidden="true">{metadataIcon(item.metadata_key)}</span>
+            <div className="task-metadata-copy">
+              <dt>{definition.label}</dt>
+              <dd className={item.metadata_key === 'tracking.requirement_card_id' ? 'task-metadata-code' : undefined}>
+                {definition.inputType === 'url'
+                  ? <a href={item.metadata_value} target="_blank" rel="noreferrer" title={item.metadata_value}>
+                    <span>{referenceHostname(item.metadata_value)}</span><ExternalLink size={13}/>
+                  </a>
+                  : requirementMetadataValueLabel(item.metadata_key, item.metadata_value)}
+              </dd>
+            </div>
+          </div>;
         })}
-      </div>
+      </dl>}
     </header>
 
     <section className="card task-original-input" aria-labelledby="task-original-input-title">
@@ -233,7 +267,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         : <p className="task-original-input-empty">创建时未填写补充描述，原始需求仅包含标题。</p>}
     </section>
 
-    <section className={`card task-steps ${task.agile_status === 'blocked' ? 'blocked' : task.agile_status === 'done' ? 'done' : ''}`} aria-label="需求当前进度">
+    <section className={`card task-steps ${task.is_paused || task.agile_status === 'blocked' ? 'blocked' : task.agile_status === 'done' ? 'done' : ''}`} aria-label="需求当前进度">
       <div className="task-steps-head">
         <strong>推进进度</strong>
         <span>{Math.max(currentStep + 1, 1)} / {taskSteps.length}</span>
@@ -512,7 +546,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
 
         <section className="card form-panel">
           <h2><GitBranch size={15}/>推进流程</h2>
-          {pipeline.length === 0 ? <p className="muted">当前没有可派发步骤。</p> : pipeline.map((item) => <div className="pipeline-card" key={`${item.lane}-${item.pipeline}-${item.storyIndex || 0}`}>
+          {pipeline.length === 0 ? <p className="muted">{task.is_paused ? '需求已暂停，恢复后才会重新派发 Agent。' : '当前没有可派发步骤。'}</p> : pipeline.map((item) => <div className="pipeline-card" key={`${item.lane}-${item.pipeline}-${item.storyIndex || 0}`}>
             <GitBranch size={16}/>
             <div>
               <strong>{item.lane === 'analysis' ? '交付分析' : item.lane === 'delivery' ? '开发验证' : '控制'} · {flowLabel(item.pipeline)} · {agentLabel(item.agent)}</strong>
@@ -523,6 +557,20 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             </div>
           </div>)}
         </section>
+
+        {task.is_paused ? <form action={resumeTaskAction} className="card form-panel release-block">
+          <h2><Play size={15}/>恢复推进</h2>
+          <p className="muted">暂停原因：{task.paused_reason || '暂缓推进'}{task.paused_at ? ` · ${formatEventTime(task.paused_at)}` : ''}</p>
+          <p className="muted">恢复后保留当前流程进度，并从原步骤重新进入调度。</p>
+          <input type="hidden" name="taskId" value={task.task_id}/>
+          <button className="button success" type="submit">恢复并等待调度</button>
+        </form> : !['done', 'cancelled'].includes(task.agile_status) && <form action={pauseTaskAction} className="card form-panel">
+          <h2><PauseCircle size={15}/>暂停推进</h2>
+          <p className="muted">暂停后保留当前进度，不再派发该需求；正在运行的 Agent 会安全停止。</p>
+          <input type="hidden" name="taskId" value={task.task_id}/>
+          <label>原因（可选）<input name="reason" maxLength={500} placeholder="例如：等待排期，暂缓到下周"/></label>
+          <button className="button secondary" type="submit">暂停这个需求</button>
+        </form>}
 
         {lanes.filter((lane) => lane.status === 'system_blocked').map((lane) => <form action={releaseBlockAction} className="card form-panel release-block" key={lane.lane}>
           <h2><AlertTriangle size={15}/>{lane.lane === 'analysis' ? '交付分析' : '开发验证'}通道阻塞</h2>

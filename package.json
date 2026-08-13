@@ -1,11 +1,19 @@
 {
   "name": "loop-engineering",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.4",
   "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
+    "build:desktop-runtime": "node scripts/build-desktop-runtime.mjs",
+    "desktop:install": "npm ci --prefix desktop --omit=dev --ignore-scripts",
+    "desktop:prepare": "npm run desktop:install && npm run build && npm run build:desktop-runtime",
+    "desktop:dev": "npm run desktop:prepare && electron desktop",
+    "desktop:dist": "npm run desktop:prepare && electron-builder --projectDir desktop --publish never",
+    "desktop:dist:mac": "npm run desktop:prepare && electron-builder --projectDir desktop --mac -c.mac.identity=null --publish never",
+    "desktop:dist:mac:signed": "npm run desktop:prepare && electron-builder --projectDir desktop --mac --publish never",
+    "desktop:dist:win": "npm run desktop:prepare && electron-builder --projectDir desktop --win --publish never",
     "start": "next start",
     "test": "tsx --test --import ./src/test/setup.ts src/**/*.test.ts",
     "db:migrate": "tsx scripts/migrate.ts",
@@ -30,7 +38,11 @@
     "zod": "^3.24.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.2.0",
     "@types/cross-spawn": "^6.0.6",
+    "electron": "^43.4.0",
+    "electron-builder": "^26.15.3",
+    "esbuild": "^0.28.2",
     "typescript": "^5.0.0"
   }
 }

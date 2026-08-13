@@ -16,8 +16,11 @@ import {
   createTask,
   getRunStatus,
   initializeTaskContext,
+  pauseTask,
   releaseBlock,
+  resumeTask,
   reopenDocumentComment,
+  setTaskPriority,
   submitClarificationAnswers,
   submitRuntimeInputs,
   rewindTask,
@@ -26,12 +29,12 @@ import {
 import { startAgentRun } from '../src/infrastructure/agent-runner';
 import { paths } from '../src/infrastructure/database';
 import { requirementPipeline } from '../src/domain/pipeline-catalog';
-import { requirementPriority } from '../src/domain/requirement-priority';
+import { DEFAULT_REQUIREMENT_PRIORITY, requirementPriority } from '../src/domain/requirement-priority';
 import { parseRequirementMetadata } from '../src/domain/requirement-metadata';
 
 export async function createTaskAction(formData: FormData) {
   const pipeline = requirementPipeline(formData.get('pipeline') || 'feature');
-  const priority = requirementPriority(formData.get('priority') || 'P2');
+  const priority = requirementPriority(formData.get('priority') || DEFAULT_REQUIREMENT_PRIORITY);
   const metadataKeys = formData.getAll('metadataKey');
   const metadataValues = formData.getAll('metadataValue');
   const metadata = parseRequirementMetadata(metadataKeys.map((key, index) => ({
@@ -46,6 +49,10 @@ export async function createTaskAction(formData: FormData) {
     metadata,
   });
   redirect(`/tasks/${taskId}`);
+}
+
+export async function updateTaskPriorityAction(taskId: string, priority: string) {
+  await setTaskPriority({ taskId, priority });
 }
 
 export async function initializeContextAction(formData: FormData) {
@@ -98,6 +105,18 @@ export async function cancelTaskAction(formData: FormData) {
   redirect('/tasks');
 }
 
+export async function pauseTaskAction(formData: FormData) {
+  const taskId = String(formData.get('taskId'));
+  await pauseTask({ taskId, reason: String(formData.get('reason') || '').trim() || undefined });
+  redirect(`/tasks/${taskId}`);
+}
+
+export async function resumeTaskAction(formData: FormData) {
+  const taskId = String(formData.get('taskId'));
+  await resumeTask({ taskId });
+  redirect(`/tasks/${taskId}`);
+}
+
 export async function startLoopRunAction(formData?: FormData) {
   const runId = await beginRun('agent-runner');
   const redirectTo = String(formData?.get('redirectTo') || '/');
@@ -117,6 +136,8 @@ export async function saveAgentExecutorAction(formData: FormData) {
     codexReasoningEffort: formData.get('codexReasoningEffort'),
     codexWebSearch: formData.get('codexWebSearch'),
     claudeModel: formData.get('claudeModel'),
+    ompModel: formData.get('ompModel'),
+    ompThinking: formData.get('ompThinking'),
   });
   redirect('/settings');
 }
@@ -128,6 +149,8 @@ export async function saveFlowAgentDefaultRuntimeAction(formData: FormData) {
     codexReasoningEffort: formData.get('codexReasoningEffort'),
     codexWebSearch: formData.get('codexWebSearch'),
     claudeModel: formData.get('claudeModel'),
+    ompModel: formData.get('ompModel'),
+    ompThinking: formData.get('ompThinking'),
   });
   redirect('/settings');
 }
@@ -147,6 +170,8 @@ export async function saveAgentRuntimeAction(formData: FormData) {
     codexReasoningEffort: formData.get('codexReasoningEffort'),
     codexWebSearch: formData.get('codexWebSearch'),
     claudeModel: formData.get('claudeModel'),
+    ompModel: formData.get('ompModel'),
+    ompThinking: formData.get('ompThinking'),
   });
   redirectToAgentSection(agentId, formData.get('section'));
 }

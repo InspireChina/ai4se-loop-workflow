@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { loopAgentCommand } from '../infrastructure/runtime-entry';
 import { revalidatePath } from 'next/cache';
 import { databaseConnection, paths } from '../infrastructure/database';
 import { gitHead } from '../infrastructure/git';
@@ -191,7 +192,7 @@ export async function loadMaintenanceEvidence(job: SoftwareMaintenanceJob) {
 }
 
 export function buildSoftwareMaintenancePrompt(job: SoftwareMaintenanceJob, events: RuntimeEventRow[]) {
-  const command = `node ${JSON.stringify(join(paths.appRoot, 'scripts', 'loop', 'loop-agent.mjs'))}`;
+  const command = loopAgentCommand();
   const evidence = events.map((event) => ({
     id: event.event_id,
     timestamp: event.timestamp,

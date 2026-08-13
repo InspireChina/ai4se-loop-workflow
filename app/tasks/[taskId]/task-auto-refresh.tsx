@@ -2,6 +2,7 @@
 
 import { useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { RefreshCw } from 'lucide-react';
 
 const REFRESH_INTERVAL_MS = 30_000;
 
@@ -20,5 +21,7 @@ export function TaskAutoRefresh() {
     };
   }, [router]);
 
-  return <span title="页面可见时每 30 秒获取一次最新状态">30 秒自动刷新</span>;
+  return <span className="task-auto-refresh" aria-label="自动刷新已开启" title="自动刷新已开启：页面可见时每 30 秒获取一次最新状态">
+    <RefreshCw size={14}/>
+  </span>;
 }

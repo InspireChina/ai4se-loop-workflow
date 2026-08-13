@@ -48,7 +48,7 @@ test('renders only the hot Backlog context in the launch Prompt while retaining 
     title: 'Borrowing reminder',
     description: 'Remind readers before a loan expires and handle overdue loans.',
     itemType: 'feature',
-    priority: 'P2',
+    priority: '5',
   });
   const full = await getTaskContext(taskId);
   const snapshot = buildAgentContextSnapshot({

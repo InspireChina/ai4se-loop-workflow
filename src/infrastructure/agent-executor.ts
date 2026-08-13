@@ -13,7 +13,7 @@ export type AgentExecutionContext = {
 
 export type AgentExecutionOptions = {
   model?: string;
-  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+  reasoningEffort?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
   webSearch?: boolean;
 };
 
@@ -142,6 +142,24 @@ export function extractAgentFinalText(executor: AgentExecutorId, line: string) {
 
 type FinalTextCandidate = { text: string; priority: number };
 
+function textFromContentBlocks(content: unknown) {
+  if (!Array.isArray(content)) return '';
+  return content
+    .filter((item) => (item as Record<string, unknown>).type === 'text')
+    .map((item) => stringifyValue((item as Record<string, unknown>).text))
+    .join('');
+}
+
+function ompAssistantText(event: Record<string, unknown>) {
+  if (event.type === 'message_end') {
+    const message = event.message as Record<string, unknown> | undefined;
+    return message?.role === 'assistant' ? textFromContentBlocks(message.content) : '';
+  }
+  if (event.type !== 'agent_end' || !Array.isArray(event.messages)) return '';
+  const message = [...event.messages].reverse().find((item) => (item as Record<string, unknown>).role === 'assistant') as Record<string, unknown> | undefined;
+  return textFromContentBlocks(message?.content);
+}
+
 function finalTextCandidate(executor: AgentExecutorId, line: string): FinalTextCandidate | null {
   try {
     const event = JSON.parse(line) as Record<string, unknown>;
@@ -158,6 +176,10 @@ function finalTextCandidate(executor: AgentExecutorId, line: string): FinalTextC
       if (event.type !== 'assistant') return null;
       const text = claudeContentBlocks(event).filter((block) => block.type === 'text').map((block) => stringifyValue(block.text)).join('');
       return text ? { text, priority: 10 } : null;
+    }
+    if (executor === 'omp') {
+      const text = ompAssistantText(event);
+      return text ? { text, priority: event.type === 'message_end' ? 30 : 20 } : null;
     }
     if (event.type === 'assistant') {
       const content = (event.message as Record<string, unknown> | undefined)?.content;
@@ -210,6 +232,16 @@ export function createAgentRunMetricsAccumulator(executor: AgentExecutorId) {
         if (typeof cost === 'number' && Number.isFinite(cost)) metrics.totalCostUsd = cost;
         const duration = event.duration_ms ?? event.durationMs;
         if (typeof duration === 'number' && Number.isFinite(duration)) metrics.durationMs = duration;
+
+        if (executor === 'omp' && event.type === 'message_end') {
+          const message = event.message as Record<string, unknown> | undefined;
+          const messageUsage = message?.usage;
+          if (messageUsage && typeof messageUsage === 'object' && !Array.isArray(messageUsage)) {
+            metrics.usage = messageUsage as Record<string, unknown>;
+          }
+          const messageModel = stringifyValue(message?.model || message?.modelId);
+          if (messageModel) metrics.model = messageModel;
+        }
 
         if (executor === 'claude' && event.modelUsage && typeof event.modelUsage === 'object' && !Array.isArray(event.modelUsage)) {
           const modelUsage = event.modelUsage as Record<string, unknown>;
@@ -533,6 +565,32 @@ function parseClaudeStdout(line: string, context: AgentExecutionContext) {
   }
 }
 
+function parseOmpStdout(line: string, context: AgentExecutionContext) {
+  try {
+    const event = JSON.parse(line) as Record<string, unknown>;
+    const type = String(event.type || 'event');
+    if (type === 'tool_execution_start' || type === 'tool_execution_end') {
+      const completed = type === 'tool_execution_end';
+      const tool = stringifyValue(event.toolName || event.tool || 'unknown');
+      const args = event.args as Record<string, unknown> | undefined;
+      const command = stringifyValue(args?.command);
+      const normalizedTool = isAgentDomainCommand(command) ? 'agent-command' : tool;
+      const detail = completed
+        ? stringifyValue(event.result || event.output || event.error)
+        : stringifyValue(args?.description) || summarizeCommand(command) || stringifyValue(event.args);
+      return standardToolLog('omp', context, normalizedTool, completed, detail);
+    }
+    if (type === 'message_end') {
+      const text = ompAssistantText(event);
+      return text ? standardOutputLog('omp', context, text) : null;
+    }
+    if (type === 'error') return `[执行器错误] ${meta('omp', context)} - ${compact(stringifyValue(event.error || event.message || line))}`;
+    return null;
+  } catch {
+    return standardOutputLog('omp', context, line);
+  }
+}
+
 function telemetryDiagnostic(executor: AgentExecutorId, summary: string, level: 'DEFAULT' | 'WARNING' | 'ERROR' = 'ERROR'): AgentTelemetryEvent {
   return { name: 'loop.agent.diagnostic', executor, summary: compact(summary, 500), level };
 }
@@ -541,6 +599,32 @@ function telemetryDiagnostic(executor: AgentExecutorId, summary: string, level: 
 export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: string): AgentTelemetryEvent | null {
   try {
     const event = JSON.parse(line) as Record<string, unknown>;
+    if (executor === 'omp') {
+      const type = String(event.type || '');
+      if (type === 'tool_execution_start' || type === 'tool_execution_end') {
+        const completed = type === 'tool_execution_end';
+        const tool = stringifyValue(event.toolName || event.tool || 'unknown');
+        const args = event.args as Record<string, unknown> | undefined;
+        const result = event.result ?? event.output;
+        const isError = event.isError === true || Boolean(event.error);
+        const exitCode = completed
+          ? numericExitCode(event.exitCode, (result as Record<string, unknown> | undefined)?.exitCode)
+          : undefined;
+        return {
+          name: 'loop.agent.tool', executor, tool, toolClass: classifyAgentTool(tool),
+          toolCallId: stringifyValue(event.toolCallId || event.callId || event.id) || undefined,
+          phase: completed ? 'completed' : 'started',
+          summary: completed
+            ? compact(stringifyValue(result || event.error), 500)
+            : summarizeCommand(stringifyValue(args?.command)) || compact(stringifyValue(event.args), 500),
+          level: isError ? 'ERROR' : 'DEFAULT',
+          ...(completed ? { success: !isError && (exitCode === null || exitCode === 0), exitCode } : {}),
+          ...(completed ? { output: result ?? event.error } : { input: event.args }),
+        };
+      }
+      if (type === 'error') return telemetryDiagnostic(executor, stringifyValue(event.error || event.message || line));
+      return null;
+    }
     if (executor === 'cursor') {
       const { tool, toolCallId, args, result } = toolNameFromCursor(event);
       if (String(event.type) === 'tool_call' || event.tool_call) {
@@ -743,6 +827,22 @@ const executors: Omit<Record<AgentExecutorId, AgentExecutor>, 'cursor'> = {
     formatCommand: (workspace, options) => `claude --print --input-format text --output-format stream-json${options?.model ? ` --model ${options.model}` : ''} (stdin cwd=${workspace})`,
     parseStdout: parseClaudeStdout,
     parseStderr: (line, context) => stderrLog('claude', context, line),
+  },
+  omp: {
+    id: 'omp', label: 'Oh My Pi', command: process.env.OMP_CLI || 'omp', promptMode: 'stdin',
+    buildArgs: (_prompt, _workspace, options) => [
+      '--mode', 'json', '--no-session', '--approval-mode', 'yolo',
+      ...(options?.model ? ['--model', options.model] : []),
+      ...(options?.reasoningEffort ? ['--thinking', options.reasoningEffort] : []),
+    ],
+    formatCommand: (workspace, options) => [
+      'omp --mode json --no-session --approval-mode yolo',
+      options?.model ? `--model ${options.model}` : '',
+      options?.reasoningEffort ? `--thinking ${options.reasoningEffort}` : '',
+      `(stdin cwd=${workspace})`,
+    ].filter(Boolean).join(' '),
+    parseStdout: parseOmpStdout,
+    parseStderr: (line, context) => stderrLog('omp', context, line),
   },
 };
 

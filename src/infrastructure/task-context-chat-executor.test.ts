@@ -7,6 +7,7 @@ test('configures non-interactive bypass permissions for every context chat execu
   assert.deepEqual(taskContextChatPermissionArgs('cursor'), ['--force', '--trust']);
   assert.deepEqual(taskContextChatPermissionArgs('claude'), ['--dangerously-skip-permissions']);
   assert.deepEqual(taskContextChatPermissionArgs('codex'), ['--dangerously-bypass-approvals-and-sandbox']);
+  assert.deepEqual(taskContextChatPermissionArgs('omp'), ['--approval-mode', 'yolo']);
 });
 
 test('builds a task-bound contract with safe direct adjustments and forward feedback', () => {

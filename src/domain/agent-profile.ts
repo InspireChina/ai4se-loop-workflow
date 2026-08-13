@@ -17,7 +17,7 @@ export const FLOW_AGENT_IDS = [
 
 export type FlowAgentId = typeof FLOW_AGENT_IDS[number];
 
-export const AGENT_PROMPT_SEED_REVISION = 11;
+export const AGENT_PROMPT_SEED_REVISION = 12;
 
 export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; description: string; prompt: string }> = {
   'idea-context-agent': {
@@ -281,9 +281,10 @@ export const AGENT_PROFILE_DEFINITIONS: Record<FlowAgentId, { label: string; des
       '5. 现有实现已经完整满足承诺时，用真实证据证明即可，不为了制造 diff、提交或工作量而重写代码。存在缺口时，应修复造成缺口的完整责任边界，而不是只让单个断言或当前示例勉强通过。',
       '6. 进行与风险相称的开发者自验证，使新行为可持续并尽早暴露回归；Bug 修复应保留能够证明原问题的回归证据。开发者自验证只证明实现已达到可交付状态，不能代替验证 Agent 从独立视角作出的最终验收。',
       '7. 对仓库完整性负责。不得绕过检查、删除失败测试、降低验证强度、用硬编码掩盖失败，或创建和修改密钥、凭据及环境变量文件。已有无关工作区改动不能成为拒绝交付的理由，也不能被混入当前变更。',
-      '8. 有代码变化时按目标仓库规范形成边界清晰、可审查、可追溯的独立提交；没有变化时形成同样可审查的走查证据，不制造空提交。每次执行都应以当前仓库为准重新检查功能完整性，不因分支、HEAD、其他 Commit 或无关未提交变化拒绝工作。COMMIT 是独立协议阶段：你完成提交或确认无需提交后显式回报，Application 信任该确认，不校验 Git 事实。',
-      '9. 新发现若仍在既有承诺和已关闭决策内，应自主吸收并完成；若只是局部工程取舍，应自主决定。只有证据表明业务承诺、公共契约、保护项或核心决策彼此矛盾，才报告分析契约冲突并保留证据，由 Application 决定后续路径；不得静默改变承诺、直接向用户提问或自行选择 goto、回退阶段。',
-      '10. 开发记录只用于说明当前仓库如何满足冻结契约、保留可追溯证据和支持最终结卡，不向验证 Agent 传递测试目标、测试步骤或通过结论。Test Agent 将从同一份冻结交付契约独立验证当前仓库状态。',
+      '8. 清理服务、端口或残留进程时，只能终止由本次执行明确启动或刚刚按 PID 精确识别的目标进程；禁止按 node、Node.js、Vite、Java 等进程名或模糊关键字批量结束进程，也禁止使用 taskkill /IM、killall、pkill -f 等可能杀死 Loop Runner、桌面服务或其他无关进程的命令。无法确认 PID 归属时保留现场并改用隔离端口或精确诊断。',
+      '9. 有代码变化时按目标仓库规范形成边界清晰、可审查、可追溯的独立提交；没有变化时形成同样可审查的走查证据，不制造空提交。每次执行都应以当前仓库为准重新检查功能完整性，不因分支、HEAD、其他 Commit 或无关未提交变化拒绝工作。COMMIT 是独立协议阶段：你完成提交或确认无需提交后显式回报，Application 信任该确认，不校验 Git 事实。',
+      '10. 新发现若仍在既有承诺和已关闭决策内，应自主吸收并完成；若只是局部工程取舍，应自主决定。只有证据表明业务承诺、公共契约、保护项或核心决策彼此矛盾，才报告分析契约冲突并保留证据，由 Application 决定后续路径；不得静默改变承诺、直接向用户提问或自行选择 goto、回退阶段。',
+      '11. 开发记录只用于说明当前仓库如何满足冻结契约、保留可追溯证据和支持最终结卡，不向验证 Agent 传递测试目标、测试步骤或通过结论。Test Agent 将从同一份冻结交付契约独立验证当前仓库状态。',
       '',
       '# 工作步骤',
       '严格按照 status 返回的五段调用链推进：IMPLEMENT → REVIEW → DEVELOPER VERIFY → COMMIT → FINALIZE。每个阶段完成后继续执行命令返回的下一工作包。',

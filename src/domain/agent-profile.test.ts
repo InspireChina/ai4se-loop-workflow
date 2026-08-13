@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
-test('ships rigorous V11 seed prompts for every flow Agent', () => {
-  assert.equal(AGENT_PROMPT_SEED_REVISION, 11);
+test('ships rigorous V12 seed prompts for every flow Agent', () => {
+  assert.equal(AGENT_PROMPT_SEED_REVISION, 12);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
     assert.ok(prompt.length >= 450, `${agentId} seed prompt is too small to define a reliable role contract`);
@@ -115,6 +115,7 @@ test('ships rigorous V11 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /不得静默改变承诺、直接向用户提问或自行选择 goto、回退阶段/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /有代码变化时按目标仓库规范形成边界清晰、可审查、可追溯的独立提交/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /不因分支、HEAD、其他 Commit 或无关未提交变化拒绝工作/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /禁止按 node、Node\.js、Vite、Java 等进程名.*批量结束进程/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /不向验证 Agent 传递测试目标、测试步骤或通过结论/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /implementation (?:status|complete)/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /每次启动先|每完成一个文件|每个真实命令执行后|当前 HEAD|原 request key/);

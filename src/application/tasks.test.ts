@@ -132,7 +132,7 @@ test('anchors verified file feedback to document revisions and supplies it to Ag
 });
 
 test('creates title-only and described Tasks without blocking delegation and serializes description into agent context', async () => {
-  const { createTask, getTaskContext, getTask, pipelineAllEnvelopes, pipelineForTask, toJsonlEnvelope } = await import('./tasks');
+  const { createTask, getTaskContext, getTask, pipelineAllEnvelopes, pipelineForTask, setTaskPriority, toJsonlEnvelope } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const titleOnlyTaskId = await createTask({ title: 'Title only Task' });
@@ -144,8 +144,12 @@ test('creates title-only and described Tasks without blocking delegation and ser
   const blankDescriptionTask = await getTask(blankDescriptionTaskId);
   const describedTask = await getTask(describedTaskId);
   assert.equal(titleOnlyTask?.task.description, null);
+  assert.equal(titleOnlyTask?.task.priority, '5');
   assert.equal(blankDescriptionTask?.task.description, null);
   assert.equal(describedTask?.task.description, 'Keep this value for the next story.');
+  await setTaskPriority({ taskId: titleOnlyTaskId, priority: '8' });
+  assert.equal((await getTask(titleOnlyTaskId))?.task.priority, '8');
+  await assert.rejects(() => setTaskPriority({ taskId: titleOnlyTaskId, priority: '10' }), /1 到 9/);
 
   const titleOnlyContext = await getTaskContext(titleOnlyTaskId);
   const describedContext = await getTaskContext(describedTaskId);
@@ -198,6 +202,26 @@ test('always creates a new UUID requirement without title, URL, external ID, or 
   assert.equal((await getTask(cancelledId))?.task.agile_status, 'cancelled');
   assert.equal((await getTask(secondId))?.task.agile_status, 'backlog');
   assert.equal((await getTask(thirdId))?.task.agile_status, 'backlog');
+});
+
+test('changes priority without clearing a pending resume or moving workflow state', async () => {
+  const { createTask, getTask, setTaskPriority } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Priority-only update', priority: '3' });
+  db.prepare(`
+    UPDATE tasks
+    SET current_subagent = 'backlog-agent', resume_pending = 1, next_step = '继续原有流程'
+    WHERE task_id = ?
+  `).run(taskId);
+
+  await setTaskPriority({ taskId, priority: '8' });
+  const detail = await getTask(taskId);
+  assert.equal(detail?.task.priority, '8');
+  assert.equal(detail?.task.resume_pending, 1);
+  assert.equal(detail?.task.current_subagent, 'backlog-agent');
+  assert.equal(detail?.task.next_step, '继续原有流程');
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id = ?").run(taskId);
 });
 
 test('persists predefined metadata independently from legacy task columns', async () => {
@@ -1179,6 +1203,49 @@ test('cancels an active Dev requirement and automatically releases both of its r
   assert.equal((await pipelineAllEnvelopes()).some((item) => item.taskId === taskId), false);
 });
 
+test('pauses one requirement without changing its workflow state and resumes it from the same step', async () => {
+  const { beginExecutionAttempt, executionCancellationRequested } = await import('./executions');
+  const { createTask, getTask, pauseTask, pipelineAllEnvelopes, pipelineForTask, resumeTask } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+
+  const taskId = await createTask({ title: 'Pause until the next planning window' });
+  const delegation = (await pipelineAllEnvelopes()).find((item) => item.taskId === taskId);
+  assert.ok(delegation);
+  const execution = await beginExecutionAttempt({
+    runId: 'run-pause-requirement',
+    delegation,
+    prompt: 'This execution should stop when its requirement is paused.',
+  });
+
+  await pauseTask({ taskId, reason: '等待下周排期' });
+
+  let detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'backlog');
+  assert.equal(detail?.task.is_paused, 1);
+  assert.equal(detail?.task.paused_reason, '等待下周排期');
+  assert.ok(detail?.task.paused_at);
+  assert.deepEqual(await pipelineForTask(taskId), []);
+  assert.equal((await pipelineAllEnvelopes()).some((item) => item.taskId === taskId), false);
+  assert.equal(await executionCancellationRequested(execution.attempt.execution_id), true);
+  const pausedExecution = db.prepare('SELECT status, last_error FROM execution_attempts WHERE execution_id = ?').get(execution.attempt.execution_id) as { status: string; last_error: string };
+  assert.deepEqual(pausedExecution, { status: 'cancelled', last_error: '需求已暂停' });
+
+  await resumeTask({ taskId });
+
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'backlog');
+  assert.equal(detail?.task.is_paused, 0);
+  assert.equal(detail?.task.paused_reason, null);
+  assert.equal(detail?.task.paused_at, null);
+  assert.equal((await pipelineAllEnvelopes()).some((item) => item.taskId === taskId), true);
+  assert.equal(await executionCancellationRequested(execution.attempt.execution_id), true);
+  assert.deepEqual(detail?.events.slice(0, 2).map((event) => event.event_type), ['TaskResumed', 'TaskPaused']);
+});
+
 test('isolates feedback scheduling per task and emits one concurrent delegation for each task queue', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { addDocumentComment, createTask, pipelineAllEnvelopes, upsertDocument } = await import('./tasks');
@@ -1446,6 +1513,25 @@ test('reserves resources and lane capacity for locally launched work before data
   assert.equal(refill.some((item) => item.resources.includes(BROWSER_EXCLUSIVE_RESOURCE)), false);
 });
 
+test('dispatches the highest numeric priority first when requirements compete for one resource', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { createTask, pipelineAllEnvelopes } = await import('./tasks');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+  db.prepare('DELETE FROM resource_claims').run();
+
+  const lowPriorityTaskId = await createTask({ title: 'Low priority resource contender', priority: '2' });
+  const highPriorityTaskId = await createTask({ title: 'High priority resource contender', priority: '9' });
+  const contenders = (await pipelineAllEnvelopes()).filter((item) =>
+    item.taskId === lowPriorityTaskId || item.taskId === highPriorityTaskId);
+
+  assert.equal(contenders.length, 1);
+  assert.equal(contenders[0].taskId, highPriorityTaskId);
+  assert.equal(contenders[0].priority, '9');
+});
+
 test('caps Analysis concurrency at four and preserves existing task cursors when lanes are materialized', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { getTask, pipelineAllEnvelopes } = await import('./tasks');
@@ -1648,9 +1734,9 @@ test('initializes one project-owned Prompt from the system template without over
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 11);
+  assert.equal(original.profile.prompt_seed_revision, 12);
   assert.equal(original.currentPrompt.version, 1);
-  assert.equal(original.currentPrompt.template_version, 11);
+  assert.equal(original.currentPrompt.template_version, 12);
   assert.equal(original.currentPrompt.source, 'system');
   assert.equal(original.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
   assert.equal('promptHistory' in original, false);
@@ -1673,9 +1759,9 @@ test('initializes one project-owned Prompt from the system template without over
   `).run();
   await ensureAgentRuntimeWorkspace();
   const upgradedSystemSeed = await getAgentProfile('review-agent');
-  assert.equal(upgradedSystemSeed.profile.prompt_seed_revision, 11);
+  assert.equal(upgradedSystemSeed.profile.prompt_seed_revision, 12);
   assert.equal(upgradedSystemSeed.currentPrompt.version, 2);
-  assert.equal(upgradedSystemSeed.currentPrompt.template_version, 11);
+  assert.equal(upgradedSystemSeed.currentPrompt.template_version, 12);
   assert.equal(upgradedSystemSeed.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['review-agent'].prompt);
 
   const legacyPrompt = '判断需求类型并整理上下文，完成时提供分类、流程方向和需求文档。';
@@ -1703,7 +1789,7 @@ test('initializes one project-owned Prompt from the system template without over
   await ensureAgentRuntimeWorkspace();
   const resetBaseline = await getAgentProfile('backlog-agent');
   assert.equal(resetBaseline.currentPrompt.version, 1);
-  assert.equal(resetBaseline.currentPrompt.template_version, 11);
+  assert.equal(resetBaseline.currentPrompt.template_version, 12);
   assert.match(resetBaseline.currentPrompt.content, /# 工作原则/);
   assert.doesNotMatch(resetBaseline.currentPrompt.content, /完成时提供分类、流程方向/);
   assert.match(
@@ -1758,7 +1844,7 @@ test('initializes one project-owned Prompt from the system template without over
   );
   const runtime = await loadAgentRuntime('dev-agent', 'plan');
   assert.equal(runtime.promptVersion, reconciled.currentPrompt.version);
-  assert.equal(runtime.promptTemplateVersion, 11);
+  assert.equal(runtime.promptTemplateVersion, 12);
   assert.equal(runtime.promptHash, hash(projectPrompt));
   assert.equal(runtime.promptStatus, 'active');
   assert.equal(runtime.evolutionCandidateId, null);
@@ -1770,9 +1856,9 @@ test('initializes one project-owned Prompt from the system template without over
   const reset = await getAgentProfile('dev-agent');
   assert.equal(resetRevision, promptRevision + 1);
   assert.equal(reset.currentPrompt.version, resetRevision);
-  assert.equal(reset.currentPrompt.template_version, 11);
+  assert.equal(reset.currentPrompt.template_version, 12);
   assert.equal(reset.currentPrompt.source, 'system');
-  assert.equal(reset.currentPrompt.reason, '用户重置为系统模板 V11');
+  assert.equal(reset.currentPrompt.reason, '用户重置为系统模板 V12');
   assert.equal(reset.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
   assert.equal(reset.currentMemory.revision, memoryRevision);
   assert.equal(reset.candidatePrompt, null);

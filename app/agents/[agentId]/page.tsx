@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { Activity, Bot, BrainCircuit, Check, FolderCog, Gauge, MemoryStick, RotateCcw, Sparkles } from 'lucide-react';
 import { getAgentProfile } from '../../../src/application/agent-profiles';
-import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, getAgentRuntimeSettings, getFlowAgentDefaultRuntimeSettings } from '../../../src/application/project-settings';
+import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, OMP_THINKING_LEVELS, getAgentRuntimeSettings, getFlowAgentDefaultRuntimeSettings } from '../../../src/application/project-settings';
 import { AGENT_PROMPT_SEED_REVISION, isFlowAgentId } from '../../../src/domain/agent-profile';
 import { resetAgentPromptAction, saveAgentMemoryAction, saveAgentPromptAction, saveAgentRuntimeAction, setAgentAutoEvolutionAction } from '../../actions';
 
@@ -38,6 +38,8 @@ export default async function AgentDetailPage({ params, searchParams }: { params
     ? `${flowDefaults.executorId} · ${flowDefaults.codexModel} · ${flowDefaults.codexReasoningEffort}${flowDefaults.codexWebSearch ? ' · 实时网页搜索' : ''}`
     : flowDefaults.executorId === 'claude'
       ? `${flowDefaults.executorId} · ${flowDefaults.claudeModel || 'CLI 默认模型'}`
+      : flowDefaults.executorId === 'omp'
+        ? `Oh My Pi · ${flowDefaults.ompModel || 'OMP 默认模型'} · ${flowDefaults.ompThinking === 'default' ? '默认思考强度' : flowDefaults.ompThinking}`
       : `${flowDefaults.executorId} · CLI 默认模型`;
   const usesLatestSystemTemplate = detail.currentPrompt.content.trim() === detail.definition.prompt.trim()
     && detail.currentPrompt.template_version === AGENT_PROMPT_SEED_REVISION
@@ -114,6 +116,15 @@ export default async function AgentDetailPage({ params, searchParams }: { params
         <fieldset className="claude-settings">
           <legend>Claude 执行参数</legend>
           <div className="fields"><label>模型<input name="claudeModel" defaultValue={runtimeSettings.claudeModel} placeholder="例如 sonnet、opus 或完整模型 ID" spellCheck={false}/><small className="muted">留空时跟随 Claude CLI 默认模型。</small></label></div>
+        </fieldset>
+        <fieldset className="omp-settings">
+          <legend>Oh My Pi 执行参数</legend>
+          <p className="muted">仅在选择 Oh My Pi 时生效；模型留空则使用 OMP 的默认模型配置。</p>
+          <div className="fields">
+            <label>模型<input name="ompModel" defaultValue={runtimeSettings.ompModel} placeholder="例如 ollama/qwen3.6:35b、opus" spellCheck={false}/><small className="muted">支持模糊模型名或完整 provider/model。</small></label>
+            <label>思考强度<select name="ompThinking" defaultValue={runtimeSettings.ompThinking}>{OMP_THINKING_LEVELS.map((level) => <option value={level} key={level}>{level === 'default' ? '跟随 OMP 默认值' : level}</option>)}</select></label>
+          </div>
+          <small>以无会话 JSON 模式运行，并自动批准工具调用。</small>
         </fieldset>
         <div className="form-actions">
           <button className="button" type="submit">保存独立 Runtime</button>

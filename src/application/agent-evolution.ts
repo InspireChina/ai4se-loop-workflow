@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { loopAgentCommand } from '../infrastructure/runtime-entry';
 import { isFlowAgentId, type FlowAgentId } from '../domain/agent-profile';
 import { evolutionObservationSchema, evolutionResultSchema, type EvolutionResult } from '../domain/agent-evolution';
 import { databaseConnection, hash, paths } from '../infrastructure/database';
@@ -47,7 +48,7 @@ export type EvolutionRuntimeInputEvidence = {
 const forbiddenEvolution = /(?:ignore\s+(?:all\s+)?previous|bypass|disable\s+(?:safety|validation|harness)|secret|password|api[_ -]?key|不要验证|绕过|取消限制|扩大权限)/i;
 
 export function buildEvolutionPrompt(evidence: EvolutionEvidence) {
-  const command = `node ${JSON.stringify(join(paths.appRoot, 'scripts', 'loop', 'loop-agent.mjs'))}`;
+  const command = loopAgentCommand();
   return [
     '你是 Loop Engineering 的 Evolution Evaluator。你不执行产品工作、不修改项目文件，只分析给定的已完成执行证据。唯一允许的写入操作是通过下方 execution 绑定的领域命令渐进维护演化草稿。',
     '目标是发现能跨任务复用的操作经验，而不是解释当前业务需求。',
