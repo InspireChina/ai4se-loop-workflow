@@ -130,6 +130,8 @@ npm run desktop:dist:win
 
 产物位于 `dist-desktop/`。`better-sqlite3` 会在准备桌面 runtime 时针对当前 Electron、操作系统和 CPU 架构重新编译，所以 Windows 和 macOS 产物应分别在对应平台构建，不能复用另一平台生成的 `desktop-runtime/`。桌面构建会额外安装 `desktop/package-lock.json` 中的更新器运行时依赖。
 
+桌面主进程包含独立于 Runner 的健康监测：用户点击“开始运行”后会持久化持续运行意图，每 10 秒检查 Runner 进程与 heartbeat；Runner 异常退出或 heartbeat 超过 45 秒未更新时，会通过既有 checkpoint 恢复链自动回收旧 execution 并启动新一轮。连续快速崩溃采用 10 秒、30 秒、90 秒直至最多 5 分钟的退避，稳定运行 2 分钟后重置。用户主动“结束本轮”会先关闭该意图，不会被自动拉起。
+
 ### 通过 GitHub Actions 构建跨平台安装包
 
 仓库中的 `Build Desktop Artifacts` 工作流会在各平台的原生 Runner 上生成：
@@ -143,7 +145,7 @@ npm run desktop:dist:win
 3. 在页面底部按系统下载 `LoopWork-windows-x64-*`、`LoopWork-macos-arm64-*` 或 `LoopWork-macos-x64-*`。
 4. 每个 Artifact 都附带按平台命名的 `SHA256SUMS-<platform>.txt`。Windows 下载后运行带 `Setup` 的 EXE 安装。
 
-也可以在 Actions 页面点击 **Run workflow** 随时手动构建。推送版本标签（例如 `v0.1.2`）会在所有平台构建成功后自动创建 GitHub Release，并上传 Windows 安装版 EXE、两个架构的 macOS DMG、两个自动升级 ZIP、更新清单和统一校验文件。安装后的应用可在“关于”页检查、下载并重启安装新版本。GitHub 会为标签自动附带无法隐藏的 Source code ZIP / tar.gz。当前 Windows 和 macOS 产物没有代码签名，安装时可能显示未知发布者或无法验证开发者，并可能阻止自动安装；正式公开分发前需要配置平台签名证书。
+也可以在 Actions 页面点击 **Run workflow** 随时手动构建。推送版本标签（例如 `v0.1.3`）会在所有平台构建成功后自动创建 GitHub Release，并上传 Windows 安装版 EXE、两个架构的 macOS DMG、两个自动升级 ZIP、更新清单和统一校验文件。安装后的应用可在“关于”页检查、下载并重启安装新版本。GitHub 会为标签自动附带无法隐藏的 Source code ZIP / tar.gz。当前 Windows 和 macOS 产物没有代码签名，安装时可能显示未知发布者或无法验证开发者，并可能阻止自动安装；正式公开分发前需要配置平台签名证书。
 
 ## 技术文档
 

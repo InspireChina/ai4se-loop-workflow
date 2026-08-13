@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { databaseConnection } from '../infrastructure/database';
 import { reconcileInterruptedExecutions } from './executions';
+import { readLoopRunIntent } from './run-supervisor';
 import { beginRun, createTask, endRun, getRunStatus, heartbeatRun, registerRunProcess } from './tasks';
 import {
   BROWSER_EXCLUSIVE_RESOURCE,
@@ -136,4 +137,20 @@ test('refreshes heartbeat without replacing the detached runner process leader',
   assert.equal((await getRunStatus())?.active, true);
 
   await endRun(runId, false, { stopRunner: false });
+});
+
+test('persists continuous-run intent across a crash but clears it before a user stop', async () => {
+  const db = await databaseConnection();
+  const runId = await beginRun('agent-runner');
+  const initialIntent = readLoopRunIntent(db);
+  assert.equal(initialIntent?.restartCount, 0);
+  await assert.rejects(endRun('another-run', false, { stopRunner: false }), /运行 ID 不匹配/);
+  assert.deepEqual(readLoopRunIntent(db), initialIntent);
+
+  await endRun(runId, true, { stopRunner: false, preserveRunIntent: true, reason: 'runner crashed' });
+  assert.deepEqual(readLoopRunIntent(db), initialIntent);
+
+  const recoveredRunId = await beginRun('desktop-supervisor', { preserveRunIntent: true });
+  await endRun(recoveredRunId, false, { stopRunner: false });
+  assert.equal(readLoopRunIntent(db), null);
 });

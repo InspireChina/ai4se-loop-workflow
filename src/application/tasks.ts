@@ -2290,7 +2290,9 @@ export async function pipelineAllEnvelopes(options: {
   return lines;
 }
 
-export async function beginRun(owner = 'ui') {
+type BeginRunOptions = { preserveRunIntent?: boolean };
+
+export async function beginRun(owner = 'ui', options: BeginRunOptions = {}) {
   const { ensureAgentRuntimeWorkspace } = await import('./agent-profiles');
   await ensureAgentRuntimeWorkspace();
   const db = await databaseConnection();
@@ -2320,6 +2322,12 @@ export async function beginRun(owner = 'ui') {
   const runId = randomUUID();
   const startedAt = new Date();
   db.transaction(() => {
+    if (!options.preserveRunIntent) {
+      db.prepare(`
+        INSERT INTO loop_meta(key, value) VALUES('loop_run_intent', ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
+      `).run(JSON.stringify({ enabledAt: toUtcIsoString(startedAt), restartCount: 0 }));
+    }
     db.prepare(`
       INSERT INTO loop_runs(run_id, owner, status, started_at)
       VALUES(?, ?, 'starting', ?)
@@ -2335,13 +2343,16 @@ export async function beginRun(owner = 'ui') {
   return runId;
 }
 
-export async function endRun(runId: string, force = false, options: { stopRunner?: boolean; reason?: string } = {}) {
+export async function endRun(runId: string, force = false, options: { stopRunner?: boolean; reason?: string; preserveRunIntent?: boolean } = {}) {
   const db = await databaseConnection();
   const current = getRunStatusFromDb(db);
   if (current?.runId && current.runId !== runId) {
     if (force) return;
     throw new Error('运行 ID 不匹配');
   }
+  // Clear the durable intent before stopping the process so the desktop
+  // supervisor cannot race a deliberate user stop and start a replacement.
+  if (!options.preserveRunIntent) db.prepare("DELETE FROM loop_meta WHERE key = 'loop_run_intent'").run();
   if (current?.runId && options.stopRunner !== false) {
     db.prepare("UPDATE loop_runs SET status = 'stopping', stop_requested_at = CURRENT_TIMESTAMP WHERE run_id = ?").run(current.runId);
     const { stopAgentRun } = await import('../infrastructure/agent-runner');

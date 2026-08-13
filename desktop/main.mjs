@@ -2,11 +2,14 @@ import { app, BrowserWindow, dialog, shell } from 'electron';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { configureUpdater, detachUpdaterWindow } from './updater.mjs';
 
 let mainWindow;
 let serverProcess;
+let supervisorTimer;
+let supervisorRequestRunning = false;
 let quitting = false;
 
 function runtimeRoot() {
@@ -61,6 +64,7 @@ async function startServer() {
   }
   const port = await availablePort();
   const url = `http://127.0.0.1:${port}`;
+  const supervisorToken = randomBytes(32).toString('hex');
   serverProcess = spawn(process.execPath, [entry], {
     cwd: root,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -75,12 +79,43 @@ async function startServer() {
       LOOP_DESKTOP_NODE: process.execPath,
       LOOP_APP_ROOT: root,
       LOOP_DATA_ROOT: join(app.getPath('userData'), 'data'),
+      LOOP_SUPERVISOR_TOKEN: supervisorToken,
     },
   });
   serverProcess.stdout?.on('data', (chunk) => console.log(`[server] ${chunk.toString().trimEnd()}`));
   serverProcess.stderr?.on('data', (chunk) => console.error(`[server] ${chunk.toString().trimEnd()}`));
   await waitForServer(url, serverProcess);
-  return url;
+  return { url, supervisorToken };
+}
+
+function startLoopSupervisor(url, token) {
+  stopLoopSupervisor();
+  const check = async () => {
+    if (quitting || supervisorRequestRunning) return;
+    supervisorRequestRunning = true;
+    try {
+      const response = await fetch(`${url}/api/loop/supervise`, {
+        method: 'POST',
+        headers: { 'x-loopwork-supervisor': token },
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!response.ok) throw new Error(`health endpoint returned ${response.status}`);
+      const result = await response.json();
+      if (result.status === 'restarted') console.warn(`[supervisor] restarted runner ${result.runId}`);
+      if (result.status === 'failed') console.error(`[supervisor] runner restart failed: ${result.error}`);
+    } catch (error) {
+      if (!quitting) console.error(`[supervisor] health check failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      supervisorRequestRunning = false;
+    }
+  };
+  void check();
+  supervisorTimer = setInterval(() => void check(), 10_000);
+}
+
+function stopLoopSupervisor() {
+  if (supervisorTimer) clearInterval(supervisorTimer);
+  supervisorTimer = undefined;
 }
 
 function stopServer() {
@@ -90,7 +125,8 @@ function stopServer() {
 }
 
 async function createWindow() {
-  const url = await startServer();
+  const { url, supervisorToken } = await startServer();
+  startLoopSupervisor(url, supervisorToken);
   const window = new BrowserWindow({
     width: 1440,
     height: 960,
@@ -145,6 +181,7 @@ app.on('activate', () => {
 
 app.on('before-quit', () => {
   quitting = true;
+  stopLoopSupervisor();
   stopServer();
 });
 

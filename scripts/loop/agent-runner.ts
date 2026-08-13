@@ -755,7 +755,11 @@ async function run() {
     await main();
   } catch (error) {
     await appendLoopRunLog(runId, `[执行器错误] ${error instanceof Error ? error.message : String(error)}`);
-    await endRun(runId, true, { stopRunner: false, reason: error instanceof Error ? error.message : String(error) });
+    await endRun(runId, true, {
+      stopRunner: false,
+      preserveRunIntent: true,
+      reason: error instanceof Error ? error.message : String(error),
+    });
     await enqueueRunnerFailureMaintenance(error);
   } finally {
     stopHeartbeat?.();
