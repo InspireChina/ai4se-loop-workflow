@@ -1,17 +1,17 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { AlertTriangle, ArrowRight, Check, CheckCircle2, Clock3, FileText, GitBranch } from 'lucide-react';
+import { AlertTriangle, ArrowRight, Bot, Check, CheckCircle2, Clock3, ExternalLink, FileText, GitBranch, Hash, Link2, Tag } from 'lucide-react';
 import { decisionAlignmentQuestions } from '../../../src/application/decision-alignment';
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask, pipelineForTask } from '../../../src/application/tasks';
 import { getTaskContextChat } from '../../../src/application/task-context-chat';
 import { deliverySpecSchema } from '../../../src/domain/agent-result';
 import { agentLabel, deliveryUnitLabel, documentKindLabel, feedbackBatchStatusLabel, feedbackWorkTypeLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
-import { requirementPriorityLabel } from '../../../src/domain/requirement-priority';
 import { requirementMetadataDefinition, requirementMetadataValueLabel } from '../../../src/domain/requirement-metadata';
 import { ArtifactDocument } from './artifact-document';
 import { TaskAutoRefresh } from './task-auto-refresh';
 import { TaskContextChat } from './task-context-chat';
+import { TaskPriorityControl } from './task-priority-control';
 import {
   acknowledgeClosureAction,
   addStoryAction,
@@ -120,6 +120,21 @@ function feedbackGroupStatusLabel(group: { status: string; work_type: string; de
   } as Record<string, string>)[group.status] || group.status;
 }
 
+function metadataIcon(key: string) {
+  if (key === 'source.reference_url') return <Link2 size={15}/>;
+  if (key === 'tracking.requirement_card_id') return <Hash size={15}/>;
+  if (key === 'workflow.analysis_decision_mode') return <Bot size={15}/>;
+  return <Tag size={15}/>;
+}
+
+function referenceHostname(value: string) {
+  try {
+    return new URL(value).hostname.replace(/^www\./, '');
+  } catch {
+    return value;
+  }
+}
+
 export default async function TaskDetail({ params }: { params: Promise<{ taskId: string }> }) {
   const { taskId } = await params;
   const detail = await getTask(taskId);
@@ -193,20 +208,32 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         </div>
         <span className={`badge ${task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : inBusinessAnalysisStage ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status)}</span>
       </div>
-      <div className="chips">
+      <div className="chips" aria-label="需求运行上下文">
         <TaskAutoRefresh/>
         <span>PIPELINE · {itemTypeLabel(task.item_type)}</span>
-        <span>优先级 · {requirementPriorityLabel(task.priority)}</span>
+        <TaskPriorityControl taskId={task.task_id} priority={task.priority}/>
         {!inBusinessAnalysisStage && <span>交付分析 · {agentLabel(analysisLane.current_agent)}</span>}
         {!inBusinessAnalysisStage && <span>开发验证 · {agentLabel(deliveryLane.current_agent)}</span>}
+      </div>
+      {metadata.length > 0 && <dl className={`task-metadata count-${Math.min(metadata.length, 3)}`} aria-label="需求属性">
         {metadata.map((item) => {
           const definition = requirementMetadataDefinition(item.metadata_key);
           if (!definition) return null;
-          return definition.inputType === 'url'
-            ? <a href={item.metadata_value} target="_blank" rel="noreferrer" key={item.metadata_key}>{definition.label} · {item.metadata_value}</a>
-            : <span key={item.metadata_key}>{definition.label} · {requirementMetadataValueLabel(item.metadata_key, item.metadata_value)}</span>;
+          return <div className="task-metadata-item" key={item.metadata_key}>
+            <span className="task-metadata-icon" aria-hidden="true">{metadataIcon(item.metadata_key)}</span>
+            <div className="task-metadata-copy">
+              <dt>{definition.label}</dt>
+              <dd className={item.metadata_key === 'tracking.requirement_card_id' ? 'task-metadata-code' : undefined}>
+                {definition.inputType === 'url'
+                  ? <a href={item.metadata_value} target="_blank" rel="noreferrer" title={item.metadata_value}>
+                    <span>{referenceHostname(item.metadata_value)}</span><ExternalLink size={13}/>
+                  </a>
+                  : requirementMetadataValueLabel(item.metadata_key, item.metadata_value)}
+              </dd>
+            </div>
+          </div>;
         })}
-      </div>
+      </dl>}
     </header>
 
     <section className="card task-original-input" aria-labelledby="task-original-input-title">

@@ -1,28 +1,34 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  DEFAULT_REQUIREMENT_PRIORITY,
   REQUIREMENT_PRIORITY_OPTIONS,
+  normalizedRequirementPriority,
   requirementPriority,
   requirementPriorityLabel,
+  requirementPriorityRank,
 } from './requirement-priority';
 
-test('offers exactly high, medium, and low requirement priorities', () => {
-  assert.deepEqual(REQUIREMENT_PRIORITY_OPTIONS, [
-    { value: 'P1', label: '高' },
-    { value: 'P2', label: '中' },
-    { value: 'P3', label: '低' },
-  ]);
-  assert.equal(requirementPriority('P1'), 'P1');
-  assert.equal(requirementPriority('P2'), 'P2');
-  assert.equal(requirementPriority('P3'), 'P3');
-  assert.throws(() => requirementPriority('P0'), /只能选择高、中或低/);
-  assert.throws(() => requirementPriority('other'), /只能选择高、中或低/);
+test('offers numeric requirement priorities from 9 down to 1', () => {
+  assert.equal(DEFAULT_REQUIREMENT_PRIORITY, '5');
+  assert.deepEqual(REQUIREMENT_PRIORITY_OPTIONS.map((option) => option.value), ['9', '8', '7', '6', '5', '4', '3', '2', '1']);
+  assert.equal(REQUIREMENT_PRIORITY_OPTIONS[0].label, '9 · 最高');
+  assert.equal(REQUIREMENT_PRIORITY_OPTIONS.at(-1)?.label, '1 · 最低');
+  assert.equal(requirementPriority('9'), '9');
+  assert.equal(requirementPriority(5), '5');
+  assert.equal(requirementPriority('1'), '1');
+  assert.throws(() => requirementPriority('P1'), /1 到 9/);
+  assert.throws(() => requirementPriority('10'), /1 到 9/);
+  assert.throws(() => requirementPriority('0'), /1 到 9/);
 });
 
-test('renders current and legacy stored priorities as user-facing labels', () => {
-  assert.equal(requirementPriorityLabel('P1'), '高');
-  assert.equal(requirementPriorityLabel('S2'), '中');
-  assert.equal(requirementPriorityLabel('P3'), '低');
-  assert.equal(requirementPriorityLabel('P0'), '紧急');
-  assert.equal(requirementPriorityLabel(null), '未定级');
+test('normalizes legacy priorities while ranking 9 as highest', () => {
+  assert.equal(normalizedRequirementPriority('P1'), '9');
+  assert.equal(normalizedRequirementPriority('S2'), '5');
+  assert.equal(normalizedRequirementPriority('P3'), '1');
+  assert.equal(requirementPriorityLabel('8'), '8');
+  assert.equal(requirementPriorityLabel('P2'), '5');
+  assert.equal(requirementPriorityLabel(null), '未设置');
+  assert.ok(requirementPriorityRank('9') > requirementPriorityRank('8'));
+  assert.ok(requirementPriorityRank('8') > requirementPriorityRank('1'));
 });

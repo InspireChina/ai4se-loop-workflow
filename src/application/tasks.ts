@@ -9,6 +9,7 @@ import {
   type ResourceKey,
 } from '../domain/resource';
 import { parseRequirementMetadata, type RequirementMetadataKey } from '../domain/requirement-metadata';
+import { DEFAULT_REQUIREMENT_PRIORITY, requirementPriority, requirementPriorityRank } from '../domain/requirement-priority';
 import { AgentResultContractError, assertDeliverySpecDecisionCoverage, deliverySpecSchema } from '../domain/agent-result';
 import { agentCommandProfile } from '../domain/agent-command-profile';
 import { databaseConnection, paths } from '../infrastructure/database';
@@ -278,6 +279,24 @@ const taskSelect = `
   FROM tasks
 `;
 
+function dispatchStageRank(status: string) {
+  return ({
+    blocked: 0,
+    'in dev': 1,
+    'in review': 2,
+    'in plan': 4,
+    'in repro': 5,
+    backlog: 6,
+  } as Record<string, number>)[status] ?? 7;
+}
+
+function compareDispatchTasks(left: Task, right: Task) {
+  return requirementPriorityRank(right.priority) - requirementPriorityRank(left.priority)
+    || dispatchStageRank(left.agile_status) - dispatchStageRank(right.agile_status)
+    || right.updated_at.localeCompare(left.updated_at)
+    || left.task_id.localeCompare(right.task_id);
+}
+
 function fetchTask(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: string) {
   return db.prepare(`${taskSelect} WHERE task_id = ?`).get(taskId) as Task | undefined;
 }
@@ -361,8 +380,10 @@ export async function listTasks(options: { includeTerminal?: boolean } = {}): Pr
   const tasks = db.prepare(`
     ${taskSelect}
     ${where}
-    ORDER BY CASE agile_status WHEN 'blocked' THEN 0 ELSE 1 END, priority, updated_at DESC
   `).all() as Task[];
+  tasks.sort((left, right) => Number(right.agile_status === 'blocked') - Number(left.agile_status === 'blocked')
+    || requirementPriorityRank(right.priority) - requirementPriorityRank(left.priority)
+    || right.updated_at.localeCompare(left.updated_at));
   return tasks.map((task) => {
     refreshTaskLaneStatesInDb(db, task);
     return { ...task, lanes: taskLanesInDb(db, task) };
@@ -667,6 +688,7 @@ const createTaskSchema = z.object({
 export async function createTask(input: unknown) {
   const value = createTaskSchema.parse(input);
   const metadata = parseRequirementMetadata(value.metadata);
+  const priority = requirementPriority(value.priority || DEFAULT_REQUIREMENT_PRIORITY);
   const description = value.description?.trim() || null;
   const link = value.link || null;
   const taskId = `REQ-${randomUUID()}`;
@@ -704,7 +726,7 @@ export async function createTask(input: unknown) {
         total_stories, spec_resolved_index, next_step,
         work_dir, blocked_reason, last_actor
       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, '', ?, ?)
-    `).run(taskId, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, value.priority || null, value.status, currentSubagent, '新建需求，等待 Loop 梳理', state.blocked_reason, value.actor);
+    `).run(taskId, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, priority, value.status, currentSubagent, '新建需求，等待 Loop 梳理', state.blocked_reason, value.actor);
     const insertMetadata = db.prepare(`
       INSERT INTO requirement_metadata(task_id, metadata_key, metadata_value)
       VALUES (?, ?, ?)
@@ -1648,7 +1670,9 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
     }
     const after = fetchTask(db, taskId);
     if (after) refreshTaskLaneStatesInDb(db, after);
-    addEvent(db, taskId, actor, 'TaskUpdated', changes.next_step || `更新状态：${changes.agile_status || before.agile_status}`);
+    const updateSummary = changes.next_step
+      || (changes.priority ? `调整优先级：${before.priority || '未设置'} → ${changes.priority}` : `更新状态：${changes.agile_status || before.agile_status}`);
+    addEvent(db, taskId, actor, 'TaskUpdated', updateSummary);
     db.exec('COMMIT');
     await syncTaskFiles(db, taskId, { createClearedBlock: Boolean(changes.agile_status && changes.agile_status !== 'blocked') });
   } catch (error) {
@@ -1656,6 +1680,26 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
     throw error;
   }
   refreshPages('/', `/tasks/${taskId}`);
+}
+
+export async function setTaskPriority(input: unknown) {
+  const value = z.object({
+    taskId: z.string().min(1),
+    priority: z.union([z.string(), z.number()]),
+  }).parse(input);
+  const priority = requirementPriority(value.priority);
+  const db = await databaseConnection();
+  const task = fetchTask(db, value.taskId);
+  if (!task) throw new Error('需求不存在');
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE tasks
+      SET priority = ?, last_actor = 'human', updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ?
+    `).run(priority, value.taskId);
+    addEvent(db, value.taskId, 'human', 'TaskPriorityChanged', `调整优先级：${task.priority || '未设置'} → ${priority}`);
+  })();
+  refreshPages('/', '/tasks', `/tasks/${value.taskId}`);
 }
 
 const transitionSchema = z.object({
@@ -2014,18 +2058,17 @@ function controlLine(task: Task, codeSlotAvailable: boolean, lanes: TaskLane[]) 
 }
 
 function analysisPriority(task: Task, lane: TaskLane) {
-  const priority = String(task.priority || '').toUpperCase();
-  const rank = priority === 'P0' || priority === 'S0' ? 0
-    : priority === 'P1' || priority === 'S1' ? 1
-      : priority === 'P2' || priority === 'S2' ? 2
-        : priority === 'P3' || priority === 'S3' ? 3 : 9;
-  return { rank, readyAt: lane.ready_at || lane.updated_at || task.updated_at, taskId: task.task_id };
+  return {
+    rank: requirementPriorityRank(task.priority),
+    readyAt: lane.ready_at || lane.updated_at || task.updated_at,
+    taskId: task.task_id,
+  };
 }
 
 function compareAnalysisCandidates(a: { task: Task; lane: TaskLane }, b: { task: Task; lane: TaskLane }) {
   const left = analysisPriority(a.task, a.lane);
   const right = analysisPriority(b.task, b.lane);
-  return left.rank - right.rank || left.readyAt.localeCompare(right.readyAt) || left.taskId.localeCompare(right.taskId);
+  return right.rank - left.rank || left.readyAt.localeCompare(right.readyAt) || left.taskId.localeCompare(right.taskId);
 }
 
 function schedulingResourceClaims(db: Awaited<ReturnType<typeof databaseConnection>>) {
@@ -2217,16 +2260,8 @@ export async function pipelineAllEnvelopes(options: {
   locallyActive?: LocallyActiveDelegation[];
 } = {}): Promise<DelegationEnvelope[]> {
   const db = await databaseConnection();
-  const tasks = db.prepare(`${taskSelect} WHERE agile_status NOT IN ('done', 'cancelled') ORDER BY
-    CASE agile_status
-      WHEN 'blocked' THEN 0 WHEN 'in dev' THEN 1 WHEN 'in review' THEN 2
-      WHEN 'in plan' THEN 4 WHEN 'in repro' THEN 5 WHEN 'backlog' THEN 6 ELSE 7
-    END,
-    CASE upper(COALESCE(priority, ''))
-      WHEN 'P0' THEN 0 WHEN 'S0' THEN 0 WHEN 'P1' THEN 1 WHEN 'S1' THEN 1
-      WHEN 'P2' THEN 2 WHEN 'S2' THEN 2 WHEN 'P3' THEN 3 WHEN 'S3' THEN 3 ELSE 9
-    END,
-    updated_at DESC`).all() as Task[];
+  const tasks = db.prepare(`${taskSelect} WHERE agile_status NOT IN ('done', 'cancelled')`).all() as Task[];
+  tasks.sort(compareDispatchTasks);
   const active = activeLaneExecutions(db);
   const activeKeys = new Set(active.map((item) => `${item.task_id}:${item.lane}`));
   for (const item of options.locallyActive || []) activeKeys.add(`${item.taskId}:${item.lane}`);

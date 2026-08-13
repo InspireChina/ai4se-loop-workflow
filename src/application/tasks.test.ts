@@ -132,7 +132,7 @@ test('anchors verified file feedback to document revisions and supplies it to Ag
 });
 
 test('creates title-only and described Tasks without blocking delegation and serializes description into agent context', async () => {
-  const { createTask, getTaskContext, getTask, pipelineAllEnvelopes, pipelineForTask, toJsonlEnvelope } = await import('./tasks');
+  const { createTask, getTaskContext, getTask, pipelineAllEnvelopes, pipelineForTask, setTaskPriority, toJsonlEnvelope } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const titleOnlyTaskId = await createTask({ title: 'Title only Task' });
@@ -144,8 +144,12 @@ test('creates title-only and described Tasks without blocking delegation and ser
   const blankDescriptionTask = await getTask(blankDescriptionTaskId);
   const describedTask = await getTask(describedTaskId);
   assert.equal(titleOnlyTask?.task.description, null);
+  assert.equal(titleOnlyTask?.task.priority, '5');
   assert.equal(blankDescriptionTask?.task.description, null);
   assert.equal(describedTask?.task.description, 'Keep this value for the next story.');
+  await setTaskPriority({ taskId: titleOnlyTaskId, priority: '8' });
+  assert.equal((await getTask(titleOnlyTaskId))?.task.priority, '8');
+  await assert.rejects(() => setTaskPriority({ taskId: titleOnlyTaskId, priority: '10' }), /1 到 9/);
 
   const titleOnlyContext = await getTaskContext(titleOnlyTaskId);
   const describedContext = await getTaskContext(describedTaskId);
@@ -198,6 +202,26 @@ test('always creates a new UUID requirement without title, URL, external ID, or 
   assert.equal((await getTask(cancelledId))?.task.agile_status, 'cancelled');
   assert.equal((await getTask(secondId))?.task.agile_status, 'backlog');
   assert.equal((await getTask(thirdId))?.task.agile_status, 'backlog');
+});
+
+test('changes priority without clearing a pending resume or moving workflow state', async () => {
+  const { createTask, getTask, setTaskPriority } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Priority-only update', priority: '3' });
+  db.prepare(`
+    UPDATE tasks
+    SET current_subagent = 'backlog-agent', resume_pending = 1, next_step = '继续原有流程'
+    WHERE task_id = ?
+  `).run(taskId);
+
+  await setTaskPriority({ taskId, priority: '8' });
+  const detail = await getTask(taskId);
+  assert.equal(detail?.task.priority, '8');
+  assert.equal(detail?.task.resume_pending, 1);
+  assert.equal(detail?.task.current_subagent, 'backlog-agent');
+  assert.equal(detail?.task.next_step, '继续原有流程');
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id = ?").run(taskId);
 });
 
 test('persists predefined metadata independently from legacy task columns', async () => {
@@ -1444,6 +1468,25 @@ test('reserves resources and lane capacity for locally launched work before data
   assert.equal(refill.some((item) => item.taskId === backlogTaskId), false);
   assert.equal(refill.some((item) => item.resources.includes(CODE_WORKSPACE_RESOURCE)), false);
   assert.equal(refill.some((item) => item.resources.includes(BROWSER_EXCLUSIVE_RESOURCE)), false);
+});
+
+test('dispatches the highest numeric priority first when requirements compete for one resource', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { createTask, pipelineAllEnvelopes } = await import('./tasks');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+  db.prepare('DELETE FROM resource_claims').run();
+
+  const lowPriorityTaskId = await createTask({ title: 'Low priority resource contender', priority: '2' });
+  const highPriorityTaskId = await createTask({ title: 'High priority resource contender', priority: '9' });
+  const contenders = (await pipelineAllEnvelopes()).filter((item) =>
+    item.taskId === lowPriorityTaskId || item.taskId === highPriorityTaskId);
+
+  assert.equal(contenders.length, 1);
+  assert.equal(contenders[0].taskId, highPriorityTaskId);
+  assert.equal(contenders[0].priority, '9');
 });
 
 test('caps Analysis concurrency at four and preserves existing task cursors when lanes are materialized', async () => {

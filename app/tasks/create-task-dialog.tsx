@@ -3,7 +3,7 @@
 import { useRef, useState } from 'react';
 import { Plus, Trash2, X } from 'lucide-react';
 import { REQUIREMENT_PIPELINES } from '../../src/domain/pipeline-catalog';
-import { REQUIREMENT_PRIORITY_OPTIONS } from '../../src/domain/requirement-priority';
+import { DEFAULT_REQUIREMENT_PRIORITY, REQUIREMENT_PRIORITY_OPTIONS } from '../../src/domain/requirement-priority';
 import { REQUIREMENT_METADATA_DEFINITIONS, type RequirementMetadataKey } from '../../src/domain/requirement-metadata';
 import { createTaskAction } from '../actions';
 
@@ -38,7 +38,7 @@ export default function CreateTaskDialog() {
         <label>描述（可选）<textarea name="description" rows={4} placeholder="补充背景、目标或验收要求"/></label>
         <div className="fields">
           <label>PIPELINE<select name="pipeline" defaultValue="feature">{REQUIREMENT_PIPELINES.map((pipeline) => <option value={pipeline.id} key={pipeline.id}>{pipeline.label}</option>)}</select></label>
-          <label>优先级<select name="priority" defaultValue="P2">{REQUIREMENT_PRIORITY_OPTIONS.map((priority) => <option value={priority.value} key={priority.value}>{priority.label}</option>)}</select></label>
+          <label>优先级（9 最高）<select name="priority" defaultValue={DEFAULT_REQUIREMENT_PRIORITY}>{REQUIREMENT_PRIORITY_OPTIONS.map((priority) => <option value={priority.value} key={priority.value}>{priority.label}</option>)}</select></label>
         </div>
         <div className="metadata-editor">
           {metadataKeys.map((key, index) => {

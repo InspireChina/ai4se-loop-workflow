@@ -18,6 +18,7 @@ import {
   initializeTaskContext,
   releaseBlock,
   reopenDocumentComment,
+  setTaskPriority,
   submitClarificationAnswers,
   submitRuntimeInputs,
   rewindTask,
@@ -26,12 +27,12 @@ import {
 import { startAgentRun } from '../src/infrastructure/agent-runner';
 import { paths } from '../src/infrastructure/database';
 import { requirementPipeline } from '../src/domain/pipeline-catalog';
-import { requirementPriority } from '../src/domain/requirement-priority';
+import { DEFAULT_REQUIREMENT_PRIORITY, requirementPriority } from '../src/domain/requirement-priority';
 import { parseRequirementMetadata } from '../src/domain/requirement-metadata';
 
 export async function createTaskAction(formData: FormData) {
   const pipeline = requirementPipeline(formData.get('pipeline') || 'feature');
-  const priority = requirementPriority(formData.get('priority') || 'P2');
+  const priority = requirementPriority(formData.get('priority') || DEFAULT_REQUIREMENT_PRIORITY);
   const metadataKeys = formData.getAll('metadataKey');
   const metadataValues = formData.getAll('metadataValue');
   const metadata = parseRequirementMetadata(metadataKeys.map((key, index) => ({
@@ -46,6 +47,10 @@ export async function createTaskAction(formData: FormData) {
     metadata,
   });
   redirect(`/tasks/${taskId}`);
+}
+
+export async function updateTaskPriorityAction(taskId: string, priority: string) {
+  await setTaskPriority({ taskId, priority });
 }
 
 export async function initializeContextAction(formData: FormData) {
