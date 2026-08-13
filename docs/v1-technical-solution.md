@@ -9,7 +9,7 @@ V1 聚焦现有流程 UI 化、业务事实入库和执行过程可观察，不�
 保留的能力：
 
 - SQLite 本地持久化和多代码库数据隔离。
-- Cursor、Codex、Claude 三种可插拔 Agent 执行器。
+- Cursor、Codex、Claude、Oh My Pi 四种可插拔 Agent 执行器。
 - 本地主干代码工作区、Agent 自主且可选的 Git 提交。
 - 设计澄清、自动恢复、回退、取消、代码槽和浏览器资源约束。
 - CLI 流式日志解析和用户友好的运行面板。
@@ -33,7 +33,7 @@ flowchart LR
   Runner --> Attempt["Execution Attempt / Lease"]
   Attempt --> Flow["推进流程计算"]
   Flow --> Executor["Agent Executor Port"]
-  Executor --> CLI["Cursor / Codex / Claude CLI"]
+  Executor --> CLI["Cursor / Codex / Claude / OMP CLI"]
   CLI --> Repo["目标代码库"]
   CLI --> Stream["JSON stream / JSONL"]
   Stream --> Logs["日志标准化"]
@@ -59,7 +59,7 @@ Next.js 页面、Server Action、领域用例、SQLite、Runner 和执行器适�
 | 领域代码 | 纯 TypeScript | 不依赖 React、Next 或 SQLite driver。 |
 | 数据库 | SQLite + `better-sqlite3` | 本地事务简单，适合单机持续 Loop。 |
 | 数据库迁移 | Umzug + 顺序 SQL | `schema_migrations` 记录版本，提供类 Flyway 的迁移行为。 |
-| Agent 执行 | Agent Executor Port | Cursor、Codex、Claude Adapter 将各自流格式标准化。 |
+| Agent 执行 | Agent Executor Port | Cursor、Codex、Claude、OMP Adapter 将各自流格式标准化。 |
 | 实时日志 | SQLite `run_logs` + SSE | Runner 写入，运行面板增量读取。 |
 | Git | 本地命令适配器 | Agent 可按仓库规则提交本轮相关代码；Runner 只记录起止 HEAD。 |
 
@@ -204,9 +204,10 @@ V1 明确区分 Git isolation 与 OS sandbox：worktree 不限制进程访问绝
 cursor-agent --print --output-format stream-json --force <prompt> # 进程 cwd 为工作区根目录
 codex exec --json -C <workspace-root> <prompt>
 claude --print --output-format stream-json [--model <model>] <prompt>
+omp --mode json --no-session --approval-mode yolo # 完整 prompt 通过 stdin，进程 cwd 为工作区根目录
 ```
 
-每个流程 Agent 独立选择执行器和模型参数：选择 Codex 时显示模型和思考强度设置；选择 Claude 时显示可选模型输入，支持 CLI 别名或完整模型 ID，留空跟随 Claude 默认值；选择 Cursor 时隐藏模型参数。Runner 在每次派发时按 Agent 解析 Runtime，同一轮中的不同 Lane 可以使用不同 CLI。上下文对话和软件自维护等没有独立 Profile 的系统辅助 Agent 使用项目级系统 Runtime。Runner 直接解析各 CLI 的 stdout、stderr、工具事件和子过程，统一写入 `run_logs`，运行面板按层级显示：
+每个流程 Agent 独立选择执行器和模型参数：选择 Codex 时显示模型和思考强度设置；选择 Claude 时显示可选模型输入，支持 CLI 别名或完整模型 ID，留空跟随 Claude 默认值；选择 Oh My Pi 时显示模型和思考强度设置，留空或选择默认值时跟随 OMP 自身配置；选择 Cursor 时不显示模型参数。Runner 在每次派发时按 Agent 解析 Runtime，同一轮中的不同 Lane 可以使用不同 CLI。上下文对话和软件自维护等没有独立 Profile 的系统辅助 Agent 使用项目级系统 Runtime。Runner 直接解析各 CLI 的 stdout、stderr、工具事件和子过程，统一写入 `run_logs`，运行面板按层级显示：
 
 ```text
 Agent

@@ -16,14 +16,15 @@ const phase = (task: { item_type: string; current_subagent: string | null; analy
 
 export default async function Home() {
   const [tasks, pipeline] = await Promise.all([listTasks(), listPipeline()]);
-  const laneWaitingForAnswers = tasks.flatMap((task) => task.lanes.filter((lane) => lane.status === 'waiting_for_answers').map((lane) => ({ task, lane })));
+  const activeTasks = tasks.filter((task) => !task.is_paused);
+  const laneWaitingForAnswers = activeTasks.flatMap((task) => task.lanes.filter((lane) => lane.status === 'waiting_for_answers').map((lane) => ({ task, lane })));
   const requirementWaitingForAnswers = tasks
-    .filter((task) => task.run_state === 'waiting_for_answers'
+    .filter((task) => !task.is_paused && task.run_state === 'waiting_for_answers'
       && ['idea-context-agent', 'business-design-agent', 'backlog-agent'].includes(task.current_subagent || ''))
     .map((task) => ({ task, lane: null }));
   const waitingForAnswers = [...requirementWaitingForAnswers, ...laneWaitingForAnswers];
-  const waitingForRuntimeInput = tasks.flatMap((task) => task.lanes.filter((lane) => lane.status === 'waiting_for_runtime_input').map((lane) => ({ task, lane })));
-  const readyToClose = tasks.filter((task) => task.agile_status === 'ready_to_close');
+  const waitingForRuntimeInput = activeTasks.flatMap((task) => task.lanes.filter((lane) => lane.status === 'waiting_for_runtime_input').map((lane) => ({ task, lane })));
+  const readyToClose = activeTasks.filter((task) => task.agile_status === 'ready_to_close');
   const needsHuman = [
     ...waitingForAnswers.map((item) => ({ ...item, kind: 'answers' as const })),
     ...waitingForRuntimeInput.map((item) => ({ ...item, kind: 'runtime' as const })),
@@ -38,8 +39,9 @@ export default async function Home() {
       const blockedLane = task.lanes.find((lane) => lane.status === 'system_blocked');
       const requirementAnswers = task.run_state === 'waiting_for_answers'
         && ['idea-context-agent', 'business-design-agent', 'backlog-agent'].includes(task.current_subagent || '');
-      const needsAttention = requirementAnswers || runtimeLane || answerLane || blockedLane;
-      const label = requirementAnswers
+      const needsAttention = !task.is_paused && (requirementAnswers || runtimeLane || answerLane || blockedLane);
+      const label = task.is_paused ? '已暂停'
+        : requirementAnswers
         ? task.current_subagent === 'idea-context-agent' ? '等待需求意图确认'
           : task.current_subagent === 'business-design-agent' ? '等待业务方案决策'
             : '等待需求澄清'
@@ -47,6 +49,6 @@ export default async function Home() {
           : inBusinessAnalysis(task)
             ? task.agile_status === 'ready_to_close' ? '等待阅读需求规格' : task.current_subagent ? agentLabel(task.current_subagent).replace(' Agent', '') : statusLabel(task.agile_status)
             : statusLabel(task.agile_status);
-      return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}><span><strong>{task.title}</strong><small>{task.task_id} · 优先级 {requirementPriorityLabel(task.priority)}</small></span><span className={`badge ${task.agile_status === 'blocked' || needsAttention ? 'amber' : 'blue'}`}><CircleDot size={13}/>{label}</span><span>{phase(task)}</span><span>{terminologyText(task.next_step)}</span></Link>;
+      return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}><span><strong>{task.title}</strong><small>{task.task_id} · 优先级 {requirementPriorityLabel(task.priority)}</small></span><span className={`badge ${task.is_paused || task.agile_status === 'blocked' || needsAttention ? 'amber' : 'blue'}`}><CircleDot size={13}/>{label}</span><span>{task.is_paused ? `暂停推进 · ${task.paused_reason || '暂缓推进'}` : phase(task)}</span><span>{task.is_paused ? '恢复后从原步骤继续' : terminologyText(task.next_step)}</span></Link>;
     })}</div></section></>;
 }

@@ -15,6 +15,7 @@ export const AGENT_EXECUTOR_OPTIONS: ReadonlyArray<{
   { id: 'cursor', label: 'Cursor', description: '使用 Cursor Agent CLI 执行每个推进步骤。' },
   { id: 'codex', label: 'Codex', description: '使用 Codex CLI 的非交互 JSON 模式执行。' },
   { id: 'claude', label: 'Claude', description: '使用 Claude Code CLI 的流式 JSON 模式执行。' },
+  { id: 'omp', label: 'Oh My Pi', description: '使用 OMP CLI 的 JSON 模式，可覆盖模型与思考强度。' },
 ];
 
 const executorSchema = z.enum(AGENT_EXECUTORS);
@@ -29,9 +30,14 @@ export const CODEX_MODEL_OPTIONS = [
 export type CodexModel = typeof CODEX_MODEL_OPTIONS[number]['id'];
 export const DEFAULT_CODEX_MODEL: CodexModel = 'gpt-5.6-sol';
 export const DEFAULT_CLAUDE_MODEL = '';
+export const DEFAULT_OMP_MODEL = '';
+export const OMP_THINKING_LEVELS = ['default', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'auto'] as const;
+export type OmpThinkingLevel = typeof OMP_THINKING_LEVELS[number];
 const codexModelSchema = z.enum(CODEX_MODEL_OPTIONS.map((option) => option.id) as [CodexModel, ...CodexModel[]]);
 const codexReasoningEffortSchema = z.enum(CODEX_REASONING_EFFORTS);
 const claudeModelSchema = z.string().trim().max(200, 'Claude 模型名称不能超过 200 个字符').regex(/^[^\u0000-\u001f\u007f]*$/, 'Claude 模型名称包含无效控制字符');
+const ompModelSchema = z.string().trim().max(200, 'OMP 模型名称不能超过 200 个字符').regex(/^[^\u0000-\u001f\u007f]*$/, 'OMP 模型名称包含无效控制字符');
+const ompThinkingSchema = z.enum(OMP_THINKING_LEVELS);
 const langfuseSampleRateSchema = z.coerce.number().min(0, '采样率不能小于 0').max(1, '采样率不能大于 1');
 
 const LANGFUSE_SETTING_KEYS = [
@@ -49,6 +55,8 @@ export type AgentExecutorSettings = {
   codexReasoningEffort: CodexReasoningEffort;
   codexWebSearch: boolean;
   claudeModel: string;
+  ompModel: string;
+  ompThinking: OmpThinkingLevel;
 };
 
 export type AgentRuntimeSettings = AgentExecutorSettings & {
@@ -63,6 +71,8 @@ type AgentRuntimeSettingsRow = {
   codex_reasoning_effort: string;
   codex_web_search: number;
   claude_model: string;
+  omp_model: string;
+  omp_thinking: string;
 };
 
 export type LangfuseSettings = {
@@ -130,17 +140,21 @@ export async function getAgentExecutorId(): Promise<AgentExecutorId> {
 }
 
 export async function getAgentExecutorSettings(): Promise<AgentExecutorSettings> {
-  const settings = await readProjectSettings(['agent_executor', 'codex_model', 'codex_reasoning_effort', 'codex_web_search', 'claude_model']);
+  const settings = await readProjectSettings(['agent_executor', 'codex_model', 'codex_reasoning_effort', 'codex_web_search', 'claude_model', 'omp_model', 'omp_thinking']);
   const executor = executorSchema.safeParse(settings.agent_executor);
   const model = codexModelSchema.safeParse(settings.codex_model);
   const effort = codexReasoningEffortSchema.safeParse(settings.codex_reasoning_effort);
   const claudeModel = claudeModelSchema.safeParse(settings.claude_model ?? DEFAULT_CLAUDE_MODEL);
+  const ompModel = ompModelSchema.safeParse(settings.omp_model ?? DEFAULT_OMP_MODEL);
+  const ompThinking = ompThinkingSchema.safeParse(settings.omp_thinking ?? 'default');
   return {
     executorId: executor.success ? executor.data : 'cursor',
     codexModel: model.success ? model.data : DEFAULT_CODEX_MODEL,
     codexReasoningEffort: effort.success ? effort.data : 'default',
     codexWebSearch: settings.codex_web_search === undefined ? true : enabledFlag(settings.codex_web_search),
     claudeModel: claudeModel.success ? claudeModel.data : DEFAULT_CLAUDE_MODEL,
+    ompModel: ompModel.success ? ompModel.data : DEFAULT_OMP_MODEL,
+    ompThinking: ompThinking.success ? ompThinking.data : 'default',
   };
 }
 
@@ -149,6 +163,8 @@ function parseAgentRuntimeSettings(row: AgentRuntimeSettingsRow | undefined, age
   const model = codexModelSchema.safeParse(row?.codex_model);
   const effort = codexReasoningEffortSchema.safeParse(row?.codex_reasoning_effort);
   const claudeModel = claudeModelSchema.safeParse(row?.claude_model ?? fallback.claudeModel);
+  const ompModel = ompModelSchema.safeParse(row?.omp_model ?? fallback.ompModel);
+  const ompThinking = ompThinkingSchema.safeParse(row?.omp_thinking ?? fallback.ompThinking);
   return {
     agentId,
     executorId: executor.success ? executor.data : fallback.executorId,
@@ -156,6 +172,8 @@ function parseAgentRuntimeSettings(row: AgentRuntimeSettingsRow | undefined, age
     codexReasoningEffort: effort.success ? effort.data : fallback.codexReasoningEffort,
     codexWebSearch: row ? Boolean(row.codex_web_search) : fallback.codexWebSearch,
     claudeModel: claudeModel.success ? claudeModel.data : fallback.claudeModel,
+    ompModel: ompModel.success ? ompModel.data : fallback.ompModel,
+    ompThinking: ompThinking.success ? ompThinking.data : fallback.ompThinking,
     source: row ? 'agent_override' : 'project_default',
   };
 }
@@ -163,19 +181,23 @@ function parseAgentRuntimeSettings(row: AgentRuntimeSettingsRow | undefined, age
 export async function getFlowAgentDefaultRuntimeSettings(): Promise<AgentExecutorSettings> {
   const settings = await readProjectSettings([
     'flow_agent_executor', 'flow_codex_model', 'flow_codex_reasoning_effort',
-    'flow_codex_web_search', 'flow_claude_model',
+    'flow_codex_web_search', 'flow_claude_model', 'flow_omp_model', 'flow_omp_thinking',
   ]);
   const systemFallback = await getAgentExecutorSettings();
   const executor = executorSchema.safeParse(settings.flow_agent_executor);
   const model = codexModelSchema.safeParse(settings.flow_codex_model);
   const effort = codexReasoningEffortSchema.safeParse(settings.flow_codex_reasoning_effort);
   const claudeModel = claudeModelSchema.safeParse(settings.flow_claude_model ?? systemFallback.claudeModel);
+  const ompModel = ompModelSchema.safeParse(settings.flow_omp_model ?? systemFallback.ompModel);
+  const ompThinking = ompThinkingSchema.safeParse(settings.flow_omp_thinking ?? systemFallback.ompThinking);
   return {
     executorId: executor.success ? executor.data : systemFallback.executorId,
     codexModel: model.success ? model.data : systemFallback.codexModel,
     codexReasoningEffort: effort.success ? effort.data : systemFallback.codexReasoningEffort,
     codexWebSearch: settings.flow_codex_web_search === undefined ? true : enabledFlag(settings.flow_codex_web_search),
     claudeModel: claudeModel.success ? claudeModel.data : systemFallback.claudeModel,
+    ompModel: ompModel.success ? ompModel.data : systemFallback.ompModel,
+    ompThinking: ompThinking.success ? ompThinking.data : systemFallback.ompThinking,
   };
 }
 
@@ -193,7 +215,7 @@ export async function listAgentRuntimeSettings(): Promise<AgentRuntimeSettings[]
   return FLOW_AGENT_IDS.map((agentId) => parseAgentRuntimeSettings(byAgent.get(agentId), agentId, fallback));
 }
 
-export async function setAgentRuntimeSettings(agentIdInput: string, input: { inheritProjectDefault?: unknown; executorId?: unknown; codexModel?: unknown; codexReasoningEffort?: unknown; codexWebSearch?: unknown; claudeModel?: unknown }) {
+export async function setAgentRuntimeSettings(agentIdInput: string, input: { inheritProjectDefault?: unknown; executorId?: unknown; codexModel?: unknown; codexReasoningEffort?: unknown; codexWebSearch?: unknown; claudeModel?: unknown; ompModel?: unknown; ompThinking?: unknown }) {
   if (!isFlowAgentId(agentIdInput)) throw new Error(`未知 Agent：${agentIdInput}`);
   const inheritProjectDefault = input.inheritProjectDefault === true || input.inheritProjectDefault === 'on' || input.inheritProjectDefault === 'true';
   const db = await databaseConnection();
@@ -210,31 +232,38 @@ export async function setAgentRuntimeSettings(agentIdInput: string, input: { inh
   const codexReasoningEffort = codexReasoningEffortSchema.parse(input.codexReasoningEffort ?? 'default');
   const codexWebSearch = input.codexWebSearch === true || input.codexWebSearch === 'on' || input.codexWebSearch === 'true';
   const claudeModel = claudeModelSchema.parse(input.claudeModel ?? DEFAULT_CLAUDE_MODEL);
+  const ompModel = ompModelSchema.parse(input.ompModel ?? DEFAULT_OMP_MODEL);
+  const ompThinking = ompThinkingSchema.parse(input.ompThinking ?? 'default');
   db.prepare(`
     INSERT INTO agent_runtime_settings(
-      agent_id, executor_id, codex_model, codex_reasoning_effort, codex_web_search, claude_model
-    ) VALUES(?, ?, ?, ?, ?, ?)
+      agent_id, executor_id, codex_model, codex_reasoning_effort, codex_web_search, claude_model,
+      omp_model, omp_thinking
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(agent_id) DO UPDATE SET
       executor_id = excluded.executor_id,
       codex_model = excluded.codex_model,
       codex_reasoning_effort = excluded.codex_reasoning_effort,
       codex_web_search = excluded.codex_web_search,
       claude_model = excluded.claude_model,
+      omp_model = excluded.omp_model,
+      omp_thinking = excluded.omp_thinking,
       updated_at = CURRENT_TIMESTAMP
-  `).run(agentIdInput, executorId, codexModel, codexReasoningEffort, codexWebSearch ? 1 : 0, claudeModel);
+  `).run(agentIdInput, executorId, codexModel, codexReasoningEffort, codexWebSearch ? 1 : 0, claudeModel, ompModel, ompThinking);
   try {
     revalidatePath('/agents');
     revalidatePath(`/agents/${agentIdInput}`);
   } catch { /* CLI usage has no request context. */ }
-  return { agentId: agentIdInput, executorId, codexModel, codexReasoningEffort, codexWebSearch, claudeModel, source: 'agent_override' } satisfies AgentRuntimeSettings;
+  return { agentId: agentIdInput, executorId, codexModel, codexReasoningEffort, codexWebSearch, claudeModel, ompModel, ompThinking, source: 'agent_override' } satisfies AgentRuntimeSettings;
 }
 
-export async function setAgentExecutorSettings(input: { executorId: unknown; codexModel?: unknown; codexReasoningEffort?: unknown; codexWebSearch?: unknown; claudeModel?: unknown }) {
+export async function setAgentExecutorSettings(input: { executorId: unknown; codexModel?: unknown; codexReasoningEffort?: unknown; codexWebSearch?: unknown; claudeModel?: unknown; ompModel?: unknown; ompThinking?: unknown }) {
   const executorId = executorSchema.parse(input.executorId);
   const codexModel = codexModelSchema.parse(input.codexModel ?? DEFAULT_CODEX_MODEL);
   const codexReasoningEffort = codexReasoningEffortSchema.parse(input.codexReasoningEffort ?? 'default');
   const codexWebSearch = input.codexWebSearch === true || input.codexWebSearch === 'on' || input.codexWebSearch === 'true';
   const claudeModel = claudeModelSchema.parse(input.claudeModel ?? DEFAULT_CLAUDE_MODEL);
+  const ompModel = ompModelSchema.parse(input.ompModel ?? DEFAULT_OMP_MODEL);
+  const ompThinking = ompThinkingSchema.parse(input.ompThinking ?? 'default');
   const db = await databaseConnection();
   const upsert = db.prepare(`INSERT INTO project_settings(setting_key, setting_value) VALUES(?, ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP`);
   db.transaction(() => {
@@ -243,17 +272,21 @@ export async function setAgentExecutorSettings(input: { executorId: unknown; cod
     upsert.run('codex_reasoning_effort', codexReasoningEffort);
     upsert.run('codex_web_search', codexWebSearch ? 'true' : 'false');
     upsert.run('claude_model', claudeModel);
+    upsert.run('omp_model', ompModel);
+    upsert.run('omp_thinking', ompThinking);
   })();
   try { revalidatePath('/settings'); } catch { /* CLI usage has no request context. */ }
-  return { executorId, codexModel, codexReasoningEffort, codexWebSearch, claudeModel };
+  return { executorId, codexModel, codexReasoningEffort, codexWebSearch, claudeModel, ompModel, ompThinking };
 }
 
-export async function setFlowAgentDefaultRuntimeSettings(input: { executorId: unknown; codexModel?: unknown; codexReasoningEffort?: unknown; codexWebSearch?: unknown; claudeModel?: unknown }) {
+export async function setFlowAgentDefaultRuntimeSettings(input: { executorId: unknown; codexModel?: unknown; codexReasoningEffort?: unknown; codexWebSearch?: unknown; claudeModel?: unknown; ompModel?: unknown; ompThinking?: unknown }) {
   const executorId = executorSchema.parse(input.executorId);
   const codexModel = codexModelSchema.parse(input.codexModel ?? DEFAULT_CODEX_MODEL);
   const codexReasoningEffort = codexReasoningEffortSchema.parse(input.codexReasoningEffort ?? 'default');
   const codexWebSearch = input.codexWebSearch === true || input.codexWebSearch === 'on' || input.codexWebSearch === 'true';
   const claudeModel = claudeModelSchema.parse(input.claudeModel ?? DEFAULT_CLAUDE_MODEL);
+  const ompModel = ompModelSchema.parse(input.ompModel ?? DEFAULT_OMP_MODEL);
+  const ompThinking = ompThinkingSchema.parse(input.ompThinking ?? 'default');
   const db = await databaseConnection();
   const upsert = db.prepare(`INSERT INTO project_settings(setting_key, setting_value) VALUES(?, ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP`);
   db.transaction(() => {
@@ -262,12 +295,14 @@ export async function setFlowAgentDefaultRuntimeSettings(input: { executorId: un
     upsert.run('flow_codex_reasoning_effort', codexReasoningEffort);
     upsert.run('flow_codex_web_search', codexWebSearch ? 'true' : 'false');
     upsert.run('flow_claude_model', claudeModel);
+    upsert.run('flow_omp_model', ompModel);
+    upsert.run('flow_omp_thinking', ompThinking);
   })();
   try {
     revalidatePath('/settings');
     revalidatePath('/agents');
   } catch { /* CLI usage has no request context. */ }
-  return { executorId, codexModel, codexReasoningEffort, codexWebSearch, claudeModel } satisfies AgentExecutorSettings;
+  return { executorId, codexModel, codexReasoningEffort, codexWebSearch, claudeModel, ompModel, ompThinking } satisfies AgentExecutorSettings;
 }
 
 export async function setAgentExecutorId(input: unknown) {
@@ -282,6 +317,10 @@ export function agentExecutionOptions(settings: AgentExecutorSettings): AgentExe
     webSearch: settings.codexWebSearch || undefined,
   };
   if (settings.executorId === 'claude') return settings.claudeModel ? { model: settings.claudeModel } : {};
+  if (settings.executorId === 'omp') return {
+    model: settings.ompModel || undefined,
+    reasoningEffort: settings.ompThinking === 'default' ? undefined : settings.ompThinking,
+  };
   return {};
 }
 

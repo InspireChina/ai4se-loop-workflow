@@ -313,10 +313,12 @@ export async function beginExecutionAttempt(input: {
 export async function recoverNextExecutionAttempt() {
   const db = await databaseConnection();
   return db.prepare(`
-    SELECT * FROM execution_attempts
-    WHERE status IN ('output_received', 'verifying', 'applying')
-      AND result_json IS NOT NULL
-    ORDER BY created_at, execution_id
+    SELECT execution_attempts.* FROM execution_attempts
+    JOIN tasks ON tasks.task_id = execution_attempts.task_id
+    WHERE execution_attempts.status IN ('output_received', 'verifying', 'applying')
+      AND execution_attempts.result_json IS NOT NULL
+      AND tasks.is_paused = 0
+    ORDER BY execution_attempts.created_at, execution_attempts.execution_id
     LIMIT 1
   `).get() as ExecutionAttempt | undefined;
 }
@@ -326,7 +328,7 @@ export async function markExecutionOutput(executionId: string, result: unknown) 
   db.prepare(`
     UPDATE execution_attempts
     SET status = 'output_received', result_json = ?, heartbeat_at = CURRENT_TIMESTAMP
-    WHERE execution_id = ?
+    WHERE execution_id = ? AND status != 'cancelled'
   `).run(JSON.stringify(result), executionId);
 }
 
@@ -335,7 +337,7 @@ export async function markExecutionStage(executionId: string, status: 'verifying
   db.prepare(`
     UPDATE execution_attempts
     SET status = ?, heartbeat_at = CURRENT_TIMESTAMP
-    WHERE execution_id = ?
+    WHERE execution_id = ? AND status != 'cancelled'
   `).run(status, executionId);
 }
 
@@ -360,7 +362,7 @@ export async function completeExecution(executionId: string) {
   db.prepare(`
     UPDATE execution_attempts
     SET status = 'applied', finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
-    WHERE execution_id = ?
+    WHERE execution_id = ? AND status != 'cancelled'
   `).run(executionId);
   releaseExecutionResourceClaimsInDb(db, executionId);
 }
@@ -373,12 +375,13 @@ export async function releaseExecutionResources(executionId: string) {
 export async function executionCancellationRequested(executionId: string) {
   const db = await databaseConnection();
   const row = db.prepare(`
-    SELECT execution_attempts.status AS execution_status, tasks.agile_status AS task_status
+    SELECT execution_attempts.status AS execution_status, tasks.agile_status AS task_status,
+           tasks.is_paused AS task_is_paused
     FROM execution_attempts
     JOIN tasks ON tasks.task_id = execution_attempts.task_id
     WHERE execution_attempts.execution_id = ?
-  `).get(executionId) as { execution_status: ExecutionStatus; task_status: string } | undefined;
-  return !row || row.execution_status === 'cancelled' || row.task_status === 'cancelled';
+  `).get(executionId) as { execution_status: ExecutionStatus; task_status: string; task_is_paused: number } | undefined;
+  return !row || row.execution_status === 'cancelled' || row.task_status === 'cancelled' || Boolean(row.task_is_paused);
 }
 
 export async function cancelExecution(executionId: string, reason = '需求已取消') {

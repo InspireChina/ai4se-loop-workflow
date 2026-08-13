@@ -25,6 +25,8 @@ test('inherits the project flow runtime by default and preserves explicit agent 
       codexReasoningEffort: previous.codexReasoningEffort,
       codexWebSearch: previous.codexWebSearch,
       claudeModel: previous.claudeModel,
+      ompModel: previous.ompModel,
+      ompThinking: previous.ompThinking,
     });
   }
 
@@ -35,6 +37,8 @@ test('inherits the project flow runtime by default and preserves explicit agent 
       codexReasoningEffort: 'high',
       codexWebSearch: true,
       claudeModel: '',
+      ompModel: '',
+      ompThinking: 'default',
     });
     await setAgentRuntimeSettings('backlog-agent', { inheritProjectDefault: true });
     await setAgentRuntimeSettings('dev-agent', {
@@ -43,13 +47,17 @@ test('inherits the project flow runtime by default and preserves explicit agent 
       codexReasoningEffort: 'default',
       codexWebSearch: false,
       claudeModel: 'claude-sonnet-4-6',
+      ompModel: '',
+      ompThinking: 'default',
     });
     await setAgentRuntimeSettings('requirement-spec-agent', {
-      executorId: 'codex',
+      executorId: 'omp',
       codexModel: 'gpt-5.6-sol',
       codexReasoningEffort: 'xhigh',
       codexWebSearch: true,
       claudeModel: '',
+      ompModel: 'ollama/qwen3.6:35b',
+      ompThinking: 'high',
     });
 
     const backlog = await getAgentRuntimeSettings('backlog-agent');
@@ -60,6 +68,9 @@ test('inherits the project flow runtime by default and preserves explicit agent 
     assert.equal(dev.source, 'agent_override');
     assert.equal(dev.executorId, 'claude');
     assert.deepEqual(agentExecutionOptions(dev), { model: 'claude-sonnet-4-6' });
+    const spec = await getAgentRuntimeSettings('requirement-spec-agent');
+    assert.equal(spec.executorId, 'omp');
+    assert.deepEqual(agentExecutionOptions(spec), { model: 'ollama/qwen3.6:35b', reasoningEffort: 'high' });
 
     await setFlowAgentDefaultRuntimeSettings({
       executorId: 'cursor',
@@ -67,6 +78,8 @@ test('inherits the project flow runtime by default and preserves explicit agent 
       codexReasoningEffort: 'low',
       codexWebSearch: false,
       claudeModel: '',
+      ompModel: '',
+      ompThinking: 'default',
     });
     assert.equal((await getAgentRuntimeSettings('backlog-agent')).executorId, 'cursor');
     assert.equal((await getAgentRuntimeSettings('dev-agent')).executorId, 'claude');
@@ -83,7 +96,7 @@ test('inherits the project flow runtime by default and preserves explicit agent 
 test('persists an optional Claude model and maps it to execution options', async () => {
   const { agentExecutionOptions, getAgentExecutorSettings, setAgentExecutorSettings } = await import('./project-settings');
   const { databaseConnection } = await import('../infrastructure/database');
-  const keys = ['agent_executor', 'codex_model', 'codex_reasoning_effort', 'codex_web_search', 'claude_model'];
+  const keys = ['agent_executor', 'codex_model', 'codex_reasoning_effort', 'codex_web_search', 'claude_model', 'omp_model', 'omp_thinking'];
   const db = await databaseConnection();
   const placeholders = keys.map(() => '?').join(', ');
   const backup = db.prepare(`SELECT setting_key, setting_value FROM project_settings WHERE setting_key IN (${placeholders})`).all(...keys) as { setting_key: string; setting_value: string }[];
@@ -97,6 +110,8 @@ test('persists an optional Claude model and maps it to execution options', async
       codexReasoningEffort: 'default',
       codexWebSearch: true,
       claudeModel: 'claude-sonnet-4-6',
+      ompModel: '',
+      ompThinking: 'default',
     });
     const settings = await getAgentExecutorSettings();
     assert.equal(settings.claudeModel, 'claude-sonnet-4-6');

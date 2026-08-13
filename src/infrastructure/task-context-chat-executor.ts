@@ -22,6 +22,7 @@ type ProcessResult = { exitCode: number; stdout: string; stderr: string };
 export function taskContextChatPermissionArgs(executor: AgentExecutorId) {
   if (executor === 'cursor') return ['--force', '--trust'];
   if (executor === 'claude') return ['--dangerously-skip-permissions'];
+  if (executor === 'omp') return ['--approval-mode', 'yolo'];
   return ['--dangerously-bypass-approvals-and-sandbox'];
 }
 
@@ -114,6 +115,16 @@ function codexSessionId(stdout: string) {
   return '';
 }
 
+function ompSessionId(stdout: string) {
+  for (const line of stdout.split(/\r?\n/)) {
+    try {
+      const event = JSON.parse(line) as { type?: string; id?: string };
+      if (event.type === 'session' && event.id) return event.id;
+    } catch { /* ignore non-JSON diagnostics */ }
+  }
+  return '';
+}
+
 export async function runTaskContextChatTurn(input: ContextChatRun) {
   const firstTurn = !input.providerSessionId;
   const prompt = buildTaskContextChatPrompt(input.taskId, input.message, firstTurn);
@@ -151,6 +162,14 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
       ...(input.executionOptions.model ? ['--model', input.executionOptions.model] : []),
       ...(firstTurn ? ['--session-id', providerSessionId] : ['--resume', providerSessionId]),
     ], prompt, 10 * 60 * 1000, chatCommandEnv);
+  } else if (input.executor === 'omp') {
+    result = await runProcess(process.env.OMP_CLI || 'omp', [
+      '--mode', 'json', ...taskContextChatPermissionArgs('omp'),
+      ...(input.executionOptions.model ? ['--model', input.executionOptions.model] : []),
+      ...(input.executionOptions.reasoningEffort ? ['--thinking', input.executionOptions.reasoningEffort] : []),
+      ...(!firstTurn && providerSessionId ? ['--resume', providerSessionId] : []),
+    ], prompt, 10 * 60 * 1000, chatCommandEnv);
+    if (firstTurn) providerSessionId = ompSessionId(result.stdout);
   } else {
     const common = [
       '--json', ...taskContextChatPermissionArgs('codex'),

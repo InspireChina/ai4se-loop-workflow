@@ -63,7 +63,7 @@
 
 Application 必须在调用 CLI 前持久化输入快照，在收到结构化输出后先持久化输出，再执行状态推进。`agent-runner` 是恢复、结果消费、新派发和空队列等待的唯一调度入口。Loop Run 通过进程存活和短周期心跳识别异常退出，不给 execution 设置租约：恢复时优先继续已有输出；只有所属 Runner 已确认退出且 execution 尚无持久化输出时，才允许创建下一个 attempt。同一输入最多自动尝试三次。
 
-执行日志不由 Agent 主动上报。Agent Executor Adapter 直接解析 Cursor、Codex、Claude 的流式输出、工具调用、stderr 和退出码；Application 在命令成功后追加领域审计事件。
+执行日志不由 Agent 主动上报。Agent Executor Adapter 直接解析 Cursor、Codex、Claude、Oh My Pi 的流式输出、工具调用、stderr 和退出码；Application 在命令成功后追加领域审计事件。
 
 Loop 的等待策略属于编排规则：本轮有 Agent 执行时，1 分钟后继续；没有可执行步骤时，5 分钟后由 Dispatch Waiter 唤醒同一个 `agent-runner`。等待器不计算派发，也不产生额外 Agent 调用。
 

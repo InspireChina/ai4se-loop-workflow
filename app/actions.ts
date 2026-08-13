@@ -16,7 +16,9 @@ import {
   createTask,
   getRunStatus,
   initializeTaskContext,
+  pauseTask,
   releaseBlock,
+  resumeTask,
   reopenDocumentComment,
   setTaskPriority,
   submitClarificationAnswers,
@@ -103,6 +105,18 @@ export async function cancelTaskAction(formData: FormData) {
   redirect('/tasks');
 }
 
+export async function pauseTaskAction(formData: FormData) {
+  const taskId = String(formData.get('taskId'));
+  await pauseTask({ taskId, reason: String(formData.get('reason') || '').trim() || undefined });
+  redirect(`/tasks/${taskId}`);
+}
+
+export async function resumeTaskAction(formData: FormData) {
+  const taskId = String(formData.get('taskId'));
+  await resumeTask({ taskId });
+  redirect(`/tasks/${taskId}`);
+}
+
 export async function startLoopRunAction(formData?: FormData) {
   const runId = await beginRun('agent-runner');
   const redirectTo = String(formData?.get('redirectTo') || '/');
@@ -122,6 +136,8 @@ export async function saveAgentExecutorAction(formData: FormData) {
     codexReasoningEffort: formData.get('codexReasoningEffort'),
     codexWebSearch: formData.get('codexWebSearch'),
     claudeModel: formData.get('claudeModel'),
+    ompModel: formData.get('ompModel'),
+    ompThinking: formData.get('ompThinking'),
   });
   redirect('/settings');
 }
@@ -133,6 +149,8 @@ export async function saveFlowAgentDefaultRuntimeAction(formData: FormData) {
     codexReasoningEffort: formData.get('codexReasoningEffort'),
     codexWebSearch: formData.get('codexWebSearch'),
     claudeModel: formData.get('claudeModel'),
+    ompModel: formData.get('ompModel'),
+    ompThinking: formData.get('ompThinking'),
   });
   redirect('/settings');
 }
@@ -152,6 +170,8 @@ export async function saveAgentRuntimeAction(formData: FormData) {
     codexReasoningEffort: formData.get('codexReasoningEffort'),
     codexWebSearch: formData.get('codexWebSearch'),
     claudeModel: formData.get('claudeModel'),
+    ompModel: formData.get('ompModel'),
+    ompThinking: formData.get('ompThinking'),
   });
   redirectToAgentSection(agentId, formData.get('section'));
 }

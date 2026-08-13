@@ -70,6 +70,9 @@ export type Task = TaskState & {
   owner: string | null;
   evidence: string | null;
   risk: string | null;
+  is_paused: number;
+  paused_reason: string | null;
+  paused_at: string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -275,7 +278,8 @@ const taskSelect = `
          total_stories, spec_resolved_index, resume_status,
          resume_pending, next_step, blocked_reason, run_state, closure_status,
          review_revision, review_document_id, closure_acknowledged_at,
-         last_actor, owner, evidence, risk, created_at, updated_at, completed_at
+         last_actor, owner, evidence, risk, is_paused, paused_reason, paused_at,
+         created_at, updated_at, completed_at
   FROM tasks
 `;
 
@@ -1930,7 +1934,58 @@ export async function cancelTask(input: unknown) {
   refreshPages('/', `/tasks/${value.taskId}`);
 }
 
+const pauseTaskSchema = z.object({
+  taskId: z.string().min(1),
+  reason: z.string().trim().max(500).optional(),
+});
+
+export async function pauseTask(input: unknown) {
+  const value = pauseTaskSchema.parse(input);
+  const db = await databaseConnection();
+  const task = fetchTask(db, value.taskId);
+  if (!task) throw new Error('需求不存在');
+  if (['done', 'cancelled'].includes(task.agile_status)) throw new Error('已结束需求不能暂停');
+  if (task.is_paused) return;
+  const reason = value.reason || '暂缓推进';
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE tasks
+      SET is_paused = 1, paused_reason = ?, paused_at = CURRENT_TIMESTAMP,
+          last_actor = 'human', updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ?
+    `).run(reason, value.taskId);
+    db.prepare(`
+      UPDATE execution_attempts
+      SET status = 'cancelled', last_error = '需求已暂停',
+          finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
+      WHERE task_id = ? AND status IN ('planned', 'running')
+    `).run(value.taskId);
+    addEvent(db, value.taskId, 'human', 'TaskPaused', `暂停推进：${reason}`);
+  })();
+  refreshPages('/', '/tasks', `/tasks/${value.taskId}`);
+}
+
+export async function resumeTask(input: unknown) {
+  const { taskId } = z.object({ taskId: z.string().min(1) }).parse(input);
+  const db = await databaseConnection();
+  const task = fetchTask(db, taskId);
+  if (!task) throw new Error('需求不存在');
+  if (!task.is_paused) return;
+  if (['done', 'cancelled'].includes(task.agile_status)) throw new Error('已结束需求不能恢复推进');
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE tasks
+      SET is_paused = 0, paused_reason = NULL, paused_at = NULL,
+          last_actor = 'human', updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ?
+    `).run(taskId);
+    addEvent(db, taskId, 'human', 'TaskResumed', '恢复推进，等待重新调度');
+  })();
+  refreshPages('/', '/tasks', `/tasks/${taskId}`);
+}
+
 function feedbackCanDispatch(task: Task, lanes: TaskLane[]) {
+  if (task.is_paused) return false;
   if (task.agile_status === 'blocked') return false;
   if (!['runnable', 'idle'].includes(task.run_state)) return false;
   return !lanes.some((lane) => lane.resume_pending || ['waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked'].includes(lane.status));
@@ -2103,6 +2158,7 @@ export async function pipelineForTask(taskId: string): Promise<Delegation[]> {
   const db = await databaseConnection();
   const task = fetchTask(db, taskId);
   if (!task) throw new Error('需求不存在');
+  if (task.is_paused) return [];
   refreshTaskLaneStatesInDb(db, task);
   const allActive = activeLaneExecutions(db);
   const active = allActive.filter((item) => item.task_id === taskId);
@@ -2134,7 +2190,7 @@ export async function pipelineAll(): Promise<Delegation[]> {
 export async function markDelegationLaneRunning(delegation: DelegationEnvelope, executionId?: string) {
   const db = await databaseConnection();
   const task = fetchTask(db, delegation.taskId);
-  if (!task || task.agile_status === 'cancelled' || task.agile_status === 'done') return;
+  if (!task || task.is_paused || task.agile_status === 'cancelled' || task.agile_status === 'done') return false;
   db.transaction(() => {
     acquireResourceClaimsInDb(db, {
       resourceKeys: delegation.resources,
@@ -2153,6 +2209,7 @@ export async function markDelegationLaneRunning(delegation: DelegationEnvelope, 
     }
   })();
   refreshPages('/', `/tasks/${delegation.taskId}`);
+  return true;
 }
 
 export async function settleDelegationLane(delegation: DelegationEnvelope) {
@@ -2260,7 +2317,7 @@ export async function pipelineAllEnvelopes(options: {
   locallyActive?: LocallyActiveDelegation[];
 } = {}): Promise<DelegationEnvelope[]> {
   const db = await databaseConnection();
-  const tasks = db.prepare(`${taskSelect} WHERE agile_status NOT IN ('done', 'cancelled')`).all() as Task[];
+  const tasks = db.prepare(`${taskSelect} WHERE agile_status NOT IN ('done', 'cancelled') AND is_paused = 0`).all() as Task[];
   tasks.sort(compareDispatchTasks);
   const active = activeLaneExecutions(db);
   const activeKeys = new Set(active.map((item) => `${item.task_id}:${item.lane}`));

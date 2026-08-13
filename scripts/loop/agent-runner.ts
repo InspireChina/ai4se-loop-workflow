@@ -49,7 +49,7 @@ import { AgentResultContractError, parseAgentResult } from '../../src/domain/age
 import { agentCommandPrompt } from '../../src/domain/agent-command-profile';
 import { resourcesForAgent } from '../../src/domain/resource';
 import { agentLabel, deliveryUnitLabel } from '../../src/domain/terminology';
-import { getAgentExecutor, type AgentExecutor, type AgentToolClass } from '../../src/infrastructure/agent-executor';
+import { getAgentExecutor, type AgentExecutionOptions, type AgentExecutor, type AgentToolClass } from '../../src/infrastructure/agent-executor';
 import { executeDelegation } from '../../src/infrastructure/delegation-execution';
 import {
   createAgentExecutionTempDirectory,
@@ -294,7 +294,7 @@ async function runDelegation(
   executionId: string,
   commandToken: string,
   executor: AgentExecutor,
-  executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'; webSearch?: boolean },
+  executionOptions: AgentExecutionOptions,
 ) {
   const { maxRuntimeMs, idleTimeoutMs } = resolveAgentExecutionLimits(process.env);
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
@@ -356,12 +356,12 @@ async function runDelegation(
 async function processDurableResult(attempt: ExecutionAttempt, delegation: DelegationEnvelope, result: ReturnType<typeof parseAgentResult>) {
   let codeCommit = attempt.code_commit || '';
   const current = await getTask(delegation.taskId);
-  if (!current || ['done', 'cancelled'].includes(current.task.agile_status)) {
+  if (!current || current.task.is_paused || ['done', 'cancelled'].includes(current.task.agile_status)) {
     await markExecutionStage(attempt.execution_id, 'applying');
     const outcome = await applyAgentResult(runId, delegation, result, { codeCommit, executionId: attempt.execution_id });
     await recordExecutionReceipt(attempt.execution_id, 'application', outcome, { outcome, terminalTask: true });
     await completeExecution(attempt.execution_id);
-    await appendLoopRunLog(runId, `[运行] ${agentLabel(delegation.agent)} 返回时需求已结束，结果仅保留为证据，不再应用`);
+    await appendLoopRunLog(runId, `[运行] ${agentLabel(delegation.agent)} 返回时需求已结束或暂停，结果仅保留为证据，不再应用`);
     return { outcome };
   }
   if (shouldRecordDevCodeCommit(delegation.agent, result) && !codeCommit) {
@@ -393,7 +393,7 @@ async function processDurableResult(attempt: ExecutionAttempt, delegation: Deleg
 async function runEvolutionEvaluator(
   evidence: EvolutionEvidence,
   executor: AgentExecutor,
-  executionOptions: { model?: string; reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'; webSearch?: boolean },
+  executionOptions: AgentExecutionOptions,
 ) {
   const evolution = await beginEvolutionRun(evidence);
   if (!evolution?.prompt || !evolution.evaluatorDirectory) return;
@@ -456,8 +456,8 @@ async function executeDelegationStep(
 ) {
   if (!(await isRunActive())) return;
   const task = await getTask(delegation.taskId);
-  if (!task || task.task.agile_status === 'cancelled') {
-    await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 已取消，跳过尚未启动的 ${agentLabel(delegation.agent)}`);
+  if (!task || task.task.agile_status === 'cancelled' || task.task.is_paused) {
+    await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 已取消或暂停，跳过尚未启动的 ${agentLabel(delegation.agent)}`);
     return;
   }
   await appendLoopRunLog(runId, `[运行] 执行任务级 Agent：requirement=${delegation.taskId} agent=${delegation.agent}`);
@@ -492,8 +492,10 @@ async function executeDelegationStep(
     attempt = durable.attempt;
     await appendLoopRunLog(runId, `[上下文] requirement=${delegation.taskId} execution=${durable.attempt.execution_id} snapshot=${builtPrompt.contextSnapshot.snapshotId} resources=${builtPrompt.contextSnapshot.resourceCount} startup_index=${builtPrompt.contextSnapshot.startupIndex.length}`);
     if (await executionCancellationRequested(durable.attempt.execution_id)) {
-      await cancelExecution(durable.attempt.execution_id);
-      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 已取消，跳过尚未启动的 ${agentLabel(delegation.agent)}，执行资源已释放`);
+      const currentTask = await getTask(delegation.taskId);
+      const paused = Boolean(currentTask?.task.is_paused);
+      await cancelExecution(durable.attempt.execution_id, paused ? '需求已暂停' : '需求已取消');
+      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 已${paused ? '暂停' : '取消'}，跳过尚未启动的 ${agentLabel(delegation.agent)}，执行资源已释放`);
       return;
     }
     if (durable.recovered && durable.attempt.status === 'applied') {
@@ -516,7 +518,14 @@ async function executeDelegationStep(
       return;
     }
     try {
-      await markDelegationLaneRunning(delegation, durable.attempt.execution_id);
+      const laneStarted = await markDelegationLaneRunning(delegation, durable.attempt.execution_id);
+      if (!laneStarted) {
+        const currentTask = await getTask(delegation.taskId);
+        const paused = Boolean(currentTask?.task.is_paused);
+        await cancelExecution(durable.attempt.execution_id, paused ? '需求已暂停' : '需求已结束');
+        await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 在启动前已${paused ? '暂停' : '结束'}，执行资源已释放`);
+        return;
+      }
     } catch (error) {
       if (error instanceof ResourceBusyError) {
         await failExecution(durable.attempt.execution_id, error.message, false);
@@ -541,8 +550,10 @@ async function executeDelegationStep(
     );
     await releaseExecutionResources(durable.attempt.execution_id);
     if (execution.cancelled) {
-      await cancelExecution(durable.attempt.execution_id);
-      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 已随需求取消，执行资源已释放`);
+      const currentTask = await getTask(delegation.taskId);
+      const paused = Boolean(currentTask?.task.is_paused);
+      await cancelExecution(durable.attempt.execution_id, paused ? '需求已暂停' : '需求已取消');
+      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 已随需求${paused ? '暂停' : '取消'}，执行资源已释放`);
       return;
     }
     if (execution.evidencePersistenceError) {

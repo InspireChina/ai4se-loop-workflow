@@ -49,7 +49,9 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
           const timeValue = task.completed_at ?? task.updated_at;
           const waitingForRequirementAnswers = !completedView && task.run_state === 'waiting_for_answers'
             && ['idea-context-agent', 'business-design-agent', 'backlog-agent'].includes(task.current_subagent || '');
-          const laneSummary = completedView ? '' : waitingForRequirementAnswers
+          const laneSummary = completedView ? '' : task.is_paused
+            ? `暂停推进${task.paused_reason ? ` · ${task.paused_reason}` : ''}`
+            : waitingForRequirementAnswers
             ? `${agentLabel(task.current_subagent)}（等待用户回答）`
             : businessAnalysisActive
               ? task.current_subagent ? agentLabel(task.current_subagent) : '等待用户阅读需求规格'
@@ -59,12 +61,12 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
               : task.current_subagent ? agentLabel(task.current_subagent).replace(' Agent', '')
                 : task.agile_status === 'backlog' ? '等待需求意图确认' : statusLabel(task.agile_status)
             : null;
-          const displayStatus = waitingForRequirementAnswers ? '等待需求确认' : businessAnalysisStatus || statusLabel(task.agile_status);
+          const displayStatus = task.is_paused ? '已暂停' : waitingForRequirementAnswers ? '等待需求确认' : businessAnalysisStatus || statusLabel(task.agile_status);
 
           return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}>
             <span><strong>{task.title}</strong><small>{task.task_id} · 优先级 {requirementPriorityLabel(task.priority)}</small></span>
             <span>{itemTypeLabel(task.item_type)}</span>
-            <span className={`badge ${task.agile_status === 'done' ? 'green' : waitingForRequirementAnswers ? 'amber' : 'blue'}`}>{displayStatus}</span>
+            <span className={`badge ${task.agile_status === 'done' ? 'green' : task.is_paused || waitingForRequirementAnswers ? 'amber' : 'blue'}`}>{displayStatus}</span>
             <span>{completedView ? <><small>{timeLabel}</small><br />{formatEventTime(timeValue)}</> : laneSummary}</span>
           </Link>;
         })}

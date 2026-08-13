@@ -20,6 +20,8 @@ export default async function AgentsPage() {
           ? CODEX_MODEL_OPTIONS.find((option) => option.id === runtime.codexModel)?.label || runtime.codexModel
           : runtime?.executorId === 'claude'
             ? runtime.claudeModel || 'CLI 默认'
+            : runtime?.executorId === 'omp'
+              ? `${runtime.ompModel || 'OMP 默认'} · ${runtime.ompThinking === 'default' ? '默认思考强度' : runtime.ompThinking}`
             : 'CLI 默认';
         const runtimeLabel = `${executorLabel} · ${modelLabel} · ${runtime?.source === 'agent_override' ? '独立' : '项目默认'}`;
         return <Link href={`/agents/${profile.agent_id}`} className="card agent-card" key={profile.agent_id}>

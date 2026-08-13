@@ -417,6 +417,7 @@ test('extracts final assistant text from every executor stream', () => {
   assert.equal(extractAgentFinalText('cursor', JSON.stringify({ type: 'result', subtype: 'success', result })), result);
   assert.equal(extractAgentFinalText('cursor', JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: result }] } })), result);
   assert.equal(extractAgentFinalText('claude', JSON.stringify({ type: 'result', is_error: false, result })), result);
+  assert.equal(extractAgentFinalText('omp', JSON.stringify({ type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: result }] } })), result);
   assert.equal(extractAgentFinalText('codex', JSON.stringify({ type: 'item.completed', item: { type: 'reasoning', text: 'thinking' } })), null);
 });
 
@@ -446,6 +447,10 @@ test('captures aggregate Codex and Claude run metrics without inventing zero usa
   const claude = createAgentRunMetricsAccumulator('claude');
   claude.ingest(JSON.stringify({ type: 'result', total_cost_usd: 0.12, duration_ms: 900, modelUsage: { 'claude-test': { inputTokens: 5, outputTokens: 2 } } }));
   assert.deepEqual(claude.value(), { model: 'claude-test', usage: { modelUsage: { 'claude-test': { inputTokens: 5, outputTokens: 2 } } }, totalCostUsd: 0.12, durationMs: 900 });
+
+  const omp = createAgentRunMetricsAccumulator('omp');
+  omp.ingest(JSON.stringify({ type: 'message_end', message: { role: 'assistant', model: 'anthropic/claude-test', usage: { input: 7, output: 3 } } }));
+  assert.deepEqual(omp.value(), { model: 'anthropic/claude-test', usage: { input: 7, output: 3 } });
 
   assert.deepEqual(createAgentRunMetricsAccumulator('cursor').value(), {});
 });
@@ -480,6 +485,38 @@ test('passes the configured Claude model as an explicit CLI override', () => {
   assert.equal(executor.buildArgs('prompt', '/workspace').includes('--model'), false);
   assert.equal(executor.buildArgs('prompt', '/workspace').includes('prompt'), false);
   assert.equal(executor.promptMode, 'stdin');
+});
+
+test('runs Oh My Pi as an ephemeral auto-approved JSON stream using stdin', () => {
+  const executor = getAgentExecutor('omp');
+  assert.equal(executor.command, process.env.OMP_CLI || 'omp');
+  assert.deepEqual(executor.buildArgs('prompt', '/workspace'), ['--mode', 'json', '--no-session', '--approval-mode', 'yolo']);
+  assert.deepEqual(executor.buildArgs('prompt', '/workspace', { model: 'ollama/qwen3.6:35b', reasoningEffort: 'high' }), [
+    '--mode', 'json', '--no-session', '--approval-mode', 'yolo',
+    '--model', 'ollama/qwen3.6:35b', '--thinking', 'high',
+  ]);
+  assert.match(executor.formatCommand('/workspace'), /^omp --mode json --no-session --approval-mode yolo/);
+  assert.match(executor.formatCommand('/workspace', { model: 'opus', reasoningEffort: 'xhigh' }), /--model opus --thinking xhigh/);
+  assert.equal(executor.promptMode, 'stdin');
+});
+
+test('normalizes Oh My Pi tool lifecycle events', () => {
+  const context = { agent: 'dev-agent', taskId: 'REQ-OMP', storyIndex: 1, pipeline: 'development' };
+  const started = parseAgentTelemetryStdout('omp', JSON.stringify({
+    type: 'tool_execution_start', toolCallId: 'omp-tool-1', toolName: 'bash', args: { command: 'npm test' },
+  }));
+  const completed = parseAgentTelemetryStdout('omp', JSON.stringify({
+    type: 'tool_execution_end', toolCallId: 'omp-tool-1', toolName: 'bash', result: { content: [{ type: 'text', text: 'ok' }], details: {} }, isError: false,
+  }));
+  assert.deepEqual(started && { phase: started.phase, tool: started.tool, toolClass: started.toolClass, toolCallId: started.toolCallId }, {
+    phase: 'started', tool: 'bash', toolClass: 'shell', toolCallId: 'omp-tool-1',
+  });
+  assert.deepEqual(completed && { phase: completed.phase, success: completed.success, exitCode: completed.exitCode }, {
+    phase: 'completed', success: true, exitCode: null,
+  });
+  assert.match(getAgentExecutor('omp').parseStdout(JSON.stringify({
+    type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
+  }), context) || '', /executor=omp.*done/);
 });
 
 test('uses the native Cursor Agent wrapper outside Windows with the workspace supplied as cwd', { skip: process.platform === 'win32' }, () => {

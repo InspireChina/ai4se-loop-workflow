@@ -87,11 +87,11 @@ LoopWork 只在以下情况请求人介入：
 | Human-gated L4 Delivery | 设计阶段：Agent 监测线上环境，生产操作由人确认 |
 | L4 End-to-End | 设计阶段：客户需求 → BA → 工程交付 → 业务结果 |
 
-当前实现采用 Next.js、SQLite 和本地 Runner。它支持 Cursor、Codex 和 Claude CLI，但尚未证明大规模并发能力；Worktree 提供 Git 隔离，不等同于 OS 级安全沙箱。
+当前实现采用 Next.js、SQLite 和本地 Runner。它支持 Cursor、Codex、Claude 和 Oh My Pi CLI，但尚未证明大规模并发能力；Worktree 提供 Git 隔离，不等同于 OS 级安全沙箱。
 
 ## 快速开始
 
-要求 Node.js 环境，并预先安装至少一种可用的 Agent CLI：Cursor、Codex 或 Claude。
+要求 Node.js 环境，并预先安装至少一种可用的 Agent CLI：Cursor、Codex、Claude 或 Oh My Pi。选择 Oh My Pi 时，LoopWork 调用本机 `omp` 的一次性 JSON 模式；模型和思考强度可以在 Runtime 设置中覆盖，留空时沿用 OMP 的默认配置。可通过 `OMP_CLI` 覆盖可执行文件路径。
 
 ```bash
 npm install
@@ -145,7 +145,7 @@ npm run desktop:dist:win
 3. 在页面底部按系统下载 `LoopWork-windows-x64-*`、`LoopWork-macos-arm64-*` 或 `LoopWork-macos-x64-*`。
 4. 每个 Artifact 都附带按平台命名的 `SHA256SUMS-<platform>.txt`。Windows 下载后运行带 `Setup` 的 EXE 安装。
 
-也可以在 Actions 页面点击 **Run workflow** 随时手动构建。推送版本标签（例如 `v0.1.3`）会在所有平台构建成功后自动创建 GitHub Release，并上传 Windows 安装版 EXE、两个架构的 macOS DMG、两个自动升级 ZIP、更新清单和统一校验文件。安装后的应用可在“关于”页检查、下载并重启安装新版本。GitHub 会为标签自动附带无法隐藏的 Source code ZIP / tar.gz。当前 Windows 和 macOS 产物没有代码签名，安装时可能显示未知发布者或无法验证开发者，并可能阻止自动安装；正式公开分发前需要配置平台签名证书。
+也可以在 Actions 页面点击 **Run workflow** 随时手动构建。推送版本标签（例如 `v0.1.4`）会在所有平台构建成功后自动创建 GitHub Release，并上传 Windows 安装版 EXE、两个架构的 macOS DMG、两个自动升级 ZIP、更新清单和统一校验文件。安装后的应用可在“关于”页检查、下载并重启安装新版本。GitHub 会为标签自动附带无法隐藏的 Source code ZIP / tar.gz。当前 Windows 和 macOS 产物没有代码签名，安装时可能显示未知发布者或无法验证开发者，并可能阻止自动安装；正式公开分发前需要配置平台签名证书。
 
 ## 技术文档
 

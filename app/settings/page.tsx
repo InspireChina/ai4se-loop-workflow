@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { paths } from '../../src/infrastructure/database';
 import { Activity, ArrowRight, Bot, Check } from 'lucide-react';
-import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, getAgentExecutorSettings, getFlowAgentDefaultRuntimeSettings, getLangfuseSettings } from '../../src/application/project-settings';
+import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, OMP_THINKING_LEVELS, getAgentExecutorSettings, getFlowAgentDefaultRuntimeSettings, getLangfuseSettings } from '../../src/application/project-settings';
 import { changeWorkspaceRootAction, saveAgentExecutorAction, saveFlowAgentDefaultRuntimeAction, saveLangfuseSettingsAction } from '../actions';
 
 export const dynamic = 'force-dynamic';
@@ -20,7 +20,7 @@ export default async function SettingsPage() {
       <div className="workspace-switch"><label>工作区根目录<input name="workspaceRoot" required defaultValue={paths.root} spellCheck={false}/></label><button className="button" type="submit">切换项目</button></div>
     </form>
     <form action={saveFlowAgentDefaultRuntimeAction} className="card settings">
-      <div className="settings-section-head"><span className="executor-icon"><Bot size={18}/></span><div><strong>流程 Agent Runtime · 项目默认</strong><p className="muted settings-description">所有选择“跟随项目默认”的流程 Agent 会立即继承这里的 CLI、模型、思考强度和网页搜索设置。</p></div><Link className="button secondary" href="/agents">Agent 独立配置 <ArrowRight size={14}/></Link></div>
+      <div className="settings-section-head"><span className="executor-icon"><Bot size={18}/></span><div><strong>流程 Agent Runtime · 项目默认</strong><p className="muted settings-description">所有选择“跟随项目默认”的流程 Agent 会立即继承这里的执行器及对应参数。</p></div><Link className="button secondary" href="/agents">Agent 独立配置 <ArrowRight size={14}/></Link></div>
       <fieldset className="executor-settings">
         <legend>默认执行器</legend>
         <div className="executor-options">
@@ -51,6 +51,15 @@ export default async function SettingsPage() {
       <fieldset className="claude-settings">
         <legend>默认 Claude 执行参数</legend>
         <div className="fields"><label>模型<input name="claudeModel" defaultValue={flowDefaults.claudeModel} placeholder="例如 sonnet、opus 或完整模型 ID" spellCheck={false}/><small className="muted">留空时跟随 Claude CLI 默认模型。</small></label></div>
+      </fieldset>
+      <fieldset className="omp-settings">
+        <legend>默认 Oh My Pi 执行参数</legend>
+        <p className="muted">仅在选择 Oh My Pi 时生效；模型留空则使用 OMP 的默认模型配置。</p>
+        <div className="fields">
+          <label>模型<input name="ompModel" defaultValue={flowDefaults.ompModel} placeholder="例如 ollama/qwen3.6:35b、opus" spellCheck={false}/><small className="muted">支持 OMP 的模糊模型名或完整 provider/model。</small></label>
+          <label>思考强度<select name="ompThinking" defaultValue={flowDefaults.ompThinking}>{OMP_THINKING_LEVELS.map((level) => <option value={level} key={level}>{level === 'default' ? '跟随 OMP 默认值' : level}</option>)}</select></label>
+        </div>
+        <small>运行方式：<code>--mode json --no-session --approval-mode yolo</code>。</small>
       </fieldset>
       <button className="button" type="submit">保存流程 Agent 默认 Runtime</button>
     </form>
@@ -95,6 +104,15 @@ export default async function SettingsPage() {
             <small className="muted">留空时跟随 Claude CLI 的默认模型。</small>
           </label>
         </div>
+      </fieldset>
+      <fieldset className="omp-settings">
+        <legend>Oh My Pi 执行参数</legend>
+        <p className="muted">仅在选择 Oh My Pi 时生效。模型留空时使用 OMP 自己的默认模型配置。</p>
+        <div className="fields">
+          <label>模型<input name="ompModel" defaultValue={settings.ompModel} placeholder="例如 ollama/qwen3.6:35b、opus" spellCheck={false}/><small className="muted">支持 OMP 的模糊模型名或完整 provider/model。</small></label>
+          <label>思考强度<select name="ompThinking" defaultValue={settings.ompThinking}>{OMP_THINKING_LEVELS.map((level) => <option value={level} key={level}>{level === 'default' ? '跟随 OMP 默认值' : level}</option>)}</select></label>
+        </div>
+        <small>通过 <code>--approval-mode yolo</code> 自动批准工具；执行任务使用一次性会话，上下文对话会继续原会话。</small>
       </fieldset>
       <button className="button" type="submit">保存系统 Runtime</button>
     </form>

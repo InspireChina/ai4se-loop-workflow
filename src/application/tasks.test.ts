@@ -1203,6 +1203,49 @@ test('cancels an active Dev requirement and automatically releases both of its r
   assert.equal((await pipelineAllEnvelopes()).some((item) => item.taskId === taskId), false);
 });
 
+test('pauses one requirement without changing its workflow state and resumes it from the same step', async () => {
+  const { beginExecutionAttempt, executionCancellationRequested } = await import('./executions');
+  const { createTask, getTask, pauseTask, pipelineAllEnvelopes, pipelineForTask, resumeTask } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+
+  const taskId = await createTask({ title: 'Pause until the next planning window' });
+  const delegation = (await pipelineAllEnvelopes()).find((item) => item.taskId === taskId);
+  assert.ok(delegation);
+  const execution = await beginExecutionAttempt({
+    runId: 'run-pause-requirement',
+    delegation,
+    prompt: 'This execution should stop when its requirement is paused.',
+  });
+
+  await pauseTask({ taskId, reason: '等待下周排期' });
+
+  let detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'backlog');
+  assert.equal(detail?.task.is_paused, 1);
+  assert.equal(detail?.task.paused_reason, '等待下周排期');
+  assert.ok(detail?.task.paused_at);
+  assert.deepEqual(await pipelineForTask(taskId), []);
+  assert.equal((await pipelineAllEnvelopes()).some((item) => item.taskId === taskId), false);
+  assert.equal(await executionCancellationRequested(execution.attempt.execution_id), true);
+  const pausedExecution = db.prepare('SELECT status, last_error FROM execution_attempts WHERE execution_id = ?').get(execution.attempt.execution_id) as { status: string; last_error: string };
+  assert.deepEqual(pausedExecution, { status: 'cancelled', last_error: '需求已暂停' });
+
+  await resumeTask({ taskId });
+
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.agile_status, 'backlog');
+  assert.equal(detail?.task.is_paused, 0);
+  assert.equal(detail?.task.paused_reason, null);
+  assert.equal(detail?.task.paused_at, null);
+  assert.equal((await pipelineAllEnvelopes()).some((item) => item.taskId === taskId), true);
+  assert.equal(await executionCancellationRequested(execution.attempt.execution_id), true);
+  assert.deepEqual(detail?.events.slice(0, 2).map((event) => event.event_type), ['TaskResumed', 'TaskPaused']);
+});
+
 test('isolates feedback scheduling per task and emits one concurrent delegation for each task queue', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { addDocumentComment, createTask, pipelineAllEnvelopes, upsertDocument } = await import('./tasks');
