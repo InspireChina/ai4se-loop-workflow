@@ -35,16 +35,14 @@ import {
   shouldRecordDevCodeCommit,
   type ExecutionAttempt,
 } from '../../src/application/executions';
-import { appendLoopRunLog, CodeSlotBusyError, endRun, getRunStatus, getTask, getTaskContext, reconcileStaleTaskLanes, recordRuntimeEventWithFallback, settleDelegationLane, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
+import { appendLoopRunLog, CodeSlotBusyError, endRun, getRunStatus, getTask, getTaskContext, reconcileStaleTaskLanes, recordRuntimeEventWithFallback, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
 import { progressDispatcher, type ReservedExecution } from '../../src/application/progress-dispatch';
-import { laneForAgent } from '../../src/application/task-lanes';
 import {
   listRecoveryItemsForStage,
   recoveryStageForAgent,
 } from '../../src/application/recovery-items';
 import { AgentResultContractError, parseAgentResult } from '../../src/domain/agent-result';
 import { agentCommandPrompt } from '../../src/domain/agent-command-profile';
-import { resourcesForAgent } from '../../src/domain/resource';
 import { agentLabel, deliveryUnitLabel } from '../../src/domain/terminology';
 import { getAgentExecutor, type AgentExecutionOptions, type AgentExecutor, type AgentToolClass } from '../../src/infrastructure/agent-executor';
 import { executeDelegation } from '../../src/infrastructure/delegation-execution';
@@ -602,14 +600,6 @@ async function executeDelegationStep(
   }
 }
 
-function normalizeDelegation(delegation: DelegationEnvelope) {
-  return {
-    ...delegation,
-    lane: delegation.lane || laneForAgent(delegation.agent),
-    resources: Array.isArray(delegation.resources) ? delegation.resources : resourcesForAgent(delegation.agent),
-  } as DelegationEnvelope;
-}
-
 function delegationLaneKey(reservation: ReservedExecution) {
   return `${reservation.work.taskId}:${reservation.work.lane}`;
 }
@@ -656,8 +646,7 @@ async function main() {
   if (staleLanes) await appendLoopRunLog(runId, `[恢复] 已恢复 ${staleLanes} 条失去活跃 execution 的 Lane`);
   let recoverable = await recoverNextExecutionAttempt();
   while (recoverable) {
-    const snapshot = JSON.parse(recoverable.input_json) as { delegation: DelegationEnvelope };
-    const delegation = normalizeDelegation(snapshot.delegation);
+    const delegation = progressDispatcher.recoverExecutionWork(recoverable);
     const maintenance = await activateMaintenanceContext(recoverable, delegation);
     try {
       const runtimeSettings = await getAgentRuntimeSettings(delegation.agent);
@@ -683,7 +672,7 @@ async function main() {
       const reason = `恢复 execution attempt 失败：${error instanceof Error ? error.message : String(error)}`;
       await handleExecutionFailure(recoverable, delegation, reason, error instanceof AgentResultContractError);
     } finally {
-      await settleDelegationLane(delegation);
+      await progressDispatcher.settleRecoveredExecution({ executionId: recoverable.execution_id });
       await enqueueExecutionMaintenance(maintenance);
     }
     recoverable = await recoverNextExecutionAttempt();
@@ -692,7 +681,7 @@ async function main() {
   const inFlightExecutions = new InFlightWork<ReservedExecution>();
   while (await isRunActive()) {
     const completionRevision = inFlightExecutions.revision();
-    const queuedWaiting = await drainQueuedAgentResults();
+    await drainQueuedAgentResults();
     const dispatch = await progressDispatcher.reserveNext({ runId });
     let launched = 0;
     for (const reservation of dispatch.kind === 'reserved' ? dispatch.reservations : []) {
@@ -717,10 +706,6 @@ async function main() {
     if (launched) continue;
     if (backgroundEvaluations.size) {
       await Promise.race(backgroundEvaluations);
-      continue;
-    }
-    if (queuedWaiting) {
-      await sleep(Number(process.env.LOOP_ACTIVE_DISPATCH_RETRY_MS || 60 * 1000));
       continue;
     }
     if (dispatch.kind === 'run-stopped') return;

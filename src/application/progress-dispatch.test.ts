@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 test('reserves runnable work atomically and exposes the active reservation to inspection', async () => {
-  const { createTask, beginRun, cancelTask, endRun } = await import('./tasks');
+  const { createTask, beginRun, cancelTask, endRun, getTask } = await import('./tasks');
   const { progressDispatcher, progressDispatchInspector } = await import('./progress-dispatch');
 
   const taskId = await createTask({ title: 'Atomic dispatch reservation' });
@@ -55,6 +55,18 @@ test('reserves runnable work atomically and exposes the active reservation to in
     assert.equal(activated.attempt.status, 'running');
     assert.equal(activated.attempt.input_hash === '', false);
     assert.equal(JSON.parse(activated.attempt.input_json).prompt, 'Perform the reserved work');
+    const duplicateActivation = await progressDispatcher.activate({
+      reservationId: first.reservations[0].reservationId,
+      prepared: {
+        prompt: 'ignored duplicate',
+        contextSnapshot: {},
+        promptMetadata: { version: 9, templateVersion: 9, hash: 'ignored' },
+        memory: { revision: 9, hash: 'ignored' },
+        runtime: { executorId: 'ignored', webSearchEnabled: false },
+      },
+    });
+    assert.equal(duplicateActivation.kind, 'running');
+    assert.equal(duplicateActivation.attempt.input_hash, activated.attempt.input_hash);
 
     assert.deepEqual(await progressDispatcher.executionExited({
       reservationId: first.reservations[0].reservationId,
@@ -62,6 +74,8 @@ test('reserves runnable work atomically and exposes the active reservation to in
       kind: 'released',
       resources: ['browser:exclusive'],
     });
+    const audited = await getTask(taskId);
+    assert.equal(audited?.executionAttempts[0].claimed_resources, 'browser:exclusive');
     assert.deepEqual(await progressDispatcher.settle({
       reservationId: first.reservations[0].reservationId,
     }), { kind: 'settled' });
@@ -75,7 +89,7 @@ test('reserves runnable work atomically and exposes the active reservation to in
 });
 
 test('limits preparation failures to three persisted attempts before blocking the requirement', async () => {
-  const { createTask, beginRun, cancelTask, endRun } = await import('./tasks');
+  const { createTask, beginRun, cancelTask, endRun, releaseBlock } = await import('./tasks');
   const { progressDispatcher } = await import('./progress-dispatch');
   const taskId = await createTask({ title: 'Finite preparation retries' });
   const runId = await beginRun('progress-dispatch-retry-test');
@@ -101,6 +115,12 @@ test('limits preparation failures to three persisted attempts before blocking th
     const afterLimit = await progressDispatcher.reserveNext({ runId });
     assert.equal(afterLimit.kind, 'wait');
     assert.equal(afterLimit.reason, 'no-runnable-work');
+    await releaseBlock(taskId);
+    const afterRelease = await progressDispatcher.reserveNext({ runId });
+    assert.equal(afterRelease.kind, 'reserved');
+    const resumed = afterRelease.reservations.find((item) => item.work.taskId === taskId);
+    assert.ok(resumed);
+    await progressDispatcher.settle({ reservationId: resumed.reservationId });
   } finally {
     await cancelTask({ taskId, reason: 'test cleanup' });
     await endRun(runId, true, { stopRunner: false });

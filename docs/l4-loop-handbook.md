@@ -228,7 +228,7 @@ LoopWork 中，每次 Agent 调用都对应一个持久化的 `execution_attempt
 - 缺少测试地址、账号配置、测试数据或其他必要验证条件：进入 `waiting_for_runtime_input`。用户可以补充条件，也可以代为执行并提供实际观察与证据；之后恢复同一 Test Agent、冻结计划和已完成结果，由 Test Agent 依据原 Oracle 形成结论。
 - 执行环境、工具协议或恢复机制异常：进入 `system_blocked`，保留完整诊断信息。
 
-应用启动新一轮前会收尾已经失去 Runner 的旧 Run：`planned/running` 且没有持久化结果的 attempt 转为 `retryable_failed`；存在待消费结果或处于 `output_received/verifying/applying` 的 attempt 保持原检查点，由新的 `agent-runner` 优先恢复。主动停止使用同一套收尾规则，因此不会留下长期占用 Lane 的运行记录。
+应用启动新一轮前会收尾已经失去 Runner 的旧 Run：尚未激活的 `planned` 派发保留会取消、按保留来源释放本次取得的 Claim，并且不消耗 Agent 重试次数；已经启动但没有持久化结果的 `running` attempt 转为 `retryable_failed`。存在待消费结果或处于 `output_received/verifying/applying` 的 attempt 保持原检查点，由新的 `agent-runner` 优先恢复。主动停止使用同一套收尾规则，因此不会留下长期占用 Lane 的运行记录。
 
 当前主流程记录执行前后的 Git HEAD，并允许 Dev Agent 按仓库规范创建本轮 Commit；Runner 不强制创建 checkpoint，也不代理提交。Git 状态、结构化 Result、数据库 Receipt 和 Trace 共同构成恢复边界。
 

@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import type { ResourceKey } from '../domain/resource';
+import { resourcesForAgent, type ResourceKey } from '../domain/resource';
 import { databaseConnection, hash } from '../infrastructure/database';
 import { acquireResourceClaimsInDb, releaseResourceClaimInDb, resourceClaimInDb } from './resource-claims';
 import { releaseExecutionResourceClaimsInDb } from './resource-claims';
-import { markTaskLaneRunningInDb, settleTaskLaneInDb, setTaskLaneStateInDb, type TaskLaneKind } from './task-lanes';
-import { pipelineAllEnvelopes, type DelegationEnvelope, type Task } from './tasks';
+import { laneForAgent, markTaskLaneRunningInDb, settleTaskLaneInDb, setTaskLaneStateInDb, type TaskLaneKind } from './task-lanes';
+import { pipelineAllEnvelopesInDb, type DelegationEnvelope, type Task } from './tasks';
 import type { ExecutionAttempt } from './executions';
 
 export type DispatchWaitReason =
@@ -13,6 +13,8 @@ export type DispatchWaitReason =
   | 'resources-busy'
   | 'paused-only'
   | 'waiting-for-input'
+  | 'system-blocked'
+  | 'lower-priority'
   | 'no-runnable-work';
 
 export type DispatchWakeInstruction =
@@ -127,7 +129,7 @@ async function reserveNext(input: { runId: string }): Promise<ReserveNextResult>
       return { kind: 'run-stopped' };
     }
 
-    const workItems = await pipelineAllEnvelopes();
+    const workItems = pipelineAllEnvelopesInDb(db);
     if (!workItems.length) {
       const result = waitResult(db);
       db.exec('COMMIT');
@@ -232,7 +234,45 @@ async function inspect(input: { requirementId: string }): Promise<DispatchExplan
       }),
     };
   }
-  return { requirementId: input.requirementId, decisions: [] };
+  const task = db.prepare('SELECT agile_status, run_state, is_paused FROM tasks WHERE task_id = ?')
+    .get(input.requirementId) as { agile_status: string; run_state: string; is_paused: number } | undefined;
+  if (!task) return { requirementId: input.requirementId, decisions: [] };
+  if (['done', 'cancelled'].includes(task.agile_status)) {
+    return { requirementId: input.requirementId, decisions: [{ lane: 'control', state: 'completed' }] };
+  }
+  if (task.is_paused) {
+    return { requirementId: input.requirementId, decisions: [{ lane: 'control', state: 'waiting', reason: 'paused-only' }] };
+  }
+  if (task.agile_status === 'blocked' || task.run_state === 'system_blocked') {
+    return { requirementId: input.requirementId, decisions: [{ lane: 'control', state: 'waiting', reason: 'system-blocked' }] };
+  }
+  if (['waiting_for_answers', 'waiting_for_runtime_input'].includes(task.run_state)) {
+    return { requirementId: input.requirementId, decisions: [{ lane: 'control', state: 'waiting', reason: 'waiting-for-input' }] };
+  }
+  const pending = db.prepare(`
+    SELECT 1 FROM agent_results WHERE task_id = ? AND application_status = 'pending' LIMIT 1
+  `).get(input.requirementId);
+  if (pending) {
+    return { requirementId: input.requirementId, decisions: [{ lane: 'control', state: 'waiting', reason: 'pending-result' }] };
+  }
+  let selected: DelegationEnvelope[] = [];
+  db.exec('SAVEPOINT dispatch_inspect');
+  try {
+    selected = pipelineAllEnvelopesInDb(db).filter((work) => work.taskId === input.requirementId);
+  } finally {
+    db.exec('ROLLBACK TO dispatch_inspect');
+    db.exec('RELEASE dispatch_inspect');
+  }
+  if (selected.length) {
+    return {
+      requirementId: input.requirementId,
+      decisions: selected.map((work) => ({ lane: work.lane, state: 'selected' })),
+    };
+  }
+  return {
+    requirementId: input.requirementId,
+    decisions: [{ lane: 'control', state: 'waiting', reason: 'lower-priority' }],
+  };
 }
 
 async function activate(input: { reservationId: string; prepared: PreparedExecution }): Promise<ActivateResult> {
@@ -255,7 +295,10 @@ async function activate(input: { reservationId: string; prepared: PreparedExecut
     if (!attempt) return { kind: 'invalidated', reason: 'superseded' } as const;
     const reservation = JSON.parse(attempt.dispatch_reservation_json) as StoredReservation;
     if (attempt.status !== 'planned') {
-      releaseAcquiredReservationClaims(db, reservation);
+      if (attempt.status === 'running') return { kind: 'running', attempt } as const;
+      if (!['output_received', 'verifying', 'applying'].includes(attempt.status)) {
+        releaseAcquiredReservationClaims(db, reservation);
+      }
       return { kind: 'invalidated', reason: 'superseded' } as const;
     }
 
@@ -388,6 +431,7 @@ async function preparationFailed(input: { reservationId: string; error: string }
     } else if (blocked) {
       db.prepare(`
         UPDATE tasks SET agile_status = 'blocked', run_state = 'system_blocked',
+          resume_status = CASE WHEN agile_status != 'blocked' THEN agile_status ELSE resume_status END,
           current_subagent = ?, blocked_reason = ?, next_step = ?, updated_at = CURRENT_TIMESTAMP
         WHERE task_id = ?
       `).run(attempt.agent, input.error, `系统阻塞：${input.error}`, attempt.task_id);
@@ -425,6 +469,42 @@ async function settle(input: { reservationId: string }) {
   }).immediate();
 }
 
-export const progressDispatcher = { reserveNext, activate, preparationFailed, executionExited, settle };
+function recoverExecutionWork(attempt: ExecutionAttempt) {
+  const snapshot = JSON.parse(attempt.input_json) as { delegation: DelegationEnvelope };
+  return {
+    ...snapshot.delegation,
+    lane: snapshot.delegation.lane || laneForAgent(snapshot.delegation.agent),
+    resources: Array.isArray(snapshot.delegation.resources)
+      ? snapshot.delegation.resources
+      : resourcesForAgent(snapshot.delegation.agent),
+  } as DelegationEnvelope;
+}
+
+async function settleRecoveredExecution(input: { executionId: string }) {
+  const db = await databaseConnection();
+  const attempt = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(input.executionId) as (ExecutionAttempt & {
+    dispatch_reservation_json?: string | null;
+  }) | undefined;
+  if (!attempt) return { kind: 'already-settled' } as const;
+  if (attempt.dispatch_reservation_json) return settle({ reservationId: input.executionId });
+  return db.transaction(() => {
+    releaseExecutionResourceClaimsInDb(db, attempt.execution_id);
+    if (attempt.lane && attempt.lane !== 'control') {
+      const task = db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(attempt.task_id) as Task | undefined;
+      if (task) settleTaskLaneInDb(db, task, attempt.lane as TaskLaneKind);
+    }
+    return { kind: 'settled' } as const;
+  }).immediate();
+}
+
+export const progressDispatcher = {
+  reserveNext,
+  activate,
+  preparationFailed,
+  executionExited,
+  settle,
+  recoverExecutionWork,
+  settleRecoveredExecution,
+};
 
 export const progressDispatchInspector = { inspect };

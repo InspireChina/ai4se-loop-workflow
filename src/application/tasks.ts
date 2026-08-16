@@ -488,8 +488,8 @@ export async function getTask(taskId: string) {
            prompt_version, prompt_template_version, prompt_hash, memory_revision, memory_hash, evolution_candidate_id,
            executor_id, configured_model, reasoning_effort, last_error,
            dispatch_generation_key, dispatch_execution_exited_at, dispatch_settled_at,
-           (SELECT GROUP_CONCAT(resource_key, ', ')
-            FROM resource_claims WHERE owner_execution_id = execution_attempts.execution_id) AS claimed_resources,
+           (SELECT GROUP_CONCAT(value, ', ')
+            FROM json_each(execution_attempts.dispatch_reservation_json, '$.claimedResources')) AS claimed_resources,
            json_extract(result_json, '$.outcome') AS result_outcome,
            json_extract(result_json, '$.verdict') AS result_verdict,
            json_extract(result_json, '$.summary') AS result_summary,
@@ -2320,6 +2320,13 @@ export async function pipelineAllEnvelopes(options: {
   locallyActive?: LocallyActiveDelegation[];
 } = {}): Promise<DelegationEnvelope[]> {
   const db = await databaseConnection();
+  return pipelineAllEnvelopesInDb(db, options);
+}
+
+export function pipelineAllEnvelopesInDb(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  options: { locallyActive?: LocallyActiveDelegation[] } = {},
+): DelegationEnvelope[] {
   const tasks = db.prepare(`${taskSelect} WHERE agile_status NOT IN ('done', 'cancelled') AND is_paused = 0`).all() as Task[];
   tasks.sort(compareDispatchTasks);
   const active = activeLaneExecutions(db);

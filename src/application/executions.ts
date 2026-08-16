@@ -5,9 +5,13 @@ import type { DelegationEnvelope } from './tasks';
 import type { AgentContextSnapshot } from './agent-context';
 import { laneForAgent } from './task-lanes';
 import {
+  releaseResourceClaimInDb,
   releaseExecutionResourceClaimsInDb,
   releaseRunExecutionResourceClaimsInDb,
 } from './resource-claims';
+import { settleTaskLaneInDb, type TaskLaneKind } from './task-lanes';
+import type { Task } from './tasks';
+import type { ResourceKey } from '../domain/resource';
 
 export type ExecutionStatus =
   | 'planned'
@@ -137,6 +141,24 @@ function storedRetrySignature(attempt: ExecutionAttempt) {
 export async function reconcileInterruptedExecutions(runId: string | null, reason: string) {
   const db = await databaseConnection();
   const scope = runId ? 'AND execution_attempts.run_id = ?' : '';
+  const orphanReservations = db.prepare(`
+    SELECT execution_attempts.execution_id, execution_attempts.task_id,
+           execution_attempts.lane, execution_attempts.dispatch_reservation_json
+    FROM execution_attempts
+    WHERE status = 'planned' AND result_json IS NULL
+      AND dispatch_reservation_json IS NOT NULL
+      ${scope}
+      AND NOT EXISTS (
+        SELECT 1 FROM agent_results
+        WHERE agent_results.execution_id = execution_attempts.execution_id
+          AND agent_results.application_status = 'pending'
+      )
+  `).all(...(runId ? [runId] : [])) as {
+    execution_id: string;
+    task_id: string;
+    lane: string | null;
+    dispatch_reservation_json: string;
+  }[];
   db.prepare(`
     UPDATE execution_attempts
     SET status = 'cancelled',
@@ -180,7 +202,19 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
           AND agent_results.application_status = 'pending'
       )
   `).run(...(runId ? [runId] : [])).changes;
-  const failedCount = db.prepare(`
+  for (const orphan of orphanReservations) {
+    const reservation = JSON.parse(orphan.dispatch_reservation_json) as {
+      resourceAcquisitions?: Record<ResourceKey, 'acquired' | 'inherited'>;
+    };
+    for (const [resourceKey, acquisition] of Object.entries(reservation.resourceAcquisitions || {}) as [ResourceKey, 'acquired' | 'inherited'][]) {
+      if (acquisition === 'acquired') releaseResourceClaimInDb(db, resourceKey, orphan.task_id);
+    }
+    if (orphan.lane && orphan.lane !== 'control') {
+      const task = db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(orphan.task_id) as Task | undefined;
+      if (task) settleTaskLaneInDb(db, task, orphan.lane as TaskLaneKind);
+    }
+  }
+  const failedExecutionCount = db.prepare(`
     UPDATE execution_attempts
     SET status = 'retryable_failed',
         last_error = ?,
@@ -195,6 +229,7 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
           AND agent_results.application_status = 'pending'
       )
   `).run(reason, ...(runId ? [runId] : [])).changes;
+  const failedCount = failedExecutionCount + orphanReservations.length;
   const recoverableCount = (db.prepare(`
     SELECT COUNT(*) AS count
     FROM execution_attempts
