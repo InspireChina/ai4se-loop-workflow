@@ -79,7 +79,10 @@ function releaseAcquiredReservationClaims(
   reservation: StoredReservation,
 ) {
   for (const [resourceKey, acquisition] of Object.entries(reservation.resourceAcquisitions) as [ResourceKey, 'acquired' | 'inherited'][]) {
-    if (acquisition === 'acquired') releaseResourceClaimInDb(db, resourceKey, reservation.work.taskId);
+    const current = resourceClaimInDb(db, resourceKey);
+    if (acquisition === 'acquired' && current?.owner_execution_id === reservation.executionId) {
+      releaseResourceClaimInDb(db, resourceKey, reservation.work.taskId);
+    }
   }
 }
 
@@ -234,8 +237,18 @@ async function inspect(input: { requirementId: string }): Promise<DispatchExplan
       }),
     };
   }
-  const task = db.prepare('SELECT agile_status, run_state, is_paused FROM tasks WHERE task_id = ?')
-    .get(input.requirementId) as { agile_status: string; run_state: string; is_paused: number } | undefined;
+  const task = db.prepare(`
+    SELECT agile_status, run_state, is_paused, analysis_index, dev_index, test_index, total_stories
+    FROM tasks WHERE task_id = ?
+  `).get(input.requirementId) as {
+    agile_status: string;
+    run_state: string;
+    is_paused: number;
+    analysis_index: number;
+    dev_index: number;
+    test_index: number;
+    total_stories: number;
+  } | undefined;
   if (!task) return { requirementId: input.requirementId, decisions: [] };
   if (['done', 'cancelled'].includes(task.agile_status)) {
     return { requirementId: input.requirementId, decisions: [{ lane: 'control', state: 'completed' }] };
@@ -246,15 +259,6 @@ async function inspect(input: { requirementId: string }): Promise<DispatchExplan
   if (task.agile_status === 'blocked' || task.run_state === 'system_blocked') {
     return { requirementId: input.requirementId, decisions: [{ lane: 'control', state: 'waiting', reason: 'system-blocked' }] };
   }
-  if (['waiting_for_answers', 'waiting_for_runtime_input'].includes(task.run_state)) {
-    return { requirementId: input.requirementId, decisions: [{ lane: 'control', state: 'waiting', reason: 'waiting-for-input' }] };
-  }
-  const pending = db.prepare(`
-    SELECT 1 FROM agent_results WHERE task_id = ? AND application_status = 'pending' LIMIT 1
-  `).get(input.requirementId);
-  if (pending) {
-    return { requirementId: input.requirementId, decisions: [{ lane: 'control', state: 'waiting', reason: 'pending-result' }] };
-  }
   let selected: DelegationEnvelope[] = [];
   db.exec('SAVEPOINT dispatch_inspect');
   try {
@@ -263,15 +267,48 @@ async function inspect(input: { requirementId: string }): Promise<DispatchExplan
     db.exec('ROLLBACK TO dispatch_inspect');
     db.exec('RELEASE dispatch_inspect');
   }
-  if (selected.length) {
-    return {
-      requirementId: input.requirementId,
-      decisions: selected.map((work) => ({ lane: work.lane, state: 'selected' })),
-    };
+  const decisions: DispatchDecision[] = selected.map((work) => ({ lane: work.lane, state: 'selected' }));
+  const selectedLanes = new Set(selected.map((work) => work.lane));
+  const pending = db.prepare(`
+    SELECT CASE WHEN agent = 'analyst-agent' THEN 'analysis'
+                WHEN agent IN ('dev-agent', 'test-agent') THEN 'delivery'
+                ELSE 'control' END AS lane
+    FROM agent_results WHERE task_id = ? AND application_status = 'pending'
+  `).all(input.requirementId) as { lane: TaskLaneKind | 'control' }[];
+  for (const row of pending) {
+    if (!selectedLanes.has(row.lane)) decisions.push({ lane: row.lane, state: 'waiting', reason: 'pending-result' });
   }
+  const lanes = db.prepare('SELECT lane, status FROM task_lanes WHERE task_id = ? ORDER BY lane')
+    .all(input.requirementId) as { lane: TaskLaneKind; status: string }[];
+  const foreignClaim = db.prepare('SELECT 1 FROM resource_claims WHERE owner_task_id != ? LIMIT 1').get(input.requirementId);
+  for (const lane of lanes) {
+    if (selectedLanes.has(lane.lane) || decisions.some((decision) => decision.lane === lane.lane)) continue;
+    if (lane.status === 'completed') decisions.push({ lane: lane.lane, state: 'completed' });
+    else if (['waiting_for_answers', 'waiting_for_runtime_input'].includes(lane.status)) {
+      decisions.push({ lane: lane.lane, state: 'waiting', reason: 'waiting-for-input' });
+    } else if (lane.status === 'system_blocked') {
+      decisions.push({ lane: lane.lane, state: 'waiting', reason: 'system-blocked' });
+    } else {
+      const hasCandidate = lane.lane === 'analysis'
+        ? task.analysis_index < task.total_stories
+        : task.test_index < task.dev_index || task.dev_index < task.analysis_index;
+      decisions.push({
+        lane: lane.lane,
+        state: 'waiting',
+        reason: hasCandidate ? (foreignClaim && lane.lane === 'delivery' ? 'resources-busy' : 'lower-priority') : 'no-runnable-work',
+      });
+    }
+  }
+  if (decisions.length) return { requirementId: input.requirementId, decisions };
   return {
     requirementId: input.requirementId,
-    decisions: [{ lane: 'control', state: 'waiting', reason: 'lower-priority' }],
+    decisions: [{
+      lane: 'control',
+      state: 'waiting',
+      reason: foreignClaim ? 'resources-busy' : ['waiting_for_answers', 'waiting_for_runtime_input'].includes(task.run_state)
+        ? 'waiting-for-input'
+        : 'no-runnable-work',
+    }],
   };
 }
 

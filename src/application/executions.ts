@@ -6,6 +6,7 @@ import type { AgentContextSnapshot } from './agent-context';
 import { laneForAgent } from './task-lanes';
 import {
   releaseResourceClaimInDb,
+  resourceClaimInDb,
   releaseExecutionResourceClaimsInDb,
   releaseRunExecutionResourceClaimsInDb,
 } from './resource-claims';
@@ -141,6 +142,7 @@ function storedRetrySignature(attempt: ExecutionAttempt) {
 export async function reconcileInterruptedExecutions(runId: string | null, reason: string) {
   const db = await databaseConnection();
   const scope = runId ? 'AND execution_attempts.run_id = ?' : '';
+  return db.transaction(() => {
   const orphanReservations = db.prepare(`
     SELECT execution_attempts.execution_id, execution_attempts.task_id,
            execution_attempts.lane, execution_attempts.dispatch_reservation_json
@@ -207,7 +209,10 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
       resourceAcquisitions?: Record<ResourceKey, 'acquired' | 'inherited'>;
     };
     for (const [resourceKey, acquisition] of Object.entries(reservation.resourceAcquisitions || {}) as [ResourceKey, 'acquired' | 'inherited'][]) {
-      if (acquisition === 'acquired') releaseResourceClaimInDb(db, resourceKey, orphan.task_id);
+      const current = resourceClaimInDb(db, resourceKey);
+      if (acquisition === 'acquired' && current?.owner_execution_id === orphan.execution_id) {
+        releaseResourceClaimInDb(db, resourceKey, orphan.task_id);
+      }
     }
     if (orphan.lane && orphan.lane !== 'control') {
       const task = db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(orphan.task_id) as Task | undefined;
@@ -238,7 +243,8 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
       ${scope}
   `).get(...(runId ? [runId] : [])) as { count: number }).count;
   releaseRunExecutionResourceClaimsInDb(db, runId);
-  return { failedCount, recoverableCount, pendingResultCount };
+    return { failedCount, recoverableCount, pendingResultCount };
+  }).immediate();
 }
 
 export async function beginExecutionAttempt(input: {
