@@ -214,18 +214,23 @@ async function reserveNext(input: { runId: string }): Promise<ReserveNextResult>
 async function inspect(input: { requirementId: string }): Promise<DispatchExplanation> {
   const db = await databaseConnection();
   const active = db.prepare(`
-    SELECT execution_id, dispatch_reservation_json
+    SELECT execution_id, lane, agent, dispatch_reservation_json
     FROM execution_attempts
     WHERE task_id = ?
       AND status IN ('planned', 'running', 'output_received', 'verifying', 'applying')
     ORDER BY created_at, execution_id
-  `).all(input.requirementId) as { execution_id: string; dispatch_reservation_json: string | null }[];
+  `).all(input.requirementId) as {
+    execution_id: string;
+    lane: string | null;
+    agent: string;
+    dispatch_reservation_json: string | null;
+  }[];
   const decisions: DispatchDecision[] = active.map((row) => {
     const reservation = row.dispatch_reservation_json
       ? JSON.parse(row.dispatch_reservation_json) as StoredReservation
       : undefined;
     return {
-      lane: reservation?.work.lane || 'control',
+      lane: reservation?.work.lane || (row.lane as TaskLaneKind | 'control' | null) || laneForAgent(row.agent),
       state: 'active',
       reason: 'active-execution',
       executionId: row.execution_id,
