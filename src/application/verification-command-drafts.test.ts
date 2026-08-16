@@ -1,3 +1,5 @@
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
+import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DelegationEnvelope } from './tasks';
@@ -9,9 +11,8 @@ async function command(executionId: string, token: string, args: string[]) {
 }
 
 async function begin(delegation: DelegationEnvelope, suffix: string) {
-  const { beginExecutionAttempt } = await import('./executions');
   const { issueAgentCommandToken } = await import('./agent-command-drafts');
-  const started = await beginExecutionAttempt({
+  const started = await beginTestExecutionAttempt({
     runId: `RUN-verification-${suffix}`,
     delegation,
     prompt: `four-phase independent verification prompt ${suffix}`,
@@ -23,7 +24,7 @@ async function begin(delegation: DelegationEnvelope, suffix: string) {
 
 async function verificationDelegation(title: string) {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask, pipelineForTask, saveDeliverySpec } = await import('./tasks');
+  const { createTask, saveDeliverySpec } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare(`
     UPDATE tasks
@@ -69,7 +70,7 @@ async function verificationDelegation(title: string) {
       },
     }),
   });
-  const delegation = (await pipelineForTask(taskId)).find((item) =>
+  const delegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'test-agent' && item.storyIndex === 1);
   assert.ok(delegation);
   return { taskId, delegation: delegation! as DelegationEnvelope };
@@ -131,7 +132,7 @@ test('verification advances through plan, execute, evidence review and finalize'
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
-  const { getTask, pipelineForTask } = await import('./tasks');
+  const { getTask } = await import('./tasks');
   const { taskId, delegation } = await verificationDelegation('四阶段前端独立验证');
   const started = await begin(delegation, `${taskId}-pass`);
 
@@ -204,7 +205,7 @@ test('verification advances through plan, execute, evidence review and finalize'
   const detail = await getTask(taskId);
   assert.equal(detail?.task.test_index, 1);
   assert.equal(detail?.task.agile_status, 'in review');
-  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'review-agent');
+  assert.equal((await inspectTaskDispatch(taskId))[0]?.agent, 'review-agent');
 });
 
 test('verification help exposes only the topic-scoped four-phase command surface', async () => {
@@ -251,7 +252,7 @@ test('verification permits an API supplement but derives implementation failure 
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
-  const { getTask, pipelineForTask } = await import('./tasks');
+  const { getTask } = await import('./tasks');
   const { taskId, delegation } = await verificationDelegation('API 补充与实现失败归因');
   const started = await begin(delegation, `${taskId}-fail`);
   await command(started.executionId, started.token!, ['verification', 'status']);
@@ -293,7 +294,7 @@ test('verification permits an API supplement but derives implementation failure 
   const detail = await getTask(taskId);
   assert.equal(detail?.task.dev_index, 0);
   assert.equal(detail?.recoveryItems[0]?.target_stage, 'dev');
-  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'dev-agent');
+  assert.equal((await inspectTaskDispatch(taskId))[0]?.agent, 'dev-agent');
 });
 
 test('blocked verification becomes human assistance and resumes the same plan', async () => {
@@ -303,7 +304,6 @@ test('blocked verification becomes human assistance and resumes the same plan', 
   const {
     answerRuntimeInput,
     getTask,
-    pipelineForTask,
     submitRuntimeInputs,
   } = await import('./tasks');
   const { taskId, delegation } = await verificationDelegation('验证环境资源阻塞');
@@ -348,7 +348,7 @@ test('blocked verification becomes human assistance and resumes the same plan', 
     answer: '人工验证：通过；实际观察：完成结果展示完成状态，未完成结果仍可识别；证据：云桌面截图 TEST-42。',
   });
   await submitRuntimeInputs(taskId, 'delivery');
-  const resumedDelegation = (await pipelineForTask(taskId)).find((item) =>
+  const resumedDelegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'test-agent' && item.pipeline === 'resume')! as DelegationEnvelope;
   assert.ok(resumedDelegation);
 
@@ -383,7 +383,6 @@ test('verification runtime input resumes the same frozen plan and partial result
   const {
     answerRuntimeInput,
     getTask,
-    pipelineForTask,
     submitRuntimeInputs,
   } = await import('./tasks');
   const { taskId, delegation } = await verificationDelegation('验证运行资源恢复');
@@ -430,7 +429,7 @@ test('verification runtime input resumes the same frozen plan and partial result
     answer: '使用 http://localhost:3001。',
   });
   await submitRuntimeInputs(taskId);
-  const resumedDelegation = (await pipelineForTask(taskId)).find((item) =>
+  const resumedDelegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'test-agent' && item.pipeline === 'resume')! as DelegationEnvelope;
   const resumed = await begin(resumedDelegation, `${taskId}-resume`);
   const restored = await command(resumed.executionId, resumed.token!, ['verification', 'status']);
@@ -502,7 +501,6 @@ test('a changed delivery contract reopens a waiting frozen plan without losing t
   const {
     answerRuntimeInput,
     getTask,
-    pipelineForTask,
     saveDeliverySpec,
     submitRuntimeInputs,
   } = await import('./tasks');
@@ -553,7 +551,7 @@ test('a changed delivery contract reopens a waiting frozen plan without losing t
       },
     }),
   });
-  const resumedDelegation = (await pipelineForTask(taskId)).find((item) =>
+  const resumedDelegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'test-agent' && item.pipeline === 'resume')! as DelegationEnvelope;
   const resumed = await begin(resumedDelegation, `${taskId}-spec-change-resume`);
   const restored = await command(resumed.executionId, resumed.token!, ['verification', 'status']);

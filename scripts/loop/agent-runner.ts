@@ -31,11 +31,10 @@ import {
   markExecutionOutput,
   markExecutionStage,
   recordExecutionReceipt,
-  recoverNextExecutionAttempt,
   shouldRecordDevCodeCommit,
   type ExecutionAttempt,
 } from '../../src/application/executions';
-import { appendLoopRunLog, CodeSlotBusyError, endRun, getRunStatus, getTask, getTaskContext, reconcileStaleTaskLanes, recordRuntimeEventWithFallback, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
+import { appendLoopRunLog, CodeSlotBusyError, endRun, getRunStatus, getTask, getTaskContext, recordRuntimeEventWithFallback, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
 import { progressDispatcher, type ReservedExecution } from '../../src/application/progress-dispatch';
 import {
   listRecoveryItemsForStage,
@@ -642,11 +641,11 @@ async function drainQueuedAgentResults() {
 }
 
 async function main() {
-  const staleLanes = await reconcileStaleTaskLanes();
+  const staleLanes = await progressDispatcher.reconcileStaleLanes();
   if (staleLanes) await appendLoopRunLog(runId, `[恢复] 已恢复 ${staleLanes} 条失去活跃 execution 的 Lane`);
-  let recoverable = await recoverNextExecutionAttempt();
-  while (recoverable) {
-    const delegation = progressDispatcher.recoverExecutionWork(recoverable);
+  let recovery = await progressDispatcher.nextRecovery();
+  while (recovery) {
+    const { attempt: recoverable, work: delegation } = recovery;
     const maintenance = await activateMaintenanceContext(recoverable, delegation);
     try {
       const runtimeSettings = await getAgentRuntimeSettings(delegation.agent);
@@ -675,7 +674,7 @@ async function main() {
       await progressDispatcher.settleRecoveredExecution({ executionId: recoverable.execution_id });
       await enqueueExecutionMaintenance(maintenance);
     }
-    recoverable = await recoverNextExecutionAttempt();
+    recovery = await progressDispatcher.nextRecovery();
   }
 
   const inFlightExecutions = new InFlightWork<ReservedExecution>();

@@ -1,3 +1,5 @@
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
+import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
@@ -10,9 +12,8 @@ async function command(executionId: string, token: string, args: string[]) {
 }
 
 async function begin(delegation: DelegationEnvelope, suffix: string) {
-  const { beginExecutionAttempt } = await import('./executions');
   const { issueAgentCommandToken } = await import('./agent-command-drafts');
-  const started = await beginExecutionAttempt({
+  const started = await beginTestExecutionAttempt({
     runId: `RUN-feedback-${suffix}`,
     delegation,
     prompt: 'progressive feedback prompt',
@@ -27,7 +28,6 @@ async function completedRequirement(label: string) {
   const {
     addDocumentComment,
     createTask,
-    pipelineForTask,
     upsertDocument,
   } = await import('./tasks');
   const db = await databaseConnection();
@@ -77,7 +77,7 @@ async function completedRequirement(label: string) {
     content: '空数据时需要显示明确提示。',
     intent: 'change_request',
   });
-  const delegation = (await pipelineForTask(taskId)).find((item) =>
+  const delegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.pipeline === 'feedback-triage');
   assert.ok(delegation);
   return {
@@ -121,9 +121,8 @@ async function recordBehaviorChange(
 
 async function planBehaviorChange(taskId: string) {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { pipelineForTask } = await import('./tasks');
   const { applyFeedbackSplitResult } = await import('./feedback');
-  const split = (await pipelineForTask(taskId)).find((item) =>
+  const split = (await inspectTaskDispatch(taskId)).find((item) =>
     item.pipeline === 'feedback-split') as DelegationEnvelope | undefined;
   assert.ok(split?.feedbackBatchId);
   assert.ok(split?.feedbackGroupId);
@@ -215,7 +214,6 @@ test('feedback clarification preserves the original decision key and partial dra
   const {
     answerQuestion,
     getTask,
-    pipelineForTask,
     submitClarificationAnswers,
   } = await import('./tasks');
   const { taskId, commentId, delegation } = await completedRequirement('反馈澄清恢复');
@@ -265,7 +263,7 @@ test('feedback clarification preserves the original decision key and partial dra
     answer: '面向全部用户。',
   });
   await submitClarificationAnswers(taskId);
-  const resumedDelegation = (await pipelineForTask(taskId)).find((item) =>
+  const resumedDelegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.pipeline === 'feedback-triage')! as DelegationEnvelope;
   const resumed = await begin(resumedDelegation, `${taskId}-resume`);
   const restored = await command(resumed.executionId, resumed.token!, ['feedback', 'status']);
@@ -295,7 +293,7 @@ test('feedback verify progressively records independent evidence and resolves on
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask, pipelineForTask } = await import('./tasks');
+  const { getTask } = await import('./tasks');
   const { recordFeedbackUnitTestPassed } = await import('./feedback');
   const { taskId, commentId, delegation } = await completedRequirement('渐进式反馈验证');
   const triage = await begin(delegation, `${taskId}-triage`);
@@ -317,7 +315,7 @@ test('feedback verify progressively records independent evidence and resolves on
     WHERE task_id = ?
   `).run(taskId);
   await recordFeedbackUnitTestPassed({ taskId, storyIndex: 2 });
-  const verifyDelegation = (await pipelineForTask(taskId)).find((item) =>
+  const verifyDelegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.pipeline === 'feedback-verify')! as DelegationEnvelope;
   assert.ok(verifyDelegation);
   const verify = await begin(verifyDelegation, `${taskId}-verify`);

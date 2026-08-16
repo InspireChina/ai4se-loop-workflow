@@ -1,3 +1,5 @@
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
+import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { deliverySpecFixture } from '../test/delivery-spec-fixture';
@@ -9,13 +11,11 @@ import {
   cancelTask,
   createTask,
   getTask,
-  pipelineForTask,
   releaseBlock,
   upsertDocument,
   type DelegationEnvelope,
 } from './tasks';
 import { applyAgentResult, applyNextQueuedAgentResult, blockDelegation } from './agent-results';
-import { beginExecutionAttempt } from './executions';
 import { applyFeedbackSplitResult } from './feedback';
 
 async function completedRequirement(label: string, options: { readyToClose?: boolean } = {}) {
@@ -124,7 +124,7 @@ async function applyNextFeedbackPlan(
 }
 
 async function delegation(taskId: string, pipeline?: string) {
-  const lines = await pipelineForTask(taskId);
+  const lines = await inspectTaskDispatch(taskId);
   const line = lines.find((item) => !pipeline || item.pipeline === pipeline);
   assert.ok(line, `缺少预期派发：${pipeline || '任意'}`);
   const detail = await getTask(taskId);
@@ -337,7 +337,7 @@ test('新版本会重新应用被旧版范围守卫误拒绝的反馈交付规�
       'acceptance:legacy-plan-recovery:1',
     ])],
   });
-  const { attempt } = await beginExecutionAttempt({
+  const { attempt } = await beginTestExecutionAttempt({
     runId: `RUN-legacy-plan-${randomUUID()}`,
     delegation: split,
     prompt: '模拟升级前已完成的交付规划 execution',
@@ -909,5 +909,5 @@ test('取消处于反馈处理中的需求会清理活动批次和工作组，�
   assert.equal(detail?.task.agile_status, 'cancelled');
   assert.equal(detail?.feedbackBatches[0].status, 'cancelled');
   assert.equal(detail?.feedbackGroups[0].status, 'cancelled');
-  assert.deepEqual(await pipelineForTask(taskId), []);
+  assert.deepEqual(await inspectTaskDispatch(taskId), []);
 });

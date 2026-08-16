@@ -4,7 +4,8 @@ import { databaseConnection, hash } from '../infrastructure/database';
 import { acquireResourceClaimsInDb, releaseResourceClaimInDb, resourceClaimInDb } from './resource-claims';
 import { releaseExecutionResourceClaimsInDb } from './resource-claims';
 import { laneForAgent, markTaskLaneRunningInDb, settleTaskLaneInDb, setTaskLaneStateInDb, type TaskLaneKind } from './task-lanes';
-import { pipelineAllEnvelopesInDb, type DelegationEnvelope, type Task } from './tasks';
+import { planDispatchInDb } from './dispatch-planner';
+import type { DelegationEnvelope, Task } from './tasks';
 import type { ExecutionAttempt } from './executions';
 
 export type DispatchWaitReason =
@@ -30,6 +31,11 @@ export type ReservedExecution = {
   claimedResources: readonly ResourceKey[];
 };
 
+export type RecoverableExecution = {
+  attempt: ExecutionAttempt;
+  work: DelegationEnvelope;
+};
+
 export type ReserveNextResult =
   | { kind: 'reserved'; reservations: readonly ReservedExecution[] }
   | { kind: 'wait'; reason: DispatchWaitReason; wake: DispatchWakeInstruction }
@@ -41,6 +47,7 @@ export type DispatchDecision = {
   reason?: DispatchWaitReason;
   executionId?: string;
   reservationId?: string;
+  work?: DelegationEnvelope;
 };
 
 export type DispatchExplanation = {
@@ -132,7 +139,7 @@ async function reserveNext(input: { runId: string }): Promise<ReserveNextResult>
       return { kind: 'run-stopped' };
     }
 
-    const workItems = pipelineAllEnvelopesInDb(db);
+    const workItems = planDispatchInDb(db);
     if (!workItems.length) {
       const result = waitResult(db);
       db.exec('COMMIT');
@@ -264,14 +271,14 @@ async function inspect(input: { requirementId: string }): Promise<DispatchExplan
   let selected: DelegationEnvelope[] = [];
   db.exec('SAVEPOINT dispatch_inspect');
   try {
-    selected = pipelineAllEnvelopesInDb(db).filter((work) => work.taskId === input.requirementId);
+    selected = planDispatchInDb(db).filter((work) => work.taskId === input.requirementId);
   } finally {
     db.exec('ROLLBACK TO dispatch_inspect');
     db.exec('RELEASE dispatch_inspect');
   }
   const occupiedLanes = new Set(decisions.map((decision) => decision.lane));
   for (const work of selected) {
-    if (!occupiedLanes.has(work.lane)) decisions.push({ lane: work.lane, state: 'selected' });
+    if (!occupiedLanes.has(work.lane)) decisions.push({ lane: work.lane, state: 'selected', work });
   }
   const selectedLanes = new Set(decisions.map((decision) => decision.lane));
   const pending = db.prepare(`
@@ -331,6 +338,24 @@ async function inspect(input: { requirementId: string }): Promise<DispatchExplan
         : 'no-runnable-work',
     }],
   };
+}
+
+async function inspectAll() {
+  const db = await databaseConnection();
+  let selected: DelegationEnvelope[] = [];
+  db.exec('SAVEPOINT dispatch_inspect_all');
+  try {
+    selected = planDispatchInDb(db);
+  } finally {
+    db.exec('ROLLBACK TO dispatch_inspect_all');
+    db.exec('RELEASE dispatch_inspect_all');
+  }
+  return selected.map((work) => ({
+    requirementId: work.taskId,
+    lane: work.lane,
+    state: 'selected' as const,
+    work,
+  }));
 }
 
 async function activate(input: { reservationId: string; prepared: PreparedExecution }): Promise<ActivateResult> {
@@ -538,6 +563,20 @@ function recoverExecutionWork(attempt: ExecutionAttempt) {
   } as DelegationEnvelope;
 }
 
+async function nextRecovery(): Promise<RecoverableExecution | undefined> {
+  const db = await databaseConnection();
+  const attempt = db.prepare(`
+    SELECT execution_attempts.* FROM execution_attempts
+    JOIN tasks ON tasks.task_id = execution_attempts.task_id
+    WHERE execution_attempts.status IN ('output_received', 'verifying', 'applying')
+      AND execution_attempts.result_json IS NOT NULL
+      AND tasks.is_paused = 0
+    ORDER BY execution_attempts.created_at, execution_attempts.execution_id
+    LIMIT 1
+  `).get() as ExecutionAttempt | undefined;
+  return attempt ? { attempt, work: recoverExecutionWork(attempt) } : undefined;
+}
+
 async function settleRecoveredExecution(input: { executionId: string }) {
   const db = await databaseConnection();
   const attempt = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(input.executionId) as (ExecutionAttempt & {
@@ -555,14 +594,41 @@ async function settleRecoveredExecution(input: { executionId: string }) {
   }).immediate();
 }
 
+async function reconcileStaleLanes() {
+  const db = await databaseConnection();
+  return db.transaction(() => {
+    const rows = db.prepare(`
+      SELECT lane.task_id, lane.lane
+      FROM task_lanes lane
+      WHERE lane.status = 'running'
+        AND NOT EXISTS (
+          SELECT 1 FROM execution_attempts execution
+          WHERE execution.task_id = lane.task_id
+            AND COALESCE(execution.lane, CASE
+              WHEN execution.agent = 'analyst-agent' THEN 'analysis'
+              WHEN execution.agent IN ('dev-agent', 'test-agent') THEN 'delivery'
+              ELSE 'control'
+            END) = lane.lane
+            AND execution.status IN ('planned', 'running', 'output_received', 'verifying', 'applying')
+        )
+    `).all() as { task_id: string; lane: TaskLaneKind }[];
+    for (const row of rows) {
+      const task = db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(row.task_id) as Task | undefined;
+      if (task) settleTaskLaneInDb(db, task, row.lane);
+    }
+    return rows.length;
+  }).immediate();
+}
+
 export const progressDispatcher = {
   reserveNext,
   activate,
   preparationFailed,
   executionExited,
   settle,
-  recoverExecutionWork,
+  nextRecovery,
   settleRecoveredExecution,
+  reconcileStaleLanes,
 };
 
-export const progressDispatchInspector = { inspect };
+export const progressDispatchInspector = { inspect, inspectAll };

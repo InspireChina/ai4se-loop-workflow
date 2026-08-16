@@ -1,3 +1,5 @@
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
+import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
@@ -5,7 +7,7 @@ import { assertAgentResultRoleContract, parseAgentResult } from '../domain/agent
 import { databaseConnection } from '../infrastructure/database';
 import { applyAgentResult, applyNextQueuedAgentResult } from './agent-results';
 import { forwardReviewClosureGaps } from './review-closure-gaps';
-import { createTask, getTask, pipelineForTask, type DelegationEnvelope } from './tasks';
+import { createTask, getTask, type DelegationEnvelope } from './tasks';
 
 async function reviewReadyRequirement(label: string) {
   const taskId = await createTask({ title: `Review closure gap · ${label} · ${randomUUID()}` });
@@ -31,7 +33,7 @@ async function reviewReadyRequirement(label: string) {
         next_step = '等待最终事实对账'
     WHERE task_id = ?
   `).run(taskId);
-  const delegation = (await pipelineForTask(taskId))
+  const delegation = (await inspectTaskDispatch(taskId))
     .find((item) => item.agent === 'review-agent' && item.pipeline === 'review');
   assert.ok(delegation);
   return {
@@ -245,10 +247,9 @@ test('a stale ordinary Review result is discarded without publishing or forwardi
 });
 
 test('queued Review replay uses the original execution frontier instead of the current task', async () => {
-  const { beginExecutionAttempt } = await import('./executions');
   const { taskId, delegation } = await reviewReadyRequirement('queued-stale');
   const result = closureGapResult();
-  const started = await beginExecutionAttempt({
+  const started = await beginTestExecutionAttempt({
     runId: `RUN-review-queued-${randomUUID()}`,
     delegation,
     prompt: 'queued Review replay',

@@ -1,3 +1,4 @@
+import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
@@ -39,7 +40,7 @@ test('keeps one executor-bound context chat per task and persists its transcript
 });
 
 test('submits unlimited keyed change requests from one Chat turn into the existing Feedback loop', async () => {
-  const { createTask, pipelineForTask } = await import('./tasks');
+  const { createTask } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const {
     beginTaskContextChatTurn,
@@ -75,7 +76,7 @@ test('submits unlimited keyed change requests from one Chat turn into the existi
     SELECT 1 FROM documents
     WHERE document_id = ? AND kind = 'context-chat-change-requests'
   `).get(submitted.documentId));
-  assert.equal((await pipelineForTask(taskId)).some((item) => item.agent === 'feedback-agent'), false);
+  assert.equal((await inspectTaskDispatch(taskId)).some((item) => item.agent === 'feedback-agent'), false);
   const repeated = await submitTaskContextChatChangeRequest({
     sessionId: claimed.session.sessionId,
     messageId: claimed.messageId,
@@ -112,7 +113,7 @@ test('submits unlimited keyed change requests from one Chat turn into the existi
   });
   assert.equal(completed.changeRequestSubmitted, true);
   assert.equal(completed.changeRequestCount, 2);
-  const feedbackPipeline = await pipelineForTask(taskId);
+  const feedbackPipeline = await inspectTaskDispatch(taskId);
   assert.equal(feedbackPipeline[0]?.agent, 'feedback-agent');
   assert.equal(feedbackPipeline[0]?.pipeline, 'feedback-triage');
   assert.equal(feedbackPipeline[0]?.feedbackIds?.length, 2);
@@ -120,7 +121,7 @@ test('submits unlimited keyed change requests from one Chat turn into the existi
 });
 
 test('does not pause the current task Delivery lane while context Chat is running', async () => {
-  const { createTask, pipelineForTask } = await import('./tasks');
+  const { createTask } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const { beginTaskContextChatTurn, completeTaskContextChatTurn } = await import('./task-context-chat');
   const taskId = await createTask({ title: 'Context chat workspace coordination' });
@@ -142,7 +143,7 @@ test('does not pause the current task Delivery lane while context Chat is runnin
   `).run(taskId);
   const chat = await beginTaskContextChatTurn(taskId, 'Explain the current delivery state', 'codex');
 
-  const pipeline = await pipelineForTask(taskId);
+  const pipeline = await inspectTaskDispatch(taskId);
   assert.deepEqual(pipeline.map((item) => [item.agent, item.storyIndex]), [['dev-agent', 1]]);
 
   await completeTaskContextChatTurn({

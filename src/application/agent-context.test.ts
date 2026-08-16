@@ -1,3 +1,4 @@
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { deliverySpecFixture } from '../test/delivery-spec-fixture';
@@ -99,7 +100,6 @@ test('builds a compact execution snapshot while preserving full context for just
     renderAgentContextResource,
     renderAgentContextSearch,
   } = await import('./agent-context');
-  const { beginExecutionAttempt } = await import('./executions');
   const db = await databaseConnection();
   const taskId = await createTask({
     title: 'Context engineering',
@@ -227,7 +227,7 @@ test('builds a compact execution snapshot while preserving full context for just
   });
   assert.doesNotMatch(JSON.stringify(testSnapshot), /analysisDecisionMode|workflow\.analysis_decision_mode/);
 
-  const started = await beginExecutionAttempt({
+  const started = await beginTestExecutionAttempt({
     runId: 'RUN-agent-context', delegation: delegation(taskId), prompt: 'compact prompt', contextSnapshot: snapshot,
   });
   const stored = await getExecutionAgentContextSnapshot(started.attempt.execution_id);
@@ -321,7 +321,6 @@ test('injects a semantic backlog resume packet while excluding pruned decision b
 
 test('hard-isolates Test context from Dev narratives while preserving the frozen verification contract', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { beginExecutionAttempt } = await import('./executions');
   const {
     createOrReopenRecoveryItem,
     listRecoveryItemsForStage,
@@ -479,7 +478,7 @@ test('hard-isolates Test context from Dev narratives while preserving the frozen
     }],
   });
 
-  const devAttempt = await beginExecutionAttempt({
+  const devAttempt = await beginTestExecutionAttempt({
     runId: `RUN-dev-context-${taskId}`,
     delegation: delegation(taskId, {
       agent: 'dev-agent',
@@ -499,7 +498,7 @@ test('hard-isolates Test context from Dev narratives while preserving the frozen
     'DEV-CODE-COMMIT-SENTINEL',
     devAttempt.attempt.execution_id,
   );
-  const testAttempt = await beginExecutionAttempt({
+  const testAttempt = await beginTestExecutionAttempt({
     runId: `RUN-test-context-${taskId}`,
     delegation: delegation(taskId, {
       agent: 'test-agent',

@@ -213,6 +213,8 @@ Agent 配置与 execution 审计是两个不同边界。系统模板只在项目
 
 外层 Workflow 还需要为 Agent 提供受控工具，使 Agent 可以提交结构化结果、请求澄清或运行信息，但不能直接修改业务数据库或任意推进流程状态。
 
+派发由 `ProgressDispatcher` 统一负责。只读 Inspector 为任务页和诊断命令提供全局一致的 selected/active/waiting/completed 解释，但它不授予执行权；Runner 只能通过 `reserveNext` 取得持久化 Ticket。候选选择、`planned` execution、全部资源 Claim 和非控制 Lane 的 running 状态在同一个 SQLite `BEGIN IMMEDIATE` transaction 中提交，随后 `activate` 再写入不可变 Prompt 与运行时输入。Runner 只准备和执行 Ticket、持久化结果并执行 Dispatcher 返回的等待指令，不再推导优先级、Lane、容量或资源所有权。诊断入口为 `npm run loopctl -- task-dispatch-inspect <requirement-id>`。
+
 ### 3.7 失败、重试与恢复
 
 长期无人值守不意味着系统不会失败，而是失败后不需要人重新理解整个过程。

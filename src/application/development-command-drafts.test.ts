@@ -1,3 +1,5 @@
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
+import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
@@ -37,11 +39,10 @@ async function begin(
   suffix: string,
   prompt = 'progressive development prompt',
 ) {
-  const { beginExecutionAttempt } = await import('./executions');
   const { issueAgentCommandToken } = await import('./agent-command-drafts');
   const { gitHead } = await import('../infrastructure/git');
   const root = await ensureRepository();
-  const started = await beginExecutionAttempt({
+  const started = await beginTestExecutionAttempt({
     runId: `RUN-development-${suffix}`,
     delegation,
     prompt,
@@ -54,7 +55,7 @@ async function begin(
 
 async function developmentDelegation(title: string) {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask, pipelineForTask, saveDeliverySpec } = await import('./tasks');
+  const { createTask, saveDeliverySpec } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare(`
     UPDATE tasks
@@ -100,7 +101,7 @@ async function developmentDelegation(title: string) {
       },
     }),
   });
-  const delegation = (await pipelineForTask(taskId)).find((item) =>
+  const delegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'dev-agent' && item.storyIndex === 1);
   assert.ok(delegation);
   return { taskId, delegation: delegation! as DelegationEnvelope };
@@ -251,7 +252,7 @@ test('development agent confirms the commit phase without Application Git valida
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask, pipelineForTask } = await import('./tasks');
+  const { getTask } = await import('./tasks');
   const { taskId, delegation } = await developmentDelegation('精简后的开发走查');
   const started = await begin(delegation, `${taskId}-existing`);
 
@@ -429,7 +430,7 @@ test('development agent confirms the commit phase without Application Git valida
   await completeExecution(started.executionId);
   const detail = await getTask(taskId);
   assert.equal(detail?.task.dev_index, 1);
-  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'test-agent');
+  assert.equal((await inspectTaskDispatch(taskId))[0]?.agent, 'test-agent');
 });
 
 test('development runtime input keeps a stable request key and answer across resume', async () => {
@@ -440,7 +441,6 @@ test('development runtime input keeps a stable request key and answer across res
   const {
     answerRuntimeInput,
     getTask,
-    pipelineForTask,
     submitRuntimeInputs,
   } = await import('./tasks');
   const { taskId, delegation } = await developmentDelegation('开发运行信息恢复');
@@ -471,7 +471,7 @@ test('development runtime input keeps a stable request key and answer across res
     answer: '使用 http://localhost:3001。',
   });
   await submitRuntimeInputs(taskId);
-  const resumedDelegation = (await pipelineForTask(taskId)).find((item) =>
+  const resumedDelegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'dev-agent' && item.pipeline === 'resume')! as DelegationEnvelope;
   const resumed = await begin(resumedDelegation, `${taskId}-resume`);
   const restored = await command(resumed.executionId, resumed.token!, ['implementation', 'status']);

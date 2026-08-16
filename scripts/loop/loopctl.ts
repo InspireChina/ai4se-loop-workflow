@@ -5,7 +5,6 @@ import {
   addQuestion,
   addStory,
   cancelTask,
-  createLoopDispatch,
   createTask,
   ensureLoopRuntimeFiles,
   getRunStatus,
@@ -15,15 +14,14 @@ import {
   initializeTaskContext,
   listDocuments,
   listTasks,
-  pipelineForTask,
   releaseBlock,
   rewindTask,
-  toJsonlEnvelope,
   toPipeEnvelope,
   transitionTask,
   updateTask,
   upsertDocument,
 } from '../../src/application/tasks';
+import { progressDispatchInspector } from '../../src/application/progress-dispatch';
 import { databaseConnection, paths } from '../../src/infrastructure/database';
 import { submitTaskContextChatChangeRequest } from '../../src/application/task-context-chat';
 import type { Actor, TaskStatus } from '../../src/domain/task';
@@ -156,42 +154,19 @@ async function printBlockList(format: string) {
   }
 }
 
-async function printTaskPipeline(taskId: string, args: Args) {
+async function printTaskDispatchInspection(taskId: string, args: Args) {
   const detail = await getTask(taskId);
   if (!detail) throw new Error(`task not found: ${taskId}`);
   const format = value(args, 'format', 'jsonl');
-  const lines = await pipelineForTask(taskId);
-  for (const line of lines) {
-    const task = detail.task;
-    const envelope = {
-      ...line,
-      title: task.title,
-      taskDescription: task.description,
-      itemType: task.item_type,
-      priority: task.priority || '',
-      link: task.link || '',
-      externalId: task.external_id || '',
-      externalStatus: task.external_status || '',
-      agileStatus: task.agile_status,
-      currentSubagent: task.current_subagent || '',
-      resumePending: task.resume_pending,
-      specResolvedIndex: task.spec_resolved_index,
-      runState: task.run_state,
-      closureStatus: task.closure_status,
-      reviewRevision: task.review_revision,
-      reviewDocumentId: task.review_document_id || '',
-      lastActor: task.last_actor || '',
-      analysisIndex: task.analysis_index,
-      devIndex: task.dev_index,
-      testIndex: task.test_index,
-      totalStories: task.total_stories,
-      nextStep: task.next_step || '',
-      blockedReason: task.blocked_reason || '',
-      owner: task.owner || '',
-      evidence: task.evidence || '',
-      risk: task.risk || '',
-    };
-    console.log(format === 'pipe' ? toPipeEnvelope(envelope) : toJsonlEnvelope(envelope));
+  const explanation = await progressDispatchInspector.inspect({ requirementId: taskId });
+  if (format === 'pipe') {
+    for (const decision of explanation.decisions) {
+      if (decision.state === 'selected' && decision.work) console.log(toPipeEnvelope(decision.work));
+    }
+    return;
+  }
+  for (const decision of explanation.decisions) {
+    console.log(JSON.stringify({ requirementId: taskId, ...decision }));
   }
 }
 
@@ -245,14 +220,9 @@ async function main() {
     case 'task-get':
       await printTask(args._[0]);
       return;
-    case 'task-pipeline':
-      await printTaskPipeline(args._[0], args);
+    case 'task-dispatch-inspect':
+      await printTaskDispatchInspection(args._[0], args);
       return;
-    case 'dispatch': {
-      const result = await createLoopDispatch(requireValue(args, 'runToken'));
-      console.log(result.runDir);
-      return;
-    }
     case 'block-list':
       await printBlockList(value(args, 'format', 'markdown'));
       return;

@@ -1,3 +1,5 @@
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
+import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DelegationEnvelope } from './tasks';
@@ -7,14 +9,14 @@ async function executeBusinessAnalysisAgent(
   commands: string[][],
   suffix: string,
 ) {
-  const { beginExecutionAttempt, completeExecution } = await import('./executions');
+  const { completeExecution } = await import('./executions');
   const {
     issueAgentCommandToken,
     readAgentCommandSubmission,
     runAgentCommand,
   } = await import('./agent-command-drafts');
   const { applyAgentResult } = await import('./agent-results');
-  const started = await beginExecutionAttempt({
+  const started = await beginTestExecutionAttempt({
     runId: `RUN-ba-${suffix}`,
     delegation,
     prompt: 'Business Analysis progressive command test',
@@ -41,7 +43,7 @@ async function executeBusinessAnalysisAgent(
 }
 
 test('runs Business Analysis from a raw idea to an independently approved requirement specification', async () => {
-  const { acknowledgeClosure, createTask, getTask, pipelineForTask } = await import('./tasks');
+  const { acknowledgeClosure, createTask, getTask } = await import('./tasks');
   const taskId = await createTask({
     title: '让团队更早发现项目健康风险',
     description: '希望有一个项目体检能力，但目标用户、检查内容和结果形态尚未确定。',
@@ -49,7 +51,7 @@ test('runs Business Analysis from a raw idea to an independently approved requir
     metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
   });
 
-  let delegation = (await pipelineForTask(taskId))[0];
+  let delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'idea-context-agent');
   await executeBusinessAnalysisAgent(delegation, [
     ['idea-context', 'discovery', 'complete', '--artifact', '# 调查\n\n团队需要更早识别项目健康风险。'],
@@ -58,7 +60,7 @@ test('runs Business Analysis from a raw idea to an independently approved requir
     ['idea-context', 'complete'],
   ], `${taskId}-intent`);
 
-  delegation = (await pipelineForTask(taskId))[0];
+  delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'business-design-agent');
   const designStatus = await executeBusinessAnalysisAgent(delegation, [
     ['business-design', 'exploration', 'complete', '--artifact', '# 探索\n\n覆盖项目状态、风险信号、解释与后续行动。'],
@@ -71,7 +73,7 @@ test('runs Business Analysis from a raw idea to an independently approved requir
   assert.equal(designStatus.businessAnalysis?.stage, 'business_design');
 
   const specification = '# AS IS\n\n项目成员缺少统一的健康风险视图。\n\n# TO BE\n\n项目成员可发起项目体检并查看分项状态、风险依据和建议行动。\n\n# ACTORS\n\n项目成员。\n\n# SCENARIOS\n\n发起体检并阅读结果。\n\n# BUSINESS RULES\n\n每个风险必须展示依据。\n\n# SCOPE\n\n项目级体检结果。\n\n# OUT OF SCOPE\n\n自动修复。\n\n# ACCEPTANCE\n\n用户可以看到分项状态、风险依据和建议行动。\n\n# DEPENDENCIES\n\n无。\n\n# ASSUMPTIONS\n\n用户可以访问目标项目。';
-  delegation = (await pipelineForTask(taskId))[0];
+  delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'requirement-spec-agent');
   await executeBusinessAnalysisAgent(delegation, [
     ['requirement-spec', 'composition', 'complete', '--artifact', specification],
@@ -79,7 +81,7 @@ test('runs Business Analysis from a raw idea to an independently approved requir
     ['requirement-spec', 'complete'],
   ], `${taskId}-spec`);
 
-  delegation = (await pipelineForTask(taskId))[0];
+  delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'spec-review-agent');
   const review = await executeBusinessAnalysisAgent(delegation, [
     ['spec-review', 'inspection', 'complete', '--artifact', '# 独立审查\n\n规格忠实继承需求意图和业务方案。'],
@@ -91,7 +93,7 @@ test('runs Business Analysis from a raw idea to an independently approved requir
   const ready = await getTask(taskId);
   assert.equal(ready?.task.agile_status, 'ready_to_close');
   assert.equal(ready?.task.closure_status, 'awaiting_read');
-  assert.equal((await pipelineForTask(taskId)).length, 0);
+  assert.equal((await inspectTaskDispatch(taskId)).length, 0);
   assert.match(ready?.documents.find((document) => document.document_id === ready.task.review_document_id)?.content || '', /# ACCEPTANCE/);
 
   await acknowledgeClosure({ taskId, reviewRevision: ready!.task.review_revision });
@@ -99,7 +101,7 @@ test('runs Business Analysis from a raw idea to an independently approved requir
 });
 
 test('hands an approved End to End specification directly to Develop without human acknowledgement', async () => {
-  const { createTask, getTask, pipelineForTask } = await import('./tasks');
+  const { createTask, getTask } = await import('./tasks');
   const taskId = await createTask({
     title: '从想法自动交付项目体检能力',
     description: '从模糊想法开始完成业务分析，并自动进入开发交付。',
@@ -107,7 +109,7 @@ test('hands an approved End to End specification directly to Develop without hum
     metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
   });
 
-  let delegation = (await pipelineForTask(taskId))[0];
+  let delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'idea-context-agent');
   await executeBusinessAnalysisAgent(delegation, [
     ['idea-context', 'discovery', 'complete', '--artifact', '# 调查\n\n团队需要更早识别项目健康风险。'],
@@ -116,7 +118,7 @@ test('hands an approved End to End specification directly to Develop without hum
     ['idea-context', 'complete'],
   ], `${taskId}-intent`);
 
-  delegation = (await pipelineForTask(taskId))[0];
+  delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'business-design-agent');
   await executeBusinessAnalysisAgent(delegation, [
     ['business-design', 'exploration', 'complete', '--artifact', '# 探索\n\n覆盖状态、风险依据和建议行动。'],
@@ -128,7 +130,7 @@ test('hands an approved End to End specification directly to Develop without hum
   ], `${taskId}-design`);
 
   const specification = '# AS IS\n\n缺少统一健康风险视图。\n\n# TO BE\n\n项目成员可查看体检结果。\n\n# ACTORS\n\n项目成员。\n\n# SCENARIOS\n\n发起并阅读体检。\n\n# BUSINESS RULES\n\n风险必须展示依据。\n\n# SCOPE\n\n项目级体检。\n\n# OUT OF SCOPE\n\n自动修复。\n\n# ACCEPTANCE\n\n展示状态、依据和建议行动。\n\n# DEPENDENCIES\n\n无。\n\n# ASSUMPTIONS\n\n用户可访问项目。';
-  delegation = (await pipelineForTask(taskId))[0];
+  delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'requirement-spec-agent');
   await executeBusinessAnalysisAgent(delegation, [
     ['requirement-spec', 'composition', 'complete', '--artifact', specification],
@@ -136,7 +138,7 @@ test('hands an approved End to End specification directly to Develop without hum
     ['requirement-spec', 'complete'],
   ], `${taskId}-spec`);
 
-  delegation = (await pipelineForTask(taskId))[0];
+  delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'spec-review-agent');
   await executeBusinessAnalysisAgent(delegation, [
     ['spec-review', 'inspection', 'complete', '--artifact', '# 独立审查\n\n规格完整继承需求意图和业务方案。'],
@@ -153,14 +155,14 @@ test('hands an approved End to End specification directly to Develop without hum
   assert.equal(handedOff?.task.review_document_id, null);
   assert.match(handedOff?.documents.find((document) => document.kind === 'ba_review')?.content || '', /# ACCEPTANCE/);
 
-  const developEntry = (await pipelineForTask(taskId))[0];
+  const developEntry = (await inspectTaskDispatch(taskId))[0];
   assert.equal(developEntry.pipeline, 'backlog');
   assert.equal(developEntry.agent, 'backlog-agent');
 });
 
 test('dynamically inserts Research for intent and business design and requires current web-search evidence', async () => {
-  const { createTask, pipelineForTask } = await import('./tasks');
-  const { beginExecutionAttempt, completeExecution, recordExecutionReceipt } = await import('./executions');
+  const { createTask } = await import('./tasks');
+  const { completeExecution, recordExecutionReceipt } = await import('./executions');
   const { issueAgentCommandToken, readAgentCommandSubmission, runAgentCommand } = await import('./agent-command-drafts');
   const { applyAgentResult } = await import('./agent-results');
   const taskId = await createTask({
@@ -184,8 +186,8 @@ test('dynamically inserts Research for intent and business design and requires c
     unresolved: [],
   });
 
-  let delegation = (await pipelineForTask(taskId))[0];
-  const intent = await beginExecutionAttempt({
+  let delegation = (await inspectTaskDispatch(taskId))[0];
+  const intent = await beginTestExecutionAttempt({
     runId: `RUN-ba-research-${taskId}-intent`,
     delegation,
     prompt: 'Intent research',
@@ -219,9 +221,9 @@ test('dynamically inserts Research for intent and business design and requires c
   await applyAgentResult(`RUN-ba-research-${taskId}-intent`, delegation, intentResult!, { executionId: intent.attempt.execution_id });
   await completeExecution(intent.attempt.execution_id);
 
-  delegation = (await pipelineForTask(taskId))[0];
+  delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'business-design-agent');
-  const design = await beginExecutionAttempt({
+  const design = await beginTestExecutionAttempt({
     runId: `RUN-ba-research-${taskId}-design`,
     delegation,
     prompt: 'Business design research',
@@ -246,12 +248,12 @@ test('dynamically inserts Research for intent and business design and requires c
   const designResult = await readAgentCommandSubmission(design.attempt.execution_id);
   await applyAgentResult(`RUN-ba-research-${taskId}-design`, delegation, designResult!, { executionId: design.attempt.execution_id });
   await completeExecution(design.attempt.execution_id);
-  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'requirement-spec-agent');
+  assert.equal((await inspectTaskDispatch(taskId))[0]?.agent, 'requirement-spec-agent');
 });
 
 test('injects decision strength only while Idea Context answers and audits fully autonomous decisions before synthesis', async () => {
-  const { createTask, getTask, pipelineForTask } = await import('./tasks');
-  const { beginExecutionAttempt, completeExecution } = await import('./executions');
+  const { createTask, getTask } = await import('./tasks');
+  const { completeExecution } = await import('./executions');
   const {
     issueAgentCommandToken,
     readAgentCommandSubmission,
@@ -263,8 +265,8 @@ test('injects decision strength only while Idea Context answers and audits fully
     itemType: 'business-analysis',
     metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
   });
-  const delegation = (await pipelineForTask(taskId))[0];
-  const started = await beginExecutionAttempt({ runId: `RUN-ba-intent-mode-${taskId}`, delegation, prompt: 'Intent answer policy' });
+  const delegation = (await inspectTaskDispatch(taskId))[0];
+  const started = await beginTestExecutionAttempt({ runId: `RUN-ba-intent-mode-${taskId}`, delegation, prompt: 'Intent answer policy' });
   const token = await issueAgentCommandToken(started.attempt.execution_id);
   assert.ok(token);
   const run = (args: string[]) => runAgentCommand({ executionId: started.attempt.execution_id, token, args });
@@ -316,8 +318,8 @@ test('injects decision strength only while Idea Context answers and audits fully
 });
 
 test('audits an Idea Context custom answer and returns to clarification proposal for incremental questions', async () => {
-  const { answerQuestion, createTask, getTask, pipelineForTask, submitClarificationAnswers } = await import('./tasks');
-  const { beginExecutionAttempt, completeExecution } = await import('./executions');
+  const { answerQuestion, createTask, getTask, submitClarificationAnswers } = await import('./tasks');
+  const { completeExecution } = await import('./executions');
   const { issueAgentCommandToken, readAgentCommandSubmission, runAgentCommand } = await import('./agent-command-drafts');
   const { applyAgentResult } = await import('./agent-results');
   const taskId = await createTask({
@@ -345,8 +347,8 @@ test('audits an Idea Context custom answer and returns to clarification proposal
     humanDecisionKeys: ['success-outcome'],
   };
 
-  let delegation = (await pipelineForTask(taskId))[0];
-  const first = await beginExecutionAttempt({ runId: `RUN-ba-intent-expand-${taskId}-1`, delegation, prompt: 'Intent clarification proposal' });
+  let delegation = (await inspectTaskDispatch(taskId))[0];
+  const first = await beginTestExecutionAttempt({ runId: `RUN-ba-intent-expand-${taskId}-1`, delegation, prompt: 'Intent clarification proposal' });
   const firstToken = await issueAgentCommandToken(first.attempt.execution_id);
   assert.ok(firstToken);
   const firstRun = (args: string[]) => runAgentCommand({ executionId: first.attempt.execution_id, token: firstToken, args });
@@ -368,8 +370,8 @@ test('audits an Idea Context custom answer and returns to clarification proposal
   });
   await submitClarificationAnswers(taskId);
 
-  delegation = (await pipelineForTask(taskId))[0];
-  const resumed = await beginExecutionAttempt({ runId: `RUN-ba-intent-expand-${taskId}-2`, delegation, prompt: 'Intent answer audit' });
+  delegation = (await inspectTaskDispatch(taskId))[0];
+  const resumed = await beginTestExecutionAttempt({ runId: `RUN-ba-intent-expand-${taskId}-2`, delegation, prompt: 'Intent answer audit' });
   const resumedToken = await issueAgentCommandToken(resumed.attempt.execution_id);
   assert.ok(resumedToken);
   const resumedRun = (args: string[]) => runAgentCommand({ executionId: resumed.attempt.execution_id, token: resumedToken, args });
@@ -422,11 +424,10 @@ test('audits a Business Design custom answer and expands only the newly introduc
     answerQuestion,
     createTask,
     getTask,
-    pipelineForTask,
     submitClarificationAnswers,
     updateTask,
   } = await import('./tasks');
-  const { beginExecutionAttempt, completeExecution } = await import('./executions');
+  const { completeExecution } = await import('./executions');
   const {
     issueAgentCommandToken,
     readAgentCommandSubmission,
@@ -459,9 +460,9 @@ test('audits a Business Design custom answer and expands only the newly introduc
     humanDecisionKeys: ['result-visibility'],
   };
 
-  let delegation = (await pipelineForTask(taskId))[0];
+  let delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'business-design-agent');
-  const first = await beginExecutionAttempt({ runId: `RUN-ba-human-${taskId}-1`, delegation, prompt: 'Business decision proposal' });
+  const first = await beginTestExecutionAttempt({ runId: `RUN-ba-human-${taskId}-1`, delegation, prompt: 'Business decision proposal' });
   const firstToken = await issueAgentCommandToken(first.attempt.execution_id);
   assert.ok(firstToken);
   const firstRun = (args: string[]) => runAgentCommand({ executionId: first.attempt.execution_id, token: firstToken, args });
@@ -489,9 +490,9 @@ test('audits a Business Design custom answer and expands only the newly introduc
   });
   await submitClarificationAnswers(taskId);
 
-  delegation = (await pipelineForTask(taskId))[0];
+  delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.pipeline, 'resume');
-  const resumed = await beginExecutionAttempt({ runId: `RUN-ba-human-${taskId}-2`, delegation, prompt: 'Business decision resume' });
+  const resumed = await beginTestExecutionAttempt({ runId: `RUN-ba-human-${taskId}-2`, delegation, prompt: 'Business decision resume' });
   const resumedToken = await issueAgentCommandToken(resumed.attempt.execution_id);
   assert.ok(resumedToken);
   const resumedRun = (args: string[]) => runAgentCommand({ executionId: resumed.attempt.execution_id, token: resumedToken, args });

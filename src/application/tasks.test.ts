@@ -1,3 +1,5 @@
+import { beginTestExecutionAttempt, PromptCanaryDeferredError } from '../test/execution-fixtures';
+import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -40,7 +42,7 @@ test('updates an existing task-level document instead of inserting a duplicate N
 });
 
 test('anchors verified file feedback to document revisions and supplies it to Agent evolution', async () => {
-  const { addDocumentComment, createTask, getTask, pipelineForTask, upsertDocument } = await import('./tasks');
+  const { addDocumentComment, createTask, getTask, upsertDocument } = await import('./tasks');
   const { applyFeedbackTriageGroups } = await import('./feedback');
   const { applyEvolutionResult, beginEvolutionRun } = await import('./agent-evolution');
   const { databaseConnection } = await import('../infrastructure/database');
@@ -76,7 +78,7 @@ test('anchors verified file feedback to document revisions and supplies it to Ag
   assert.equal(detail?.documentComments[0].quoted_text, 'needs a clearer boundary');
   assert.equal(detail?.documentComments[0].status, 'open');
 
-  const feedbackDelegation = (await pipelineForTask(taskId))[0];
+  const feedbackDelegation = (await inspectTaskDispatch(taskId))[0];
   assert.ok(feedbackDelegation.feedbackBatchId);
   await applyFeedbackTriageGroups({
     taskId,
@@ -132,7 +134,7 @@ test('anchors verified file feedback to document revisions and supplies it to Ag
 });
 
 test('creates title-only and described Tasks without blocking delegation and serializes description into agent context', async () => {
-  const { createTask, getTaskContext, getTask, pipelineAllEnvelopes, pipelineForTask, setTaskPriority, toJsonlEnvelope } = await import('./tasks');
+  const { createTask, getTaskContext, getTask, setTaskPriority } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const titleOnlyTaskId = await createTask({ title: 'Title only Task' });
@@ -158,27 +160,25 @@ test('creates title-only and described Tasks without blocking delegation and ser
 
   // Each creation path can produce the normal backlog delegation; a missing
   // description must never be interpreted as a pipeline blocker.
-  assert.equal((await pipelineForTask(titleOnlyTaskId))[0]?.agent, 'backlog-agent');
-  assert.equal((await pipelineForTask(describedTaskId))[0]?.agent, 'backlog-agent');
+  assert.equal((await inspectTaskDispatch(titleOnlyTaskId))[0]?.agent, 'backlog-agent');
+  assert.equal((await inspectTaskDispatch(describedTaskId))[0]?.agent, 'backlog-agent');
 
   // A backlog delegation consumes the browser resource, so isolate each path
   // when inspecting its serialized Agent input.
   db.prepare("UPDATE tasks SET agile_status = 'done' WHERE task_id NOT IN (?, ?, ?)").run(titleOnlyTaskId, blankDescriptionTaskId, describedTaskId);
   db.prepare("UPDATE tasks SET agile_status = 'done' WHERE task_id = ?").run(blankDescriptionTaskId);
   db.prepare("UPDATE tasks SET agile_status = 'done' WHERE task_id = ?").run(describedTaskId);
-  const titleOnlyEnvelope = (await pipelineAllEnvelopes()).find((item) => item.taskId === titleOnlyTaskId);
+  const titleOnlyEnvelope = (await inspectAllDispatch()).find((item) => item.taskId === titleOnlyTaskId);
   assert.ok(titleOnlyEnvelope);
 
-  const titleOnlyAgentInput = JSON.parse(toJsonlEnvelope(titleOnlyEnvelope));
-  assert.equal(titleOnlyAgentInput.task_description, null);
+  assert.equal(titleOnlyEnvelope.taskDescription, null);
 
   db.prepare("UPDATE tasks SET agile_status = 'done' WHERE task_id = ?").run(titleOnlyTaskId);
   db.prepare("UPDATE tasks SET agile_status = 'backlog' WHERE task_id = ?").run(describedTaskId);
-  const describedEnvelope = (await pipelineAllEnvelopes()).find((item) => item.taskId === describedTaskId);
+  const describedEnvelope = (await inspectAllDispatch()).find((item) => item.taskId === describedTaskId);
   assert.ok(describedEnvelope);
-  const describedAgentInput = JSON.parse(toJsonlEnvelope(describedEnvelope));
-  assert.equal(describedAgentInput.task_description, 'Keep this value for the next story.');
-  assert.equal(describedAgentInput.description, '澄清业务变化上下文');
+  assert.equal(describedEnvelope.taskDescription, 'Keep this value for the next story.');
+  assert.equal(describedEnvelope.description, '澄清业务变化上下文');
 });
 
 test('always creates a new UUID requirement without title, URL, external ID, or terminal-state deduplication', async () => {
@@ -303,12 +303,12 @@ test('lists only completed Tasks in completion order while preserving terminal T
 test('pauses requirement intake for user alignment and resumes the same backlog agent before splitting', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { parseAgentResult } = await import('../domain/agent-result');
-  const { answerQuestion, createTask, getTask, pipelineForTask, submitClarificationAnswers } = await import('./tasks');
+  const { answerQuestion, createTask, getTask, submitClarificationAnswers } = await import('./tasks');
   const taskId = await createTask({
     title: 'Requirement-level clarification',
     description: 'Add an export action, but the intended audience is not specified.',
   });
-  const firstDelegation = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
+  const firstDelegation = (await inspectTaskDispatch(taskId))[0] as Parameters<typeof applyAgentResult>[1];
   assert.deepEqual([firstDelegation.lane, firstDelegation.pipeline, firstDelegation.agent, firstDelegation.storyIndex], ['control', 'backlog', 'backlog-agent', null]);
 
   const blocked = await applyAgentResult('run-requirement-clarification', firstDelegation, parseAgentResult(JSON.stringify({
@@ -342,14 +342,14 @@ test('pauses requirement intake for user alignment and resumes the same backlog 
   assert.equal(question?.story_index, null);
   assert.equal(question?.kind, 'local');
   assert.equal(question?.status, 'pending');
-  assert.deepEqual(await pipelineForTask(taskId), []);
+  assert.deepEqual(await inspectTaskDispatch(taskId), []);
 
   await answerQuestion({ taskId, questionId: question!.question_id, answer: '本轮只面向管理员。' });
   await submitClarificationAnswers(taskId);
   detail = await getTask(taskId);
   assert.equal(detail?.task.run_state, 'runnable');
   assert.equal(detail?.task.resume_pending, 1);
-  const resumedDelegation = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
+  const resumedDelegation = (await inspectTaskDispatch(taskId))[0] as Parameters<typeof applyAgentResult>[1];
   assert.deepEqual([resumedDelegation.lane, resumedDelegation.pipeline, resumedDelegation.agent, resumedDelegation.storyIndex], ['control', 'resume', 'backlog-agent', null]);
 
   await applyAgentResult('run-requirement-clarification-resume', resumedDelegation, parseAgentResult(JSON.stringify({
@@ -369,14 +369,14 @@ test('pauses requirement intake for user alignment and resumes the same backlog 
   assert.equal(detail?.task.resume_pending, 0);
   assert.equal(detail?.questions.find((item) => item.question_id === question?.question_id)?.status, 'resolved');
   assert.ok(detail?.events.some((event) => event.event_type === 'RequirementClarificationsResolved'));
-  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'story-splitter-agent');
+  assert.equal((await inspectTaskDispatch(taskId))[0]?.agent, 'story-splitter-agent');
 });
 
 test('keeps an unreproduced Bug in Repro until a human aligns the missing conditions', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { parseAgentResult } = await import('../domain/agent-result');
   const { databaseConnection } = await import('../infrastructure/database');
-  const { answerQuestion, createTask, getTask, pipelineForTask, submitClarificationAnswers } = await import('./tasks');
+  const { answerQuestion, createTask, getTask, submitClarificationAnswers } = await import('./tasks');
   const taskId = await createTask({ title: 'Bug must be reproduced before planning' });
   const db = await databaseConnection();
   db.prepare(`
@@ -385,7 +385,7 @@ test('keeps an unreproduced Bug in Repro until a human aligns the missing condit
     WHERE task_id = ?
   `).run(taskId);
 
-  const repro = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
+  const repro = (await inspectTaskDispatch(taskId))[0] as Parameters<typeof applyAgentResult>[1];
   assert.deepEqual([repro.pipeline, repro.agent], ['repro', 'repro-agent']);
   const blocked = await applyAgentResult('run-repro-not-reproduced', repro, parseAgentResult(JSON.stringify({
     outcome: 'needs_input',
@@ -410,7 +410,7 @@ test('keeps an unreproduced Bug in Repro until a human aligns the missing condit
   assert.equal(detail?.task.run_state, 'waiting_for_answers');
   assert.equal(detail?.task.current_subagent, 'repro-agent');
   assert.equal(question?.status, 'pending');
-  assert.deepEqual(await pipelineForTask(taskId), []);
+  assert.deepEqual(await inspectTaskDispatch(taskId), []);
 
   await answerQuestion({
     taskId,
@@ -418,7 +418,7 @@ test('keeps an unreproduced Bug in Repro until a human aligns the missing condit
     answer: '问题只出现在管理员入口，并且需要使用一条已归档的数据。',
   });
   await submitClarificationAnswers(taskId);
-  const resumed = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
+  const resumed = (await inspectTaskDispatch(taskId))[0] as Parameters<typeof applyAgentResult>[1];
   assert.deepEqual([resumed.pipeline, resumed.agent, resumed.storyIndex], ['resume', 'repro-agent', null]);
 
   await applyAgentResult('run-repro-after-alignment', resumed, parseAgentResult(JSON.stringify({
@@ -500,7 +500,7 @@ test('submits answered analysis clarifications back to the analyst without appro
 test('resumes Analysis by lane ownership when Delivery leaves test-agent at task level', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { parseAgentResult } = await import('../domain/agent-result');
-  const { addQuestion, answerQuestion, getTask, pipelineForTask, submitClarificationAnswers } = await import('./tasks');
+  const { addQuestion, answerQuestion, getTask, submitClarificationAnswers } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = 'TASK-analysis-resume-with-test-owner';
@@ -539,7 +539,7 @@ test('resumes Analysis by lane ownership when Delivery leaves test-agent at task
       ['delivery', 'pending', null, 0],
     ],
   );
-  const resumed = (await pipelineForTask(taskId))[0] as Parameters<typeof applyAgentResult>[1];
+  const resumed = (await inspectTaskDispatch(taskId))[0] as Parameters<typeof applyAgentResult>[1];
   assert.deepEqual([resumed.lane, resumed.pipeline, resumed.agent, resumed.storyIndex], ['analysis', 'resume', 'analyst-agent', 2]);
 
   await applyAgentResult('run-concurrent-analysis-resume', resumed, parseAgentResult(JSON.stringify({
@@ -583,7 +583,7 @@ test('resumes Analysis by lane ownership when Delivery leaves test-agent at task
 });
 
 test('acknowledges the current review report as read without an approval decision', async () => {
-  const { acknowledgeClosure, addDocumentComment, addQuestion, getTask, pipelineForTask } = await import('./tasks');
+  const { acknowledgeClosure, addDocumentComment, addQuestion, getTask } = await import('./tasks');
   const { applyFeedbackTriageGroups } = await import('./feedback');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -617,7 +617,7 @@ test('acknowledges the current review report as read without an approval decisio
     content: '请在后续报告中保留这个表述约定。',
   });
   await assert.rejects(() => acknowledgeClosure({ taskId, reviewRevision: 1 }), /1 条反馈尚未通过/);
-  const feedbackDelegation = (await pipelineForTask(taskId))[0];
+  const feedbackDelegation = (await inspectTaskDispatch(taskId))[0];
   assert.ok(feedbackDelegation.feedbackBatchId);
   await applyFeedbackTriageGroups({
     taskId,
@@ -776,11 +776,9 @@ test('lets Dev and Test request runtime information and resume the same delivery
   const {
     answerRuntimeInput,
     getTask,
-    markDelegationLaneRunning,
-    pipelineAllEnvelopes,
-    pipelineForTask,
     submitRuntimeInputs,
   } = await import('./tasks');
+  const { markTestDelegationRunning } = await import('../test/dispatch-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const {
     BROWSER_EXCLUSIVE_RESOURCE,
@@ -846,7 +844,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
   });
 
   addExecution('execution-runtime-dev-request', 'dev-agent', 'dev');
-  await markDelegationLaneRunning(envelope('dev-agent', 'dev'), 'execution-runtime-dev-request');
+  await markTestDelegationRunning(envelope('dev-agent', 'dev'), 'execution-runtime-dev-request');
   assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, 'execution-runtime-dev-request');
   await applyAgentResult('run-runtime-input', envelope('dev-agent', 'dev'), parseAgentResult(JSON.stringify({
     outcome: 'needs_input',
@@ -876,7 +874,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
       run_state, work_dir
     ) VALUES(?, 'Competing development', 'feature', 'ready for dev', 'analyst-agent', 1, 0, 0, 1, 1, 'runnable', '')
   `).run(competingTaskId);
-  const competingDev = (await pipelineAllEnvelopes()).find((item) => item.taskId === competingTaskId);
+  const competingDev = (await inspectAllDispatch()).find((item) => item.taskId === competingTaskId);
   assert.equal(competingDev?.agent, 'dev-agent');
   const competingExecutionId = 'execution-runtime-competing-dev';
   db.prepare(`
@@ -885,7 +883,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
       attempt, status, input_hash, input_json
     ) VALUES(?, 'run-runtime-input', ?, 1, 'dev-agent', 'dev', 'delivery', ?, 1, 'running', ?, '{}')
   `).run(competingExecutionId, competingTaskId, `key-${competingExecutionId}`, `hash-${competingExecutionId}`);
-  await markDelegationLaneRunning(competingDev!, competingExecutionId);
+  await markTestDelegationRunning(competingDev!, competingExecutionId);
   db.prepare("UPDATE tasks SET agile_status = 'in dev', current_subagent = 'dev-agent' WHERE task_id = ?").run(competingTaskId);
 
   await answerRuntimeInput({ taskId, requestId: detail!.runtimeInputs[0].request_id, answer: '#N/A' });
@@ -893,13 +891,13 @@ test('lets Dev and Test request runtime information and resume the same delivery
   assert.equal((await getTask(taskId))?.task.resume_pending, 0);
   assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, competingTaskId);
   assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, competingExecutionId);
-  assert.deepEqual(await pipelineForTask(taskId), []);
+  assert.deepEqual(await inspectTaskDispatch(taskId), []);
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id = ?").run(competingTaskId);
   db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE execution_id = ?").run(competingExecutionId);
   releaseExecutionResourceClaimsInDb(db, competingExecutionId);
   releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, competingTaskId);
 
-  const devResume = (await pipelineForTask(taskId))[0];
+  const devResume = (await inspectTaskDispatch(taskId))[0];
   assert.deepEqual(devResume, {
     taskId,
     lane: 'delivery',
@@ -910,7 +908,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
     description: '读取人工输入，并恢复开发验证通道',
   });
   addExecution('execution-runtime-dev-resume', 'dev-agent', 'resume');
-  await markDelegationLaneRunning(envelope('dev-agent', 'resume'), 'execution-runtime-dev-resume');
+  await markTestDelegationRunning(envelope('dev-agent', 'resume'), 'execution-runtime-dev-resume');
   assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, taskId);
   assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, 'execution-runtime-dev-resume');
   await applyAgentResult('run-runtime-input', envelope('dev-agent', 'resume'), parseAgentResult(JSON.stringify({
@@ -940,7 +938,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
   assert.match(evolution?.prompt || '', /#N\/A/);
 
   addExecution('execution-runtime-test-request', 'test-agent', 'test');
-  await markDelegationLaneRunning(envelope('test-agent', 'test'), 'execution-runtime-test-request');
+  await markTestDelegationRunning(envelope('test-agent', 'test'), 'execution-runtime-test-request');
   assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, 'execution-runtime-test-request');
   await applyAgentResult('run-runtime-input', envelope('test-agent', 'test'), parseAgentResult(JSON.stringify({
     outcome: 'needs_input',
@@ -956,11 +954,11 @@ test('lets Dev and Test request runtime information and resume the same delivery
   await answerRuntimeInput({ taskId, requestId: testInput.request_id, answer: '使用本地预览环境。' });
   await submitRuntimeInputs(taskId);
   assert.equal((await getTask(taskId))?.task.resume_pending, 0);
-  assert.equal((await pipelineForTask(taskId))[0]?.agent, 'test-agent');
-  assert.equal((await pipelineForTask(taskId))[0]?.pipeline, 'resume');
+  assert.equal((await inspectTaskDispatch(taskId))[0]?.agent, 'test-agent');
+  assert.equal((await inspectTaskDispatch(taskId))[0]?.pipeline, 'resume');
 
   addExecution('execution-runtime-test-resume', 'test-agent', 'resume');
-  await markDelegationLaneRunning(envelope('test-agent', 'resume'), 'execution-runtime-test-resume');
+  await markTestDelegationRunning(envelope('test-agent', 'resume'), 'execution-runtime-test-resume');
   assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, 'execution-runtime-test-resume');
   await applyAgentResult('run-runtime-input', envelope('test-agent', 'resume'), parseAgentResult(JSON.stringify({
     outcome: 'completed',
@@ -978,36 +976,35 @@ test('lets Dev and Test request runtime information and resume the same delivery
 });
 
 test('persists execution input before work and recovers output without rerunning the Agent', async () => {
-  const { createTask, pipelineAllEnvelopes } = await import('./tasks');
+  const { createTask } = await import('./tasks');
   const {
-    beginExecutionAttempt,
     completeExecution,
     markExecutionOutput,
-    recoverNextExecutionAttempt,
     recordExecutionReceipt,
   } = await import('./executions');
+  const { progressDispatcher } = await import('./progress-dispatch');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Durable execution input' });
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id != ?").run(taskId);
-  const delegation = (await pipelineAllEnvelopes()).find((item) => item.taskId === taskId);
+  const delegation = (await inspectAllDispatch()).find((item) => item.taskId === taskId);
   assert.ok(delegation);
 
   const runtime = { executorId: 'codex', configuredModel: 'gpt-5.6-terra', reasoningEffort: 'high' };
-  const started = await beginExecutionAttempt({ runId: 'run-durable-test', delegation, prompt: 'stable prompt', ...runtime });
+  const started = await beginTestExecutionAttempt({ runId: 'run-durable-test', delegation, prompt: 'stable prompt', ...runtime });
   assert.equal(started.recovered, false);
   assert.equal(started.attempt.status, 'running');
   assert.equal(started.attempt.executor_id, 'codex');
   assert.equal(started.attempt.configured_model, 'gpt-5.6-terra');
   assert.equal(started.attempt.reasoning_effort, 'high');
   await markExecutionOutput(started.attempt.execution_id, { outcome: 'completed', summary: 'captured output' });
-  const recoverable = await recoverNextExecutionAttempt();
-  assert.equal(recoverable?.execution_id, started.attempt.execution_id);
-  assert.match(recoverable?.result_json || '', /captured output/);
+  const recoverable = await progressDispatcher.nextRecovery();
+  assert.equal(recoverable?.attempt.execution_id, started.attempt.execution_id);
+  assert.match(recoverable?.attempt.result_json || '', /captured output/);
 
   await recordExecutionReceipt(started.attempt.execution_id, 'code_commit', 'abc123', { committed: true });
   await completeExecution(started.attempt.execution_id);
-  const repeated = await beginExecutionAttempt({ runId: 'run-durable-test-2', delegation, prompt: 'stable prompt', ...runtime });
+  const repeated = await beginTestExecutionAttempt({ runId: 'run-durable-test-2', delegation, prompt: 'stable prompt', ...runtime });
   assert.equal(repeated.recovered, true);
   assert.equal(repeated.attempt.status, 'applied');
   const row = db.prepare('SELECT code_commit, executor_id FROM execution_attempts WHERE execution_id = ?').get(started.attempt.execution_id) as { code_commit: string; executor_id: string };
@@ -1016,27 +1013,27 @@ test('persists execution input before work and recovers output without rerunning
 });
 
 test('keeps retry attempts in one logical generation even when the rebuilt prompt changes', async () => {
-  const { createTask, pipelineAllEnvelopes } = await import('./tasks');
-  const { beginExecutionAttempt, completeExecution, failExecution } = await import('./executions');
+  const { createTask } = await import('./tasks');
+  const { completeExecution, failExecution } = await import('./executions');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Stable retry generation' });
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id != ?").run(taskId);
-  const delegation = (await pipelineAllEnvelopes()).find((item) => item.taskId === taskId);
+  const delegation = (await inspectAllDispatch()).find((item) => item.taskId === taskId);
   assert.ok(delegation);
 
-  const first = await beginExecutionAttempt({ runId: 'run-retry-1', delegation, prompt: 'prompt before execution history exists' });
+  const first = await beginTestExecutionAttempt({ runId: 'run-retry-1', delegation, prompt: 'prompt before execution history exists' });
   await failExecution(first.attempt.execution_id, 'executor failed', false);
-  const second = await beginExecutionAttempt({ runId: 'run-retry-2', delegation, prompt: 'prompt now includes attempt one' });
+  const second = await beginTestExecutionAttempt({ runId: 'run-retry-2', delegation, prompt: 'prompt now includes attempt one' });
   await failExecution(second.attempt.execution_id, 'executor failed again', false);
-  const third = await beginExecutionAttempt({ runId: 'run-retry-3', delegation, prompt: 'prompt now includes attempts one and two' });
+  const third = await beginTestExecutionAttempt({ runId: 'run-retry-3', delegation, prompt: 'prompt now includes attempts one and two' });
 
   assert.deepEqual([first.attempt.attempt, second.attempt.attempt, third.attempt.attempt], [1, 2, 3]);
   assert.equal(second.attempt.delegation_key, first.attempt.delegation_key);
   assert.equal(third.attempt.delegation_key, first.attempt.delegation_key);
 
   await completeExecution(third.attempt.execution_id);
-  const rework = await beginExecutionAttempt({ runId: 'run-rework-1', delegation, prompt: 'new rework generation after completion' });
+  const rework = await beginTestExecutionAttempt({ runId: 'run-rework-1', delegation, prompt: 'new rework generation after completion' });
   assert.equal(rework.recovered, false);
   assert.equal(rework.attempt.attempt, 1);
   assert.notEqual(rework.attempt.delegation_key, first.attempt.delegation_key);
@@ -1044,9 +1041,8 @@ test('keeps retry attempts in one logical generation even when the rebuilt promp
 });
 
 test('does not let a late execution failure overwrite cancellation', async () => {
-  const { createTask, pipelineAllEnvelopes } = await import('./tasks');
+  const { createTask } = await import('./tasks');
   const {
-    beginExecutionAttempt,
     cancelExecution,
     failExecution,
   } = await import('./executions');
@@ -1054,10 +1050,10 @@ test('does not let a late execution failure overwrite cancellation', async () =>
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Cancellation wins over late failure' });
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id != ?").run(taskId);
-  const delegation = (await pipelineAllEnvelopes()).find((item) => item.taskId === taskId);
+  const delegation = (await inspectAllDispatch()).find((item) => item.taskId === taskId);
   assert.ok(delegation);
 
-  const started = await beginExecutionAttempt({
+  const started = await beginTestExecutionAttempt({
     runId: 'run-cancel-before-failure',
     delegation,
     prompt: 'stable prompt',
@@ -1075,14 +1071,14 @@ test('does not let a late execution failure overwrite cancellation', async () =>
 test('records a late Agent result after cancellation without reopening task lanes or applying effects', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { parseAgentResult } = await import('../domain/agent-result');
-  const { cancelTask, createTask, getTask, pipelineAllEnvelopes } = await import('./tasks');
+  const { cancelTask, createTask, getTask } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Cancel while Agent is running' });
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id != ?").run(taskId);
   db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
   db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
-  const delegation = (await pipelineAllEnvelopes()).find((item) => item.taskId === taskId);
+  const delegation = (await inspectAllDispatch()).find((item) => item.taskId === taskId);
   assert.ok(delegation);
 
   await cancelTask({ taskId, reason: 'No longer needed' });
@@ -1101,11 +1097,10 @@ test('records a late Agent result after cancellation without reopening task lane
 
 test('cancels an active Dev requirement and automatically releases both of its resources', async () => {
   const {
-    beginExecutionAttempt,
     cancelExecution,
     executionCancellationRequested,
   } = await import('./executions');
-  const { cancelTask, getTask, pipelineAllEnvelopes } = await import('./tasks');
+  const { cancelTask, getTask } = await import('./tasks');
   const {
     acquireResourceClaimsInDb,
     BROWSER_EXCLUSIVE_RESOURCE,
@@ -1159,7 +1154,7 @@ test('cancels an active Dev requirement and automatically releases both of its r
     evidence: '',
     risk: '',
   };
-  const execution = await beginExecutionAttempt({
+  const execution = await beginTestExecutionAttempt({
     runId: 'run-cancel-active-dev',
     delegation,
     prompt: 'Implement until cancelled.',
@@ -1200,12 +1195,12 @@ test('cancels an active Dev requirement and automatically releases both of its r
   await cancelExecution(execution.attempt.execution_id);
   const status = db.prepare('SELECT status FROM execution_attempts WHERE execution_id = ?').get(execution.attempt.execution_id) as { status: string };
   assert.equal(status.status, 'cancelled');
-  assert.equal((await pipelineAllEnvelopes()).some((item) => item.taskId === taskId), false);
+  assert.equal((await inspectAllDispatch()).some((item) => item.taskId === taskId), false);
 });
 
 test('pauses one requirement without changing its workflow state and resumes it from the same step', async () => {
-  const { beginExecutionAttempt, executionCancellationRequested } = await import('./executions');
-  const { createTask, getTask, pauseTask, pipelineAllEnvelopes, pipelineForTask, resumeTask } = await import('./tasks');
+  const { executionCancellationRequested } = await import('./executions');
+  const { createTask, getTask, pauseTask, resumeTask } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
@@ -1213,9 +1208,9 @@ test('pauses one requirement without changing its workflow state and resumes it 
   db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
 
   const taskId = await createTask({ title: 'Pause until the next planning window' });
-  const delegation = (await pipelineAllEnvelopes()).find((item) => item.taskId === taskId);
+  const delegation = (await inspectAllDispatch()).find((item) => item.taskId === taskId);
   assert.ok(delegation);
-  const execution = await beginExecutionAttempt({
+  const execution = await beginTestExecutionAttempt({
     runId: 'run-pause-requirement',
     delegation,
     prompt: 'This execution should stop when its requirement is paused.',
@@ -1228,8 +1223,8 @@ test('pauses one requirement without changing its workflow state and resumes it 
   assert.equal(detail?.task.is_paused, 1);
   assert.equal(detail?.task.paused_reason, '等待下周排期');
   assert.ok(detail?.task.paused_at);
-  assert.deepEqual(await pipelineForTask(taskId), []);
-  assert.equal((await pipelineAllEnvelopes()).some((item) => item.taskId === taskId), false);
+  assert.deepEqual(await inspectTaskDispatch(taskId), []);
+  assert.equal((await inspectAllDispatch()).some((item) => item.taskId === taskId), false);
   assert.equal(await executionCancellationRequested(execution.attempt.execution_id), true);
   const pausedExecution = db.prepare('SELECT status, last_error FROM execution_attempts WHERE execution_id = ?').get(execution.attempt.execution_id) as { status: string; last_error: string };
   assert.deepEqual(pausedExecution, { status: 'cancelled', last_error: '需求已暂停' });
@@ -1241,14 +1236,14 @@ test('pauses one requirement without changing its workflow state and resumes it 
   assert.equal(detail?.task.is_paused, 0);
   assert.equal(detail?.task.paused_reason, null);
   assert.equal(detail?.task.paused_at, null);
-  assert.equal((await pipelineAllEnvelopes()).some((item) => item.taskId === taskId), true);
+  assert.equal((await inspectAllDispatch()).some((item) => item.taskId === taskId), true);
   assert.equal(await executionCancellationRequested(execution.attempt.execution_id), true);
   assert.deepEqual(detail?.events.slice(0, 2).map((event) => event.event_type), ['TaskResumed', 'TaskPaused']);
 });
 
 test('isolates feedback scheduling per task and emits one concurrent delegation for each task queue', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { addDocumentComment, createTask, pipelineAllEnvelopes, upsertDocument } = await import('./tasks');
+  const { addDocumentComment, createTask, upsertDocument } = await import('./tasks');
   const feedbackTasks: string[] = [];
   for (const [index, suffix] of ['A', 'B'].entries()) {
     const taskId = await createTask({ title: `Isolated feedback task ${suffix}` });
@@ -1272,7 +1267,7 @@ test('isolates feedback scheduling per task and emits one concurrent delegation 
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'in plan' WHERE task_id = ?").run(normalTaskId);
 
-  const delegations = await pipelineAllEnvelopes();
+  const delegations = await inspectAllDispatch();
   const first = delegations.find((item) => item.taskId === feedbackTasks[0]);
   const second = delegations.find((item) => item.taskId === feedbackTasks[1]);
   const normal = delegations.find((item) => item.taskId === normalTaskId);
@@ -1284,7 +1279,7 @@ test('isolates feedback scheduling per task and emits one concurrent delegation 
 
 test('dispatches independent Analysis and Delivery lanes for the same task', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { pipelineAllEnvelopes, pipelineForTask, toPipeEnvelope } = await import('./tasks');
+  const { toPipeEnvelope } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
@@ -1304,12 +1299,12 @@ test('dispatches independent Analysis and Delivery lanes for the same task', asy
     VALUES('SPEC-parallel-1', ?, 1, 1, 'resolved', '{}')
   `).run(taskId);
 
-  const delegations = await pipelineForTask(taskId);
+  const delegations = await inspectTaskDispatch(taskId);
   assert.deepEqual(delegations.map((item) => [item.lane, item.agent, item.storyIndex]).sort(), [
     ['analysis', 'analyst-agent', 2],
     ['delivery', 'dev-agent', 1],
   ]);
-  const envelope = (await pipelineAllEnvelopes()).find((item) => item.taskId === taskId && item.lane === 'analysis');
+  const envelope = (await inspectAllDispatch()).find((item) => item.taskId === taskId && item.lane === 'analysis');
   assert.ok(envelope);
   const pipeColumns = toPipeEnvelope(envelope).split('|');
   assert.deepEqual(pipeColumns.slice(2, 5), ['analysis', 'analyst-agent', '2']);
@@ -1318,7 +1313,7 @@ test('dispatches independent Analysis and Delivery lanes for the same task', asy
 
 test('keeps Delivery runnable while Analysis waits for human clarification', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask, pipelineForTask, setTaskLaneState } = await import('./tasks');
+  const { getTask, setTaskLaneState } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   const taskId = 'TASK-analysis-waits-delivery-runs';
@@ -1345,7 +1340,7 @@ test('keeps Delivery runnable while Analysis waits for human clarification', asy
     blockedReason: 'Need product decision',
   });
 
-  const delegations = await pipelineForTask(taskId);
+  const delegations = await inspectTaskDispatch(taskId);
   assert.deepEqual(delegations.map((item) => [item.lane, item.agent, item.storyIndex]), [['delivery', 'dev-agent', 1]]);
   const detail = await getTask(taskId);
   assert.equal(detail?.lanes.find((lane) => lane.lane === 'analysis')?.status, 'waiting_for_answers');
@@ -1360,13 +1355,13 @@ test('keeps Delivery runnable while Analysis waits for human clarification', asy
     currentStoryIndex: 1,
     blockedReason: 'Development executor unavailable',
   });
-  const whileDeliveryBlocked = await pipelineForTask(taskId);
+  const whileDeliveryBlocked = await inspectTaskDispatch(taskId);
   assert.deepEqual(whileDeliveryBlocked.map((item) => [item.lane, item.agent, item.storyIndex]), [['analysis', 'analyst-agent', 2]]);
 });
 
 test('does not infer code-slot ownership from an Analysis task status', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask, pipelineAllEnvelopes, setTaskLaneState } = await import('./tasks');
+  const { getTask, setTaskLaneState } = await import('./tasks');
   const { CODE_WORKSPACE_RESOURCE } = await import('./resource-claims');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
@@ -1401,13 +1396,12 @@ test('does not infer code-slot ownership from an Analysis task status', async ()
     ) VALUES(?, 'Independent development', 'feature', 'ready for dev', 'analyst-agent', 1, 0, 0, 1, 1, 'runnable', '')
   `).run(competingTaskId);
 
-  const competingDev = (await pipelineAllEnvelopes()).find((item) => item.taskId === competingTaskId);
+  const competingDev = (await inspectAllDispatch()).find((item) => item.taskId === competingTaskId);
   assert.equal(competingDev?.agent, 'dev-agent');
 });
 
 test('blocks browser-dependent Dev and Backlog while Idea Context continues without browser', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { pipelineAllEnvelopes, pipelineForTask } = await import('./tasks');
   const {
     BROWSER_EXCLUSIVE_RESOURCE,
     CODE_WORKSPACE_RESOURCE,
@@ -1457,7 +1451,7 @@ test('blocks browser-dependent Dev and Backlog while Idea Context continues with
     executionId: 'EXEC-browser-claim-owner',
   });
 
-  const whileClaimed = await pipelineAllEnvelopes();
+  const whileClaimed = await inspectAllDispatch();
   assert.equal(whileClaimed.some((item) => item.resources.includes(BROWSER_EXCLUSIVE_RESOURCE)), false);
   assert.equal(whileClaimed.some((item) => item.taskId === devTaskId && item.agent === 'dev-agent'), false);
   assert.equal(whileClaimed.some((item) => item.taskId === waitingBrowserTaskId && item.agent === 'backlog-agent'), false);
@@ -1466,18 +1460,19 @@ test('blocks browser-dependent Dev and Backlog while Idea Context continues with
   assert.deepEqual(ideaContext?.resources, []);
 
   releaseExecutionResourceClaimsInDb(db, 'EXEC-browser-claim-owner');
-  const afterRelease = await pipelineAllEnvelopes();
+  const afterRelease = await inspectAllDispatch();
   assert.equal(afterRelease.filter((item) => item.resources.includes(BROWSER_EXCLUSIVE_RESOURCE)).length, 1);
   assert.equal(afterRelease.some((item) => item.taskId === waitingBrowserTaskId && item.agent === 'backlog-agent'), true);
-  assert.deepEqual((await pipelineForTask(devTaskId))[0]?.resources, [
+  assert.deepEqual((await inspectTaskDispatch(devTaskId))[0]?.resources, [
     CODE_WORKSPACE_RESOURCE,
     BROWSER_EXCLUSIVE_RESOURCE,
   ]);
 });
 
-test('reserves resources and lane capacity for locally launched work before database claims are visible', async () => {
+test('persists resource and lane reservations before returning work to the runner', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { pipelineAllEnvelopes, pipelineForTask } = await import('./tasks');
+  const { beginRun, endRun } = await import('./tasks');
+  const { progressDispatcher } = await import('./progress-dispatch');
   const {
     BROWSER_EXCLUSIVE_RESOURCE,
     CODE_WORKSPACE_RESOURCE,
@@ -1497,25 +1492,36 @@ test('reserves resources and lane capacity for locally launched work before data
     ) VALUES(?, 'Locally launched Dev', 'feature', 'ready for dev', 'analyst-agent', 1, 0, 0, 1, 1, '')
   `).run(devTaskId);
   db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Reserved unit', 'unit-001')").run(devTaskId);
+  db.prepare("UPDATE tasks SET priority = '9' WHERE task_id = ?").run(devTaskId);
   db.prepare(`
     INSERT INTO tasks(task_id, title, item_type, agile_status, current_subagent, work_dir)
     VALUES(?, 'Browser contender', 'feature', 'backlog', 'backlog-agent', '')
   `).run(backlogTaskId);
+  db.prepare("UPDATE tasks SET priority = '1' WHERE task_id = ?").run(backlogTaskId);
 
-  const dev = (await pipelineForTask(devTaskId))[0];
+  const dev = (await inspectTaskDispatch(devTaskId))[0];
   assert.deepEqual(dev.resources, [CODE_WORKSPACE_RESOURCE, BROWSER_EXCLUSIVE_RESOURCE]);
   assert.equal((db.prepare('SELECT COUNT(*) AS count FROM resource_claims').get() as { count: number }).count, 0);
 
-  const refill = await pipelineAllEnvelopes({ locallyActive: [dev] });
-  assert.equal(refill.some((item) => item.taskId === devTaskId), false);
-  assert.equal(refill.some((item) => item.taskId === backlogTaskId), false);
-  assert.equal(refill.some((item) => item.resources.includes(CODE_WORKSPACE_RESOURCE)), false);
-  assert.equal(refill.some((item) => item.resources.includes(BROWSER_EXCLUSIVE_RESOURCE)), false);
+  const runId = await beginRun('dispatch-reservation-test');
+  try {
+    const reserved = await progressDispatcher.reserveNext({ runId });
+    assert.equal(reserved.kind, 'reserved');
+    const devReservation = reserved.reservations.find((item) => item.work.taskId === devTaskId);
+    assert.ok(devReservation);
+    assert.deepEqual(devReservation.claimedResources, [CODE_WORKSPACE_RESOURCE, BROWSER_EXCLUSIVE_RESOURCE]);
+    assert.equal((db.prepare('SELECT COUNT(*) AS count FROM resource_claims').get() as { count: number }).count, 2);
+
+    const refill = await progressDispatcher.reserveNext({ runId });
+    assert.equal(refill.kind, 'wait');
+  } finally {
+    await endRun(runId, true, { stopRunner: false });
+  }
 });
 
 test('dispatches the highest numeric priority first when requirements compete for one resource', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask, pipelineAllEnvelopes } = await import('./tasks');
+  const { createTask } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
@@ -1524,7 +1530,7 @@ test('dispatches the highest numeric priority first when requirements compete fo
 
   const lowPriorityTaskId = await createTask({ title: 'Low priority resource contender', priority: '2' });
   const highPriorityTaskId = await createTask({ title: 'High priority resource contender', priority: '9' });
-  const contenders = (await pipelineAllEnvelopes()).filter((item) =>
+  const contenders = (await inspectAllDispatch()).filter((item) =>
     item.taskId === lowPriorityTaskId || item.taskId === highPriorityTaskId);
 
   assert.equal(contenders.length, 1);
@@ -1534,7 +1540,7 @@ test('dispatches the highest numeric priority first when requirements compete fo
 
 test('caps Analysis concurrency at four and preserves existing task cursors when lanes are materialized', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask, pipelineAllEnvelopes } = await import('./tasks');
+  const { getTask } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
@@ -1570,14 +1576,14 @@ test('caps Analysis concurrency at four and preserves existing task cursors when
     `).run(taskId, `Analysis cap ${index}`, index === 4 ? 'P0' : 'P3');
     db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, ?, ?)').run(taskId, `Unit ${index}`, `unit-${index}`);
   }
-  const analysis = (await pipelineAllEnvelopes()).filter((item) => taskIds.includes(item.taskId) && item.lane === 'analysis');
+  const analysis = (await inspectAllDispatch()).filter((item) => taskIds.includes(item.taskId) && item.lane === 'analysis');
   assert.equal(analysis.length, 4);
   assert.equal(analysis.some((item) => item.taskId === 'TASK-analysis-cap-4'), true);
 });
 
 test('releases only the requested blocked lane and resumes its persisted delivery unit', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask, pipelineForTask, releaseBlock, setTaskLaneState } = await import('./tasks');
+  const { getTask, releaseBlock, setTaskLaneState } = await import('./tasks');
   const {
     acquireResourceClaimInDb,
     CODE_WORKSPACE_RESOURCE,
@@ -1611,14 +1617,14 @@ test('releases only the requested blocked lane and resumes its persisted deliver
     ['analysis', 'runnable', 1],
     ['delivery', 'system_blocked', 0],
   ]);
-  assert.deepEqual((await pipelineForTask(taskId)).map((item) => [item.lane, item.pipeline, item.storyIndex]), [
+  assert.deepEqual((await inspectTaskDispatch(taskId)).map((item) => [item.lane, item.pipeline, item.storyIndex]), [
     ['analysis', 'resume', 1],
   ]);
 });
 
 test('opens Review only after both lanes are completed and never skips a post-result lane block', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask, pipelineForTask, releaseBlock, setTaskLaneState } = await import('./tasks');
+  const { getTask, releaseBlock, setTaskLaneState } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   const taskId = 'TASK-review-lane-gate';
@@ -1631,21 +1637,20 @@ test('opens Review only after both lanes are completed and never skips a post-re
   await getTask(taskId);
   await setTaskLaneState({ taskId, lane: 'analysis', status: 'system_blocked', currentAgent: 'analyst-agent', currentStoryIndex: 1, blockedReason: 'post-result hook failed' });
 
-  assert.deepEqual(await pipelineForTask(taskId), []);
+  assert.deepEqual(await inspectTaskDispatch(taskId), []);
   await releaseBlock(taskId, 'analysis');
-  assert.deepEqual((await pipelineForTask(taskId)).map((item) => [item.lane, item.pipeline, item.storyIndex]), [
+  assert.deepEqual((await inspectTaskDispatch(taskId)).map((item) => [item.lane, item.pipeline, item.storyIndex]), [
     ['analysis', 'resume', 1],
   ]);
 
   await setTaskLaneState({ taskId, lane: 'analysis', status: 'completed' });
-  const review = await pipelineForTask(taskId);
+  const review = await inspectTaskDispatch(taskId);
   assert.equal(review.length, 1);
   assert.deepEqual([review[0].lane, review[0].agent, review[0].pipeline], ['control', 'review-agent', 'review']);
 });
 
 test('does not dispatch Review when a task is manually moved to review with incomplete units', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { pipelineForTask } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   const taskId = 'TASK-incomplete-manual-review';
@@ -1655,12 +1660,12 @@ test('does not dispatch Review when a task is manually moved to review with inco
       analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
     ) VALUES(?, 'Incomplete manual review', 'feature', 'in review', 'review-agent', 1, 0, 0, 2, 1, '')
   `).run(taskId);
-  assert.deepEqual(await pipelineForTask(taskId), []);
+  assert.deepEqual(await inspectTaskDispatch(taskId), []);
 });
 
 test('treats legacy task-level blocked state as an exclusive control gate', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask, pipelineAllEnvelopes, pipelineForTask } = await import('./tasks');
+  const { getTask } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   const taskId = 'TASK-global-control-block';
@@ -1674,13 +1679,12 @@ test('treats legacy task-level blocked state as an exclusive control gate', asyn
   `).run(taskId);
   const detail = await getTask(taskId);
   assert.equal(detail?.lanes.some((lane) => lane.status === 'runnable'), true);
-  assert.deepEqual(await pipelineForTask(taskId), []);
-  assert.equal((await pipelineAllEnvelopes()).some((item) => item.taskId === taskId), false);
+  assert.deepEqual(await inspectTaskDispatch(taskId), []);
+  assert.equal((await inspectAllDispatch()).some((item) => item.taskId === taskId), false);
 });
 
 test('counts one active Analysis lane once when both its execution and queued result are visible', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { pipelineAllEnvelopes } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
@@ -1714,7 +1718,7 @@ test('counts one active Analysis lane once when both its execution and queued re
       VALUES(?, ?, 'feature', 'P2', 'ready for dev', 'analyst-agent', 1, '')
     `).run(taskId, `Analysis candidate ${index}`);
   }
-  const dispatched = (await pipelineAllEnvelopes()).filter((item) => candidates.includes(item.taskId) && item.lane === 'analysis');
+  const dispatched = (await inspectAllDispatch()).filter((item) => candidates.includes(item.taskId) && item.lane === 'analysis');
   assert.equal(dispatched.length, 3);
 });
 
@@ -1878,7 +1882,7 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
   const { databaseConnection, hash } = await import('../infrastructure/database');
   const { applyEvolutionResult, beginEvolutionRun, updatePromptCanary } = await import('./agent-evolution');
   const { ensureAgentRuntimeWorkspace, getAgentProfile, loadAgentRuntime } = await import('./agent-profiles');
-  const { beginExecutionAttempt, cancelExecution, PromptCanaryDeferredError } = await import('./executions');
+  const { cancelExecution } = await import('./executions');
   const db = await databaseConnection();
   const taskA = await createTask({ title: 'Evolution evidence A' });
   const taskB = await createTask({ title: 'Evolution evidence B' });
@@ -1993,7 +1997,7 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
     evidence: '',
     risk: '',
   });
-  const activeCanary = await beginExecutionAttempt({
+  const activeCanary = await beginTestExecutionAttempt({
     runId: 'run-canary-serial-1',
     delegation: canaryDelegation(taskA),
     prompt: candidateRuntime.prompt,
@@ -2006,7 +2010,7 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
   assert.equal(activeCanary.attempt.prompt_template_version, detail.currentPrompt.template_version);
   assert.equal(activeCanary.attempt.prompt_hash, candidateRuntime.promptHash);
   await assert.rejects(
-    beginExecutionAttempt({
+    beginTestExecutionAttempt({
       runId: 'run-canary-serial-2',
       delegation: canaryDelegation(taskB),
       prompt: candidateRuntime.prompt,
@@ -2015,8 +2019,7 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
       promptHash: candidateRuntime.promptHash,
       evolutionCandidateId: candidateId,
     }),
-    PromptCanaryDeferredError,
-  );
+    );
   await cancelExecution(activeCanary.attempt.execution_id, '只验证串行门禁，不计入 Canary');
 
   for (const index of [1, 2, 3]) {

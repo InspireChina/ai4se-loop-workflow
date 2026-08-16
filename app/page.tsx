@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { AlertTriangle, ArrowRight, CircleDot } from 'lucide-react';
-import { listPipeline, listTasks } from '../src/application/tasks';
+import { listTasks } from '../src/application/tasks';
+import { progressDispatchInspector } from '../src/application/progress-dispatch';
 import { agentLabel, statusLabel, terminologyText } from '../src/domain/terminology';
 import { requirementPriorityLabel } from '../src/domain/requirement-priority';
 
@@ -15,7 +16,7 @@ const phase = (task: { item_type: string; current_subagent: string | null; analy
   : `${task.analysis_index}/${task.total_stories} 交付分析 · ${task.dev_index}/${task.total_stories} 实现 · ${task.test_index}/${task.total_stories} 验证`;
 
 export default async function Home() {
-  const [tasks, pipeline] = await Promise.all([listTasks(), listPipeline()]);
+  const [tasks, pipeline] = await Promise.all([listTasks(), progressDispatchInspector.inspectAll()]);
   const activeTasks = tasks.filter((task) => !task.is_paused);
   const laneWaitingForAnswers = activeTasks.flatMap((task) => task.lanes.filter((lane) => lane.status === 'waiting_for_answers').map((lane) => ({ task, lane })));
   const requirementWaitingForAnswers = tasks

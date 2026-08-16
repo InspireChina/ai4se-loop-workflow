@@ -65,7 +65,7 @@ export function buildTaskContextChatPrompt(
     '上下文对话独立于 Loop Runner。即使 Loop 尚未启动或当前已停止，也必须直接基于当前需求记录和已经产出的文档继续工作。',
     `完整任务上下文（包含当前需求已经产出的文档）：npm --prefix ${commandPath(paths.appRoot)} run loopctl -- task-context --task-id ${taskId}`,
     `任务摘要：npm --prefix ${commandPath(paths.appRoot)} run loopctl -- task-get ${taskId}`,
-    `推进队列：npm --prefix ${commandPath(paths.appRoot)} run loopctl -- task-pipeline ${taskId}`,
+    `派发诊断：npm --prefix ${commandPath(paths.appRoot)} run loopctl -- task-dispatch-inspect ${taskId}`,
     `Runner 状态：npm --prefix ${commandPath(paths.appRoot)} run loopctl -- run-status`,
     `文档列表：npm --prefix ${commandPath(paths.appRoot)} run loopctl -- document-list --task-id ${taskId}`,
     `读取文档：npm --prefix ${commandPath(paths.appRoot)} run loopctl -- document-get --task-id ${taskId} --kind <kind> [--story <n>]`,

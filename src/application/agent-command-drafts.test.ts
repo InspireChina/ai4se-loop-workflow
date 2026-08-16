@@ -1,3 +1,5 @@
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
+import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -56,10 +58,9 @@ async function completeBacklogAnswerReview(executionId: string, token: string) {
 }
 
 async function begin(taskId: string, pipeline = 'backlog') {
-  const { beginExecutionAttempt } = await import('./executions');
   const { issueAgentCommandToken } = await import('./agent-command-drafts');
   const delegation = backlogDelegation(taskId, pipeline);
-  const started = await beginExecutionAttempt({
+  const started = await beginTestExecutionAttempt({
     runId: `RUN-command-${taskId}-${pipeline}`,
     delegation,
     prompt: 'role-specific command prompt',
@@ -70,9 +71,8 @@ async function begin(taskId: string, pipeline = 'backlog') {
 }
 
 async function beginDelegation(delegation: DelegationEnvelope, runSuffix = 'delivery-plan') {
-  const { beginExecutionAttempt } = await import('./executions');
   const { issueAgentCommandToken } = await import('./agent-command-drafts');
-  const started = await beginExecutionAttempt({
+  const started = await beginTestExecutionAttempt({
     runId: `RUN-command-${runSuffix}-${delegation.taskId}`,
     delegation,
     prompt: 'role-specific progressive command prompt',
@@ -83,7 +83,7 @@ async function beginDelegation(delegation: DelegationEnvelope, runSuffix = 'deli
 }
 
 async function taskReadyForSplit(title: string) {
-  const { createTask, pipelineForTask } = await import('./tasks');
+  const { createTask } = await import('./tasks');
   const { applyAgentResult } = await import('./agent-results');
   const { databaseConnection } = await import('../infrastructure/database');
   const taskId = await createTask({
@@ -130,7 +130,7 @@ async function taskReadyForSplit(title: string) {
       recoveryResolutions: [],
     },
   );
-  const delegation = (await pipelineForTask(taskId))[0] as DelegationEnvelope | undefined;
+  const delegation = (await inspectTaskDispatch(taskId))[0] as DelegationEnvelope | undefined;
   assert.equal(delegation?.agent, 'story-splitter-agent');
   assert.equal(delegation?.pipeline, 'split');
   return { taskId, delegation: delegation! };
@@ -678,7 +678,6 @@ test('inherits a persisted clarification draft after resume and forces status ag
     answerQuestion,
     createTask,
     getTask,
-    pipelineForTask,
     submitClarificationAnswers,
   } = await import('./tasks');
   const { applyAgentResult } = await import('./agent-results');
@@ -873,7 +872,7 @@ test('inherits a persisted clarification draft after resume and forces status ag
   });
   await submitClarificationAnswers(taskId);
 
-  const resumeDelegation = (await pipelineForTask(taskId))[0];
+  const resumeDelegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(resumeDelegation?.pipeline, 'resume');
   const resumed = await begin(taskId, 'resume');
   await assert.rejects(

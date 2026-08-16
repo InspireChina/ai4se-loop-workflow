@@ -1,3 +1,4 @@
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -60,7 +61,7 @@ test('Prompt evolution progressively restores observations and submits without A
     issueInternalAgentCommandToken,
     readInternalAgentCommandSubmission,
   } = await import('./internal-agent-command-drafts');
-  const { beginExecutionAttempt, completeExecution } = await import('./executions');
+  const { completeExecution } = await import('./executions');
   const { createTask } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
 
@@ -68,7 +69,7 @@ test('Prompt evolution progressively restores observations and submits without A
   const db = await databaseConnection();
   db.prepare("UPDATE agent_profiles SET auto_evolve = 1 WHERE agent_id = 'backlog-agent'").run();
   const taskId = await createTask({ title: '渐进式 Prompt 演化测试' });
-  const started = await beginExecutionAttempt({
+  const started = await beginTestExecutionAttempt({
     runId: `RUN-internal-evolution-${randomUUID()}`,
     delegation: backlogDelegation(taskId),
     prompt: 'test',

@@ -1,3 +1,5 @@
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
+import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DelegationEnvelope } from './tasks';
@@ -8,9 +10,8 @@ async function command(executionId: string, token: string, args: string[]) {
 }
 
 async function begin(delegation: DelegationEnvelope, runSuffix: string) {
-  const { beginExecutionAttempt } = await import('./executions');
   const { issueAgentCommandToken } = await import('./agent-command-drafts');
-  const started = await beginExecutionAttempt({
+  const started = await beginTestExecutionAttempt({
     runId: `RUN-reproduction-${runSuffix}`,
     delegation,
     prompt: 'progressive reproduction prompt',
@@ -22,7 +23,7 @@ async function begin(delegation: DelegationEnvelope, runSuffix: string) {
 
 async function bugDelegation(title: string) {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask, pipelineForTask } = await import('./tasks');
+  const { createTask } = await import('./tasks');
   const taskId = await createTask({
     title,
     description: '管理员打开已归档需求并保存时，页面显示空白；预期保存成功后仍停留在详情页。',
@@ -34,7 +35,7 @@ async function bugDelegation(title: string) {
         next_step = '复现管理员保存已归档需求后页面空白'
     WHERE task_id = ?
   `).run(taskId);
-  const delegation = (await pipelineForTask(taskId))[0] as DelegationEnvelope | undefined;
+  const delegation = (await inspectTaskDispatch(taskId))[0] as DelegationEnvelope | undefined;
   assert.equal(delegation?.agent, 'repro-agent');
   assert.equal(delegation?.pipeline, 'repro');
   return { taskId, delegation: delegation! };
@@ -88,7 +89,6 @@ test('repro agent persists an unsuccessful attempt, restores user alignment, and
   const {
     answerQuestion,
     getTask,
-    pipelineForTask,
     submitClarificationAnswers,
   } = await import('./tasks');
   const { applyAgentResult } = await import('./agent-results');
@@ -159,7 +159,7 @@ test('repro agent persists an unsuccessful attempt, restores user alignment, and
     answer: 'Windows 11 24H2，Edge 138。',
   });
   await submitClarificationAnswers(taskId);
-  const resumedDelegation = (await pipelineForTask(taskId))[0] as DelegationEnvelope;
+  const resumedDelegation = (await inspectTaskDispatch(taskId))[0] as DelegationEnvelope;
   assert.equal(resumedDelegation.pipeline, 'resume');
   const resumed = await begin(resumedDelegation, `${taskId}-resume`);
   await assert.rejects(

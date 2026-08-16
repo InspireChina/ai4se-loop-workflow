@@ -1,3 +1,5 @@
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
+import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
@@ -14,10 +16,9 @@ async function begin(
   suffix: string,
   resources: unknown[],
 ) {
-  const { beginExecutionAttempt } = await import('./executions');
   const { issueAgentCommandToken } = await import('./agent-command-drafts');
   const { databaseConnection } = await import('../infrastructure/database');
-  const started = await beginExecutionAttempt({
+  const started = await beginTestExecutionAttempt({
     runId: `RUN-review-${suffix}`,
     delegation,
     prompt: 'progressive review prompt',
@@ -38,7 +39,7 @@ async function begin(
 
 async function reviewDelegation(title: string) {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask, pipelineForTask, upsertDocument } = await import('./tasks');
+  const { createTask, upsertDocument } = await import('./tasks');
   const db = await databaseConnection();
   db.prepare(`
     UPDATE tasks
@@ -101,7 +102,7 @@ async function reviewDelegation(title: string) {
     content: '从用户入口完成独立黑盒验证，AC-1 通过。',
     format: 'markdown',
   });
-  const delegation = (await pipelineForTask(taskId)).find((item) =>
+  const delegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'review-agent' && item.pipeline === 'review');
   assert.ok(delegation);
   const testRef = `DOC:${testDocumentId}`;

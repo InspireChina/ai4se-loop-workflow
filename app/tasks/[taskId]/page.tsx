@@ -3,7 +3,8 @@ import { notFound } from 'next/navigation';
 import { AlertTriangle, ArrowRight, Bot, Check, CheckCircle2, Clock3, ExternalLink, FileText, GitBranch, Hash, Link2, PauseCircle, Play, Tag } from 'lucide-react';
 import { decisionAlignmentQuestions } from '../../../src/application/decision-alignment';
 import { formatEventTime } from '../../../src/application/event-time';
-import { getTask, pipelineForTask } from '../../../src/application/tasks';
+import { getTask } from '../../../src/application/tasks';
+import { progressDispatchInspector, type DispatchWaitReason } from '../../../src/application/progress-dispatch';
 import { getTaskContextChat } from '../../../src/application/task-context-chat';
 import { deliverySpecSchema } from '../../../src/domain/agent-result';
 import { agentLabel, deliveryUnitLabel, documentKindLabel, feedbackBatchStatusLabel, feedbackWorkTypeLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
@@ -138,6 +139,19 @@ function referenceHostname(value: string) {
   }
 }
 
+function dispatchReasonLabel(reason: DispatchWaitReason | undefined) {
+  return ({
+    'active-execution': '已有 Agent 正在执行',
+    'pending-result': 'Agent 结果等待应用',
+    'resources-busy': '所需独占资源正在使用',
+    'paused-only': '需求已暂停',
+    'waiting-for-input': '等待人工输入',
+    'system-blocked': '系统阻塞，等待处理',
+    'lower-priority': '当前由更高优先级工作先推进',
+    'no-runnable-work': '当前没有可派发步骤',
+  } as Record<DispatchWaitReason, string>)[reason || 'no-runnable-work'];
+}
+
 export default async function TaskDetail({ params }: { params: Promise<{ taskId: string }> }) {
   const { taskId } = await params;
   const detail = await getTask(taskId);
@@ -149,7 +163,12 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
     || (isEndToEnd && businessAnalysisAgentIds.includes(task.current_subagent as typeof businessAnalysisAgentIds[number]));
   const analysisLane = lanes.find((lane) => lane.lane === 'analysis')!;
   const deliveryLane = lanes.find((lane) => lane.lane === 'delivery')!;
-  const pipeline = await pipelineForTask(taskId);
+  const dispatch = await progressDispatchInspector.inspect({ requirementId: taskId });
+  const pipeline = dispatch.decisions.flatMap((decision) => decision.state === 'selected' && decision.work ? [decision.work] : []);
+  const dispatchWaitingText = dispatch.decisions
+    .filter((decision) => decision.state === 'waiting' || decision.state === 'active')
+    .map((decision) => `${decision.lane === 'analysis' ? '交付分析' : decision.lane === 'delivery' ? '开发验证' : '控制'}：${dispatchReasonLabel(decision.reason)}`)
+    .join('；');
   const contextChat = await getTaskContextChat(taskId);
   const unansweredQuestions = questions.filter((question) => question.status === 'pending');
   const alignedDecisions = decisionAlignmentQuestions(questions, deliverySpecs);
@@ -546,7 +565,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
 
         <section className="card form-panel">
           <h2><GitBranch size={15}/>推进流程</h2>
-          {pipeline.length === 0 ? <p className="muted">{task.is_paused ? '需求已暂停，恢复后才会重新派发 Agent。' : '当前没有可派发步骤。'}</p> : pipeline.map((item) => <div className="pipeline-card" key={`${item.lane}-${item.pipeline}-${item.storyIndex || 0}`}>
+          {pipeline.length === 0 ? <p className="muted">{dispatchWaitingText || '当前没有可派发步骤。'}</p> : pipeline.map((item) => <div className="pipeline-card" key={`${item.lane}-${item.pipeline}-${item.storyIndex || 0}`}>
             <GitBranch size={16}/>
             <div>
               <strong>{item.lane === 'analysis' ? '交付分析' : item.lane === 'delivery' ? '开发验证' : '控制'} · {flowLabel(item.pipeline)} · {agentLabel(item.agent)}</strong>

@@ -2,12 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { deliveryUnitContractSchema } from '../domain/delivery-unit';
-import {
-  CODE_WORKSPACE_RESOURCE,
-  RESOURCE_DEFINITIONS,
-  resourcesForAgent,
-  type ResourceKey,
-} from '../domain/resource';
+import { CODE_WORKSPACE_RESOURCE } from '../domain/resource';
 import { parseRequirementMetadata, type RequirementMetadataKey } from '../domain/requirement-metadata';
 import { DEFAULT_REQUIREMENT_PRIORITY, requirementPriority, requirementPriorityRank } from '../domain/requirement-priority';
 import { AgentResultContractError, assertDeliverySpecDecisionCoverage, deliverySpecSchema } from '../domain/agent-result';
@@ -17,45 +12,33 @@ import { isProcessAlive, readRunPid } from '../infrastructure/run-process';
 import { toUtcIsoString } from './event-time';
 import { recordLoopLogEventInDb } from './runtime-events';
 import {
-  laneCanDispatch,
   ensureTaskLanesInDb,
   laneForAgent,
-  markTaskLaneRunningInDb,
   refreshTaskLaneStatesInDb,
-  settleTaskLaneInDb,
   setTaskLaneStateInDb,
   taskLaneInDb,
   taskLanesInDb,
   type TaskLane,
   type TaskLaneKind,
 } from './task-lanes';
-import { taskContextChatTurnIsRunning } from './task-context-chat';
 import { insertDeliveryUnitContractsInDb } from './delivery-units';
 import {
-  activeResourceClaimInDb,
-  acquireResourceClaimsInDb,
   releaseResourceClaimInDb,
   releaseExecutionResourceClaimsInDb,
   releaseLaneExecutionResourceClaimsInDb,
   releaseTaskResourceClaimsInDb,
-  type ResourceClaim,
 } from './resource-claims';
 import {
   assertActorCanCreate,
   assertState,
   assertUpdate,
-  nextDelegation,
   type Actor,
   type Delegation,
   type TaskState,
   type TaskStatus,
 } from '../domain/task';
 import type { RecoveryItem } from './recovery-items';
-import {
-  cancelFeedbackForTask,
-  nextFeedbackDispatchInDb,
-  type FeedbackDispatch,
-} from './feedback';
+import { cancelFeedbackForTask } from './feedback';
 
 export type Task = TaskState & {
   title: string;
@@ -283,24 +266,6 @@ const taskSelect = `
   FROM tasks
 `;
 
-function dispatchStageRank(status: string) {
-  return ({
-    blocked: 0,
-    'in dev': 1,
-    'in review': 2,
-    'in plan': 4,
-    'in repro': 5,
-    backlog: 6,
-  } as Record<string, number>)[status] ?? 7;
-}
-
-function compareDispatchTasks(left: Task, right: Task) {
-  return requirementPriorityRank(right.priority) - requirementPriorityRank(left.priority)
-    || dispatchStageRank(left.agile_status) - dispatchStageRank(right.agile_status)
-    || right.updated_at.localeCompare(left.updated_at)
-    || left.task_id.localeCompare(right.task_id);
-}
-
 function fetchTask(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: string) {
   return db.prepare(`${taskSelect} WHERE task_id = ?`).get(taskId) as Task | undefined;
 }
@@ -405,10 +370,6 @@ export async function listCompletedTasks(): Promise<Task[]> {
     WHERE agile_status = 'done'
     ORDER BY COALESCE(completed_at, updated_at) DESC
   `).all() as Task[];
-}
-
-export async function listPipeline() {
-  return pipelineAll();
 }
 
 export async function listRecentEvents(limit = 20): Promise<(Event & { task_id: string; title: string })[]> {
@@ -1987,267 +1948,6 @@ export async function resumeTask(input: unknown) {
   refreshPages('/', '/tasks', `/tasks/${taskId}`);
 }
 
-function feedbackCanDispatch(task: Task, lanes: TaskLane[]) {
-  if (task.is_paused) return false;
-  if (task.agile_status === 'blocked') return false;
-  if (!['runnable', 'idle'].includes(task.run_state)) return false;
-  return !lanes.some((lane) => lane.resume_pending || ['waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked'].includes(lane.status));
-}
-
-function feedbackDelegation(task: Task, work: FeedbackDispatch): DelegationEnvelope {
-  const agent = work.kind === 'repro' ? 'repro-agent'
-    : work.kind === 'split' ? 'story-splitter-agent'
-      : work.kind === 'report' ? 'review-agent'
-        : 'feedback-agent';
-  const pipeline = work.kind === 'triage' ? 'feedback-triage'
-    : work.kind === 'verify' ? 'feedback-verify'
-      : work.kind === 'repro' ? 'feedback-repro'
-        : work.kind === 'split' ? 'feedback-split'
-          : 'feedback-report';
-  return {
-    ...toEnvelope(task, {
-      taskId: task.task_id,
-      lane: 'control',
-      pipeline,
-      agent,
-      storyIndex: null,
-      resources: resourcesForAgent(agent),
-      feedbackId: work.feedbackId,
-      feedbackIds: work.commentIds,
-      feedbackBatchId: work.batchId,
-      feedbackGroupId: 'groupId' in work ? work.groupId : null,
-      description: work.description,
-    }),
-    feedbackId: work.feedbackId,
-    feedbackIds: work.commentIds,
-    feedbackBatchId: work.batchId,
-    feedbackGroupId: 'groupId' in work ? work.groupId : null,
-  };
-}
-
-type ActiveLaneExecution = { task_id: string; lane: string; agent: string };
-
-function activeLaneExecutions(db: Awaited<ReturnType<typeof databaseConnection>>) {
-  return db.prepare(`
-    SELECT task_id, lane, MAX(agent) AS agent
-    FROM (
-      SELECT task_id, COALESCE(lane, CASE
-        WHEN agent = 'analyst-agent' THEN 'analysis'
-        WHEN agent IN ('dev-agent', 'test-agent') THEN 'delivery'
-        ELSE 'control'
-      END) AS lane, agent
-      FROM execution_attempts
-      WHERE status IN ('planned', 'running', 'output_received', 'verifying', 'applying')
-      UNION ALL
-      SELECT task_id, CASE
-        WHEN agent = 'analyst-agent' THEN 'analysis'
-        WHEN agent IN ('dev-agent', 'test-agent') THEN 'delivery'
-        ELSE 'control'
-      END AS lane, agent
-      FROM agent_results
-      WHERE application_status = 'pending'
-    ) active
-    GROUP BY task_id, lane
-  `).all() as ActiveLaneExecution[];
-}
-
-function laneLine(task: Task, lane: TaskLane, codeSlotAvailable: boolean, deliveryTaskAvailable = true): Delegation | null {
-  const line = (pipeline: string, agent: string, storyIndex: number | null, description: string): Delegation => ({
-    taskId: task.task_id,
-    lane: lane.lane,
-    pipeline,
-    agent,
-    storyIndex,
-    resources: resourcesForAgent(agent),
-    description,
-  });
-  if (!laneCanDispatch(lane)) return null;
-  if (lane.lane === 'analysis') {
-    if (lane.resume_pending && lane.current_agent) {
-      const storyIndex = lane.current_story_index || Math.min(task.total_stories, task.analysis_index + 1);
-      return line('resume', lane.current_agent, storyIndex, '读取人工输入或恢复信息，并继续交付分析通道');
-    }
-    if (task.analysis_index >= task.total_stories) return null;
-    return line(
-      'analysis',
-      'analyst-agent',
-      task.analysis_index + 1,
-      `收敛交付单元 ${task.analysis_index + 1} 的实际影响、关键决策与冻结交付契约`,
-    );
-  }
-  if (!deliveryTaskAvailable) return null;
-  if (lane.resume_pending && lane.current_agent) {
-    const storyIndex = lane.current_story_index || (lane.current_agent === 'test-agent' ? task.test_index + 1 : task.dev_index + 1);
-    if (['dev-agent', 'test-agent'].includes(lane.current_agent) && !codeSlotAvailable) return null;
-    return line('resume', lane.current_agent, storyIndex, '读取人工输入，并恢复开发验证通道');
-  }
-  if (task.test_index < task.dev_index && codeSlotAvailable) return line('test', 'test-agent', task.test_index + 1, `验证交付单元 ${task.test_index + 1}`);
-  if (task.dev_index < task.analysis_index && codeSlotAvailable) return line('dev', 'dev-agent', task.dev_index + 1, `实现交付单元 ${task.dev_index + 1}`);
-  return null;
-}
-
-function controlLine(task: Task, codeSlotAvailable: boolean, lanes: TaskLane[]) {
-  const deliveryComplete = task.total_stories > 0
-    && task.analysis_index === task.total_stories
-    && task.dev_index === task.total_stories
-    && task.test_index === task.total_stories;
-  const lanesCompleted = lanes.length === 2 && lanes.every((lane) => lane.status === 'completed');
-  if (task.agile_status === 'in review' && (!deliveryComplete || !lanesCompleted)) return null;
-  if (task.total_stories > 0 && ['ready for dev', 'in dev', 'blocked'].includes(task.agile_status)) {
-    if (lanesCompleted && deliveryComplete && task.run_state === 'runnable') {
-      return {
-        taskId: task.task_id,
-        lane: 'control',
-        pipeline: 'review',
-        agent: 'review-agent',
-        storyIndex: null,
-        resources: resourcesForAgent('review-agent'),
-        description: '全部交付单元已完成，进入整体验收',
-      } satisfies Delegation;
-    }
-    if (!task.resume_pending) return null;
-  }
-  if (task.resume_pending
-    || task.total_stories === 0
-    || ['backlog', 'in repro', 'in plan', 'in review'].includes(task.agile_status)) {
-    return nextDelegation(task, codeSlotAvailable);
-  }
-  return null;
-}
-
-function analysisPriority(task: Task, lane: TaskLane) {
-  return {
-    rank: requirementPriorityRank(task.priority),
-    readyAt: lane.ready_at || lane.updated_at || task.updated_at,
-    taskId: task.task_id,
-  };
-}
-
-function compareAnalysisCandidates(a: { task: Task; lane: TaskLane }, b: { task: Task; lane: TaskLane }) {
-  const left = analysisPriority(a.task, a.lane);
-  const right = analysisPriority(b.task, b.lane);
-  return right.rank - left.rank || left.readyAt.localeCompare(right.readyAt) || left.taskId.localeCompare(right.taskId);
-}
-
-function schedulingResourceClaims(db: Awaited<ReturnType<typeof databaseConnection>>) {
-  const claims = new Map<ResourceKey, ResourceClaim>();
-  for (const resourceKey of Object.keys(RESOURCE_DEFINITIONS) as ResourceKey[]) {
-    const claim = activeResourceClaimInDb(db, resourceKey);
-    if (claim) claims.set(resourceKey, claim);
-  }
-  return claims;
-}
-
-function resourcesAvailableForDelegation(
-  delegation: Delegation,
-  claims: Map<ResourceKey, ResourceClaim>,
-  reserved: Set<ResourceKey> = new Set(),
-) {
-  return delegation.resources.every((resourceKey) => {
-    const claim = claims.get(resourceKey);
-    if (claim) {
-      return RESOURCE_DEFINITIONS[resourceKey].ownerScope === 'task'
-        && claim.owner_task_id === delegation.taskId;
-    }
-    return !reserved.has(resourceKey);
-  });
-}
-
-function reserveDelegationResources(delegation: Delegation, reserved: Set<ResourceKey>) {
-  for (const resourceKey of delegation.resources) reserved.add(resourceKey);
-}
-
-export async function pipelineForTask(taskId: string): Promise<Delegation[]> {
-  const db = await databaseConnection();
-  const task = fetchTask(db, taskId);
-  if (!task) throw new Error('需求不存在');
-  if (task.is_paused) return [];
-  refreshTaskLaneStatesInDb(db, task);
-  const allActive = activeLaneExecutions(db);
-  const active = allActive.filter((item) => item.task_id === taskId);
-  const lanes = taskLanesInDb(db, task);
-  const resourceClaims = schedulingResourceClaims(db);
-  const feedback = taskContextChatTurnIsRunning(db, taskId) ? undefined : nextFeedbackDispatchInDb(db, taskId);
-  if (feedback && feedbackCanDispatch(task, lanes)) {
-    const delegation = feedbackDelegation(task, feedback);
-    return active.length || !resourcesAvailableForDelegation(delegation, resourceClaims) ? [] : [delegation];
-  }
-  if (task.agile_status === 'blocked') return [];
-  const deliveryTaskAvailable = true;
-  const codeClaim = resourceClaims.get(CODE_WORKSPACE_RESOURCE);
-  const codeSlotAvailable = !codeClaim || codeClaim.owner_task_id === taskId;
-  const control = controlLine(task, codeSlotAvailable, lanes);
-  if (control) return active.length || !resourcesAvailableForDelegation(control, resourceClaims) ? [] : [control];
-  const lines = lanes
-    .filter((lane) => !active.some((item) => item.lane === lane.lane))
-    .map((lane) => laneLine(task, lane, codeSlotAvailable, deliveryTaskAvailable))
-    .filter((line): line is Delegation => Boolean(line))
-    .filter((line) => resourcesAvailableForDelegation(line, resourceClaims));
-  return lines;
-}
-
-export async function pipelineAll(): Promise<Delegation[]> {
-  return pipelineAllEnvelopes();
-}
-
-export async function markDelegationLaneRunning(delegation: DelegationEnvelope, executionId?: string) {
-  const db = await databaseConnection();
-  const task = fetchTask(db, delegation.taskId);
-  if (!task || task.is_paused || task.agile_status === 'cancelled' || task.agile_status === 'done') return false;
-  db.transaction(() => {
-    acquireResourceClaimsInDb(db, {
-      resourceKeys: delegation.resources,
-      taskId: delegation.taskId,
-      lane: delegation.lane,
-      storyIndex: delegation.storyIndex,
-      executionId: executionId || null,
-    });
-    if (delegation.lane !== 'control') {
-      markTaskLaneRunningInDb(db, {
-        taskId: delegation.taskId,
-        lane: delegation.lane,
-        agent: delegation.agent,
-        storyIndex: delegation.storyIndex,
-      });
-    }
-  })();
-  refreshPages('/', `/tasks/${delegation.taskId}`);
-  return true;
-}
-
-export async function settleDelegationLane(delegation: DelegationEnvelope) {
-  if (delegation.lane === 'control') return;
-  const db = await databaseConnection();
-  const task = fetchTask(db, delegation.taskId);
-  if (!task) return;
-  settleTaskLaneInDb(db, task, delegation.lane);
-  refreshPages('/', `/tasks/${delegation.taskId}`);
-}
-
-export async function reconcileStaleTaskLanes() {
-  const db = await databaseConnection();
-  const rows = db.prepare(`
-    SELECT lane.task_id, lane.lane
-    FROM task_lanes lane
-    WHERE lane.status = 'running'
-      AND NOT EXISTS (
-        SELECT 1 FROM execution_attempts execution
-        WHERE execution.task_id = lane.task_id
-          AND COALESCE(execution.lane, CASE
-            WHEN execution.agent = 'analyst-agent' THEN 'analysis'
-            WHEN execution.agent IN ('dev-agent', 'test-agent') THEN 'delivery'
-            ELSE 'control'
-          END) = lane.lane
-          AND execution.status IN ('planned', 'running', 'output_received', 'verifying', 'applying')
-      )
-  `).all() as { task_id: string; lane: TaskLaneKind }[];
-  for (const row of rows) {
-    const task = fetchTask(db, row.task_id);
-    if (task) settleTaskLaneInDb(db, task, row.lane);
-  }
-  return rows.length;
-}
-
 export async function setTaskLaneState(input: {
   taskId: string;
   lane: TaskLaneKind;
@@ -2283,116 +1983,12 @@ export async function setTaskLaneState(input: {
   refreshPages('/', `/tasks/${input.taskId}`);
 }
 
-function toEnvelope(task: Task, delegation: Delegation): DelegationEnvelope {
-  return {
-    ...delegation,
-    title: task.title || '',
-    taskDescription: task.description,
-    itemType: task.item_type || 'other',
-    priority: task.priority || '',
-    link: task.link || '',
-    externalId: task.external_id || '',
-    externalStatus: task.external_status || '',
-    agileStatus: task.agile_status,
-    currentSubagent: task.current_subagent || '',
-    resumePending: task.resume_pending,
-    specResolvedIndex: task.spec_resolved_index,
-    runState: task.run_state,
-    closureStatus: task.closure_status,
-    reviewRevision: task.review_revision,
-    reviewDocumentId: task.review_document_id || '',
-    lastActor: task.last_actor || '',
-    analysisIndex: task.analysis_index,
-    devIndex: task.dev_index,
-    testIndex: task.test_index,
-    totalStories: task.total_stories,
-    nextStep: task.next_step || '',
-    blockedReason: task.blocked_reason || '',
-    owner: task.owner || '',
-    evidence: task.evidence || '',
-    risk: task.risk || '',
-  };
-}
-
-type LocallyActiveDelegation = Pick<Delegation, 'taskId' | 'lane' | 'resources'>;
-
-export async function pipelineAllEnvelopes(options: {
-  locallyActive?: LocallyActiveDelegation[];
-} = {}): Promise<DelegationEnvelope[]> {
-  const db = await databaseConnection();
-  return pipelineAllEnvelopesInDb(db, options);
-}
-
-export function pipelineAllEnvelopesInDb(
-  db: Awaited<ReturnType<typeof databaseConnection>>,
-  options: { locallyActive?: LocallyActiveDelegation[] } = {},
-): DelegationEnvelope[] {
-  const tasks = db.prepare(`${taskSelect} WHERE agile_status NOT IN ('done', 'cancelled') AND is_paused = 0`).all() as Task[];
-  tasks.sort(compareDispatchTasks);
-  const active = activeLaneExecutions(db);
-  const activeKeys = new Set(active.map((item) => `${item.task_id}:${item.lane}`));
-  for (const item of options.locallyActive || []) activeKeys.add(`${item.taskId}:${item.lane}`);
-  let analysisSlots = Math.max(0, 4 - [...activeKeys].filter((key) => key.endsWith(':analysis')).length);
-  const resourceClaims = schedulingResourceClaims(db);
-  const codeClaim = resourceClaims.get(CODE_WORKSPACE_RESOURCE);
-  const reservedResources = new Set<ResourceKey>(
-    (options.locallyActive || []).flatMap((item) => item.resources),
-  );
-  const locallyActiveTasks = new Set((options.locallyActive || []).map((item) => item.taskId));
-  const lines: DelegationEnvelope[] = [];
-  const analysisCandidates: { task: Task; lane: TaskLane }[] = [];
-  for (const task of tasks) {
-    const deliveryTaskAvailable = true;
-    refreshTaskLaneStatesInDb(db, task);
-    const lanes = taskLanesInDb(db, task);
-    const taskCodeAvailable = codeClaim?.owner_task_id === task.task_id
-      || (!codeClaim && !reservedResources.has(CODE_WORKSPACE_RESOURCE));
-    const feedback = taskContextChatTurnIsRunning(db, task.task_id)
-      ? undefined
-      : nextFeedbackDispatchInDb(db, task.task_id);
-    const taskHasActive = locallyActiveTasks.has(task.task_id)
-      || active.some((item) => item.task_id === task.task_id);
-    if (feedback && feedbackCanDispatch(task, lanes)) {
-      const delegation = feedbackDelegation(task, feedback);
-      if (!taskHasActive && resourcesAvailableForDelegation(delegation, resourceClaims, reservedResources)) {
-        reserveDelegationResources(delegation, reservedResources);
-        lines.push(delegation);
-      }
-      continue;
-    }
-    if (task.agile_status === 'blocked') continue;
-    const control = controlLine(task, taskCodeAvailable, lanes);
-    if (control) {
-      if (taskHasActive) continue;
-      if (!resourcesAvailableForDelegation(control, resourceClaims, reservedResources)) continue;
-      reserveDelegationResources(control, reservedResources);
-      lines.push(toEnvelope(task, control));
-      continue;
-    }
-    const analysis = lanes.find((lane) => lane.lane === 'analysis');
-    if (analysis && !activeKeys.has(`${task.task_id}:analysis`) && laneLine(task, analysis, taskCodeAvailable, deliveryTaskAvailable)) analysisCandidates.push({ task, lane: analysis });
-    const delivery = lanes.find((lane) => lane.lane === 'delivery');
-    if (!delivery || activeKeys.has(`${task.task_id}:delivery`)) continue;
-    const deliveryLine = laneLine(task, delivery, taskCodeAvailable, deliveryTaskAvailable);
-    if (!deliveryLine) continue;
-    if (!resourcesAvailableForDelegation(deliveryLine, resourceClaims, reservedResources)) continue;
-    reserveDelegationResources(deliveryLine, reservedResources);
-    lines.push(toEnvelope(task, deliveryLine));
-  }
-  for (const candidate of analysisCandidates.sort(compareAnalysisCandidates)) {
-    if (!analysisSlots) break;
-    const deliveryTaskAvailable = true;
-    const line = laneLine(candidate.task, candidate.lane, true, deliveryTaskAvailable);
-    if (!line) continue;
-    if (!resourcesAvailableForDelegation(line, resourceClaims, reservedResources)) continue;
-    reserveDelegationResources(line, reservedResources);
-    lines.push(toEnvelope(candidate.task, line));
-    analysisSlots -= 1;
-  }
-  return lines;
-}
-
 type BeginRunOptions = { preserveRunIntent?: boolean };
+
+async function reconcileDispatchLanes() {
+  const { progressDispatcher } = await import('./progress-dispatch');
+  return progressDispatcher.reconcileStaleLanes();
+}
 
 export async function beginRun(owner = 'ui', options: BeginRunOptions = {}) {
   const { ensureAgentRuntimeWorkspace } = await import('./agent-profiles');
@@ -2414,12 +2010,12 @@ export async function beginRun(owner = 'ui', options: BeginRunOptions = {}) {
       WHERE run_id = ? AND status IN ('starting', 'running', 'stopping')
     `).run(current.runId);
     db.prepare("DELETE FROM loop_meta WHERE key = 'active_run'").run();
-    await reconcileStaleTaskLanes();
+    await reconcileDispatchLanes();
     await appendLoopRunLog(current.runId, `[恢复] 检测到旧 Runner 已退出：${recovered.failedCount} 个无结果执行转为可重试，${recovered.recoverableCount + recovered.pendingResultCount} 个已有结果执行等待恢复`);
   } else {
     const { reconcileInterruptedExecutions } = await import('./executions');
     const recovered = await reconcileInterruptedExecutions(null, '未找到所属 Runner，执行尚未返回结构化结果，可安全重试');
-    if (recovered.failedCount) await reconcileStaleTaskLanes();
+    if (recovered.failedCount) await reconcileDispatchLanes();
   }
   const runId = randomUUID();
   const startedAt = new Date();
@@ -2464,7 +2060,7 @@ export async function endRun(runId: string, force = false, options: { stopRunner
     const reason = options.reason || (force ? '异常终止' : '用户停止');
     const { reconcileInterruptedExecutions } = await import('./executions');
     const recovered = await reconcileInterruptedExecutions(current.runId, `Loop 已停止（${reason}），执行尚未返回结构化结果，可安全重试`);
-    await reconcileStaleTaskLanes();
+    await reconcileDispatchLanes();
     await appendLoopRunLog(current.runId, `[运行] Loop 已停止：${reason}`);
     await appendLoopRunLog(current.runId, `[恢复] ${recovered.failedCount} 个无结果执行转为可重试，${recovered.recoverableCount + recovered.pendingResultCount} 个已有结果执行将在下次运行继续`);
     db.prepare(`
@@ -2555,75 +2151,8 @@ export async function startRunHeartbeat(runId: string, processKind: 'agent-runne
   return () => clearInterval(timer);
 }
 
-export async function requireActiveRun(runId: string) {
-  const run = await getRunStatus();
-  if (!run || run.runId !== runId || !run.active) throw new Error('运行已停止，请从运行面板重新开始');
-}
-
 export async function ensureLoopRuntimeFiles() {
   await databaseConnection();
-}
-
-export async function createLoopDispatch(runId: string, options: {
-  includeRunHeader?: boolean;
-  logDelegations?: boolean;
-  locallyActive?: LocallyActiveDelegation[];
-} = {}) {
-  await requireActiveRun(runId);
-  if (options.includeRunHeader !== false) {
-    await appendLoopRunLog(runId, `[运行] 开始运行 run=${runId}`);
-    await appendLoopRunLog(runId, `[运行] 工作区=${paths.root}`);
-    await appendLoopRunLog(runId, `[运行] 数据目录=${paths.dataDir}`);
-  }
-  const lines = await pipelineAllEnvelopes({ locallyActive: options.locallyActive });
-  if (options.logDelegations !== false) {
-    await appendLoopRunLog(runId, `[派发] 本轮生成 ${lines.length} 个 agent`);
-    for (const [index, line] of lines.entries()) {
-      await appendLoopRunLog(runId, `[派发] #${index + 1} lane=${line.lane} agent=${line.agent} flow=${line.pipeline} requirement=${line.taskId} unit=${line.storyIndex ?? '-'} resources=${line.resources.join(',') || 'none'}`);
-      await appendLoopRunLog(runId, `[派发]      ${line.description}`);
-    }
-    if (!lines.length) await appendLoopRunLog(runId, '[派发] 当前没有可执行步骤，等待新需求或状态变化');
-  }
-  return { runDir: 'database', delegations: lines };
-}
-
-export function toJsonlEnvelope(item: DelegationEnvelope) {
-  return JSON.stringify({
-    task_id: item.taskId,
-    lane: item.lane,
-    title: item.title,
-    task_description: item.taskDescription,
-    item_type: item.itemType,
-    priority: item.priority,
-    link: item.link,
-    external_id: item.externalId,
-    external_status: item.externalStatus,
-    agile_status: item.agileStatus,
-    pipeline: item.pipeline,
-    agent: item.agent,
-    resources: item.resources,
-    current_subagent: item.currentSubagent,
-    resume_pending: item.resumePending,
-    spec_resolved_index: item.specResolvedIndex,
-    run_state: item.runState,
-    closure_status: item.closureStatus,
-    review_revision: item.reviewRevision,
-    review_document_id: item.reviewDocumentId,
-    last_actor: item.lastActor,
-    story_index: item.storyIndex,
-    analysis_index: item.analysisIndex,
-    dev_index: item.devIndex,
-    test_index: item.testIndex,
-    total_stories: item.totalStories,
-    next_step: item.nextStep,
-    blocked_reason: item.blockedReason,
-    owner: item.owner,
-    evidence: item.evidence,
-    risk: item.risk,
-    description: item.description,
-    feedback_id: item.feedbackId || null,
-    feedback_ids: item.feedbackIds || [],
-  });
 }
 
 export function toPipeEnvelope(item: DelegationEnvelope) {

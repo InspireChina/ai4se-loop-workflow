@@ -1,3 +1,5 @@
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
+import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DelegationEnvelope } from './tasks';
@@ -15,9 +17,8 @@ async function completeDeliveryAnswerReview(executionId: string, token: string) 
 }
 
 async function begin(delegation: DelegationEnvelope, suffix: string) {
-  const { beginExecutionAttempt } = await import('./executions');
   const { issueAgentCommandToken } = await import('./agent-command-drafts');
-  const started = await beginExecutionAttempt({
+  const started = await beginTestExecutionAttempt({
     runId: `RUN-delivery-analysis-${suffix}`,
     delegation,
     prompt: 'progressive delivery analysis prompt',
@@ -32,7 +33,7 @@ async function deliveryAnalysisDelegation(
   analysisDecisionMode?: 'conservative' | 'balanced' | 'autonomous' | 'fully_autonomous',
 ) {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask, pipelineForTask } = await import('./tasks');
+  const { createTask } = await import('./tasks');
   const taskId = await createTask({
     title,
     description: '导出完成后用户需要选择下载 CSV，或在页面直接查看结果。',
@@ -74,7 +75,7 @@ async function deliveryAnalysisDelegation(
          '用户可以识别并使用导出结果', 'TEST:acceptance:usable-result')
     `).run(taskId, taskId, taskId);
   })();
-  const delegation = (await pipelineForTask(taskId)).find((item) =>
+  const delegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'analyst-agent' && item.storyIndex === 1);
   assert.ok(delegation);
   return { taskId, delegation: delegation! as DelegationEnvelope };
@@ -230,7 +231,6 @@ test('delivery analysis walks a conditional human decision tree and resumes the 
   const {
     answerQuestion,
     getTask,
-    pipelineForTask,
     submitClarificationAnswers,
   } = await import('./tasks');
   const { applyAgentResult } = await import('./agent-results');
@@ -319,7 +319,7 @@ test('delivery analysis walks a conditional human decision tree and resumes the 
   assert.equal(detail?.questions.find((item) => item.decision_key === 'inline-pagination')?.status, 'not_applicable');
   await submitClarificationAnswers(taskId);
 
-  const resumedDelegation = (await pipelineForTask(taskId)).find((item) =>
+  const resumedDelegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'analyst-agent' && item.pipeline === 'resume')! as DelegationEnvelope;
   const resumed = await begin(resumedDelegation, `${taskId}-resume`);
   const restored = await command(resumed.executionId, resumed.token!, ['delivery-analysis', 'status']);
