@@ -163,13 +163,30 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
           AND agent_results.application_status = 'pending'
       )
   `).get(...(runId ? [runId] : [])) as { count: number }).count;
+  db.prepare(`
+    UPDATE execution_attempts
+    SET status = 'cancelled',
+        last_error = '所属 Runner 已退出，取消未激活的派发保留并重新调度',
+        finished_at = CURRENT_TIMESTAMP,
+        heartbeat_at = CURRENT_TIMESTAMP,
+        dispatch_execution_exited_at = CURRENT_TIMESTAMP,
+        dispatch_settled_at = CURRENT_TIMESTAMP
+    WHERE status = 'planned'
+      AND result_json IS NULL
+      ${scope}
+      AND NOT EXISTS (
+        SELECT 1 FROM agent_results
+        WHERE agent_results.execution_id = execution_attempts.execution_id
+          AND agent_results.application_status = 'pending'
+      )
+  `).run(...(runId ? [runId] : [])).changes;
   const failedCount = db.prepare(`
     UPDATE execution_attempts
     SET status = 'retryable_failed',
         last_error = ?,
         finished_at = CURRENT_TIMESTAMP,
         heartbeat_at = CURRENT_TIMESTAMP
-    WHERE status IN ('planned', 'running')
+    WHERE status = 'running'
       AND result_json IS NULL
       ${scope}
       AND NOT EXISTS (

@@ -89,14 +89,15 @@ test('runner resolves runtime settings for each delegated agent instead of once 
   const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
 
   assert.match(source, /getAgentRuntimeSettings\(delegation\.agent\)/);
-  assert.match(source, /executeDelegationStep\(delegation\)/);
+  assert.match(source, /executeDelegationStep\(reservation\)/);
+  assert.match(source, /progressDispatcher\.activate/);
   assert.doesNotMatch(source, /const settings = await getAgentExecutorSettings\(\)/);
 });
 
 test('continuously refills completed lanes and cleans each execution temporary directory independently', () => {
   const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
 
-  assert.match(source, /new InFlightWork<DelegationEnvelope>\(\)/);
+  assert.match(source, /new InFlightWork<ReservedExecution>\(\)/);
   assert.match(source, /inFlightExecutions\.waitForNextCompletion\(completionRevision\)/);
   assert.doesNotMatch(source, /Promise\.allSettled\(cycleExecutions\.values\(\)\)/);
   assert.match(source, /createAgentExecutionTempDirectory\(paths\.root, executionId\)/);

@@ -24,7 +24,6 @@ import {
 } from '../../src/application/internal-agent-command-drafts';
 import { applyAgentResult, applyNextQueuedAgentResult, blockDelegation } from '../../src/application/agent-results';
 import {
-  beginExecutionAttempt,
   cancelExecution,
   completeExecution,
   executionCancellationRequested,
@@ -33,13 +32,11 @@ import {
   markExecutionStage,
   recordExecutionReceipt,
   recoverNextExecutionAttempt,
-  releaseExecutionResources,
   shouldRecordDevCodeCommit,
-  PromptCanaryDeferredError,
   type ExecutionAttempt,
 } from '../../src/application/executions';
-import { appendLoopRunLog, CodeSlotBusyError, createLoopDispatch, endRun, getRunStatus, getTask, getTaskContext, markDelegationLaneRunning, reconcileStaleTaskLanes, recordRuntimeEventWithFallback, settleDelegationLane, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
-import { ResourceBusyError } from '../../src/application/resource-claims';
+import { appendLoopRunLog, CodeSlotBusyError, endRun, getRunStatus, getTask, getTaskContext, reconcileStaleTaskLanes, recordRuntimeEventWithFallback, settleDelegationLane, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
+import { progressDispatcher, type ReservedExecution } from '../../src/application/progress-dispatch';
 import { laneForAgent } from '../../src/application/task-lanes';
 import {
   listRecoveryItemsForStage,
@@ -452,12 +449,17 @@ async function handleExecutionFailure(attempt: ExecutionAttempt, delegation: Del
 }
 
 async function executeDelegationStep(
-  delegation: DelegationEnvelope,
+  reservation: ReservedExecution,
 ) {
-  if (!(await isRunActive())) return;
+  const delegation = reservation.work;
+  if (!(await isRunActive())) {
+    await progressDispatcher.settle({ reservationId: reservation.reservationId });
+    return;
+  }
   const task = await getTask(delegation.taskId);
   if (!task || task.task.agile_status === 'cancelled' || task.task.is_paused) {
     await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 已取消或暂停，跳过尚未启动的 ${agentLabel(delegation.agent)}`);
+    await progressDispatcher.settle({ reservationId: reservation.reservationId });
     return;
   }
   await appendLoopRunLog(runId, `[运行] 执行任务级 Agent：requirement=${delegation.taskId} agent=${delegation.agent}`);
@@ -472,102 +474,77 @@ async function executeDelegationStep(
     await appendLoopRunLog(runId, `[Runtime] requirement=${delegation.taskId} agent=${delegation.agent} executor=${executor.id} model=${executionOptions.model || 'default'} reasoning=${executionOptions.reasoningEffort || 'default'} web_search=${executionOptions.webSearch ? 'enabled' : 'disabled'}`);
     const headBefore = gitHead(paths.root);
     const builtPrompt = await buildPrompt(delegation, headBefore || null);
-    const durable = await beginExecutionAttempt({
-      runId,
-      delegation,
-      prompt: builtPrompt.prompt,
-      baseCommit: headBefore,
-      promptVersion: builtPrompt.runtime.promptVersion,
-      promptTemplateVersion: builtPrompt.runtime.promptTemplateVersion,
-      promptHash: builtPrompt.runtime.promptHash,
-      memoryRevision: builtPrompt.runtime.memoryRevision,
-      memoryHash: builtPrompt.runtime.memoryHash,
-      evolutionCandidateId: builtPrompt.runtime.evolutionCandidateId,
-      executorId: runtimeSettings.executorId,
-      configuredModel: executionOptions.model,
-      reasoningEffort: executionOptions.reasoningEffort,
-      webSearchEnabled: Boolean(executionOptions.webSearch),
-      contextSnapshot: builtPrompt.contextSnapshot,
+    const activated = await progressDispatcher.activate({
+      reservationId: reservation.reservationId,
+      prepared: {
+        prompt: builtPrompt.prompt,
+        baseCommit: headBefore,
+        promptMetadata: {
+          version: builtPrompt.runtime.promptVersion,
+          templateVersion: builtPrompt.runtime.promptTemplateVersion,
+          hash: builtPrompt.runtime.promptHash,
+        },
+        memory: {
+          revision: builtPrompt.runtime.memoryRevision,
+          hash: builtPrompt.runtime.memoryHash,
+        },
+        evolutionCandidateId: builtPrompt.runtime.evolutionCandidateId,
+        contextSnapshot: builtPrompt.contextSnapshot,
+        runtime: {
+          executorId: runtimeSettings.executorId,
+          model: executionOptions.model,
+          reasoningEffort: executionOptions.reasoningEffort,
+          webSearchEnabled: Boolean(executionOptions.webSearch),
+        },
+      },
     });
-    attempt = durable.attempt;
-    await appendLoopRunLog(runId, `[上下文] requirement=${delegation.taskId} execution=${durable.attempt.execution_id} snapshot=${builtPrompt.contextSnapshot.snapshotId} resources=${builtPrompt.contextSnapshot.resourceCount} startup_index=${builtPrompt.contextSnapshot.startupIndex.length}`);
-    if (await executionCancellationRequested(durable.attempt.execution_id)) {
+    if (activated.kind === 'invalidated') {
+      await appendLoopRunLog(runId, `[调度] requirement=${delegation.taskId} reservation=${reservation.reservationId} 启动前失效：${activated.reason}`);
+      return;
+    }
+    attempt = activated.attempt;
+    await appendLoopRunLog(runId, `[上下文] requirement=${delegation.taskId} execution=${attempt.execution_id} snapshot=${builtPrompt.contextSnapshot.snapshotId} resources=${builtPrompt.contextSnapshot.resourceCount} startup_index=${builtPrompt.contextSnapshot.startupIndex.length}`);
+    if (await executionCancellationRequested(attempt.execution_id)) {
       const currentTask = await getTask(delegation.taskId);
       const paused = Boolean(currentTask?.task.is_paused);
-      await cancelExecution(durable.attempt.execution_id, paused ? '需求已暂停' : '需求已取消');
+      await cancelExecution(attempt.execution_id, paused ? '需求已暂停' : '需求已取消');
       await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 已${paused ? '暂停' : '取消'}，跳过尚未启动的 ${agentLabel(delegation.agent)}，执行资源已释放`);
       return;
     }
-    if (durable.recovered && durable.attempt.status === 'applied') {
-      maintenance = await activateMaintenanceContext(durable.attempt, delegation);
-      await appendLoopRunLog(runId, `[恢复] requirement=${delegation.taskId} execution attempt ${durable.attempt.execution_id} 已应用，跳过重复执行`);
-      return;
-    }
-    if (durable.recovered && durable.attempt.result_json) {
-      maintenance = await activateMaintenanceContext(durable.attempt, delegation);
-      try {
-        await processDurableResult(durable.attempt, delegation, parseAgentResult(durable.attempt.result_json));
-      } catch (error) {
-        await handleExecutionFailure(
-          durable.attempt,
-          delegation,
-          error instanceof Error ? error.message : String(error),
-          error instanceof AgentResultContractError,
-        );
-      }
-      return;
-    }
-    try {
-      const laneStarted = await markDelegationLaneRunning(delegation, durable.attempt.execution_id);
-      if (!laneStarted) {
-        const currentTask = await getTask(delegation.taskId);
-        const paused = Boolean(currentTask?.task.is_paused);
-        await cancelExecution(durable.attempt.execution_id, paused ? '需求已暂停' : '需求已结束');
-        await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 在启动前已${paused ? '暂停' : '结束'}，执行资源已释放`);
-        return;
-      }
-    } catch (error) {
-      if (error instanceof ResourceBusyError) {
-        await failExecution(durable.attempt.execution_id, error.message, false);
-        await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 等待 ${error.ownerTaskId} 释放资源 ${error.resourceKey}`);
-        return;
-      }
-      throw error;
-    }
-    maintenance = await activateMaintenanceContext(durable.attempt, delegation);
+    maintenance = await activateMaintenanceContext(attempt, delegation);
 
-    const commandToken = await issueAgentCommandToken(durable.attempt.execution_id);
+    const commandToken = await issueAgentCommandToken(attempt.execution_id);
     if (!commandToken) {
       throw new Error(`${delegation.agent}/${delegation.pipeline} 无法签发渐进式命令凭证`);
     }
     const execution = await runDelegation(
       delegation,
       builtPrompt.prompt,
-      durable.attempt.execution_id,
+      attempt.execution_id,
       commandToken,
       executor,
       executionOptions,
     );
-    await releaseExecutionResources(durable.attempt.execution_id);
+    await progressDispatcher.executionExited({ reservationId: reservation.reservationId });
     if (execution.cancelled) {
       const currentTask = await getTask(delegation.taskId);
       const paused = Boolean(currentTask?.task.is_paused);
-      await cancelExecution(durable.attempt.execution_id, paused ? '需求已暂停' : '需求已取消');
+      await cancelExecution(attempt.execution_id, paused ? '需求已暂停' : '需求已取消');
       await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 已随需求${paused ? '暂停' : '取消'}，执行资源已释放`);
       return;
     }
     if (execution.evidencePersistenceError) {
       await handleExecutionFailure(
-        durable.attempt,
+        attempt,
         delegation,
         `本地执行证据写入失败，将自动重试：${execution.evidencePersistenceError}`,
         true,
       );
       return;
     }
-    const commandSubmission = await readAgentCommandSubmission(durable.attempt.execution_id);
+    const commandSubmission = await readAgentCommandSubmission(attempt.execution_id);
     if (execution.exitCode !== 0 && !commandSubmission) {
-      await handleExecutionFailure(durable.attempt, delegation, `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`, true);
+      await handleExecutionFailure(attempt, delegation, `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`, true);
       return;
     }
 
@@ -580,20 +557,20 @@ async function executeDelegationStep(
       await appendLoopRunLog(runId, `[Agent 命令] requirement=${delegation.taskId} ${delegation.agent} 已通过领域终止命令提交结果`);
     } catch (error) {
       const reason = `Agent 未通过角色终止命令提交结果：${error instanceof Error ? error.message : String(error)}`;
-      await handleExecutionFailure(durable.attempt, delegation, reason, true);
+      await handleExecutionFailure(attempt, delegation, reason, true);
       return;
     }
-    await markExecutionOutput(durable.attempt.execution_id, result);
+    await markExecutionOutput(attempt.execution_id, result);
     try {
-      const applied = await processDurableResult({ ...durable.attempt, result_json: JSON.stringify(result), status: 'output_received' }, delegation, result);
+      const applied = await processDurableResult({ ...attempt, result_json: JSON.stringify(result), status: 'output_received' }, delegation, result);
       const succeeded = result.outcome !== 'failed' && result.verdict !== 'failed';
-      await updatePromptCanary(delegation.agent, succeeded, durable.attempt.execution_id);
+      await updatePromptCanary(delegation.agent, succeeded, attempt.execution_id);
       scheduleEvolution(runEvolutionEvaluator({
-        executionId: durable.attempt.execution_id,
+        executionId: attempt.execution_id,
         taskId: delegation.taskId,
         storyIndex: delegation.storyIndex,
         agentId: delegation.agent,
-        attempt: durable.attempt.attempt,
+        attempt: attempt.attempt,
         promptVersion: builtPrompt.runtime.promptVersion,
         result: { outcome: result.outcome, summary: result.summary },
         applicationOutcome: applied.outcome,
@@ -601,29 +578,26 @@ async function executeDelegationStep(
       }, executor, executionOptions));
     } catch (error) {
       if (error instanceof CodeSlotBusyError) {
-        await failExecution(durable.attempt.execution_id, error.message, false);
+        await failExecution(attempt.execution_id, error.message, false);
         await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 结果已进入队列，等待 ${error.ownerTaskId} 释放代码槽`);
         return;
       }
       const reason = `应用 Agent 结果失败：${error instanceof Error ? error.message : String(error)}`;
-      await handleExecutionFailure(durable.attempt, delegation, reason, error instanceof AgentResultContractError);
+      await handleExecutionFailure(attempt, delegation, reason, error instanceof AgentResultContractError);
     }
   } catch (error) {
-    if (error instanceof PromptCanaryDeferredError) {
-      await appendLoopRunLog(runId, `[演化] requirement=${delegation.taskId} agent=${delegation.agent} ${error.message}`);
-      await sleep(Number(process.env.LOOP_CANARY_DISPATCH_RETRY_MS || 5_000));
-      return;
-    }
     unexpectedFailure = error;
     const reason = `任务级 Agent 执行异常：${error instanceof Error ? error.message : String(error)}`;
     if (attempt) await handleExecutionFailure(attempt, delegation, reason, false);
     else {
-      await appendLoopRunLog(runId, `[错误] requirement=${delegation.taskId} agent=${delegation.agent} ${reason}`);
-      await blockDelegation(delegation, reason);
+      const preparation = await progressDispatcher.preparationFailed({ reservationId: reservation.reservationId, error: reason });
+      await appendLoopRunLog(runId, preparation.kind === 'retry'
+        ? `[恢复] requirement=${delegation.taskId} prompt 准备失败 ${preparation.attempt}/3，将重新保留并重试：${reason}`
+        : `[错误] requirement=${delegation.taskId} agent=${delegation.agent} ${reason}`);
     }
   } finally {
-    if (attempt) await releaseExecutionResources(attempt.execution_id);
-    await settleDelegationLane(delegation);
+    await progressDispatcher.executionExited({ reservationId: reservation.reservationId });
+    await progressDispatcher.settle({ reservationId: reservation.reservationId });
     if (maintenance) await enqueueExecutionMaintenance(maintenance, unexpectedFailure);
   }
 }
@@ -636,19 +610,20 @@ function normalizeDelegation(delegation: DelegationEnvelope) {
   } as DelegationEnvelope;
 }
 
-function delegationLaneKey(delegation: DelegationEnvelope) {
-  return `${delegation.taskId}:${delegation.lane}`;
+function delegationLaneKey(reservation: ReservedExecution) {
+  return `${reservation.work.taskId}:${reservation.work.lane}`;
 }
 
 function launchDelegation(
-  delegation: DelegationEnvelope,
-  inFlightExecutions: InFlightWork<DelegationEnvelope>,
+  reservation: ReservedExecution,
+  inFlightExecutions: InFlightWork<ReservedExecution>,
 ) {
-  const key = delegationLaneKey(delegation);
+  const delegation = reservation.work;
+  const key = delegationLaneKey(reservation);
   return inFlightExecutions.launch(
     key,
-    delegation,
-    () => executeDelegationStep(delegation),
+    reservation,
+    () => executeDelegationStep(reservation),
     async (error) => {
       try {
         await appendLoopRunLog(runId, `[错误] requirement=${delegation.taskId} lane=${delegation.lane} agent=${delegation.agent} 执行器退出：${error instanceof Error ? error.message : String(error)}`);
@@ -714,23 +689,17 @@ async function main() {
     recoverable = await recoverNextExecutionAttempt();
   }
 
-  let firstDispatch = true;
-  const inFlightExecutions = new InFlightWork<DelegationEnvelope>();
+  const inFlightExecutions = new InFlightWork<ReservedExecution>();
   while (await isRunActive()) {
     const completionRevision = inFlightExecutions.revision();
     const queuedWaiting = await drainQueuedAgentResults();
-    const dispatch = await createLoopDispatch(runId, {
-      includeRunHeader: false,
-      logDelegations: firstDispatch,
-      locallyActive: inFlightExecutions.values(),
-    });
-    firstDispatch = false;
+    const dispatch = await progressDispatcher.reserveNext({ runId });
     let launched = 0;
-    for (const rawDelegation of dispatch.delegations) {
-      const delegation = normalizeDelegation(rawDelegation);
-      if (launchDelegation(delegation, inFlightExecutions)) {
+    for (const reservation of dispatch.kind === 'reserved' ? dispatch.reservations : []) {
+      const delegation = reservation.work;
+      if (launchDelegation(reservation, inFlightExecutions)) {
         launched += 1;
-        await appendLoopRunLog(runId, `[调度] 启动 Lane Agent：requirement=${delegation.taskId} lane=${delegation.lane} agent=${delegation.agent} resources=${delegation.resources.join(',') || 'none'}`);
+        await appendLoopRunLog(runId, `[调度] 启动 Lane Agent：requirement=${delegation.taskId} lane=${delegation.lane} agent=${delegation.agent} resources=${reservation.claimedResources.join(',') || 'none'}`);
       }
     }
     if (launched) {
@@ -752,6 +721,11 @@ async function main() {
     }
     if (queuedWaiting) {
       await sleep(Number(process.env.LOOP_ACTIVE_DISPATCH_RETRY_MS || 60 * 1000));
+      continue;
+    }
+    if (dispatch.kind === 'run-stopped') return;
+    if (dispatch.kind === 'wait' && dispatch.wake.kind === 'retry-after') {
+      await sleep(Math.max(0, new Date(dispatch.wake.notBefore).getTime() - Date.now()));
       continue;
     }
     await startDispatchRetryRun(runId);

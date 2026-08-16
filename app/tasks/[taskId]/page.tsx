@@ -616,6 +616,9 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             <summary><GitBranch size={15}/><span>{attempt.lane ? `${attempt.lane === 'analysis' ? '交付分析' : attempt.lane === 'delivery' ? '开发验证' : '控制'} · ` : ''}{deliveryUnitLabel(attempt.story_index)} · {agentLabel(attempt.agent)} · attempt {attempt.attempt}</span><small>{attempt.status}</small></summary>
             <pre>{[
               `execution: ${attempt.execution_id}`,
+              attempt.dispatch_generation_key ? `reservation: ${attempt.execution_id} · run ${attempt.run_id}` : '',
+              attempt.claimed_resources ? `claimed resources: ${attempt.claimed_resources}` : '',
+              attempt.status === 'planned' ? `preparing since: ${attempt.created_at}` : '',
               `input hash: ${attempt.input_hash}`,
               attempt.executor_id ? `runtime: ${attempt.executor_id} · model ${attempt.configured_model || 'default'} · reasoning ${attempt.reasoning_effort || 'default'}` : '',
               attempt.base_commit ? `base commit: ${attempt.base_commit}` : '',
