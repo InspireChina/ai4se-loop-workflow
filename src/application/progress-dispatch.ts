@@ -220,30 +220,27 @@ async function inspect(input: { requirementId: string }): Promise<DispatchExplan
       AND status IN ('planned', 'running', 'output_received', 'verifying', 'applying')
     ORDER BY created_at, execution_id
   `).all(input.requirementId) as { execution_id: string; dispatch_reservation_json: string | null }[];
-  if (active.length) {
+  const decisions: DispatchDecision[] = active.map((row) => {
+    const reservation = row.dispatch_reservation_json
+      ? JSON.parse(row.dispatch_reservation_json) as StoredReservation
+      : undefined;
     return {
-      requirementId: input.requirementId,
-      decisions: active.map((row) => {
-        const reservation = row.dispatch_reservation_json
-          ? JSON.parse(row.dispatch_reservation_json) as StoredReservation
-          : undefined;
-        return {
-          lane: reservation?.work.lane || 'control',
-          state: 'active',
-          reason: 'active-execution',
-          executionId: row.execution_id,
-          reservationId: reservation?.reservationId || row.execution_id,
-        };
-      }),
+      lane: reservation?.work.lane || 'control',
+      state: 'active',
+      reason: 'active-execution',
+      executionId: row.execution_id,
+      reservationId: reservation?.reservationId || row.execution_id,
     };
-  }
+  });
   const task = db.prepare(`
-    SELECT agile_status, run_state, is_paused, analysis_index, dev_index, test_index, total_stories
+    SELECT agile_status, run_state, is_paused, current_subagent,
+           analysis_index, dev_index, test_index, total_stories
     FROM tasks WHERE task_id = ?
   `).get(input.requirementId) as {
     agile_status: string;
     run_state: string;
     is_paused: number;
+    current_subagent: string | null;
     analysis_index: number;
     dev_index: number;
     test_index: number;
@@ -267,8 +264,11 @@ async function inspect(input: { requirementId: string }): Promise<DispatchExplan
     db.exec('ROLLBACK TO dispatch_inspect');
     db.exec('RELEASE dispatch_inspect');
   }
-  const decisions: DispatchDecision[] = selected.map((work) => ({ lane: work.lane, state: 'selected' }));
-  const selectedLanes = new Set(selected.map((work) => work.lane));
+  const occupiedLanes = new Set(decisions.map((decision) => decision.lane));
+  for (const work of selected) {
+    if (!occupiedLanes.has(work.lane)) decisions.push({ lane: work.lane, state: 'selected' });
+  }
+  const selectedLanes = new Set(decisions.map((decision) => decision.lane));
   const pending = db.prepare(`
     SELECT CASE WHEN agent = 'analyst-agent' THEN 'analysis'
                 WHEN agent IN ('dev-agent', 'test-agent') THEN 'delivery'
@@ -277,6 +277,22 @@ async function inspect(input: { requirementId: string }): Promise<DispatchExplan
   `).all(input.requirementId) as { lane: TaskLaneKind | 'control' }[];
   for (const row of pending) {
     if (!selectedLanes.has(row.lane)) decisions.push({ lane: row.lane, state: 'waiting', reason: 'pending-result' });
+  }
+  const controlStage = task.total_stories === 0
+    || selectedLanes.has('control')
+    || Boolean(task.current_subagent && !['analyst-agent', 'dev-agent', 'test-agent'].includes(task.current_subagent));
+  if (controlStage) {
+    if (!decisions.some((decision) => decision.lane === 'control')) {
+      const foreignClaim = db.prepare('SELECT 1 FROM resource_claims WHERE owner_task_id != ? LIMIT 1').get(input.requirementId);
+      decisions.push({
+        lane: 'control',
+        state: 'waiting',
+        reason: ['waiting_for_answers', 'waiting_for_runtime_input'].includes(task.run_state)
+          ? 'waiting-for-input'
+          : foreignClaim ? 'resources-busy' : 'no-runnable-work',
+      });
+    }
+    return { requirementId: input.requirementId, decisions };
   }
   const lanes = db.prepare('SELECT lane, status FROM task_lanes WHERE task_id = ? ORDER BY lane')
     .all(input.requirementId) as { lane: TaskLaneKind; status: string }[];
