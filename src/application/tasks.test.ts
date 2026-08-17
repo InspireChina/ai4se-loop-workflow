@@ -1040,6 +1040,53 @@ test('keeps retry attempts in one logical generation even when the rebuilt promp
   await completeExecution(rework.attempt.execution_id);
 });
 
+test('gives a CLI exit one independent restart even after other failures in the generation', async () => {
+  const { createTask } = await import('./tasks');
+  const { completeExecution, failExecutionWithRetryPolicy } = await import('./executions');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Independent CLI retry budget' });
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id != ?").run(taskId);
+  const delegation = (await inspectAllDispatch()).find((item) => item.taskId === taskId);
+  assert.ok(delegation);
+
+  const preparation = await beginTestExecutionAttempt({ runId: 'run-kind-1', delegation, prompt: 'first failure kind' });
+  await failExecutionWithRetryPolicy(preparation.attempt.execution_id, 'evidence failed', {
+    kind: 'evidence-persistence', maxRetries: 2,
+  });
+  const missingResult = await beginTestExecutionAttempt({ runId: 'run-kind-2', delegation, prompt: 'second failure kind' });
+  await failExecutionWithRetryPolicy(missingResult.attempt.execution_id, 'missing terminal command', {
+    kind: 'agent-missing-terminal-command', maxRetries: 2,
+  });
+
+  const firstCliExit = await beginTestExecutionAttempt({ runId: 'run-kind-3', delegation, prompt: 'CLI exits one' });
+  const retry = await failExecutionWithRetryPolicy(firstCliExit.attempt.execution_id, 'CLI exit 1', {
+    kind: 'agent-cli-exit', maxRetries: 1,
+  });
+  assert.deepEqual(
+    { willRetry: retry.willRetry, failureAttempt: retry.failureAttempt, globalAttempt: firstCliExit.attempt.attempt },
+    { willRetry: true, failureAttempt: 1, globalAttempt: 3 },
+  );
+
+  const secondCliExit = await beginTestExecutionAttempt({ runId: 'run-kind-4', delegation, prompt: 'CLI retry exits one' });
+  const blocked = await failExecutionWithRetryPolicy(secondCliExit.attempt.execution_id, 'CLI exit 1 again', {
+    kind: 'agent-cli-exit', maxRetries: 1,
+  });
+  assert.deepEqual(
+    { willRetry: blocked.willRetry, failureAttempt: blocked.failureAttempt, globalAttempt: secondCliExit.attempt.attempt },
+    { willRetry: false, failureAttempt: 2, globalAttempt: 4 },
+  );
+  const rows = db.prepare(`
+    SELECT failure_kind, status FROM execution_attempts
+    WHERE execution_id IN (?, ?) ORDER BY attempt
+  `).all(firstCliExit.attempt.execution_id, secondCliExit.attempt.execution_id);
+  assert.deepEqual(rows, [
+    { failure_kind: 'agent-cli-exit', status: 'retryable_failed' },
+    { failure_kind: 'agent-cli-exit', status: 'system_blocked' },
+  ]);
+  await completeExecution(secondCliExit.attempt.execution_id);
+});
+
 test('does not let a late execution failure overwrite cancellation', async () => {
   const { createTask } = await import('./tasks');
   const {

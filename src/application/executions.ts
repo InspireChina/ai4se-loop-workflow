@@ -41,6 +41,7 @@ export type ExecutionAttempt = {
   application_result_id: string | null;
   heartbeat_at: string | null;
   last_error: string | null;
+  failure_kind: string | null;
   prompt_version: number | null;
   prompt_template_version: number | null;
   prompt_hash: string | null;
@@ -250,4 +251,49 @@ export async function failExecution(executionId: string, error: string, blocked 
     WHERE execution_id = ? AND status NOT IN ('cancelled', 'applied')
   `).run(blocked ? 'system_blocked' : 'retryable_failed', error, executionId);
   releaseExecutionResourceClaimsInDb(db, executionId);
+}
+
+export type ExecutionFailureRetryPolicy = {
+  kind: string;
+  maxRetries: number;
+};
+
+export async function failExecutionWithRetryPolicy(
+  executionId: string,
+  error: string,
+  policy: ExecutionFailureRetryPolicy,
+) {
+  const db = await databaseConnection();
+  return db.transaction(() => {
+    const current = db.prepare(`
+      SELECT dispatch_generation_key, delegation_key, status
+      FROM execution_attempts WHERE execution_id = ?
+    `).get(executionId) as {
+      dispatch_generation_key: string | null;
+      delegation_key: string;
+      status: ExecutionStatus;
+    } | undefined;
+    if (!current || ['cancelled', 'applied'].includes(current.status)) {
+      return { ignored: true as const, willRetry: false, failureAttempt: 0, maxRetries: policy.maxRetries };
+    }
+    const generationKey = current.dispatch_generation_key || current.delegation_key;
+    const previous = generationKey
+      ? (db.prepare(`
+          SELECT COUNT(*) AS count
+          FROM execution_attempts
+          WHERE COALESCE(dispatch_generation_key, delegation_key) = ? AND failure_kind = ?
+            AND execution_id != ? AND status IN ('retryable_failed', 'system_blocked')
+        `).get(generationKey, policy.kind, executionId) as { count: number }).count
+      : 0;
+    const failureAttempt = previous + 1;
+    const willRetry = failureAttempt <= policy.maxRetries;
+    db.prepare(`
+      UPDATE execution_attempts
+      SET status = ?, last_error = ?, failure_kind = ?, finished_at = CURRENT_TIMESTAMP,
+          heartbeat_at = CURRENT_TIMESTAMP
+      WHERE execution_id = ? AND status NOT IN ('cancelled', 'applied')
+    `).run(willRetry ? 'retryable_failed' : 'system_blocked', error, policy.kind, executionId);
+    releaseExecutionResourceClaimsInDb(db, executionId);
+    return { ignored: false as const, willRetry, failureAttempt, maxRetries: policy.maxRetries };
+  }).immediate();
 }

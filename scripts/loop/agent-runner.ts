@@ -27,6 +27,7 @@ import {
   completeExecution,
   executionCancellationRequested,
   failExecution,
+  failExecutionWithRetryPolicy,
   markExecutionOutput,
   markExecutionStage,
   recordExecutionReceipt,
@@ -421,9 +422,20 @@ async function runEvolutionEvaluator(
   }
 }
 
-async function handleExecutionFailure(attempt: ExecutionAttempt, delegation: DelegationEnvelope, reason: string, retryable: boolean) {
-  const willRetry = retryable && attempt.attempt < 3;
-  await failExecution(attempt.execution_id, reason, !willRetry);
+type FailureRetryPolicy = { kind: string; maxRetries: number };
+
+async function handleExecutionFailure(
+  attempt: ExecutionAttempt,
+  delegation: DelegationEnvelope,
+  reason: string,
+  retryPolicy?: FailureRetryPolicy,
+) {
+  const retry = retryPolicy
+    ? await failExecutionWithRetryPolicy(attempt.execution_id, reason, retryPolicy)
+    : null;
+  if (retry?.ignored) return;
+  const willRetry = Boolean(retry?.willRetry);
+  if (!retryPolicy) await failExecution(attempt.execution_id, reason, true);
   try {
     await updatePromptCanary(delegation.agent, false, attempt.execution_id);
     await recordExecutionFailureObservation({ executionId: attempt.execution_id, taskId: delegation.taskId, agentId: delegation.agent, reason });
@@ -431,7 +443,10 @@ async function handleExecutionFailure(attempt: ExecutionAttempt, delegation: Del
     await appendLoopRunLog(runId, `[演化] 失败观察写入失败但不影响主流程：${evolutionError instanceof Error ? evolutionError.message : String(evolutionError)}`);
   }
   if (willRetry) {
-    await appendLoopRunLog(runId, `[恢复] execution attempt ${attempt.attempt}/3 失败，将自动重试：${reason}`);
+    await appendLoopRunLog(
+      runId,
+      `[恢复] ${retryPolicy?.kind} 同类失败 ${retry?.failureAttempt}/${(retry?.maxRetries || 0) + 1}，将重新启动 CLI：${reason}`,
+    );
     return;
   }
   await appendLoopRunLog(runId, `[错误] ${agentLabel(delegation.agent)} ${reason}`);
@@ -528,13 +543,18 @@ async function executeDelegationStep(
         attempt,
         delegation,
         `本地执行证据写入失败，将自动重试：${execution.evidencePersistenceError}`,
-        true,
+        { kind: 'evidence-persistence', maxRetries: 2 },
       );
       return;
     }
     const commandSubmission = await readAgentCommandSubmission(attempt.execution_id);
     if (execution.exitCode !== 0 && !commandSubmission) {
-      await handleExecutionFailure(attempt, delegation, `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`, true);
+      await handleExecutionFailure(
+        attempt,
+        delegation,
+        `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`,
+        { kind: 'agent-cli-exit', maxRetries: 1 },
+      );
       return;
     }
 
@@ -547,7 +567,7 @@ async function executeDelegationStep(
       await appendLoopRunLog(runId, `[Agent 命令] requirement=${delegation.taskId} ${delegation.agent} 已通过领域终止命令提交结果`);
     } catch (error) {
       const reason = `Agent 未通过角色终止命令提交结果：${error instanceof Error ? error.message : String(error)}`;
-      await handleExecutionFailure(attempt, delegation, reason, true);
+      await handleExecutionFailure(attempt, delegation, reason, { kind: 'agent-missing-terminal-command', maxRetries: 2 });
       return;
     }
     await markExecutionOutput(attempt.execution_id, result);
@@ -573,12 +593,17 @@ async function executeDelegationStep(
         return;
       }
       const reason = `应用 Agent 结果失败：${error instanceof Error ? error.message : String(error)}`;
-      await handleExecutionFailure(attempt, delegation, reason, error instanceof AgentResultContractError);
+      await handleExecutionFailure(
+        attempt,
+        delegation,
+        reason,
+        error instanceof AgentResultContractError ? { kind: 'agent-result-contract', maxRetries: 2 } : undefined,
+      );
     }
   } catch (error) {
     unexpectedFailure = error;
     const reason = `任务级 Agent 执行异常：${error instanceof Error ? error.message : String(error)}`;
-    if (attempt) await handleExecutionFailure(attempt, delegation, reason, false);
+    if (attempt) await handleExecutionFailure(attempt, delegation, reason);
     else {
       const preparation = await progressDispatcher.preparationFailed({ reservationId: reservation.reservationId, error: reason });
       await appendLoopRunLog(runId, preparation.kind === 'retry'
@@ -662,7 +687,12 @@ async function main() {
       }, executor, executionOptions));
     } catch (error) {
       const reason = `恢复 execution attempt 失败：${error instanceof Error ? error.message : String(error)}`;
-      await handleExecutionFailure(recoverable, delegation, reason, error instanceof AgentResultContractError);
+      await handleExecutionFailure(
+        recoverable,
+        delegation,
+        reason,
+        error instanceof AgentResultContractError ? { kind: 'agent-result-contract', maxRetries: 2 } : undefined,
+      );
     } finally {
       await progressDispatcher.settleRecoveredExecution({ executionId: recoverable.execution_id });
       await recordExecutionCycleFinished(cycle);
