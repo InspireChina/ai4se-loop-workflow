@@ -68,6 +68,7 @@ function statusText(state: UpdaterState) {
 
 export function UpdatePanel() {
   const [state, setState] = useState<UpdaterState>(webState);
+  const [resuming, setResuming] = useState(false);
 
   useEffect(() => {
     const updater = window.loopworkUpdater;
@@ -77,10 +78,21 @@ export function UpdatePanel() {
   }, []);
 
   const updater = typeof window === 'undefined' ? undefined : window.loopworkUpdater;
+  const lifecycle = typeof window === 'undefined' ? undefined : window.loopworkLifecycle;
   const checking = state.status === 'checking';
   const downloading = state.status === 'downloading';
   const installing = state.status === 'installing';
   const progress = Math.round(state.percent ?? 0);
+  const resumeAfterFailure = async () => {
+    if (!lifecycle) return;
+    setResuming(true);
+    try {
+      await lifecycle.command({ kind: 'resume-after-update' });
+      setState((value) => ({ ...value, error: undefined }));
+    } finally {
+      setResuming(false);
+    }
+  };
 
   return <div className="card update-card">
     <div className="update-head">
@@ -103,6 +115,7 @@ export function UpdatePanel() {
       {state.status === 'available' && <button className="button" type="button" onClick={() => void updater?.downloadUpdate()}><Download size={15}/>下载 v{state.latestVersion}</button>}
       {downloading && <button className="button" type="button" disabled><LoaderCircle className="spin" size={15}/>下载中</button>}
       {state.status === 'downloaded' && <button className="button success" type="button" onClick={() => void updater?.installUpdate()}><RotateCcw size={15}/>重启并安装</button>}
+      {state.status === 'downloaded' && state.error && lifecycle && <button className="button secondary" type="button" disabled={resuming} onClick={() => void resumeAfterFailure()}>{resuming ? <LoaderCircle className="spin" size={15}/> : null}恢复使用</button>}
       {installing && <button className="button success" type="button" disabled><LoaderCircle className="spin" size={15}/>正在关闭后台任务</button>}
       {state.status === 'up-to-date' && <span className="update-ok"><CheckCircle2 size={16}/>无需更新</span>}
     </div>

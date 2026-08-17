@@ -7,6 +7,8 @@ import crossSpawn from 'cross-spawn';
 import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, parseAgentTelemetryStderr, parseAgentTelemetryStdoutEvents, type AgentEnvironment, type AgentExecutionContext, type AgentExecutionOptions, type AgentExecutor, type AgentTelemetryEvent } from './agent-executor';
 import { agentResultChannelEnv, createAgentResultChannel, readAgentResultChannel, removeAgentResultChannel, type AgentResultChannel, type AgentResultKind } from './agent-result-channel';
 import type { LangfuseTelemetry } from './langfuse';
+import { markManagedAgentProcessExited, registerManagedAgentProcess } from './managed-process-registry';
+import { terminateProcessTree } from './process-tree';
 
 export type DelegationExecutionInput = {
   runId: string;
@@ -140,7 +142,34 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       stdio: [executor.promptMode === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       windowsHide: true,
     });
-    let childExited = false;
+    const spawnOutcome = await new Promise<{ spawned: true } | { spawned: false; error: unknown }>((resolve) => {
+      const onSpawn = () => {
+        cleanup();
+        resolve({ spawned: true });
+      };
+      const onError = (error: unknown) => {
+        cleanup();
+        resolve({ spawned: false, error });
+      };
+      const cleanup = () => {
+        child.removeListener('spawn', onSpawn);
+        child.removeListener('error', onError);
+      };
+      child.once('spawn', onSpawn);
+      child.once('error', onError);
+    });
+    const launchError = spawnOutcome.spawned ? undefined : spawnOutcome.error;
+    let processStartMarker: string | null = null;
+    if (spawnOutcome.spawned) {
+      if (!child.pid) throw new Error('Agent CLI 启动后未获得 PID');
+      try {
+        processStartMarker = await registerManagedAgentProcess(runId, child.pid);
+      } catch (error) {
+        await terminateProcessTree(child.pid, 5_000).catch(() => false);
+        throw error;
+      }
+    }
+    let childExited = child.exitCode !== null;
     child.once('exit', () => { childExited = true; });
     if (executor.promptMode === 'stdin') child.stdin?.end(prompt);
 
@@ -202,6 +231,14 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     if (cancellationTimer) void checkCancellation();
     try {
       terminalExitCode = await new Promise<number | null>((resolve, reject) => {
+        if (launchError) {
+          reject(launchError);
+          return;
+        }
+        if (child.exitCode !== null) {
+          resolve(child.exitCode);
+          return;
+        }
         child.once('error', reject);
         child.once('exit', resolve);
       });
@@ -213,6 +250,9 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       clearTimeout(maxTimer);
       clearInterval(idleTimer);
       if (cancellationTimer) clearInterval(cancellationTimer);
+      if (child.pid && processStartMarker) {
+        await markManagedAgentProcessExited(runId, child.pid, processStartMarker).catch(() => undefined);
+      }
     }
     stdoutBuffer += stdoutDecoder.end();
     stderrBuffer += stderrDecoder.end();

@@ -2076,60 +2076,6 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
   assert.equal(detail.observations.find((item) => item.fingerprint === 'avoid-ambiguous-tool-order')?.status, 'rejected');
 });
 
-test('correlates and redacts structured runtime events before queuing a durable software maintenance job', async () => {
-  const { createTask, appendLoopRunLog } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const { clearRuntimeEventContext, recordRuntimeEvent, setRuntimeEventContext } = await import('./runtime-events');
-  const {
-    claimNextSoftwareMaintenanceJob,
-    enqueueSoftwareMaintenance,
-    setSoftwareMaintenanceSettings,
-    updateSoftwareMaintenanceJob,
-  } = await import('./software-maintenance');
-  const db = await databaseConnection();
-  await setSoftwareMaintenanceSettings({ enabled: true, autoApply: true });
-  const taskId = await createTask({ title: 'Structured maintenance evidence' });
-  const executionId = 'execution-structured-maintenance';
-  db.prepare(`
-    INSERT INTO execution_attempts(
-      execution_id, run_id, task_id, agent, pipeline, delegation_key,
-      attempt, status, input_hash, input_json
-    ) VALUES(?, 'run-structured-maintenance', ?, 'dev-agent', 'dev', ?, 1, 'applied', 'maintenance-hash', '{}')
-  `).run(executionId, taskId, `key-${executionId}`);
-
-  setRuntimeEventContext({ runId: 'run-structured-maintenance', executionId, taskId, agentId: 'dev-agent', stage: 'verifying' });
-  try {
-    const fromId = await recordRuntimeEvent({
-      eventName: 'loop.execution.cycle.started', component: 'loop-runner', body: 'cycle started',
-    });
-    await appendLoopRunLog('run-structured-maintenance', '[错误] verification failed token=super-secret password=hunter2');
-    const event = db.prepare(`
-      SELECT * FROM runtime_events WHERE run_id = ? ORDER BY event_id DESC LIMIT 1
-    `).get('run-structured-maintenance') as { execution_id: string; task_id: string; severity_text: string; body: string };
-    assert.equal(event.execution_id, executionId);
-    assert.equal(event.task_id, taskId);
-    assert.equal(event.severity_text, 'ERROR');
-    assert.doesNotMatch(event.body, /super-secret|hunter2/);
-    assert.match(event.body, /\[REDACTED\]/);
-
-    const firstJob = await enqueueSoftwareMaintenance({
-      triggerKind: 'execution_finally', runId: 'run-structured-maintenance', executionId, eventFromId: fromId,
-    });
-    const repeatedJob = await enqueueSoftwareMaintenance({
-      triggerKind: 'execution_finally', runId: 'run-structured-maintenance', executionId, eventFromId: fromId,
-    });
-    assert.equal(repeatedJob, firstJob);
-    const claimed = await claimNextSoftwareMaintenanceJob();
-    assert.equal(claimed?.job_id, firstJob);
-    assert.equal(claimed?.severity_text, 'ERROR');
-    assert.equal(claimed?.status, 'running');
-    await updateSoftwareMaintenanceJob(claimed!.job_id, { status: 'no_issue', summary: 'test cleanup', finished: true });
-  } finally {
-    clearRuntimeEventContext();
-    await setSoftwareMaintenanceSettings({ enabled: false, autoApply: false });
-  }
-});
-
 test('redacts nested authorization attributes before persisting runtime events', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { recordRuntimeEventInDb } = await import('./runtime-events');
@@ -2159,7 +2105,7 @@ test('redacts nested authorization attributes before persisting runtime events',
   });
 });
 
-test('runtime-event-tolerance run-log: retains text log and writes maintenance warning when its structured mirror fails', async () => {
+test('runtime-event-tolerance run-log: retains text log and writes a warning when its structured mirror fails', async () => {
   const { appendLoopRunLog, readLoopRunLogChunk } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -2170,7 +2116,7 @@ test('runtime-event-tolerance run-log: retains text log and writes maintenance w
     await assert.doesNotReject(appendLoopRunLog(runId, '[运行] text record must survive'));
     const log = await readLoopRunLogChunk(runId);
     assert.match(log.raw, /\[运行\] text record must survive/);
-    assert.match(log.raw, /\[维护\] 结构化运行时事件写入失败/);
+    assert.match(log.raw, /\[警告\] 结构化运行时事件写入失败/);
   } finally {
     db.exec('ALTER TABLE runtime_events_unavailable RENAME TO runtime_events');
   }
@@ -2189,34 +2135,13 @@ test('runtime-event-tolerance cycle-start: isolates startup event writes and pre
       eventName: 'loop.execution.cycle.started', component: 'loop-runner', body: 'injected cycle-start failure', context: { runId },
     }));
     assert.equal(eventFromId, null);
-    assert.match((await readLoopRunLogChunk(runId)).raw, /\[维护\] cycle\.started 结构化事件写入失败/);
+    assert.match((await readLoopRunLogChunk(runId)).raw, /\[警告\] cycle\.started 结构化事件写入失败/);
   } finally {
     db.exec('ALTER TABLE runtime_events_unavailable RENAME TO runtime_events');
   }
   const source = readFileSync(join(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
   assert.match(source, /recordRuntimeEventWithFallback\([\s\S]*?cycle\.started 结构化事件写入失败[\s\S]*?recordRuntimeEvent/);
   assert.match(source, /eventFromId: number \| null/);
-});
-
-test('runtime-event-tolerance dispatch-waiter: isolates exception writes and records a maintenance warning', async () => {
-  const { recordRuntimeEventWithFallback, readLoopRunLogChunk } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const { recordRuntimeException } = await import('./runtime-events');
-  const db = await databaseConnection();
-  const runId = 'runtime-event-tolerance-dispatch-waiter';
-
-  db.exec('ALTER TABLE runtime_events RENAME TO runtime_events_unavailable');
-  try {
-    const eventId = await recordRuntimeEventWithFallback(runId, 'dispatch-waiter 结构化异常事件写入失败，不影响原始失败', () => recordRuntimeException({
-      runId, component: 'dispatch-waiter', stage: 'finally', error: new Error('injected dispatch-waiter exception failure'), fatal: true,
-    }));
-    assert.equal(eventId, null);
-    assert.match((await readLoopRunLogChunk(runId)).raw, /\[维护\] dispatch-waiter 结构化异常事件写入失败/);
-  } finally {
-    db.exec('ALTER TABLE runtime_events_unavailable RENAME TO runtime_events');
-  }
-  const source = readFileSync(join(process.cwd(), 'scripts/loop/dispatch-waiter.ts'), 'utf8');
-  assert.match(source, /recordRuntimeEventWithFallback\([\s\S]*?dispatch-waiter 结构化异常事件写入失败[\s\S]*?recordRuntimeException/);
 });
 
 test('infers event metadata from message prefix', async () => {
@@ -2231,7 +2156,6 @@ test('infers event metadata from message prefix', async () => {
     { message: '[执行器输出] result', eventName: 'loop.agent.output', component: 'agent-executor', severity: 'INFO' },
     { message: '[验证] test passed', eventName: 'loop.verification', component: 'harness', severity: 'INFO' },
     { message: '[演化] prompt updated', eventName: 'loop.agent_evolution', component: 'agent-evolution', severity: 'INFO' },
-    { message: '[维护] check started', eventName: 'loop.software_maintenance', component: 'software-maintenance', severity: 'INFO' },
     { message: '[错误] something broke', eventName: 'loop.error', component: 'loop-runner', severity: 'ERROR' },
     { message: '[恢复] retry succeeded', eventName: 'loop.recovery', component: 'loop-runner', severity: 'INFO' },
     { message: '[派发] task assigned', eventName: 'loop.dispatch', component: 'orchestrator', severity: 'INFO' },
@@ -2343,249 +2267,6 @@ test('generates exception fingerprint', async () => {
   ).get(sanitized) as any;
   assert.match(se.exception_message, /\[REDACTED\]/);
   assert.doesNotMatch(se.exception_message, /super-secret-123/);
-});
-
-test('evidence-window: loads events by event_from_id..event_to_id window in ascending order', async () => {
-  const { databaseConnection } = await import('../infrastructure/database');
-  const { recordRuntimeEventInDb } = await import('./runtime-events');
-  const { loadMaintenanceEvidence } = await import('./software-maintenance');
-  const db = await databaseConnection();
-
-  const ids: number[] = [];
-  db.transaction(() => {
-    for (let i = 0; i < 10; i++) {
-      ids.push(recordRuntimeEventInDb(db, {
-        eventName: `test.window.${i}`, component: 'test', body: `window event ${i}`,
-      }));
-    }
-  })();
-
-  const events = await loadMaintenanceEvidence({
-    event_from_id: ids[2], event_to_id: ids[6],
-    trigger_run_id: null, trigger_execution_id: null,
-  } as Parameters<typeof loadMaintenanceEvidence>[0]);
-
-  assert.equal(events.length, 5);
-  assert.deepEqual(events.map((e) => e.event_id), ids.slice(2, 7));
-  for (let i = 1; i < events.length; i++) {
-    assert.ok(events[i].event_id > events[i - 1].event_id, 'events should be in ascending order');
-  }
-});
-
-test('self-referential: filters out component=software-maintenance events from evidence', async () => {
-  const { databaseConnection } = await import('../infrastructure/database');
-  const { clearRuntimeEventContext, recordRuntimeEventInDb, setRuntimeEventContext } = await import('./runtime-events');
-  const { loadMaintenanceEvidence } = await import('./software-maintenance');
-  const db = await databaseConnection();
-  const runId = 'self-ref-test-run';
-
-  setRuntimeEventContext({ runId });
-  try {
-    const normalIds: number[] = [];
-    db.transaction(() => {
-      for (let i = 0; i < 3; i++) {
-        normalIds.push(recordRuntimeEventInDb(db, {
-          eventName: `test.normal.${i}`, component: 'loop-runner', body: `normal event ${i}`,
-        }));
-      }
-      for (let i = 0; i < 2; i++) {
-        recordRuntimeEventInDb(db, {
-          eventName: 'loop.software_maintenance.check', component: 'software-maintenance', body: `maintenance event ${i}`,
-        });
-      }
-    })();
-
-    const events = await loadMaintenanceEvidence({
-      event_from_id: 0, event_to_id: Number.MAX_SAFE_INTEGER,
-      trigger_run_id: runId, trigger_execution_id: null,
-    } as Parameters<typeof loadMaintenanceEvidence>[0]);
-
-    assert.equal(events.length, 3);
-    assert.deepEqual(events.map((e) => e.event_id), normalIds);
-    for (const e of events) {
-      assert.notEqual(e.component, 'software-maintenance');
-    }
-  } finally {
-    clearRuntimeEventContext();
-  }
-});
-
-test('evidence-limit: truncates to 500 events when window exceeds limit', async () => {
-  const { databaseConnection } = await import('../infrastructure/database');
-  const { loadMaintenanceEvidence } = await import('./software-maintenance');
-  const db = await databaseConnection();
-
-  const insert = db.prepare(`
-    INSERT INTO runtime_events(timestamp, observed_at, event_name, component, severity_text, severity_number, body, attributes_json)
-    VALUES(datetime('now'), datetime('now'), 'test.limit', 'test', 'INFO', 9, ?, '{}')
-  `);
-  db.transaction(() => {
-    for (let i = 0; i < 600; i++) {
-      insert.run(`limit event ${i}`);
-    }
-  })();
-
-  const events = await loadMaintenanceEvidence({
-    event_from_id: 0, event_to_id: Number.MAX_SAFE_INTEGER,
-    trigger_run_id: null, trigger_execution_id: null,
-  } as Parameters<typeof loadMaintenanceEvidence>[0]);
-
-  assert.equal(events.length, 500);
-  for (let i = 1; i < events.length; i++) {
-    assert.ok(events[i].event_id > events[i - 1].event_id, 'events should be in ascending order');
-  }
-});
-
-test('fallback-evidence: falls back to run_id when window query returns empty', async () => {
-  const { databaseConnection } = await import('../infrastructure/database');
-  const { loadMaintenanceEvidence } = await import('./software-maintenance');
-  const db = await databaseConnection();
-  const runId = 'fallback-evidence-run';
-
-  const ids: number[] = [];
-  const insert = db.prepare(`
-    INSERT INTO runtime_events(timestamp, observed_at, run_id, event_name, component, severity_text, severity_number, body, attributes_json)
-    VALUES(datetime('now'), datetime('now'), ?, 'test.fallback', 'loop-runner', 'INFO', 9, ?, '{}')
-  `);
-  db.transaction(() => {
-    for (let i = 0; i < 50; i++) {
-      const info = insert.run(runId, `fallback event ${i}`);
-      ids.push(Number(info.lastInsertRowid));
-    }
-  })();
-
-  const events = await loadMaintenanceEvidence({
-    event_from_id: 999_999, event_to_id: 999_999,
-    trigger_run_id: runId, trigger_execution_id: null,
-  } as Parameters<typeof loadMaintenanceEvidence>[0]);
-
-  assert.equal(events.length, 50);
-  assert.deepEqual(events.map((e) => e.event_id), ids);
-  for (let i = 1; i < events.length; i++) {
-    assert.ok(events[i].event_id > events[i - 1].event_id, 'events should be in ascending order');
-  }
-});
-
-test('settings-gate: software maintenance defaults off and skips non-manual enqueue', async () => {
-  const { databaseConnection } = await import('../infrastructure/database');
-  const { enqueueSoftwareMaintenance, getSoftwareMaintenanceSettings } = await import('./software-maintenance');
-  const db = await databaseConnection();
-
-  const initial = await getSoftwareMaintenanceSettings();
-  assert.equal(initial.enabled, false);
-  try {
-    const nonManual = await enqueueSoftwareMaintenance({ triggerKind: 'execution_finally' });
-    assert.equal(nonManual, null);
-    const manual = await enqueueSoftwareMaintenance({ triggerKind: 'manual' });
-    assert.ok(manual, 'manual trigger should bypass enabled check');
-    assert.match(manual!, /^[a-f0-9-]{36}$/);
-  } finally {
-    db.prepare(`UPDATE project_settings SET setting_value = 'false' WHERE setting_key = 'software_maintenance_enabled'`).run();
-  }
-});
-
-test('prompt-build: maps RuntimeEventRow fields to stable JSON evidence structure including exception', async () => {
-  const { buildSoftwareMaintenancePrompt } = await import('./software-maintenance');
-  const job = {
-    job_id: 'test-job-id',
-    trigger_kind: 'execution_finally',
-    severity_text: 'INFO',
-    base_commit: null,
-  } as Parameters<typeof buildSoftwareMaintenancePrompt>[0];
-
-  const event = {
-    event_id: 42,
-    timestamp: '2026-07-20T10:00:00.000Z',
-    run_id: 'test-run',
-    execution_id: 'test-exec',
-    task_id: 'test-task',
-    agent_id: 'dev-agent',
-    event_name: 'loop.exception.fatal',
-    component: 'loop-runner',
-    stage: 'verifying',
-    severity_text: 'FATAL',
-    body: 'something broke',
-    attributes_json: JSON.stringify({ key: 'value', nested: { a: 1 } }),
-    exception_type: 'TypeError',
-    exception_message: 'cannot read property X',
-    exception_stack: 'at foo (bar.ts:10:5)',
-    exception_fingerprint: 'abc123def456',
-  };
-
-  const prompt = buildSoftwareMaintenancePrompt(job, [event]);
-  assert.ok(prompt.includes('结构化运行证据'), 'prompt should contain evidence section');
-
-  const evidenceMatch = prompt.match(/结构化运行证据：\n(\[[\s\S]*\])$/);
-  assert.ok(evidenceMatch, 'prompt should contain a JSON evidence array');
-  const evidence = JSON.parse(evidenceMatch![1]);
-
-  assert.equal(evidence.length, 1);
-  const e = evidence[0];
-  assert.equal(e.id, 42);
-  assert.equal(e.timestamp, '2026-07-20T10:00:00.000Z');
-  assert.equal(e.eventName, 'loop.exception.fatal');
-  assert.equal(e.component, 'loop-runner');
-  assert.equal(e.stage, 'verifying');
-  assert.equal(e.severity, 'FATAL');
-  assert.equal(e.runId, 'test-run');
-  assert.equal(e.executionId, 'test-exec');
-  assert.equal(e.taskId, 'test-task');
-  assert.equal(e.agentId, 'dev-agent');
-  assert.equal(e.body, 'something broke');
-  assert.deepEqual(e.attributes, { key: 'value', nested: { a: 1 } });
-  assert.ok(e.exception);
-  assert.equal(e.exception.type, 'TypeError');
-  assert.equal(e.exception.message, 'cannot read property X');
-  assert.equal(e.exception.stack, 'at foo (bar.ts:10:5)');
-  assert.equal(e.exception.fingerprint, 'abc123def456');
-
-  const jobLine = prompt.includes('test-job-id');
-  assert.ok(jobLine, 'prompt should include job id');
-});
-
-test('prompt-build: falls back to empty attributes object on parse failure', async () => {
-  const { buildSoftwareMaintenancePrompt } = await import('./software-maintenance');
-  const job = {
-    job_id: 'test-job-id', trigger_kind: 'execution_finally' as const,
-    severity_text: 'INFO' as const, base_commit: null,
-  } as Parameters<typeof buildSoftwareMaintenancePrompt>[0];
-
-  const event = {
-    event_id: 1, timestamp: '2026-01-01T00:00:00.000Z',
-    run_id: null, execution_id: null, task_id: null, agent_id: null,
-    event_name: 'test', component: 'test', stage: null,
-    severity_text: 'INFO', body: 'test',
-    attributes_json: 'not-valid-json{{{',
-    exception_type: null, exception_message: null,
-    exception_stack: null, exception_fingerprint: null,
-  };
-
-  const prompt = buildSoftwareMaintenancePrompt(job, [event]);
-  const evidenceMatch = prompt.match(/结构化运行证据：\n(\[[\s\S]*\])$/);
-  assert.ok(evidenceMatch);
-  const evidence = JSON.parse(evidenceMatch![1]);
-  assert.deepEqual(evidence[0].attributes, {});
-  assert.equal(evidence[0].exception, null);
-});
-
-test('prompt-build: includes security contract and progressive command protocol', async () => {
-  const { buildSoftwareMaintenancePrompt } = await import('./software-maintenance');
-  const job = {
-    job_id: 'test-job-id', trigger_kind: 'runner_error' as const,
-    severity_text: 'FATAL' as const, base_commit: 'abc1234',
-  } as Parameters<typeof buildSoftwareMaintenancePrompt>[0];
-
-  const prompt = buildSoftwareMaintenancePrompt(job, []);
-  assert.ok(prompt.includes('Software Maintenance Agent'), 'prompt should address maintenance agent');
-  assert.ok(prompt.includes('禁止修改'), 'prompt should include safety constraints');
-  assert.ok(prompt.includes('maintenance status'), 'prompt should require status recovery');
-  assert.ok(prompt.includes('maintenance complete'), 'prompt should include terminal command');
-  assert.ok(prompt.includes('test-job-id'), 'prompt should include job id');
-  assert.ok(prompt.includes('runner_error'), 'prompt should include trigger kind');
-  assert.ok(prompt.includes('FATAL'), 'prompt should include severity');
-  assert.ok(prompt.includes('abc1234'), 'prompt should include base commit');
-  assert.equal(prompt.includes('submit-agent-result'), false);
-  assert.ok(prompt.includes('普通最终文本和手写 JSON 都不推进流程'));
 });
 
 test('truncates long body', async () => {

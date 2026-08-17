@@ -380,7 +380,7 @@ test('labels progressive Review reconciliation as an Agent domain action', () =>
   assert.match(parsed || '', /保存最终事实对账/);
 });
 
-test('labels progressive internal Agent commands as domain actions', () => {
+test('labels progressive Evolution Agent commands as domain actions', () => {
   const evolution = getAgentExecutor('codex').parseStdout(JSON.stringify({
     type: 'item.started',
     item: {
@@ -393,24 +393,9 @@ test('labels progressive internal Agent commands as domain actions', () => {
     storyIndex: null,
     pipeline: 'evolution',
   });
-  const maintenance = getAgentExecutor('codex').parseStdout(JSON.stringify({
-    type: 'item.started',
-    item: {
-      type: 'command_execution',
-      command: 'node "/app/scripts/loop/loop-agent.mjs" maintenance test upsert --key targeted',
-    },
-  }), {
-    agent: 'software-maintenance-agent',
-    taskId: 'JOB-1',
-    storyIndex: null,
-    pipeline: 'software-maintenance',
-  });
   assert.match(evolution || '', /tool=agent-command/);
   assert.match(evolution || '', /更新可复用观察/);
-  assert.match(maintenance || '', /tool=agent-command/);
-  assert.match(maintenance || '', /更新维护测试/);
 });
-
 test('extracts final assistant text from every executor stream', () => {
   const result = '{"outcome":"completed","summary":"ok"}';
   assert.equal(extractAgentFinalText('codex', JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: result } })), result);

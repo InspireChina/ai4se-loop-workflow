@@ -75,7 +75,7 @@ LoopWork 只在以下情况请求人介入：
 - Feedback Agent 的批次分组、前向追加工作和独立处理验证。
 - 每个需求一个持久化 Chat 会话；Agent 每轮重新读取交付文档、活动和代码。Runner 空闲、相关文件归属清楚且调整不改变业务语义、范围、可观察结果或验收标准时，可直接完成局部 UI、排版和 wording 小改动，验证后只提交自己的代码且不创建交付单元；其他变化统一进入 Feedback 闭环，始终不由 Chat 修改 Loop 状态。
 - 权限边界、人工介入和可插拔执行器。
-- 受限的 Prompt 演化和 LoopWork 自维护闭环。
+- 受限的 Prompt 演化，以及可诊断但不会在安装包内自行修改源码的运行事件。
 
 项目只需要注入自己的 Agent Profile、领域知识、AC、工具、权限和验证规则；后续可以进一步通过 Skill 和 Workflow Profile 复用这些配置。统一的是“如何可靠运行一个 Loop”，而不是“每个项目应该做什么”。
 
@@ -130,7 +130,7 @@ npm run desktop:dist:win
 
 产物位于 `dist-desktop/`。`better-sqlite3` 会在准备桌面 runtime 时针对当前 Electron、操作系统和 CPU 架构重新编译，所以 Windows 和 macOS 产物应分别在对应平台构建，不能复用另一平台生成的 `desktop-runtime/`。桌面构建会额外安装 `desktop/package-lock.json` 中的更新器运行时依赖。
 
-桌面主进程包含独立于 Runner 的健康监测：用户点击“开始运行”后会持久化持续运行意图，每 10 秒检查 Runner 进程与 heartbeat；Runner 异常退出或 heartbeat 超过 45 秒未更新时，会通过既有 checkpoint 恢复链自动回收旧 execution 并启动新一轮。连续快速崩溃采用 10 秒、30 秒、90 秒直至最多 5 分钟的退避，稳定运行 2 分钟后重置。用户主动“结束本轮”会先关闭该意图，不会被自动拉起。
+桌面主进程承载独立于 UI 的 Loop 生命周期：用户点击“开始运行”后会持久化持续运行意图，并以 30 秒监督租约和 fencing token 管理 Runner。Runner 异常退出或 heartbeat 失效时，会通过既有草稿与 checkpoint 恢复链回收旧 execution 并启动新一轮；连续失败采用 5 秒、15 秒、30 秒、随后最多 5 分钟的退避，健康运行 10 分钟后重置。关闭窗口只隐藏到托盘，明确退出才停止 Loop。应用更新会先进入更新静默并验证 UI Server、Runner 和 Agent CLI 进程树全部退出；失败时不会自动恢复 Agent，用户可明确重试或恢复使用。
 
 ### 通过 GitHub Actions 构建跨平台安装包
 
@@ -160,7 +160,7 @@ app/                 Next.js 页面与 Server Actions
 src/domain/          领域模型与协议
 src/application/     Workflow 用例与状态推进
 src/infrastructure/  数据库、Agent、验证与运行适配器
-scripts/loop/         Runner、Maintenance Runner 与 loopctl
+scripts/loop/         Runner、Agent 命令入口与 loopctl
 migrations/          项目数据库迁移
 docs/                工作手册与技术文档
 ```

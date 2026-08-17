@@ -52,7 +52,6 @@ function inferEventName(message: string) {
   if (message.startsWith('[执行器输出]')) return 'loop.agent.output';
   if (message.startsWith('[验证]')) return 'loop.verification';
   if (message.startsWith('[演化]')) return 'loop.agent_evolution';
-  if (message.startsWith('[维护]')) return 'loop.software_maintenance';
   if (message.startsWith('[错误]') || message.startsWith('[执行器错误]')) return 'loop.error';
   if (message.startsWith('[恢复]')) return 'loop.recovery';
   if (message.startsWith('[派发]')) return 'loop.dispatch';
@@ -60,7 +59,6 @@ function inferEventName(message: string) {
 }
 
 function inferComponent(eventName: string) {
-  if (eventName.startsWith('loop.software_maintenance')) return 'software-maintenance';
   if (eventName.startsWith('loop.agent_evolution')) return 'agent-evolution';
   if (eventName.startsWith('loop.agent')) return 'agent-executor';
   if (eventName.startsWith('loop.verification')) return 'harness';

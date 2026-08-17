@@ -66,7 +66,7 @@ export default async function SettingsPage() {
     <form action={saveAgentExecutorAction} className="card settings">
       <fieldset className="executor-settings">
         <legend>系统辅助 Agent Runtime</legend>
-        <p className="muted">用于上下文对话和软件自维护等没有独立 Agent Profile 的能力，不会覆盖流程 Agent 的独立 Runtime。所选 CLI 需要已在本机登录。</p>
+        <p className="muted">用于上下文对话等没有独立 Agent Profile 的能力，不会覆盖流程 Agent 的独立 Runtime。所选 CLI 需要已在本机登录。</p>
         <div className="executor-options">
           {AGENT_EXECUTOR_OPTIONS.map((option) => <label className="executor-option" key={option.id}>
             <input type="radio" name="agentExecutor" value={option.id} defaultChecked={settings.executorId === option.id}/>

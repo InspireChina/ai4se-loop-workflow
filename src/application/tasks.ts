@@ -279,9 +279,9 @@ function loopLogLine(message: string) {
   return `${toUtcIsoString()} ${message}\n`;
 }
 
-function appendMaintenanceWarningInDb(db: Awaited<ReturnType<typeof databaseConnection>>, runId: string, message: string) {
+function appendRuntimeEventWarningInDb(db: Awaited<ReturnType<typeof databaseConnection>>, runId: string, message: string) {
   try {
-    db.prepare('INSERT INTO run_logs(run_id, line) VALUES(?, ?)').run(runId, loopLogLine(`[维护] ${message}`));
+    db.prepare('INSERT INTO run_logs(run_id, line) VALUES(?, ?)').run(runId, loopLogLine(`[警告] ${message}`));
   } catch { /* the primary operation must not depend on its degradation signal */ }
 }
 
@@ -290,7 +290,7 @@ export async function recordRuntimeEventWithFallback(runId: string, warning: str
     return await record();
   } catch {
     try {
-      appendMaintenanceWarningInDb(await databaseConnection(), runId, warning);
+      appendRuntimeEventWarningInDb(await databaseConnection(), runId, warning);
     } catch { /* the primary operation must not depend on its degradation signal */ }
     return null;
   }
@@ -304,7 +304,7 @@ function appendRunLogInDb(db: Awaited<ReturnType<typeof databaseConnection>>, ru
   } catch (error) {
     // The text log is the durable primary record. Do not retry the failed mirror here:
     // that would recurse when runtime_events is unavailable.
-    appendMaintenanceWarningInDb(db, runId, '结构化运行时事件写入失败，已保留文本日志');
+    appendRuntimeEventWarningInDb(db, runId, '结构化运行时事件写入失败，已保留文本日志');
   }
 }
 
@@ -2080,6 +2080,7 @@ type LoopRunRow = {
   runner_pid: number | null;
   started_at: string;
   heartbeat_at: string | null;
+  supervision_token: number | null;
 };
 
 const RUN_HEARTBEAT_TIMEOUT_MS = 45_000;
@@ -2100,7 +2101,18 @@ function getRunStatusFromDb(db: Awaited<ReturnType<typeof databaseConnection>>) 
     const heartbeatAt = persisted?.heartbeat_at || null;
     const starting = !heartbeatAt && Date.now() - databaseTimestampMs(startedAt) < 15_000;
     const heartbeatFresh = Boolean(heartbeatAt) && Date.now() - databaseTimestampMs(heartbeatAt) <= RUN_HEARTBEAT_TIMEOUT_MS;
-    const active = persisted?.status !== 'stopped' && persisted?.status !== 'crashed'
+    let generationActive = true;
+    const runnerToken = Number(process.env.LOOP_SUPERVISION_TOKEN || 0);
+    if (runnerToken > 0) {
+      const lifecycle = db.prepare(`SELECT desired_intent, mode FROM loop_lifecycle_state WHERE singleton = 1`).get() as { desired_intent: string; mode: string } | undefined;
+      const lease = db.prepare(`SELECT fencing_token, expires_at FROM loop_supervisor_lease WHERE singleton = 1`).get() as { fencing_token: number; expires_at: string } | undefined;
+      generationActive = lifecycle?.desired_intent === 'running'
+        && lifecycle.mode === 'normal'
+        && persisted?.supervision_token === runnerToken
+        && lease?.fencing_token === runnerToken
+        && databaseTimestampMs(lease.expires_at) + 15_000 > Date.now();
+    }
+    const active = generationActive && persisted?.status !== 'stopped' && persisted?.status !== 'crashed'
       && (starting || (isProcessAlive(pid) && heartbeatFresh));
     return {
       runId: parsed.runId,
@@ -2122,27 +2134,40 @@ export async function getRunStatus(): Promise<RunStatus> {
   return getRunStatusFromDb(db);
 }
 
-export async function registerRunProcess(runId: string, processKind: 'agent-runner' | 'dispatch-waiter', pid: number) {
+export async function registerRunProcess(runId: string, processKind: 'agent-runner', pid: number, supervisionToken: number, processStartMarker: string) {
   const db = await databaseConnection();
-  db.prepare(`
-    UPDATE loop_runs
-    SET status = 'running', process_kind = ?, runner_pid = ?, heartbeat_at = CURRENT_TIMESTAMP
-    WHERE run_id = ? AND status IN ('starting', 'running')
-  `).run(processKind, pid, runId);
+  db.transaction(() => {
+    const lease = db.prepare(`SELECT fencing_token, expires_at FROM loop_supervisor_lease WHERE singleton = 1`).get() as { fencing_token: number; expires_at: string } | undefined;
+    const lifecycle = db.prepare(`SELECT desired_intent, mode FROM loop_lifecycle_state WHERE singleton = 1`).get() as { desired_intent: string; mode: string } | undefined;
+    if (!lease || lease.fencing_token !== supervisionToken || databaseTimestampMs(lease.expires_at) <= Date.now()
+      || lifecycle?.desired_intent !== 'running' || lifecycle.mode !== 'normal') {
+      throw new Error('Runner 登记被拒绝：监督代次已经失效');
+    }
+    const updated = db.prepare(`
+      UPDATE loop_runs
+      SET status = 'running', process_kind = ?, runner_pid = ?, supervision_token = ?, heartbeat_at = CURRENT_TIMESTAMP
+      WHERE run_id = ? AND status IN ('starting', 'running')
+    `).run(processKind, pid, supervisionToken, runId);
+    if (updated.changes !== 1) throw new Error('Runner 登记被拒绝：运行状态已经变化');
+    db.prepare(`
+      INSERT INTO loop_managed_processes(
+        process_id, supervision_token, process_kind, pid, process_start_marker, run_id
+      ) VALUES(?, ?, 'agent-runner', ?, ?, ?)
+    `).run(randomUUID(), supervisionToken, pid, processStartMarker, runId);
+  })();
 }
 
-export async function heartbeatRun(runId: string, processKind: 'agent-runner' | 'dispatch-waiter') {
+export async function heartbeatRun(runId: string, processKind: 'agent-runner') {
   const db = await databaseConnection();
-  // runner_pid belongs to the detached process-group leader registered by the launcher.
-  // The tsx worker that emits heartbeats can have a different process.pid.
+  const supervisionToken = Number(process.env.LOOP_SUPERVISION_TOKEN || 0);
   db.prepare(`
     UPDATE loop_runs
     SET status = 'running', process_kind = ?, heartbeat_at = CURRENT_TIMESTAMP
-    WHERE run_id = ? AND status IN ('starting', 'running')
-  `).run(processKind, runId);
+    WHERE run_id = ? AND supervision_token = ? AND status IN ('starting', 'running')
+  `).run(processKind, runId, supervisionToken);
 }
 
-export async function startRunHeartbeat(runId: string, processKind: 'agent-runner' | 'dispatch-waiter') {
+export async function startRunHeartbeat(runId: string, processKind: 'agent-runner') {
   await heartbeatRun(runId, processKind);
   const timer = setInterval(() => {
     void heartbeatRun(runId, processKind).catch(() => { /* main runner owns error reporting */ });

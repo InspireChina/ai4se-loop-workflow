@@ -4,13 +4,9 @@ import {
   evolutionResultSchema,
   type EvolutionResult,
 } from '../domain/agent-evolution';
-import {
-  softwareMaintenanceResultSchema,
-  type SoftwareMaintenanceResult,
-} from '../domain/software-maintenance';
 import { databaseConnection, hash } from '../infrastructure/database';
 
-type WorkType = 'evolution' | 'maintenance';
+type WorkType = 'evolution';
 type Db = Awaited<ReturnType<typeof databaseConnection>>;
 type FlagMap = Map<string, string>;
 
@@ -93,18 +89,11 @@ function loadDraft(db: Db, workType: WorkType, workId: string) {
   `).get(workType, workId) as DraftRow | undefined;
 }
 
-function assertSourceActive(db: Db, workType: WorkType, workId: string) {
-  if (workType === 'evolution') {
-    const row = db.prepare(`
-      SELECT 1 FROM agent_evolution_runs WHERE evolution_id = ? AND status = 'running'
-    `).get(workId);
-    if (!row) throw new Error('当前 Prompt 演化工作不存在或已经结束');
-    return;
-  }
+function assertSourceActive(db: Db, _workType: WorkType, workId: string) {
   const row = db.prepare(`
-    SELECT 1 FROM software_maintenance_jobs WHERE job_id = ? AND status = 'running'
+    SELECT 1 FROM agent_evolution_runs WHERE evolution_id = ? AND status = 'running'
   `).get(workId);
-  if (!row) throw new Error('当前软件维护工作不存在或已经结束');
+  if (!row) throw new Error('当前 Prompt 演化工作不存在或已经结束');
 }
 
 function assertAuthorized(
@@ -130,19 +119,12 @@ function assertViewed(draft: DraftRow, sessionId: string) {
 
 function createDraft(db: Db, workType: WorkType, workId: string) {
   const draftId = randomUUID();
-  const agent = workType === 'evolution'
-    ? 'prompt-evolution-agent'
-    : 'software-maintenance-agent';
   db.transaction(() => {
     db.prepare(`
       INSERT INTO internal_agent_drafts(draft_id, work_type, work_id, agent)
-      VALUES(?, ?, ?, ?)
-    `).run(draftId, workType, workId, agent);
-    if (workType === 'evolution') {
-      db.prepare('INSERT INTO evolution_evaluator_drafts(draft_id) VALUES(?)').run(draftId);
-    } else {
-      db.prepare('INSERT INTO software_maintenance_drafts(draft_id) VALUES(?)').run(draftId);
-    }
+      VALUES(?, ?, ?, 'prompt-evolution-agent')
+    `).run(draftId, workType, workId);
+    db.prepare('INSERT INTO evolution_evaluator_drafts(draft_id) VALUES(?)').run(draftId);
   })();
   return loadDraft(db, workType, workId)!;
 }
@@ -317,230 +299,6 @@ function runEvolutionCommand(
   throw new Error(`未知命令：${command}。请使用 loop-agent help`);
 }
 
-function maintenanceState(db: Db, draft: DraftRow) {
-  const header = db.prepare(`
-    SELECT outcome, fingerprint, classification, summary, root_cause, confidence, follow_up
-    FROM software_maintenance_drafts WHERE draft_id = ?
-  `).get(draft.draft_id) as {
-    outcome: SoftwareMaintenanceResult['outcome'] | null;
-    fingerprint: string | null;
-    classification: SoftwareMaintenanceResult['classification'] | null;
-    summary: string | null;
-    root_cause: string | null;
-    confidence: number | null;
-    follow_up: string | null;
-  };
-  const files = db.prepare(`
-    SELECT path, ordinal FROM software_maintenance_draft_files
-    WHERE draft_id = ? ORDER BY ordinal, path
-  `).all(draft.draft_id) as Array<{ path: string; ordinal: number }>;
-  const tests = db.prepare(`
-    SELECT test_key, command, passed, summary, ordinal
-    FROM software_maintenance_draft_tests
-    WHERE draft_id = ? ORDER BY ordinal, test_key
-  `).all(draft.draft_id) as Array<{
-    test_key: string;
-    command: string;
-    passed: number;
-    summary: string;
-    ordinal: number;
-  }>;
-  return { header, files, tests };
-}
-
-function maintenanceStatus(db: Db, draft: DraftRow) {
-  const state = maintenanceState(db, draft);
-  return [
-    `软件维护草稿 · 变更 ${draft.change_seq}`,
-    `结果：${state.header.outcome || '未填写'}`,
-    `分类：${state.header.classification || '未填写'}`,
-    `Fingerprint：${state.header.fingerprint || '未填写'}`,
-    `摘要：${state.header.summary || '未填写'}`,
-    `根因：${state.header.root_cause || '未填写'}`,
-    `置信度：${state.header.confidence ?? '未填写'}`,
-    `变更文件：${state.files.length}`,
-    ...state.files.map((item) => `- ${item.path}`),
-    `测试：${state.tests.length}`,
-    ...state.tests.map((item) => `- ${item.test_key} · ${item.passed ? '通过' : '失败'} · ${item.command}`),
-    '',
-    '每次启动必须先查看本状态；使用稳定 test key 覆盖同一测试。',
-  ].join('\n');
-}
-
-function maintenanceHelp() {
-  return [
-    '  maintenance status',
-    '  maintenance outcome set --value <no_issue|fixed|not_repairable>',
-    '  maintenance fingerprint set --value <stable-kebab-case-key>',
-    '  maintenance classification set --value <loop_bug|executor_issue|target_repo_issue|expected_failure|insufficient_evidence>',
-    '  maintenance summary set --text <结论>',
-    '  maintenance root-cause set --text <证据支持的根因>',
-    '  maintenance confidence set --value <0..1>',
-    '  maintenance follow-up set --text <后续动作>',
-    '  maintenance changed-file add --path <相对路径>',
-    '  maintenance changed-file remove --path <相对路径>',
-    '  maintenance test upsert --key <稳定 key> --command <命令> --passed <true|false> --summary <结果>',
-    '  maintenance test remove --key <稳定 key>',
-    '  maintenance complete',
-  ].join('\n');
-}
-
-function buildMaintenanceResult(db: Db, draft: DraftRow) {
-  const state = maintenanceState(db, draft);
-  const result = softwareMaintenanceResultSchema.parse({
-    outcome: state.header.outcome,
-    fingerprint: state.header.fingerprint,
-    classification: state.header.classification,
-    summary: state.header.summary,
-    rootCause: state.header.root_cause,
-    confidence: state.header.confidence,
-    changedFiles: state.files.map((item) => item.path),
-    tests: state.tests.map((item) => ({
-      command: item.command,
-      passed: Boolean(item.passed),
-      summary: item.summary,
-    })),
-    followUp: state.header.follow_up || '',
-  });
-  if (result.outcome !== 'fixed' && result.changedFiles.length) {
-    throw new Error('未修复结果不能声明变更文件');
-  }
-  if (result.outcome === 'fixed') {
-    if (!result.changedFiles.length) throw new Error('fixed 必须记录实际变更文件');
-    if (!result.tests.length || result.tests.some((item) => !item.passed)) {
-      throw new Error('fixed 必须至少记录一条通过的针对性测试，且不能保留失败测试');
-    }
-  }
-  return result;
-}
-
-function setMaintenanceField(
-  db: Db,
-  draft: DraftRow,
-  column: string,
-  value: string | number,
-) {
-  db.prepare(`UPDATE software_maintenance_drafts SET ${column} = ? WHERE draft_id = ?`)
-    .run(value, draft.draft_id);
-  touch(db, draft.draft_id);
-}
-
-function runMaintenanceCommand(
-  db: Db,
-  draft: DraftRow,
-  sessionId: string,
-  command: string,
-  flags: FlagMap,
-) {
-  if (command === 'help') return maintenanceHelp();
-  if (command === 'maintenance status') {
-    db.prepare(`
-      UPDATE internal_agent_drafts
-      SET status_viewed_session_id = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE draft_id = ?
-    `).run(sessionId, draft.draft_id);
-    return maintenanceStatus(db, { ...draft, status_viewed_session_id: sessionId });
-  }
-  if (command === 'maintenance complete' && draft.status === 'submitted') {
-    return '软件维护草稿已经提交，无需重复提交。';
-  }
-  assertViewed(draft, sessionId);
-  if (command === 'maintenance outcome set') {
-    const value = required(flags, 'value');
-    if (!['no_issue', 'fixed', 'not_repairable'].includes(value)) {
-      throw new Error('--value 必须是 no_issue、fixed 或 not_repairable');
-    }
-    setMaintenanceField(db, draft, 'outcome', value);
-    return '维护结果已保存。';
-  }
-  if (command === 'maintenance fingerprint set') {
-    setMaintenanceField(db, draft, 'fingerprint', bounded(required(flags, 'value'), 'Fingerprint', 120));
-    return '维护 Fingerprint 已保存。';
-  }
-  if (command === 'maintenance classification set') {
-    const value = required(flags, 'value');
-    if (![
-      'loop_bug', 'executor_issue', 'target_repo_issue',
-      'expected_failure', 'insufficient_evidence',
-    ].includes(value)) {
-      throw new Error('--value 不是支持的软件维护分类');
-    }
-    setMaintenanceField(db, draft, 'classification', value);
-    return '维护分类已保存。';
-  }
-  if (command === 'maintenance summary set') {
-    setMaintenanceField(db, draft, 'summary', bounded(required(flags, 'text'), '维护摘要', 1000));
-    return '维护摘要已保存。';
-  }
-  if (command === 'maintenance root-cause set') {
-    setMaintenanceField(db, draft, 'root_cause', bounded(required(flags, 'text'), '根因', 3000));
-    return '维护根因已保存。';
-  }
-  if (command === 'maintenance confidence set') {
-    setMaintenanceField(db, draft, 'confidence', parseConfidence(required(flags, 'value')));
-    return '维护置信度已保存。';
-  }
-  if (command === 'maintenance follow-up set') {
-    setMaintenanceField(db, draft, 'follow_up', bounded(required(flags, 'text'), '后续动作', 2000));
-    return '维护后续动作已保存。';
-  }
-  if (command === 'maintenance changed-file add') {
-    const path = bounded(required(flags, 'path'), '变更路径', 300);
-    const ordinal = nextOrdinal(db, 'software_maintenance_draft_files', draft.draft_id);
-    db.prepare(`
-      INSERT INTO software_maintenance_draft_files(draft_id, path, ordinal)
-      VALUES(?, ?, ?) ON CONFLICT(draft_id, path) DO NOTHING
-    `).run(draft.draft_id, path, ordinal);
-    touch(db, draft.draft_id);
-    return `维护变更文件 ${path} 已保存。`;
-  }
-  if (command === 'maintenance changed-file remove') {
-    db.prepare(`
-      DELETE FROM software_maintenance_draft_files WHERE draft_id = ? AND path = ?
-    `).run(draft.draft_id, required(flags, 'path'));
-    touch(db, draft.draft_id);
-    return '维护变更文件已删除。';
-  }
-  if (command === 'maintenance test upsert') {
-    const key = bounded(required(flags, 'key'), '测试 key', 120);
-    const ordinal = nextOrdinal(db, 'software_maintenance_draft_tests', draft.draft_id);
-    db.prepare(`
-      INSERT INTO software_maintenance_draft_tests(
-        draft_id, test_key, command, passed, summary, ordinal
-      ) VALUES(?, ?, ?, ?, ?, ?)
-      ON CONFLICT(draft_id, test_key) DO UPDATE SET
-        command = excluded.command, passed = excluded.passed, summary = excluded.summary
-    `).run(
-      draft.draft_id,
-      key,
-      bounded(required(flags, 'command'), '测试命令', 300),
-      parseBoolean(required(flags, 'passed'), '--passed') ? 1 : 0,
-      bounded(required(flags, 'summary'), '测试结果', 1000),
-      ordinal,
-    );
-    touch(db, draft.draft_id);
-    return `维护测试 ${key} 已保存。`;
-  }
-  if (command === 'maintenance test remove') {
-    db.prepare(`
-      DELETE FROM software_maintenance_draft_tests WHERE draft_id = ? AND test_key = ?
-    `).run(draft.draft_id, required(flags, 'key'));
-    touch(db, draft.draft_id);
-    return '维护测试已删除。';
-  }
-  if (command === 'maintenance complete') {
-    const result = buildMaintenanceResult(db, draft);
-    db.prepare(`
-      UPDATE internal_agent_drafts
-      SET status = 'submitted', terminal_action = 'complete', result_json = ?,
-          submitted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-      WHERE draft_id = ?
-    `).run(JSON.stringify(result), draft.draft_id);
-    return '软件维护结果已提交。';
-  }
-  throw new Error(`未知命令：${command}。请使用 loop-agent help`);
-}
-
 export async function runInternalAgentCommand(input: {
   workType: WorkType;
   workId: string;
@@ -548,27 +306,21 @@ export async function runInternalAgentCommand(input: {
   token: string;
   args: string[];
 }) {
-  if (!['evolution', 'maintenance'].includes(input.workType)) {
+  if (input.workType !== 'evolution') {
     throw new Error(`不支持的内部 Agent 工作类型：${input.workType}`);
   }
   const db = await databaseConnection();
   const draft = assertAuthorized(db, input);
   const { command, flags } = parseArgs(input.args);
-  if (input.workType === 'evolution') {
-    return runEvolutionCommand(db, draft, input.sessionId, command, flags);
-  }
-  return runMaintenanceCommand(db, draft, input.sessionId, command, flags);
+  return runEvolutionCommand(db, draft, input.sessionId, command, flags);
 }
 
-export async function readInternalAgentCommandSubmission<T extends WorkType>(
-  workType: T,
+export async function readInternalAgentCommandSubmission(
+  workType: WorkType,
   workId: string,
-): Promise<T extends 'evolution' ? EvolutionResult | null : SoftwareMaintenanceResult | null> {
+): Promise<EvolutionResult | null> {
   const db = await databaseConnection();
   const draft = loadDraft(db, workType, workId);
-  if (!draft?.result_json || draft.status !== 'submitted') return null as never;
-  const value = JSON.parse(draft.result_json);
-  return (workType === 'evolution'
-    ? evolutionResultSchema.parse(value)
-    : softwareMaintenanceResultSchema.parse(value)) as never;
+  if (!draft?.result_json || draft.status !== 'submitted') return null;
+  return evolutionResultSchema.parse(JSON.parse(draft.result_json));
 }

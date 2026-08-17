@@ -2,7 +2,6 @@
 import '../load-env.js';
 import { createHash } from 'node:crypto';
 import { agentExecutionOptions, getAgentRuntimeSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
-import { enqueueSoftwareMaintenance } from '../../src/application/software-maintenance';
 import { buildAgentContextSnapshot, renderAgentWorkingContextPack } from '../../src/application/agent-context';
 import { recordRuntimeEvent, recordRuntimeException } from '../../src/application/runtime-events';
 import { loadAgentRuntime } from '../../src/application/agent-profiles';
@@ -50,12 +49,10 @@ import {
   removeAgentExecutionTempDirectory,
   type AgentExecutionTempDirectory,
 } from '../../src/infrastructure/agent-workspace-temp';
-import { startDispatchRetryRun } from '../../src/infrastructure/agent-runner';
 import { resolveAgentExecutionLimits } from '../../src/infrastructure/agent-execution-limits';
 import { paths } from '../../src/infrastructure/database';
 import { gitHead } from '../../src/infrastructure/git';
 import { createLangfuseTelemetry, sanitizeLangfuseValue } from '../../src/infrastructure/langfuse';
-import { startMaintenanceRunner } from '../../src/infrastructure/maintenance-runner';
 import { InFlightWork } from '../../src/infrastructure/in-flight-work';
 
 const runId = process.argv[2];
@@ -68,7 +65,7 @@ function scheduleEvolution(evaluation: Promise<void>) {
   backgroundEvaluations.add(tracked);
 }
 
-async function activateMaintenanceContext(attempt: ExecutionAttempt, delegation: DelegationEnvelope) {
+async function recordExecutionCycleStarted(attempt: ExecutionAttempt, delegation: DelegationEnvelope) {
   let eventFromId: number | null = null;
   eventFromId = await recordRuntimeEventWithFallback(
     runId,
@@ -84,35 +81,21 @@ async function activateMaintenanceContext(attempt: ExecutionAttempt, delegation:
   return { executionId: attempt.execution_id, eventFromId };
 }
 
-async function enqueueExecutionMaintenance(context: { executionId: string; eventFromId: number | null }, failure?: unknown) {
+async function recordExecutionCycleFinished(context: { executionId: string; eventFromId: number | null }, failure?: unknown) {
   try {
     if (failure) await recordRuntimeException({ runId, executionId: context.executionId, component: 'loop-runner', stage: 'finally', error: failure, fatal: true });
     else await recordRuntimeEvent({
       eventName: 'loop.execution.cycle.finished', component: 'loop-runner', body: `execution cycle finished ${context.executionId}`,
-      context: { runId, executionId: context.executionId }, attributes: { maintenanceQueued: true },
+      context: { runId, executionId: context.executionId }, attributes: { startedEventId: context.eventFromId },
     });
-    const jobId = await enqueueSoftwareMaintenance({
-      triggerKind: failure ? 'runner_error' : 'execution_finally',
-      runId,
-      executionId: context.executionId,
-      eventFromId: context.eventFromId,
-      severity: failure ? 'FATAL' : undefined,
-      summary: failure instanceof Error ? failure.message : failure ? String(failure) : 'execution finally inspection',
-    });
-    if (jobId) await startMaintenanceRunner();
   } catch (error) {
-    try { await appendLoopRunLog(runId, `[维护] 无法排入软件维护任务，但不影响主 Loop：${error instanceof Error ? error.message : String(error)}`); } catch { /* main runner is already terminating */ }
+    try { await appendLoopRunLog(runId, `[日志] 无法保存 execution 收尾事件，但不影响主 Loop：${error instanceof Error ? error.message : String(error)}`); } catch { /* main runner is already terminating */ }
   }
 }
 
-async function enqueueRunnerFailureMaintenance(failure: unknown) {
+async function recordRunnerFailure(failure: unknown) {
   try {
-    const eventFromId = await recordRuntimeException({ runId, component: 'loop-runner', stage: 'finally', error: failure, fatal: true });
-    const jobId = await enqueueSoftwareMaintenance({
-      triggerKind: 'runner_error', runId, eventFromId, severity: 'FATAL',
-      summary: failure instanceof Error ? failure.message : String(failure),
-    });
-    if (jobId) await startMaintenanceRunner();
+    await recordRuntimeException({ runId, component: 'loop-runner', stage: 'finally', error: failure, fatal: true });
   } catch { /* runner failure remains the primary error */ }
 }
 
@@ -203,6 +186,15 @@ function sleep(ms: number) {
 async function isRunActive() {
   const run = await getRunStatus();
   return Boolean(run?.active && run.runId === runId);
+}
+
+async function sleepWhileRunActive(ms: number) {
+  const deadline = Date.now() + Math.max(0, ms);
+  while (Date.now() < deadline) {
+    await sleep(Math.min(5_000, deadline - Date.now()));
+    if (!await isRunActive()) return false;
+  }
+  return isRunActive();
 }
 
 function commandFromToolInput(input: unknown) {
@@ -335,7 +327,7 @@ async function runDelegation(
         LOOP_EXECUTION_TOKEN: commandToken,
         LOOP_AGENT_TMP_DIR: temporary.directory,
       },
-      cancellationRequested: () => executionCancellationRequested(executionId),
+      cancellationRequested: async () => !await isRunActive() || await executionCancellationRequested(executionId),
     });
     return { ...execution, diagnostics };
   } finally {
@@ -415,6 +407,7 @@ async function runEvolutionEvaluator(
         LOOP_INTERNAL_SESSION_ID: command.sessionId,
         LOOP_INTERNAL_COMMAND_TOKEN: command.token,
       },
+      cancellationRequested: async () => !await isRunActive(),
     });
     const result = await readInternalAgentCommandSubmission('evolution', evolution.evolutionId);
     if (execution.exitCode !== 0 && !result) throw new Error(`Evaluator CLI 退出码 ${execution.exitCode}`);
@@ -462,7 +455,7 @@ async function executeDelegationStep(
   await appendLoopRunLog(runId, `[运行] 执行任务级 Agent：requirement=${delegation.taskId} agent=${delegation.agent}`);
 
   let attempt: ExecutionAttempt | null = null;
-  let maintenance: { executionId: string; eventFromId: number | null } | null = null;
+  let cycle: { executionId: string; eventFromId: number | null } | null = null;
   let unexpectedFailure: unknown;
   try {
     const runtimeSettings = await getAgentRuntimeSettings(delegation.agent);
@@ -508,7 +501,7 @@ async function executeDelegationStep(
       await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 已${paused ? '暂停' : '取消'}，跳过尚未启动的 ${agentLabel(delegation.agent)}，执行资源已释放`);
       return;
     }
-    maintenance = await activateMaintenanceContext(attempt, delegation);
+    cycle = await recordExecutionCycleStarted(attempt, delegation);
 
     const commandToken = await issueAgentCommandToken(attempt.execution_id);
     if (!commandToken) {
@@ -595,7 +588,7 @@ async function executeDelegationStep(
   } finally {
     await progressDispatcher.executionExited({ reservationId: reservation.reservationId });
     await progressDispatcher.settle({ reservationId: reservation.reservationId });
-    if (maintenance) await enqueueExecutionMaintenance(maintenance, unexpectedFailure);
+    if (cycle) await recordExecutionCycleFinished(cycle, unexpectedFailure);
   }
 }
 
@@ -646,7 +639,7 @@ async function main() {
   let recovery = await progressDispatcher.nextRecovery();
   while (recovery) {
     const { attempt: recoverable, work: delegation } = recovery;
-    const maintenance = await activateMaintenanceContext(recoverable, delegation);
+    const cycle = await recordExecutionCycleStarted(recoverable, delegation);
     try {
       const runtimeSettings = await getAgentRuntimeSettings(delegation.agent);
       const executor = getAgentExecutor(runtimeSettings.executorId);
@@ -672,7 +665,7 @@ async function main() {
       await handleExecutionFailure(recoverable, delegation, reason, error instanceof AgentResultContractError);
     } finally {
       await progressDispatcher.settleRecoveredExecution({ executionId: recoverable.execution_id });
-      await enqueueExecutionMaintenance(maintenance);
+      await recordExecutionCycleFinished(cycle);
     }
     recovery = await progressDispatcher.nextRecovery();
   }
@@ -709,11 +702,12 @@ async function main() {
     }
     if (dispatch.kind === 'run-stopped') return;
     if (dispatch.kind === 'wait' && dispatch.wake.kind === 'retry-after') {
-      await sleep(Math.max(0, new Date(dispatch.wake.notBefore).getTime() - Date.now()));
+      if (!await sleepWhileRunActive(Math.max(0, new Date(dispatch.wake.notBefore).getTime() - Date.now()))) return;
       continue;
     }
-    await startDispatchRetryRun(runId);
-    return;
+    const retryMs = Number(process.env.LOOP_EMPTY_DISPATCH_RETRY_MS || 5 * 60 * 1000);
+    await appendLoopRunLog(runId, `[运行] 当前没有可执行 Agent，${Math.max(1, Math.round(retryMs / 1000))} 秒后重新计算`);
+    if (!await sleepWhileRunActive(retryMs)) return;
   }
 }
 
@@ -729,7 +723,7 @@ async function run() {
       preserveRunIntent: true,
       reason: error instanceof Error ? error.message : String(error),
     });
-    await enqueueRunnerFailureMaintenance(error);
+    await recordRunnerFailure(error);
   } finally {
     stopHeartbeat?.();
     for (const temporary of activeExecutionTemporaries.values()) {

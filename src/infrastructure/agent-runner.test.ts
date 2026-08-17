@@ -5,12 +5,12 @@ import { basename, resolve } from 'node:path';
 import { shouldRecordDevCodeCommit } from '../application/executions';
 import { resolveRunnerCommand } from './agent-runner';
 
-test('starts TypeScript runners through Node and the local tsx CLI', () => {
-  const launch = resolveRunnerCommand('RUN-123', 'dispatch-waiter.ts');
+test('starts the TypeScript Runner through Node and the local tsx CLI', () => {
+  const launch = resolveRunnerCommand('RUN-123', 'agent-runner.ts');
 
   assert.equal(launch.command, process.execPath);
   assert.match(launch.args[0], /tsx[/\\]dist[/\\]cli\.mjs$/);
-  assert.equal(basename(launch.args[1]), 'dispatch-waiter.ts');
+  assert.equal(basename(launch.args[1]), 'agent-runner.ts');
   assert.equal(launch.args[2], 'RUN-123');
   assert.ok(!launch.args.includes('npx'));
 });
@@ -25,9 +25,9 @@ test('starts bundled desktop runners through Electron in Node mode', () => {
   process.env.LOOP_DESKTOP_NODE = '/Applications/LoopWork.app/Contents/MacOS/LoopWork';
   process.env.LOOP_APP_ROOT = '/Applications/LoopWork.app/Contents/Resources/app-server';
   try {
-    const launch = resolveRunnerCommand('RUN-123', 'dispatch-waiter.ts');
+    const launch = resolveRunnerCommand('RUN-123', 'agent-runner.ts');
     assert.equal(launch.command, process.env.LOOP_DESKTOP_NODE);
-    assert.equal(basename(launch.args[0]), 'dispatch-waiter.cjs');
+    assert.equal(basename(launch.args[0]), 'agent-runner.cjs');
     assert.equal(launch.args[1], 'RUN-123');
   } finally {
     if (previous.desktop === undefined) delete process.env.LOOP_DESKTOP;

@@ -1,10 +1,10 @@
 import Link from 'next/link';
-import { Activity, LockKeyhole, Route, ScrollText } from 'lucide-react';
+import { Activity, ScrollText } from 'lucide-react';
 import { formatEventTime } from '../../src/application/event-time';
 import { getRunStatus, listRecentEvents } from '../../src/application/tasks';
 import { agentLabel, terminologyText } from '../../src/domain/terminology';
-import { endLoopRunAction, startLoopRunAction } from '../actions';
 import LoopLogStream from '../loop-log-stream';
+import { RunLifecycleControls } from './run-lifecycle-controls';
 
 export const dynamic = 'force-dynamic';
 
@@ -19,18 +19,10 @@ export default async function RunsPage() {
     </header>
 
     <section className="run-toolbar">
-      <div>
-        <span className={`badge ${run?.active ? 'amber' : 'green'}`}>{run?.active ? '运行中' : '已停止'}</span>
-        <small>{run?.active ? `${run.owner} · pid ${run.pid ?? '启动中'}` : '当前没有运行中的 loop。'}</small>
-      </div>
-      {run?.active ? <form action={endLoopRunAction}>
-        <input type="hidden" name="runId" value={run.runId}/>
-        <input type="hidden" name="redirectTo" value="/runs"/>
-        <button className="button secondary" type="submit"><LockKeyhole size={15}/>结束本轮</button>
-      </form> : <form action={startLoopRunAction}>
-        <input type="hidden" name="redirectTo" value="/runs"/>
-        <button className="button" type="submit"><Route size={15}/>开始运行</button>
-      </form>}
+      <RunLifecycleControls
+        active={Boolean(run?.active)}
+        detail={run?.active ? `${run.owner} · pid ${run.pid ?? '启动中'}` : '当前没有运行中的 loop。'}
+      />
     </section>
 
     <section className="run-console-layout">

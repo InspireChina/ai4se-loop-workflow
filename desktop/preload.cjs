@@ -11,3 +11,8 @@ contextBridge.exposeInMainWorld('loopworkUpdater', {
     return () => ipcRenderer.removeListener('loopwork:updater:state', handler);
   },
 });
+
+contextBridge.exposeInMainWorld('loopworkLifecycle', {
+  status: () => ipcRenderer.invoke('loopwork:lifecycle:status'),
+  command: (action) => ipcRenderer.invoke('loopwork:lifecycle:command', action),
+});

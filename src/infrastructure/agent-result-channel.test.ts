@@ -54,55 +54,23 @@ test('rejects invalid CLI submissions without publishing a result', (t) => {
   assert.equal(existsSync(input), true);
 });
 
-test('accepts the Evolution and Maintenance result kinds through the same CLI', (t) => {
+test('accepts the Evolution result kind through the same CLI', (t) => {
   const inputDirectory = mkdtempSync(join(tmpdir(), 'loopwork-result-kinds-'));
-  const channels = [createAgentResultChannel('evolution'), createAgentResultChannel('maintenance')];
+  const channel = createAgentResultChannel('evolution');
   t.after(() => {
-    for (const channel of channels) removeAgentResultChannel(channel);
+    removeAgentResultChannel(channel);
     rmSync(inputDirectory, { recursive: true, force: true });
   });
-  const fixtures = [
-    {
-      channel: channels[0],
-      result: { summary: 'no reusable learning', observations: [] },
-      expected: { summary: 'no reusable learning', observations: [] },
-    },
-    {
-      channel: channels[1],
-      result: {
-        outcome: 'no_issue',
-        fingerprint: 'expected-no-issue',
-        classification: 'expected_failure',
-        summary: 'The observed behavior does not require a repair.',
-        rootCause: 'The behavior matches the current contract.',
-        confidence: 0.9,
-      },
-      expected: {
-        outcome: 'no_issue',
-        fingerprint: 'expected-no-issue',
-        classification: 'expected_failure',
-        summary: 'The observed behavior does not require a repair.',
-        rootCause: 'The behavior matches the current contract.',
-        confidence: 0.9,
-        changedFiles: [],
-        tests: [],
-        followUp: '',
-      },
-    },
-  ];
-
-  for (const [index, fixture] of fixtures.entries()) {
-    const input = join(inputDirectory, `result-${index}.json`);
-    writeFileSync(input, JSON.stringify(fixture.result));
-    execFileSync(process.execPath, [join(process.cwd(), 'scripts', 'loop', 'submit-agent-result.mjs'), '--input', input], {
-      cwd: process.cwd(),
-      stdio: 'pipe',
-      env: { ...process.env, ...agentResultChannelEnv(fixture.channel) },
-    });
-    assert.deepEqual(JSON.parse(readAgentResultChannel(fixture.channel)!), fixture.expected);
-  }
+  const input = join(inputDirectory, 'result.json');
+  const result = { summary: 'no reusable learning', observations: [] };
+  writeFileSync(input, JSON.stringify(result));
+  execFileSync(process.execPath, [join(process.cwd(), 'scripts', 'loop', 'submit-agent-result.mjs'), '--input', input], {
+    cwd: process.cwd(),
+    stdio: 'pipe',
+    env: { ...process.env, ...agentResultChannelEnv(channel) },
+  });
+  assert.deepEqual(JSON.parse(readAgentResultChannel(channel)!), result);
 });
-
 test('returns the full contract error to the Agent and accepts a corrected resubmission', (t) => {
   const channel = createAgentResultChannel('flow');
   const inputDirectory = mkdtempSync(join(tmpdir(), 'loopwork-result-retry-'));

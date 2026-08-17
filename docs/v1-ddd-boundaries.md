@@ -27,8 +27,6 @@
 | Agent Profile | 某个项目中一个流程 Agent 的完整 Current Prompt、至多一个临时 Prompt candidate、带 revision 历史的 Memory 与演化策略；系统模板只负责首次初始化。 |
 | 演化观察 | 从真实 execution 证据提取的可复用候选经验；它不是事实，必须经累计和验证后才能提升。 |
 | 运行事件 | 与 run / execution 关联、已脱敏的机器可分析日志事实。 |
-| 软件维护任务 | 主 Runner 在 finally 写入的 durable outbox；独立维护进程据此诊断 Loop Engineering 自身。 |
-| 修复候选 | 在隔离 worktree 中通过变更预算和 Harness 的软件 patch；它不是产品 Approval。 |
 
 标准推进过程：
 
@@ -117,17 +115,7 @@ Application 从 Agent 的结构化结果写入文档，UI 直接读取数据库�
 
 Prompt 配置与 execution 审计严格分离。每个 `ExecutionAttempt` 永久保存当次实际发送给模型的完整 Prompt snapshot、execution input hash、项目 Prompt revision、初始模板 version、Prompt hash 以及 Memory revision/hash；Prompt 更新或 candidate 被丢弃都不能改写该快照，也不能把历史 execution 快照恢复为当前配置。
 
-### 2.8 软件自维护（Autonomous Software Maintenance）
-
-负责把 Loop Engineering 自身的异常转化为可恢复的结构化维护任务，并在不阻塞主 Loop 的前提下生成、验证和安全落地最小修复。
-
-- 模型：`RuntimeEvent`、`SoftwareMaintenanceJob`、`RepairCandidate`、`RepairHarness`
-- 关键命令：记录事件、finally 入队、claim 维护任务、创建 worktree、验证变更预算、执行 Harness、自动落地或拒绝
-- 依赖：Loop 编排提供 correlation；Agent Executor 执行诊断；Git 与 Harness 提供独立事实
-
-Maintenance Agent 的结论不是事实。Git status 决定实际变更，test/build 决定候选有效性，clean baseline 决定能否落地。维护上下文不能改变 Requirement、Delivery Unit 或代码槽状态；维护失败只记录在自身聚合中。自修复引擎和 migration 是 V1 的保护边界，防止递归改坏恢复机制。
-
-### 2.9 项目配置（Project Configuration）
+### 2.8 项目配置（Project Configuration）
 
 用户配置工作区根目录，并为每个流程 Agent 独立配置执行器及其可选模型参数：Codex 模型/思考强度或 Claude 模型。没有独立 Profile 的系统辅助 Agent 使用单独的项目级系统 Runtime。工作区短 hash、应用数据目录和 SQLite 路径对普通用户不可见。
 
@@ -169,7 +157,6 @@ classDiagram
   class MemoryRevision
   class EvolutionObservation
   class RuntimeEvent
-  class SoftwareMaintenanceJob
 
   Requirement "1" *-- "0..*" DeliveryUnit
   Requirement "1" --> "0..*" ClarificationQuestion
@@ -187,7 +174,6 @@ classDiagram
   AgentProfile "1" --> "0..*" EvolutionObservation
   ExecutionAttempt --> AgentProfile : snapshots prompt/memory
   ExecutionAttempt --> RuntimeEvent : correlates
-  SoftwareMaintenanceJob --> RuntimeEvent : evidence range
 ```
 
 ## 4. 需求不变量
@@ -208,9 +194,7 @@ classDiagram
 14. 同一个 execution attempt 的 Agent Commit（如有）、验证和 Agent Result 必须幂等记录。
 15. execution attempt 必须记录实际发送给模型的完整 Prompt snapshot、execution input hash、项目 Prompt revision、初始模板 version、Prompt hash 和 Memory revision/hash；配置变化不得改写审计快照。
 16. 每个项目的每个 Agent 必须且只能有一条完整 Current Prompt，并且至多有一个临时 Prompt candidate。系统模板只在首次初始化时复制，应用升级不得覆盖项目 Prompt。自动提升必须满足证据阈值并通过三次真实 Canary，全部成功且原 revision 未变化后替换 Current Prompt，任一次失败或用户编辑则丢弃 candidate。配置域不得保存 Prompt 历史或提供恢复能力。
-17. 主 Runner 的 finally 只能持久化维护任务，不能同步修改代码或等待 Maintenance Agent。
-18. runtime event 在持久化前必须脱敏，并保留 run/execution correlation、severity 和稳定异常 fingerprint。
-19. 软件修复候选只能在独立 worktree 生成；变更预算、保护路径、test/build 和 clean baseline 缺一不可。
+17. runtime event 在持久化前必须脱敏，并保留 run/execution correlation、severity 和稳定异常 fingerprint。
 
 ## 5. Agent 与流程的责任边界
 
@@ -230,9 +214,8 @@ classDiagram
 | 运行信息请求、回答与原阶段恢复 | 当前 Agent 提出；Application 持久化和恢复；用户仅补充事实 |
 | Git 提交 | 开发实现 Agent；有代码改动时按仓库规范提交相关文件，无改动走查不制造 Commit；Runner 不以 Git 历史建立完成门禁 |
 | 项目 Current Prompt、临时 candidate、Memory revisions 与自动演化 | Agent Configuration；Harness 约束 candidate 的验证、替换或丢弃 |
-| Loop Engineering 自身缺陷诊断 | Software Maintenance Agent 提议；Git/Harness 决定候选与落地 |
 
-角色提交能力由 Agent Profile 或内部工作类型明确声明。需求梳理 Agent 使用 `loop-agent requirement-context`，交付规划 Agent 使用 `loop-agent delivery-plan`，问题复现 Agent 使用 `loop-agent reproduction`，交付分析 Agent 使用 `loop-agent delivery-analysis`，开发实现 Agent 使用 `loop-agent implementation`，验证 Agent 使用 `loop-agent verification`，反馈处理 Agent 使用 `loop-agent feedback`，结卡报告 Agent 使用 `loop-agent review`，Prompt 演化评估器使用 `loop-agent evolution`，软件维护 Agent 使用 `loop-agent maintenance`。所有角色渐进维护 Application 拥有的草稿：每次进程启动先读取 status，编辑命令只更新草稿，角色终止命令才产生 Result Receipt。流程 execution token 或内部工作 token 只授权当前 Agent 的命令空间，Agent 不接触 SQLite。普通最终回复和手写 JSON 不承担控制面协议。
+角色提交能力由 Agent Profile 或内部工作类型明确声明。需求梳理 Agent 使用 `loop-agent requirement-context`，交付规划 Agent 使用 `loop-agent delivery-plan`，问题复现 Agent 使用 `loop-agent reproduction`，交付分析 Agent 使用 `loop-agent delivery-analysis`，开发实现 Agent 使用 `loop-agent implementation`，验证 Agent 使用 `loop-agent verification`，反馈处理 Agent 使用 `loop-agent feedback`，结卡报告 Agent 使用 `loop-agent review`，Prompt 演化评估器使用 `loop-agent evolution`。所有角色渐进维护 Application 拥有的草稿：每次进程启动先读取 status，编辑命令只更新草稿，角色终止命令才产生 Result Receipt。流程 execution token 或内部工作 token 只授权当前 Agent 的命令空间，Agent 不接触 SQLite。普通最终回复和手写 JSON 不承担控制面协议。
 
 `DeliveryPlanDraft` 属于交付规划 Application 能力，不直接改变 `Task` 聚合。创建草稿时，Application 为普通拆分冻结已完成业务变化上下文中的 change、preserve、technical 和 acceptance 输入；反馈范围新增则只冻结当前反馈工作组的变化与验收输入。草稿记录拆分依据、整体覆盖、排序说明、带稳定 `unit_key` 的有序候选单元、输入承接关系和自然依赖；错误候选通过 dismiss 或 supersede 保留修订历史。`delivery-plan complete` 只校验输入覆盖、稳定引用、单元完整性和无环顺序等结构事实，成功后一次事务把完整单元契约投影进 `Requirement` 聚合。交付分析 Agent 直接继承参与者、触发条件、可观察结果、单元验收、来源快照和前置单元，不再从标题重新猜测边界。
 
@@ -248,7 +231,7 @@ classDiagram
 
 `ReviewDraft` 属于结卡 Application 能力，以需求下一报告修订版本或反馈报告工作组为稳定身份。它冻结 Application 生成且带内容指纹的 `RequiredSubject`，用 `Reconciliation` 把每个 subject 映射到最终可观察结果和 Context Snapshot 中带版本指纹的 evidence ref，用 `ClosureGap` 保存证据缺失、最终事实冲突或未闭合义务，并用固定 section kind 保存报告表达。普通结卡只有 `report_ready` 和 `closure_gap` 两种成功结果：前者要求全部 subject 已对账、每项结论有独立且通过的 Test execution、证据仍与冻结版本一致且报告核心章节齐备；后者不生成报告、不阻塞也不回退，Application 在交付前沿连续且 execution 快照仍匹配时，为每个 gap 幂等追加新的 Delivery Unit，使其重新经过 Analysis、Dev、Test 与 Review。报告表达更正继承并锁定当前报告基线，只能产生待 Feedback Agent 独立验证的候选新版本。报告文档、Task 状态、Feedback 工作组和 Agent Result 在同一个事务中发布，重放使用原 execution delegation 而不是当前 Task 反向重建。Review 不创建问题或运行信息请求。
 
-`InternalAgentDraft` 属于内部演化与维护 Application 能力，不进入 Task 聚合，也不占用业务 Lane。Evolution 草稿以 `evolution_id` 为稳定身份，保存摘要和稳定 observation key；Maintenance 草稿以 `job_id` 为稳定身份，保存诊断、真实文件声明和针对性测试。新的进程会获得新的 session 与 token，但继承原工作草稿且必须重新执行 status。终止命令只产生内部结果收据；Memory revision 提升、Prompt candidate 的验证与替换或丢弃、真实 diff 验证、提交与自动落地仍由既有确定性 Harness 负责。
+`InternalAgentDraft` 属于内部演化 Application 能力，不进入 Task 聚合，也不占用业务 Lane。Evolution 草稿以 `evolution_id` 为稳定身份，保存摘要和稳定 observation key。新的进程会获得新的 session 与 token，但继承原工作草稿且必须重新执行 status。终止命令只产生内部结果收据；Memory revision 提升、Prompt candidate 的验证与替换或丢弃仍由既有确定性 Harness 负责。
 
 ## 6. SQLite 持久化映射
 
@@ -264,13 +247,12 @@ V1 的 Requirement / Delivery Unit 等业务表暂时保留已有物理名，它
 | Verification Draft / Test Result / Recovery Evidence | `verification_drafts`、`verification_plan_scenarios`、`verification_results`、`documents` 与 `recovery_items`；旧 `verification_runs` / `verification_evidence` 及旧验证草稿明细表均已删除。 |
 | Closure Acknowledgement | `closure_acknowledgements`。 |
 | Delivery Document | `documents`。 |
-| Loop Run / logs | `loop_meta` / `run_logs`。 |
+| Loop Run / logs | `loop_lifecycle_state` / `loop_supervisor_lease` / `loop_managed_processes` / `loop_runs` / `run_logs`。 |
 | Agent Result | `agent_results`。 |
 | Execution Attempt / Receipt | `execution_attempts` / `execution_receipts`。 |
 | Agent Profile / Project Prompt / Prompt Candidate / Memory | `agent_profiles` / `agent_prompts` / `agent_prompt_candidates` / `agent_memory_versions`；每个项目的每个 Agent 一条 Current Prompt、至多一个 candidate，不保存 Prompt 历史；Memory 表保留 revision 历史。 |
 | Evolution Observation / Run | `agent_observations` / `agent_observation_occurrences` / `agent_evolution_runs`。 |
 | Runtime Event | `runtime_events`。 |
-| Software Maintenance Job / Candidate | `software_maintenance_jobs` 与本地 Git worktree/branch。 |
 | Project Configuration | 项目级 `project_settings` 与应用级 `app_settings`。 |
 | Audit Event | `task_events`，仅用于时间线，不做 Event Sourcing。 |
 

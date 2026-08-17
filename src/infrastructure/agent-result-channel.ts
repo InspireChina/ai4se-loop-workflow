@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 export const agentResultProtocol = 'loop-agent-result/v1';
-export type AgentResultKind = 'flow' | 'evolution' | 'maintenance';
+export type AgentResultKind = 'flow' | 'evolution';
 
 export type AgentResultChannel = {
   directory: string;

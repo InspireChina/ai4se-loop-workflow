@@ -3,16 +3,13 @@
 import { redirect } from 'next/navigation';
 import { normalizeWorkspaceRoot, setAgentExecutorSettings, setAgentRuntimeSettings, setFlowAgentDefaultRuntimeSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
 import { resetAgentPromptToSystemTemplate, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
-import { setSoftwareMaintenanceSettings } from '../src/application/software-maintenance';
 import {
   addDocumentComment,
   addStory,
   acknowledgeClosure,
   answerQuestion,
   answerRuntimeInput,
-  beginRun,
   cancelTask,
-  endRun,
   createTask,
   getRunStatus,
   initializeTaskContext,
@@ -26,7 +23,6 @@ import {
   rewindTask,
   transitionTask,
 } from '../src/application/tasks';
-import { startAgentRun } from '../src/infrastructure/agent-runner';
 import { paths } from '../src/infrastructure/database';
 import { requirementPipeline } from '../src/domain/pipeline-catalog';
 import { DEFAULT_REQUIREMENT_PRIORITY, requirementPriority } from '../src/domain/requirement-priority';
@@ -117,18 +113,6 @@ export async function resumeTaskAction(formData: FormData) {
   redirect(`/tasks/${taskId}`);
 }
 
-export async function startLoopRunAction(formData?: FormData) {
-  const runId = await beginRun('agent-runner');
-  const redirectTo = String(formData?.get('redirectTo') || '/');
-  try {
-    await startAgentRun(runId);
-  } catch (error) {
-    await endRun(runId, true);
-    throw error;
-  }
-  redirect(redirectTo);
-}
-
 export async function saveAgentExecutorAction(formData: FormData) {
   await setAgentExecutorSettings({
     executorId: formData.get('agentExecutor'),
@@ -194,11 +178,6 @@ export async function changeWorkspaceRootAction(formData: FormData) {
   if (nextRoot !== currentRoot && (await getRunStatus())?.active) throw new Error('请先结束当前运行，再切换工作区');
   setWorkspaceRoot(nextRoot);
   redirect('/settings');
-}
-
-export async function endLoopRunAction(formData: FormData) {
-  await endRun(String(formData.get('runId')), formData.get('force') === 'on');
-  redirect(String(formData.get('redirectTo') || '/'));
 }
 
 export async function answerQuestionAction(formData: FormData) {
@@ -306,12 +285,4 @@ export async function setAgentAutoEvolutionAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
   await setAgentAutoEvolution({ agentId, enabled: formData.get('enabled') });
   redirectToAgentSection(agentId, formData.get('section'));
-}
-
-export async function saveSoftwareMaintenanceSettingsAction(formData: FormData) {
-  await setSoftwareMaintenanceSettings({
-    enabled: formData.get('softwareMaintenanceEnabled'),
-    autoApply: formData.get('softwareMaintenanceAutoApply'),
-  });
-  redirect('/maintenance');
 }

@@ -44,7 +44,7 @@ function backlogDelegation(taskId: string): DelegationEnvelope {
 }
 
 async function run(
-  workType: 'evolution' | 'maintenance',
+  workType: 'evolution',
   workId: string,
   sessionId: string,
   token: string,
@@ -144,88 +144,4 @@ test('Prompt evolution progressively restores observations and submits without A
 
   await applyEvolutionResult(evolution!.evolutionId, evidence, result!);
   await completeExecution(started.attempt.execution_id);
-});
-
-test('Software maintenance progressively records diagnosis and enforces fixed evidence', async () => {
-  const {
-    issueInternalAgentCommandToken,
-    readInternalAgentCommandSubmission,
-  } = await import('./internal-agent-command-drafts');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-  const jobId = randomUUID();
-  db.prepare(`
-    INSERT INTO software_maintenance_jobs(
-      job_id, trigger_kind, severity_text, status, attempt
-    ) VALUES(?, 'manual', 'ERROR', 'running', 1)
-  `).run(jobId);
-  const command = await issueInternalAgentCommandToken('maintenance', jobId);
-  const env = { ...process.env } as NodeJS.ProcessEnv;
-  delete env.LOOP_TEST;
-  delete env.LOOP_TEST_SETUP_PID;
-  delete env.NODE_TEST_CONTEXT;
-  const cli = spawnSync(process.execPath, [
-    join(process.cwd(), 'scripts', 'loop', 'loop-agent.mjs'),
-    'maintenance', 'status',
-  ], {
-    cwd: process.cwd(),
-    encoding: 'utf8',
-    env: {
-      ...env,
-      LOOP_INTERNAL_WORK_TYPE: 'maintenance',
-      LOOP_INTERNAL_WORK_ID: jobId,
-      LOOP_INTERNAL_SESSION_ID: command.sessionId,
-      LOOP_INTERNAL_COMMAND_TOKEN: command.token,
-    },
-  });
-  assert.equal(cli.status, 0, cli.stderr);
-  assert.match(cli.stdout, /软件维护草稿/);
-  for (const args of [
-    ['maintenance', 'outcome', 'set', '--value', 'fixed'],
-    ['maintenance', 'fingerprint', 'set', '--value', 'runner-status-recovery'],
-    ['maintenance', 'classification', 'set', '--value', 'loop_bug'],
-    ['maintenance', 'summary', 'set', '--text', '修复 Runner 状态恢复中的确定性缺陷。'],
-    ['maintenance', 'root-cause', 'set', '--text', '恢复分支遗漏了持久状态映射。'],
-    ['maintenance', 'confidence', 'set', '--value', '0.91'],
-  ]) {
-    await run('maintenance', jobId, command.sessionId, command.token, args);
-  }
-  await assert.rejects(
-    run('maintenance', jobId, command.sessionId, command.token, [
-      'maintenance', 'complete',
-    ]),
-    /fixed 必须记录实际变更文件/,
-  );
-  await run('maintenance', jobId, command.sessionId, command.token, [
-    'maintenance', 'changed-file', 'add', '--path', 'src/runner-state.ts',
-  ]);
-  await assert.rejects(
-    run('maintenance', jobId, command.sessionId, command.token, [
-      'maintenance', 'complete',
-    ]),
-    /至少记录一条通过的针对性测试/,
-  );
-  await run('maintenance', jobId, command.sessionId, command.token, [
-    'maintenance', 'test', 'upsert',
-    '--key', 'runner-state-unit',
-    '--command', 'npm test -- runner-state',
-    '--passed', 'true',
-    '--summary', '状态恢复测试通过。',
-  ]);
-  await run('maintenance', jobId, command.sessionId, command.token, [
-    'maintenance', 'complete',
-  ]);
-  const result = await readInternalAgentCommandSubmission('maintenance', jobId);
-  assert.equal(result?.outcome, 'fixed');
-  assert.deepEqual(result?.changedFiles, ['src/runner-state.ts']);
-  assert.deepEqual(result?.tests, [{
-    command: 'npm test -- runner-state',
-    passed: true,
-    summary: '状态恢复测试通过。',
-  }]);
-  db.prepare(`
-    UPDATE software_maintenance_jobs
-    SET status = 'verified', finished_at = CURRENT_TIMESTAMP
-    WHERE job_id = ?
-  `).run(jobId);
 });

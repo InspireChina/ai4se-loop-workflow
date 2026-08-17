@@ -79,7 +79,7 @@ function installHandlers() {
     updateState({ status: 'installing', error: undefined });
     installRequest = (async () => {
       try {
-        await prepareToInstall();
+        await prepareToInstall(state.latestVersion);
         setImmediate(() => autoUpdater.quitAndInstall(false, true));
         return true;
       } catch (error) {
@@ -132,8 +132,8 @@ export function configureUpdater(window, prepare) {
   if (initialized) return;
   initialized = true;
   autoUpdater.autoDownload = false;
-  // Installing on an ordinary app quit bypasses the coordinated shutdown of
-  // the detached Runner and can leave LoopWork.exe locked on Windows.
+  // Installing on an ordinary app quit bypasses the lifecycle update gate and
+  // can leave a managed LoopWork process holding the installation on Windows.
   autoUpdater.autoInstallOnAppQuit = false;
   autoUpdater.allowPrerelease = false;
   autoUpdater.allowDowngrade = false;

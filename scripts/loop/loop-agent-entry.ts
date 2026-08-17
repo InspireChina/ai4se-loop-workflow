@@ -50,7 +50,7 @@ try {
   }
   const output = hasInternalContext
     ? await runInternalAgentCommand({
-        workType: internalWorkType as 'evolution' | 'maintenance', workId: internalWorkId!, sessionId: internalSessionId!, token: internalToken!, args,
+        workType: internalWorkType as 'evolution', workId: internalWorkId!, sessionId: internalSessionId!, token: internalToken!, args,
       })
     : await runAgentCommand({ executionId: executionId!, token: token!, args });
   process.stdout.write(`${output}\n`);

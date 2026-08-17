@@ -426,13 +426,6 @@ function summarizeCommand(command: string) {
     if (normalized.includes(' evolution summary set')) return '保存演化摘要';
     if (normalized.includes(' evolution observation ')) return '更新可复用观察';
     if (normalized.includes(' evolution complete')) return '提交 Prompt 演化结果';
-    if (normalized.includes(' maintenance status')) return '恢复软件维护草稿';
-    if (normalized.includes(' maintenance outcome ')) return '保存维护结果';
-    if (normalized.includes(' maintenance classification ')) return '保存维护分类';
-    if (normalized.includes(' maintenance root-cause ')) return '保存维护根因';
-    if (normalized.includes(' maintenance changed-file ')) return '更新维护变更文件';
-    if (normalized.includes(' maintenance test ')) return '更新维护测试';
-    if (normalized.includes(' maintenance complete')) return '提交软件维护结果';
     if (normalized.includes(' help')) return '查看当前 Agent 可用命令';
     return '更新 Agent 工作草稿';
   }

@@ -3,9 +3,9 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { appendLoopRunLog, registerRunProcess } from '../application/tasks';
-import { paths } from './database';
-import { terminateProcessTree } from './process-tree';
-import { readRunPid, runPidPath } from './run-process';
+import { databaseConnection, paths } from './database';
+import { inspectProcessCommand, inspectProcessIdentity, terminateProcessTree } from './process-tree';
+import { isProcessAlive, readRunPid, runPidPath } from './run-process';
 import { isDesktopRuntime, runtimeNodeEnvironment, runtimeNodeExecutable, runtimeScript } from './runtime-entry';
 
 export function resolveRunnerCommand(runId: string, scriptName: string) {
@@ -26,11 +26,11 @@ function waitForSpawn(child: ReturnType<typeof spawn>) {
   });
 }
 
-async function startDetachedRunner(runId: string, scriptName: string) {
+async function startManagedRunner(runId: string, scriptName: string, supervisionToken: number) {
   const launch = resolveRunnerCommand(runId, scriptName);
   const child = spawn(launch.command, launch.args, {
     cwd: paths.appRoot,
-    detached: true,
+    detached: false,
     stdio: 'ignore',
     windowsHide: true,
     env: {
@@ -38,6 +38,7 @@ async function startDetachedRunner(runId: string, scriptName: string) {
       ...runtimeNodeEnvironment(),
       LOOP_APP_ROOT: paths.appRoot,
       LOOP_WORKSPACE_ROOT_OVERRIDE: paths.root,
+      LOOP_SUPERVISION_TOKEN: String(supervisionToken),
     },
   });
   try {
@@ -46,29 +47,65 @@ async function startDetachedRunner(runId: string, scriptName: string) {
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`无法启动 ${scriptName}：${detail}`, { cause: error });
   }
-  child.unref();
   if (!child.pid) throw new Error(`无法启动 ${scriptName}：未获得进程 ID`);
-  await mkdir(join(paths.runsDir, runId), { recursive: true });
-  await writeFile(runPidPath(runId), String(child.pid), 'utf8');
-  const processKind = scriptName === 'dispatch-waiter.ts' ? 'dispatch-waiter' : 'agent-runner';
-  await registerRunProcess(runId, processKind, child.pid);
+  const identity = inspectProcessIdentity(child.pid);
+  if (!identity) {
+    child.kill('SIGKILL');
+    throw new Error(`无法启动 ${scriptName}：无法验证进程身份`);
+  }
+  try {
+    await mkdir(join(paths.runsDir, runId), { recursive: true });
+    await writeFile(runPidPath(runId), String(child.pid), 'utf8');
+    await registerRunProcess(runId, 'agent-runner', child.pid, supervisionToken, identity.startMarker);
+  } catch (error) {
+    await terminateProcessTree(child.pid, 5_000, identity.startMarker);
+    throw error;
+  }
   return child.pid;
 }
 
-export async function startAgentRun(runId: string) {
-  const pid = await startDetachedRunner(runId, 'agent-runner.ts');
+export async function startAgentRun(runId: string, supervisionToken = Number(process.env.LOOP_SUPERVISION_TOKEN || 0)) {
+  if (!Number.isInteger(supervisionToken) || supervisionToken <= 0) throw new Error('缺少有效的 supervision token');
+  const pid = await startManagedRunner(runId, 'agent-runner.ts', supervisionToken);
   await appendLoopRunLog(runId, `[运行] 已启动 Lane 调度 runner pid=${pid}`);
 }
 
-export async function startDispatchRetryRun(runId: string) {
-  const pid = await startDetachedRunner(runId, 'dispatch-waiter.ts');
-  await appendLoopRunLog(runId, `[运行] 已启动空队列重试 runner pid=${pid}`);
-}
-
 export async function stopAgentRun(runId: string) {
+  const db = await databaseConnection();
+  const registered = db.prepare(`
+    SELECT process_id, process_kind, pid, process_start_marker
+    FROM loop_managed_processes
+    WHERE run_id = ? AND process_kind IN ('agent-cli', 'agent-runner') AND status = 'running'
+    ORDER BY CASE process_kind WHEN 'agent-cli' THEN 0 ELSE 1 END, registered_at DESC
+  `).all(runId) as Array<{
+    process_id: string;
+    process_kind: 'agent-cli' | 'agent-runner';
+    pid: number;
+    process_start_marker: string;
+  }>;
+  for (const managedProcess of registered) {
+    if (managedProcess.pid === process.pid) {
+      throw new Error(`拒绝停止当前宿主进程 pid=${managedProcess.pid}`);
+    }
+    if (!await terminateProcessTree(managedProcess.pid, 10_000, managedProcess.process_start_marker)) {
+      throw new Error(`无法停止 ${managedProcess.process_kind} 进程树 pid=${managedProcess.pid}`);
+    }
+    db.prepare(`
+      UPDATE loop_managed_processes SET status = 'exited', exited_at = CURRENT_TIMESTAMP
+      WHERE process_id = ?
+    `).run(managedProcess.process_id);
+  }
+
+  if (registered.some((process) => process.process_kind === 'agent-runner')) return;
   const pid = readRunPid(runId) || 0;
   if (!pid || pid === process.pid) return;
-  if (!await terminateProcessTree(pid)) {
-    throw new Error(`无法停止 Runner 进程树 pid=${pid}`);
+  const command = inspectProcessCommand(pid);
+  if (!command && !isProcessAlive(pid)) return;
+  const knownLegacyRunner = command.includes('agent-runner') || command.includes('dispatch-waiter');
+  if (!knownLegacyRunner || !command.includes(runId)) {
+    throw new Error(`无法验证旧 Runner 进程身份 pid=${pid}`);
+  }
+  if (!await terminateProcessTree(pid, 10_000)) {
+    throw new Error(`无法停止旧 Runner 进程树 pid=${pid}`);
   }
 }

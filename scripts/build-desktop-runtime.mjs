@@ -58,8 +58,7 @@ await mkdir(runnerOutput, { recursive: true });
 
 const runnerEntries = {
   'agent-runner': join(projectRoot, 'scripts', 'loop', 'agent-runner.ts'),
-  'dispatch-waiter': join(projectRoot, 'scripts', 'loop', 'dispatch-waiter.ts'),
-  'maintenance-runner': join(projectRoot, 'scripts', 'loop', 'maintenance-runner.ts'),
+  'lifecycle-host': join(projectRoot, 'src', 'application', 'loop-run-lifecycle.ts'),
   'loop-agent': join(projectRoot, 'scripts', 'loop', 'loop-agent-entry.ts'),
   loopctl: join(projectRoot, 'scripts', 'loop', 'loopctl.ts'),
 };

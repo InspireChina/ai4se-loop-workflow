@@ -31,7 +31,7 @@ try {
   fail(`cannot read valid JSON from ${inputArgument}: ${error instanceof Error ? error.message : String(error)}`);
 }
 if (!result || typeof result !== 'object' || Array.isArray(result)) fail('top-level result must be a JSON object');
-if (!['flow', 'evolution', 'maintenance'].includes(kind)) fail(`unsupported result kind: ${kind}`);
+if (!['flow', 'evolution'].includes(kind)) fail(`unsupported result kind: ${kind}`);
 
 function validationMessage(error) {
   if (Array.isArray(error?.issues)) return JSON.stringify(error.issues, null, 2);
@@ -46,9 +46,6 @@ try {
   } else if (kind === 'evolution') {
     const { evolutionResultSchema } = await tsImport('../../src/domain/agent-evolution.ts', import.meta.url);
     result = evolutionResultSchema.parse(result);
-  } else {
-    const { softwareMaintenanceResultSchema } = await tsImport('../../src/domain/software-maintenance.ts', import.meta.url);
-    result = softwareMaintenanceResultSchema.parse(result);
   }
 } catch (error) {
   fail(`result does not satisfy the ${kind} contract:\n${validationMessage(error)}`);
