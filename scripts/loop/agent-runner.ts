@@ -55,6 +55,7 @@ import { paths } from '../../src/infrastructure/database';
 import { gitHead } from '../../src/infrastructure/git';
 import { createLangfuseTelemetry, sanitizeLangfuseValue } from '../../src/infrastructure/langfuse';
 import { InFlightWork } from '../../src/infrastructure/in-flight-work';
+import { waitForRunnerStartGate } from '../../src/infrastructure/run-process';
 
 const runId = process.argv[2];
 if (!runId) throw new Error('missing run id');
@@ -744,6 +745,8 @@ async function main() {
 async function run() {
   let stopHeartbeat: (() => void) | undefined;
   try {
+    const startGateToken = process.env.LOOP_RUNNER_START_GATE_TOKEN;
+    if (startGateToken) await waitForRunnerStartGate(runId, startGateToken);
     stopHeartbeat = await startRunHeartbeat(runId, 'agent-runner');
     await main();
   } catch (error) {

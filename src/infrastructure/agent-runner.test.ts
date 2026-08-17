@@ -105,3 +105,14 @@ test('continuously refills completed lanes and cleans each execution temporary d
   assert.match(source, /removeAgentExecutionTempDirectory\(temporary\)/);
   assert.match(source, /Lane execution 已结束，立即重新计算可执行步骤/);
 });
+
+test('keeps the Runner behind its start gate until process registration completes', () => {
+  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+  const gate = source.indexOf('await waitForRunnerStartGate(runId, startGateToken)');
+  const heartbeat = source.indexOf("await startRunHeartbeat(runId, 'agent-runner')");
+  const dispatch = source.indexOf('await main()');
+
+  assert.ok(gate >= 0);
+  assert.ok(gate < heartbeat);
+  assert.ok(heartbeat < dispatch);
+});

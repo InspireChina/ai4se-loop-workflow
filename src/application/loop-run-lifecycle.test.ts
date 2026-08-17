@@ -22,7 +22,7 @@ test('reclaims an unexpired lease only when the previous local supervisor is pro
 test('takes over a stale supervisor generation immediately and retires its dead process records', async () => {
   const db = await databaseConnection();
   const ownerId = `electron-${process.pid}-${randomUUID()}`;
-  const missingPid = 999_999;
+  const missingPid = 99_999;
   db.transaction(() => {
     db.prepare('DELETE FROM loop_supervisor_lease').run();
     db.prepare('DELETE FROM loop_managed_processes').run();

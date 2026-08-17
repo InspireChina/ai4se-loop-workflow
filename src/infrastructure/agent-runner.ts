@@ -1,11 +1,18 @@
 import { spawn } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { appendLoopRunLog, registerRunProcess } from '../application/tasks';
 import { databaseConnection, paths } from './database';
 import { inspectProcessCommand, terminateProcessTree, waitForProcessIdentity } from './process-tree';
-import { isProcessAlive, readRunPid, runPidPath } from './run-process';
+import {
+  cancelRunnerStartGate,
+  createRunnerStartGate,
+  isProcessAlive,
+  readRunPid,
+  releaseRunnerStartGate,
+  runPidPath,
+} from './run-process';
 import { isDesktopRuntime, runtimeNodeEnvironment, runtimeNodeExecutable, runtimeScript } from './runtime-entry';
 
 export function resolveRunnerCommand(runId: string, scriptName: string) {
@@ -28,6 +35,7 @@ function waitForSpawn(child: ReturnType<typeof spawn>) {
 
 async function startManagedRunner(runId: string, scriptName: string, supervisionToken: number) {
   const launch = resolveRunnerCommand(runId, scriptName);
+  const gate = await createRunnerStartGate(runId);
   const child = spawn(launch.command, launch.args, {
     cwd: paths.appRoot,
     detached: false,
@@ -39,18 +47,21 @@ async function startManagedRunner(runId: string, scriptName: string, supervision
       LOOP_APP_ROOT: paths.appRoot,
       LOOP_WORKSPACE_ROOT_OVERRIDE: paths.root,
       LOOP_SUPERVISION_TOKEN: String(supervisionToken),
+      LOOP_RUNNER_START_GATE_TOKEN: gate.token,
     },
   });
   try {
     await waitForSpawn(child);
   } catch (error) {
+    await cancelRunnerStartGate(gate);
     const detail = error instanceof Error ? error.message : String(error);
     throw new Error(`无法启动 ${scriptName}：${detail}`, { cause: error });
   }
   if (!child.pid) throw new Error(`无法启动 ${scriptName}：未获得进程 ID`);
   const identity = await waitForProcessIdentity(child.pid);
   if (!identity) {
-    child.kill('SIGKILL');
+    await terminateProcessTree(child.pid, 5_000).catch(() => false);
+    await cancelRunnerStartGate(gate);
     const detail = child.exitCode !== null
       ? `进程已退出，exit code=${child.exitCode}`
       : child.signalCode
@@ -59,11 +70,12 @@ async function startManagedRunner(runId: string, scriptName: string, supervision
     throw new Error(`无法启动 ${scriptName}：${detail}`);
   }
   try {
-    await mkdir(join(paths.runsDir, runId), { recursive: true });
     await writeFile(runPidPath(runId), String(child.pid), 'utf8');
     await registerRunProcess(runId, 'agent-runner', child.pid, supervisionToken, identity.startMarker);
+    await releaseRunnerStartGate(gate);
   } catch (error) {
     await terminateProcessTree(child.pid, 5_000, identity.startMarker);
+    await cancelRunnerStartGate(gate);
     throw error;
   }
   return child.pid;
@@ -104,6 +116,10 @@ export async function stopAgentRun(runId: string) {
   if (registered.some((process) => process.process_kind === 'agent-runner')) return;
   const pid = readRunPid(runId) || 0;
   if (!pid || pid === process.pid) return;
+  if (process.platform === 'win32') {
+    if (!await terminateProcessTree(pid, 10_000)) throw new Error(`无法停止旧 Runner 进程树 pid=${pid}`);
+    return;
+  }
   const command = inspectProcessCommand(pid);
   if (!command && !isProcessAlive(pid)) return;
   const knownLegacyRunner = command.includes('agent-runner') || command.includes('dispatch-waiter');

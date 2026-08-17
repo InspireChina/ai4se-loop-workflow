@@ -201,6 +201,11 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     const residual: Array<{ kind: string; pid: number }> = [];
     for (const row of rows) {
       if (!includeUiServer && row.process_kind === 'ui-server') continue;
+      if (process.platform === 'win32') {
+        if (isProcessAlive(row.pid)) residual.push({ kind: row.process_kind, pid: row.pid });
+        else db.prepare(`UPDATE loop_managed_processes SET status = 'exited', exited_at = CURRENT_TIMESTAMP WHERE process_id = ?`).run(row.process_id);
+        continue;
+      }
       const identity = inspectProcessIdentity(row.pid);
       if (!identity && isProcessAlive(row.pid)) {
         residual.push({ kind: row.process_kind, pid: row.pid });
@@ -226,6 +231,16 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     `).all(token) as ManagedProcessRow[];
     const residual: Array<{ kind: string; pid: number }> = [];
     for (const row of rows) {
+      if (process.platform === 'win32') {
+        if (!isProcessAlive(row.pid)) {
+          db.prepare(`UPDATE loop_managed_processes SET status = 'exited', exited_at = CURRENT_TIMESTAMP WHERE process_id = ?`).run(row.process_id);
+        } else if (row.pid === process.pid || !await terminateProcessTree(row.pid, 10_000)) {
+          residual.push({ kind: row.process_kind, pid: row.pid });
+        } else {
+          db.prepare(`UPDATE loop_managed_processes SET status = 'exited', exited_at = CURRENT_TIMESTAMP WHERE process_id = ?`).run(row.process_id);
+        }
+        continue;
+      }
       const identity = inspectProcessIdentity(row.pid);
       if (!identity && isProcessAlive(row.pid)) {
         residual.push({ kind: `${row.process_kind}-unverified`, pid: row.pid });
@@ -255,6 +270,11 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
       return null;
     }
     if (!Number.isInteger(pid) || pid <= 0) {
+      await unlink(pidPath).catch(() => undefined);
+      return null;
+    }
+    if (process.platform === 'win32') {
+      if (isProcessAlive(pid) && !await terminateProcessTree(pid, 10_000)) return { kind: 'legacy-maintenance', pid };
       await unlink(pidPath).catch(() => undefined);
       return null;
     }

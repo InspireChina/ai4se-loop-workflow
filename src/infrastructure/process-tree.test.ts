@@ -1,14 +1,18 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { inspectProcessIdentity, processIdentityCommand, waitForProcessIdentity } from './process-tree';
+import { inspectProcessIdentity, waitForProcessIdentity, windowsTaskkillCommand } from './process-tree';
 
-test('uses Get-Process instead of eventually consistent CIM data for Windows process identity', () => {
-  const lookup = processIdentityCommand(4321, 'win32');
+test('does not require PowerShell process identity during Windows startup', () => {
+  const source = String(inspectProcessIdentity);
+  assert.match(source, /windows-pid/);
+  assert.doesNotMatch(source, /powershell|Get-Process|Get-CimInstance/i);
+});
 
-  assert.equal(lookup.command, 'powershell.exe');
-  assert.match(lookup.args.at(-1) || '', /Get-Process -Id 4321/);
-  assert.match(lookup.args.at(-1) || '', /StartTime\.ToUniversalTime\(\)\.ToString\('o'\)/);
-  assert.doesNotMatch(lookup.args.at(-1) || '', /Get-CimInstance/);
+test('uses the v0.1.4-compatible Windows whole-tree cleanup command', () => {
+  assert.deepEqual(windowsTaskkillCommand(4321), {
+    command: 'taskkill.exe',
+    args: ['/PID', '4321', '/T', '/F'],
+  });
 });
 
 test('retries process identity inspection while a newly spawned process is alive', async () => {
