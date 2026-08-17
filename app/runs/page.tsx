@@ -8,6 +8,16 @@ import { RunLifecycleControls } from './run-lifecycle-controls';
 
 export const dynamic = 'force-dynamic';
 
+function runDetail(run: NonNullable<Awaited<ReturnType<typeof getRunStatus>>>) {
+  const supervisor = run.owner === 'cli-supervisor'
+    ? 'CLI Supervisor'
+    : run.owner === 'electron-supervisor'
+      ? 'Electron Supervisor'
+      : null;
+  const processKind = run.processKind || 'agent-runner';
+  return `${processKind} · pid ${run.pid ?? '启动中'}${supervisor ? ` · 由 ${supervisor} 管理` : ''}`;
+}
+
 export default async function RunsPage() {
   const [run, events] = await Promise.all([getRunStatus(), listRecentEvents(30)]);
 
@@ -21,7 +31,7 @@ export default async function RunsPage() {
     <section className="run-toolbar">
       <RunLifecycleControls
         active={Boolean(run?.active)}
-        detail={run?.active ? `${run.owner} · pid ${run.pid ?? '启动中'}` : '当前没有运行中的 loop。'}
+        detail={run?.active ? runDetail(run) : '当前没有运行中的 loop。'}
       />
     </section>
 
