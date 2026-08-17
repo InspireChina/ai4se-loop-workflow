@@ -1,6 +1,13 @@
 import { execFileSync, spawn } from 'node:child_process';
 
 export type ProcessIdentity = { pid: number; startMarker: string };
+type ProcessIdentityPlatform = NodeJS.Platform;
+type WaitForProcessIdentityOptions = {
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  inspect?: (pid: number) => ProcessIdentity | null;
+  isAlive?: (pid: number) => boolean;
+};
 
 function commandOutput(command: string, args: string[]) {
   try {
@@ -10,15 +17,48 @@ function commandOutput(command: string, args: string[]) {
   }
 }
 
+export function processIdentityCommand(pid: number, platform: ProcessIdentityPlatform = process.platform) {
+  return platform === 'win32'
+    ? {
+      command: 'powershell.exe',
+      args: [
+        '-NoProfile', '-NonInteractive', '-Command',
+        `$target = Get-Process -Id ${pid} -ErrorAction Stop; $target.StartTime.ToUniversalTime().ToString('o')`,
+      ],
+    }
+    : { command: 'ps', args: ['-o', 'lstart=', '-p', String(pid)] };
+}
+
 export function inspectProcessIdentity(pid: number): ProcessIdentity | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
-  const startMarker = process.platform === 'win32'
-    ? commandOutput('powershell.exe', [
-      '-NoProfile', '-NonInteractive', '-Command',
-      `(Get-CimInstance Win32_Process -Filter \"ProcessId = ${pid}\").CreationDate.ToUniversalTime().ToString('o')`,
-    ])
-    : commandOutput('ps', ['-o', 'lstart=', '-p', String(pid)]).replace(/\s+/g, ' ');
+  const lookup = processIdentityCommand(pid);
+  const output = commandOutput(lookup.command, lookup.args);
+  const startMarker = process.platform === 'win32' ? output : output.replace(/\s+/g, ' ');
   return startMarker ? { pid, startMarker } : null;
+}
+
+function processExists(pid: number) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+export async function waitForProcessIdentity(pid: number, options: WaitForProcessIdentityOptions = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  const timeoutMs = Math.max(0, options.timeoutMs ?? 5_000);
+  const pollIntervalMs = Math.max(1, options.pollIntervalMs ?? 100);
+  const inspect = options.inspect ?? inspectProcessIdentity;
+  const isAlive = options.isAlive ?? processExists;
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const identity = inspect(pid);
+    if (identity) return identity;
+    if (!isAlive(pid) || Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, Math.min(pollIntervalMs, Math.max(1, deadline - Date.now()))));
+  }
 }
 
 export function inspectProcessCommand(pid: number) {

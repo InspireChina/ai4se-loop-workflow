@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { appendLoopRunLog, registerRunProcess } from '../application/tasks';
 import { databaseConnection, paths } from './database';
-import { inspectProcessCommand, inspectProcessIdentity, terminateProcessTree } from './process-tree';
+import { inspectProcessCommand, terminateProcessTree, waitForProcessIdentity } from './process-tree';
 import { isProcessAlive, readRunPid, runPidPath } from './run-process';
 import { isDesktopRuntime, runtimeNodeEnvironment, runtimeNodeExecutable, runtimeScript } from './runtime-entry';
 
@@ -48,10 +48,15 @@ async function startManagedRunner(runId: string, scriptName: string, supervision
     throw new Error(`无法启动 ${scriptName}：${detail}`, { cause: error });
   }
   if (!child.pid) throw new Error(`无法启动 ${scriptName}：未获得进程 ID`);
-  const identity = inspectProcessIdentity(child.pid);
+  const identity = await waitForProcessIdentity(child.pid);
   if (!identity) {
     child.kill('SIGKILL');
-    throw new Error(`无法启动 ${scriptName}：无法验证进程身份`);
+    const detail = child.exitCode !== null
+      ? `进程已退出，exit code=${child.exitCode}`
+      : child.signalCode
+        ? `进程已退出，signal=${child.signalCode}`
+        : '等待进程身份信息就绪超时';
+    throw new Error(`无法启动 ${scriptName}：${detail}`);
   }
   try {
     await mkdir(join(paths.runsDir, runId), { recursive: true });

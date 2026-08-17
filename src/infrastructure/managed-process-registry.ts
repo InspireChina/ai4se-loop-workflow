@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { databaseConnection } from './database';
-import { inspectProcessIdentity } from './process-tree';
+import { waitForProcessIdentity } from './process-tree';
 
 export async function registerManagedAgentProcess(runId: string, pid: number) {
   const supervisionToken = Number(process.env.LOOP_SUPERVISION_TOKEN || 0);
@@ -8,8 +8,8 @@ export async function registerManagedAgentProcess(runId: string, pid: number) {
   if (!Number.isInteger(supervisionToken) || supervisionToken <= 0) {
     throw new Error('Agent CLI 缺少有效的 supervision token');
   }
-  const identity = inspectProcessIdentity(pid);
-  if (!identity) throw new Error(`无法验证 Agent CLI 进程身份 pid=${pid}`);
+  const identity = await waitForProcessIdentity(pid);
+  if (!identity) throw new Error(`Agent CLI 已退出或等待进程身份信息就绪超时 pid=${pid}`);
   const db = await databaseConnection();
   db.transaction(() => {
     const lease = db.prepare(`SELECT fencing_token, expires_at FROM loop_supervisor_lease WHERE singleton = 1`).get() as {

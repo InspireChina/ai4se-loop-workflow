@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { appendLoopRunLog, beginRun, endRun, getRunStatus } from './tasks';
 import { databaseConnection, paths } from '../infrastructure/database';
 import { startAgentRun } from '../infrastructure/agent-runner';
-import { inspectProcessCommand, inspectProcessIdentity, terminateProcessTree } from '../infrastructure/process-tree';
+import { inspectProcessCommand, inspectProcessIdentity, terminateProcessTree, waitForProcessIdentity } from '../infrastructure/process-tree';
 import { isProcessAlive } from '../infrastructure/run-process';
 
 export type LifecycleSource = {
@@ -64,7 +64,7 @@ type LifecycleStateRow = {
 };
 
 type LeaseRow = { owner_id: string; fencing_token: number; expires_at: string };
-type ManagedProcessRow = { process_kind: string; pid: number; process_start_marker: string };
+type ManagedProcessRow = { process_id: string; supervision_token: number; process_kind: string; pid: number; process_start_marker: string };
 
 const LEASE_MS = 30_000;
 const HEALTHY_RESET_MS = 10 * 60_000;
@@ -87,6 +87,19 @@ function stateRow(db: Awaited<ReturnType<typeof databaseConnection>>) {
 
 function leaseRow(db: Awaited<ReturnType<typeof databaseConnection>>) {
   return db.prepare('SELECT owner_id, fencing_token, expires_at FROM loop_supervisor_lease WHERE singleton = 1').get() as LeaseRow | undefined;
+}
+
+function supervisorOwnerPid(ownerId: string) {
+  const match = ownerId.match(/^(?:electron|web)-(\d+)-/);
+  const pid = Number(match?.[1]);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+export function canReclaimSupervisorLease(previousOwnerId: string, currentOwnerId: string, isAlive = isProcessAlive) {
+  const previousPid = supervisorOwnerPid(previousOwnerId);
+  if (!previousPid) return false;
+  const currentPid = supervisorOwnerPid(currentOwnerId);
+  return previousPid === currentPid || !isAlive(previousPid);
 }
 
 export type LoopRunLifecycleOptions = {
@@ -124,10 +137,11 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
           .run(expiresAt, options.ownerId, lease.fencing_token);
         return renewed.changes === 1 ? lease.fencing_token : null;
       }
-      if (timestamp(lease.expires_at) > now.getTime()) return null;
+      if (timestamp(lease.expires_at) > now.getTime()
+        && !canReclaimSupervisorLease(lease.owner_id, options.ownerId)) return null;
       const nextToken = lease.fencing_token + 1;
-      const claimed = db.prepare(`UPDATE loop_supervisor_lease SET owner_id = ?, fencing_token = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1 AND fencing_token = ? AND expires_at = ?`)
-        .run(options.ownerId, nextToken, expiresAt, lease.fencing_token, lease.expires_at);
+      const claimed = db.prepare(`UPDATE loop_supervisor_lease SET owner_id = ?, fencing_token = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1 AND owner_id = ? AND fencing_token = ? AND expires_at = ?`)
+        .run(options.ownerId, nextToken, expiresAt, lease.owner_id, lease.fencing_token, lease.expires_at);
       return claimed.changes === 1 ? nextToken : null;
     })();
     currentToken = token;
@@ -181,7 +195,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
   async function activeResidualProcesses(includeUiServer = true) {
     const db = await databaseConnection();
     const rows = db.prepare(`
-      SELECT process_kind, pid, process_start_marker
+      SELECT process_id, supervision_token, process_kind, pid, process_start_marker
       FROM loop_managed_processes WHERE status = 'running'
     `).all() as ManagedProcessRow[];
     const residual: Array<{ kind: string; pid: number }> = [];
@@ -198,6 +212,36 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
         continue;
       }
       residual.push({ kind: row.process_kind, pid: row.pid });
+    }
+    return residual;
+  }
+
+  async function cleanupSupersededProcesses(token: number) {
+    const db = await databaseConnection();
+    const rows = db.prepare(`
+      SELECT process_id, supervision_token, process_kind, pid, process_start_marker
+      FROM loop_managed_processes
+      WHERE status = 'running' AND supervision_token != ?
+      ORDER BY CASE process_kind WHEN 'agent-cli' THEN 0 WHEN 'agent-runner' THEN 1 ELSE 2 END
+    `).all(token) as ManagedProcessRow[];
+    const residual: Array<{ kind: string; pid: number }> = [];
+    for (const row of rows) {
+      const identity = inspectProcessIdentity(row.pid);
+      if (!identity && isProcessAlive(row.pid)) {
+        residual.push({ kind: `${row.process_kind}-unverified`, pid: row.pid });
+        continue;
+      }
+      if (!identity || identity.startMarker !== row.process_start_marker) {
+        db.prepare(`UPDATE loop_managed_processes SET status = 'exited', exited_at = CURRENT_TIMESTAMP WHERE process_id = ?`)
+          .run(row.process_id);
+        continue;
+      }
+      if (row.pid === process.pid || !await terminateProcessTree(row.pid, 10_000, row.process_start_marker)) {
+        residual.push({ kind: row.process_kind, pid: row.pid });
+        continue;
+      }
+      db.prepare(`UPDATE loop_managed_processes SET status = 'exited', exited_at = CURRENT_TIMESTAMP WHERE process_id = ?`)
+        .run(row.process_id);
     }
     return residual;
   }
@@ -234,7 +278,9 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
   async function registerHostProcess(processKind: 'ui-server', pid: number) {
     const token = await acquireLease();
     if (token === null) throw new Error('当前宿主没有监督租约');
-    const identity = inspectProcessIdentity(pid);
+    const residual = await cleanupSupersededProcesses(token);
+    if (residual.length) throw new Error(`无法清理上一监督代次进程：${residual.map((item) => `${item.kind} pid=${item.pid}`).join(', ')}`);
+    const identity = await waitForProcessIdentity(pid);
     if (!identity) throw new Error(`无法验证 ${processKind} 进程身份 pid=${pid}`);
     const db = await databaseConnection();
     const processId = randomUUID();
@@ -273,6 +319,13 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     const token = await acquireLease();
     if (token === null) return { outcome: 'observer', snapshot: await snapshot() };
     const db = await databaseConnection();
+    const supersededResidual = await cleanupSupersededProcesses(token);
+    if (supersededResidual.length) {
+      const message = `blocked-by-superseded-process: ${supersededResidual.map((item) => `${item.kind} pid=${item.pid}`).join(', ')}`;
+      db.prepare(`UPDATE loop_lifecycle_state SET actual_phase = 'crashed', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1`)
+        .run(message);
+      return { outcome: 'blocked', error: message, residualProcesses: supersededResidual, snapshot: await snapshot() };
+    }
     const legacyResidual = await cleanupLegacyMaintenanceProcess();
     if (legacyResidual) {
       db.prepare(`UPDATE loop_lifecycle_state SET actual_phase = 'crashed', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1`)
