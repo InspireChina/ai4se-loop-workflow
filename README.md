@@ -145,7 +145,7 @@ npm run desktop:dist:win
 3. 在页面底部按系统下载 `LoopWork-windows-x64-*`、`LoopWork-macos-arm64-*` 或 `LoopWork-macos-x64-*`。
 4. 每个 Artifact 都附带按平台命名的 `SHA256SUMS-<platform>.txt`。Windows 下载后运行带 `Setup` 的 EXE 安装。
 
-也可以在 Actions 页面点击 **Run workflow** 随时手动构建。推送版本标签（例如 `v0.1.7`）会在所有平台构建成功后自动创建 GitHub Release，并上传 Windows 安装版 EXE、两个架构的 macOS DMG、两个自动升级 ZIP、更新清单和统一校验文件。安装后的应用可在“关于”页检查、下载并重启安装新版本。GitHub 会为标签自动附带无法隐藏的 Source code ZIP / tar.gz。当前 Windows 和 macOS 产物没有代码签名，安装时可能显示未知发布者或无法验证开发者，并可能阻止自动安装；正式公开分发前需要配置平台签名证书。
+也可以在 Actions 页面点击 **Run workflow** 随时手动构建。推送版本标签（例如 `v0.1.8`）会在所有平台构建成功后自动创建 GitHub Release，并上传 Windows 安装版 EXE、两个架构的 macOS DMG、两个自动升级 ZIP、更新清单和统一校验文件。安装后的应用可在“关于”页检查、下载并重启安装新版本。GitHub 会为标签自动附带无法隐藏的 Source code ZIP / tar.gz。当前 Windows 和 macOS 产物没有代码签名，安装时可能显示未知发布者或无法验证开发者，并可能阻止自动安装；正式公开分发前需要配置平台签名证书。
 
 ## 技术文档
 
