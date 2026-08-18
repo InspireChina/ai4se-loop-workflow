@@ -102,6 +102,7 @@ test('runs Business Analysis from a raw idea to an independently approved requir
 
 test('hands an approved End to End specification directly to Develop without human acknowledgement', async () => {
   const { createTask, getTask } = await import('./tasks');
+  const { applyAgentResult } = await import('./agent-results');
   const taskId = await createTask({
     title: '从想法自动交付项目体检能力',
     description: '从模糊想法开始完成业务分析，并自动进入开发交付。',
@@ -158,6 +159,24 @@ test('hands an approved End to End specification directly to Develop without hum
   const developEntry = (await inspectTaskDispatch(taskId))[0];
   assert.equal(developEntry.pipeline, 'backlog');
   assert.equal(developEntry.agent, 'backlog-agent');
+
+  await applyAgentResult(`RUN-e2e-backlog-${taskId}`, developEntry, {
+    outcome: 'completed',
+    summary: '业务变化上下文已完成，按照既定 End to End Pipeline 进入交付规划。',
+    artifact: {
+      title: '业务变化上下文',
+      content: '# 业务变化上下文\n\n保留既定 End to End Pipeline。',
+    },
+    questions: [],
+    runtimeInputs: [],
+    feedbackResolutions: [],
+    recoveryResolutions: [],
+  });
+  const planning = await getTask(taskId);
+  assert.equal(planning?.task.item_type, 'end-to-end');
+  assert.equal(planning?.task.agile_status, 'in plan');
+  assert.equal(planning?.task.current_subagent, 'story-splitter-agent');
+  assert.equal((await inspectTaskDispatch(taskId))[0]?.pipeline, 'split');
 });
 
 test('dynamically inserts Research for intent and business design and requires current web-search evidence', async () => {

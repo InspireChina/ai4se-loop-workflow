@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
-test('ships rigorous V12 seed prompts for every flow Agent', () => {
-  assert.equal(AGENT_PROMPT_SEED_REVISION, 12);
+test('ships rigorous V13 seed prompts for every flow Agent', () => {
+  assert.equal(AGENT_PROMPT_SEED_REVISION, 13);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
     assert.ok(prompt.length >= 450, `${agentId} seed prompt is too small to define a reliable role contract`);
@@ -42,7 +42,7 @@ test('ships rigorous V12 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /继续执行命令返回的下一工作包/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /\bintake\b/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /已有用户决定必须按原 key 继承/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /bug 表示 Actual 偏离已有明确 Expected.*feature 表示主动改变.*tech 主要改变.*other 只用于/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /Pipeline 已由用户或调用方预先选择.*唯一流程权威.*不得重新分类需求、改变 Pipeline 或决定下一节点/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /没有独立业务文档时，应深入代码和真实入口还原当前行为/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /持久化内容必须提升为参与者、触发条件、业务规则、状态变化和可观察结果/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /代码是获取知识的手段，不是需求上下文的表达语言/);
@@ -99,10 +99,10 @@ test('ships rigorous V12 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['repro-agent'].prompt, /不要把事实补充包装成产品决策/);
   assert.match(AGENT_PROFILE_DEFINITIONS['repro-agent'].prompt, /无法确认不等于证明问题不存在/);
   assert.match(AGENT_PROFILE_DEFINITIONS['repro-agent'].prompt, /确认有条件、有证据的 Observed Actual.*不得把它上升为权威业务语义/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['repro-agent'].prompt, /不决定这个 Actual 是否符合现行业务规则、最终 TO-BE、需求类型/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['repro-agent'].prompt, /既定 Bug Fix Pipeline.*Pipeline 是调用方预先确定的流程权威.*不得重新分类或切换 Pipeline/s);
   assert.match(AGENT_PROFILE_DEFINITIONS['repro-agent'].prompt, /不得修改目标仓库中的任何持久文件/);
   assert.match(AGENT_PROFILE_DEFINITIONS['repro-agent'].prompt, /真实环境只做已经授权的非破坏性观察/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['repro-agent'].prompt, /不输出 bug 或 not-bug 的业务裁决/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['repro-agent'].prompt, /不输出是否应该修复的业务裁决，也不改变既定 Bug Fix Pipeline/);
   assert.match(AGENT_PROFILE_DEFINITIONS['repro-agent'].prompt, /交给后续业务对齐/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['repro-agent'].prompt, /reproduction (?:status|complete|request-alignment|validate)/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /当前交付单元的实现负责人/);

@@ -15,6 +15,7 @@ const statusLabels: Record<string, string> = {
 const agentLabels: Record<string, string> = {
   human: '用户',
   system: '系统',
+  'direct-agent': 'Direct Agent',
   'backlog-agent': '需求梳理 Agent',
   'story-splitter-agent': '交付规划 Agent',
   'analyst-agent': '交付分析 Agent',
@@ -31,6 +32,7 @@ const agentLabels: Record<string, string> = {
 };
 
 const itemTypeLabels: Record<string, string> = {
+  direct: 'Direct',
   feature: 'Develop',
   bug: 'Bug Fix',
   tech: '技术改进',
@@ -41,6 +43,7 @@ const itemTypeLabels: Record<string, string> = {
 };
 
 const flowLabels: Record<string, string> = {
+  direct: '直接执行',
   backlog: '需求梳理',
   repro: '问题复现',
   split: '交付拆分',
@@ -61,6 +64,7 @@ const flowLabels: Record<string, string> = {
 };
 
 const documentKindLabels: Record<string, string> = {
+  direct_result: '直接执行结果',
   context: '需求上下文',
   delivery_split: '交付拆分',
   analysis: '交付分析',

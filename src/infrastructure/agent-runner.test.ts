@@ -116,3 +116,20 @@ test('keeps the Runner behind its start gate until process registration complete
   assert.ok(gate < heartbeat);
   assert.ok(heartbeat < dispatch);
 });
+
+test('uses Event Hub revisions and schedule deadlines instead of fixed business polling', () => {
+  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+  const subscription = source.indexOf('subscribeRuntimeEvents({');
+  const dispatch = source.indexOf('await main()');
+
+  assert.ok(subscription >= 0);
+  assert.ok(subscription < dispatch);
+  assert.match(source, /onReady:\s*synchronizeEventRevisions/);
+  assert.match(source, /runtimeEventRevisionInDb\(db, topic\)/);
+  assert.match(source, /materializeDueScheduledRequirements\(\)/);
+  assert.match(source, /nextScheduledRequirementWakeAt\(\)/);
+  assert.match(source, /runnerWake\.wait\(/);
+  assert.match(source, /executionOptions,\s*cancellation\.signal/);
+  assert.doesNotMatch(source, /LOOP_EMPTY_DISPATCH_RETRY_MS/);
+  assert.doesNotMatch(source, /sleepWhileRunActive/);
+});

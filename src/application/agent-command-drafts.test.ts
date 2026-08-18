@@ -16,10 +16,10 @@ function backlogDelegation(taskId: string, pipeline = 'backlog'): DelegationEnve
     agent: 'backlog-agent',
     storyIndex: null,
     resources: ['browser:exclusive'],
-    description: pipeline === 'resume' ? '根据用户回答继续需求梳理' : '收集需求上下文并完成分类',
+    description: pipeline === 'resume' ? '根据用户回答继续需求梳理' : '收集需求上下文',
     title: '渐进式需求上下文',
     taskDescription: '支持将筛选结果导出。',
-    itemType: 'intake',
+    itemType: 'feature',
     priority: '',
     link: '',
     externalId: '',
@@ -99,8 +99,8 @@ async function taskReadyForSplit(title: string) {
     ) VALUES(?, ?, 1, 'requirement_context', ?, 'backlog-agent', 'submitted', 'complete', CURRENT_TIMESTAMP)
   `).run(draftId, `requirement-context:${taskId}`, taskId);
   db.prepare(`
-    INSERT INTO requirement_context_drafts(draft_id, intent, change_summary, classification)
-    VALUES(?, '管理员取得筛选结果文件', '从只能在线查看变为可以下载当前筛选结果', 'feature')
+    INSERT INTO requirement_context_drafts(draft_id, intent, change_summary)
+    VALUES(?, '管理员取得筛选结果文件', '从只能在线查看变为可以下载当前筛选结果')
   `).run(draftId);
   db.prepare(`
     INSERT INTO requirement_context_impacts(
@@ -124,8 +124,6 @@ async function taskReadyForSplit(title: string) {
       },
       questions: [],
       runtimeInputs: [],
-      classification: 'feature',
-      route: 'plan',
       feedbackResolutions: [],
       recoveryResolutions: [],
     },
@@ -136,7 +134,7 @@ async function taskReadyForSplit(title: string) {
   return { taskId, delegation: delegation! };
 }
 
-test('requires status first, accepts progressive edits, and submits a deterministic route without Agent JSON', async () => {
+test('requires status first, accepts progressive edits, and submits context without Agent routing', async () => {
   const { createTask, getTask } = await import('./tasks');
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
@@ -217,9 +215,6 @@ test('requires status first, accepts progressive edits, and submits a determinis
     '--key', 'filtered-file-matches-list',
     '--text', '下载文件中的记录与当前筛选列表一致',
     '--source', 'filtered-export-target',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'classification', 'set', 'feature',
   ]);
   await command(active.executionId, active.token!, [
     'requirement-context', 'scope', 'include',
@@ -331,11 +326,11 @@ test('requires status first, accepts progressive edits, and submits a determinis
   );
 
   const result = await readAgentCommandSubmission(active.executionId);
-  assert.equal(result?.classification, 'feature');
-  assert.equal(result?.route, 'plan');
+  assert.equal(result?.classification, undefined);
+  assert.equal(result?.route, undefined);
   assert.match(result?.artifact?.content || '', /状态：Aligned/);
   assert.match(result?.artifact?.content || '', /版本：v1/);
-  assert.match(result?.artifact?.content || '', /需求类型：feature/);
+  assert.match(result?.artifact?.content || '', /Pipeline：feature/);
   assert.match(result?.artifact?.content || '', /## BUSINESS INTENT/);
   assert.match(result?.artifact?.content || '', /## AS-IS\s+### Actual/);
   assert.match(result?.artifact?.content || '', /当前导出不继承筛选结果/);
@@ -592,11 +587,14 @@ test('requirement context migration exposes split decision phases and proposal a
 });
 
 test('routes an evidence-backed Actual versus Expected deviation to reproduction', async () => {
-  const { createTask } = await import('./tasks');
+  const { applyAgentResult } = await import('./agent-results');
+  const { completeExecution } = await import('./executions');
+  const { createTask, getTask } = await import('./tasks');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const taskId = await createTask({
     title: '筛选导出行为偏离现行业务规则',
     description: '筛选后导出仍然包含全部记录。',
+    itemType: 'bug',
   });
   const active = await begin(taskId);
   await command(active.executionId, active.token!, ['requirement-context', 'status']);
@@ -638,9 +636,6 @@ test('routes an evidence-backed Actual versus Expected deviation to reproduction
     '--source', 'expected-filtered-export',
   ]);
   await command(active.executionId, active.token!, [
-    'requirement-context', 'classification', 'set', 'bug',
-  ]);
-  await command(active.executionId, active.token!, [
     'requirement-context', 'scope', 'include',
     '--key', 'restore-filtered-export',
     '--text', '恢复筛选结果导出行为',
@@ -654,7 +649,7 @@ test('routes an evidence-backed Actual versus Expected deviation to reproduction
   await command(active.executionId, active.token!, ['requirement-context', 'scope', 'complete']);
   await assert.rejects(
     command(active.executionId, active.token!, ['requirement-context', 'acceptance', 'complete']),
-    /Bug 必须具备可靠 Existing Expected/,
+    /Bug Fix Pipeline 必须具备可靠 Existing Expected/,
   );
   await command(active.executionId, active.token!, [
     'requirement-context', 'assertion', 'upsert',
@@ -668,9 +663,18 @@ test('routes an evidence-backed Actual versus Expected deviation to reproduction
   await command(active.executionId, active.token!, ['requirement-context', 'validate']);
   await command(active.executionId, active.token!, ['requirement-context', 'complete']);
   const result = await readAgentCommandSubmission(active.executionId);
-  assert.equal(result?.classification, 'bug');
-  assert.equal(result?.route, 'repro');
+  assert.equal(result?.classification, undefined);
+  assert.equal(result?.route, undefined);
   assert.match(result?.artifact?.content || '', /Actual 偏离现行 Expected/);
+  await applyAgentResult(`RUN-command-${taskId}-backlog`, active.delegation, result!, {
+    executionId: active.executionId,
+  });
+  await completeExecution(active.executionId);
+  const detail = await getTask(taskId);
+  assert.equal(detail?.task.item_type, 'bug');
+  assert.equal(detail?.task.agile_status, 'in repro');
+  assert.equal(detail?.task.current_subagent, 'repro-agent');
+  assert.equal((await inspectTaskDispatch(taskId))[0]?.pipeline, 'repro');
 });
 
 test('inherits a persisted clarification draft after resume and forces status again for the new execution', async () => {
@@ -842,7 +846,7 @@ test('inherits a persisted clarification draft after resume and forces status ag
   ]);
   assert.equal(questionResult?.questions.find((item) => item.decisionKey === 'admin-export-mode')?.initialStatus, 'conditional');
   assert.match(questionResult?.artifact?.content || '', /状态：Needs Clarification/);
-  assert.match(questionResult?.artifact?.content || '', /需求类型：待确认/);
+  assert.match(questionResult?.artifact?.content || '', /Pipeline：feature/);
   assert.match(questionResult?.artifact?.content || '', /## OPEN QUESTIONS/);
   assert.match(questionResult?.artifact?.content || '', /决策影响：/);
   await applyAgentResult('RUN-command-question', first.delegation, questionResult!, {
@@ -883,7 +887,7 @@ test('inherits a persisted clarification draft after resume and forces status ag
     'requirement-context', 'status',
   ]);
   assert.match(inherited, /草稿 v2/);
-  assert.match(inherited, /分类：未填写/);
+  assert.match(inherited, /Pipeline：feature/);
   assert.match(inherited, /## 确认导出能力的目标用户 · export-audience/);
   assert.match(inherited, /- Decision：仅管理员/);
   assert.match(inherited, /- Decided By：HUMAN/);
@@ -948,13 +952,6 @@ test('inherits a persisted clarification draft after resume and forces status ag
   await command(resumed.executionId, resumed.token!, ['requirement-context', 'to-be', 'complete']);
   await command(resumed.executionId, resumed.token!, ['requirement-context', 'impact-scan', 'complete']);
   await command(resumed.executionId, resumed.token!, ['requirement-context', 'scope', 'complete']);
-  await assert.rejects(
-    command(resumed.executionId, resumed.token!, ['requirement-context', 'acceptance', 'complete']),
-    /缺少最终需求分类/,
-  );
-  await command(resumed.executionId, resumed.token!, [
-    'requirement-context', 'classification', 'set', 'feature',
-  ]);
   await command(resumed.executionId, resumed.token!, ['requirement-context', 'acceptance', 'complete']);
   assert.match(
     await command(resumed.executionId, resumed.token!, ['requirement-context', 'validate']),
@@ -965,7 +962,7 @@ test('inherits a persisted clarification draft after resume and forces status ag
   const completedResult = await readAgentCommandSubmission(resumed.executionId);
   assert.equal(completedResult?.outcome, 'completed');
   assert.match(completedResult?.artifact?.content || '', /状态：Aligned/);
-  assert.match(completedResult?.artifact?.content || '', /需求类型：feature/);
+  assert.match(completedResult?.artifact?.content || '', /Pipeline：feature/);
   assert.match(completedResult?.artifact?.content || '', /## DECISIONS/);
   assert.match(completedResult?.artifact?.content || '', /决定：仅管理员/);
   assert.doesNotMatch(completedResult?.artifact?.content || '', /## OPEN QUESTIONS/);
@@ -1100,7 +1097,9 @@ test('exposes only the new business-context protocol and rejects every legacy co
   assert.match(answerReviewHelp, /answer-review expand/);
 
   const scopeHelp = await command(active.executionId, active.token!, ['help', 'scope']);
-  assert.match(scopeHelp, /bug\s+Actual 偏离已有明确 Expected/);
+  assert.match(scopeHelp, /Pipeline 已在需求创建时确定/);
+  assert.match(scopeHelp, /不重新分类或选择后续节点/);
+  assert.doesNotMatch(scopeHelp, /classification set|feature\|bug\|tech\|other/);
   assert.match(scopeHelp, /约束与范围.*可选边界/s);
   assert.match(scopeHelp, /约束不用于提前记录技术设计/);
 

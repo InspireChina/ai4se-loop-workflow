@@ -3,7 +3,15 @@ import '../load-env.js';
 import { createHash } from 'node:crypto';
 import { agentExecutionOptions, getAgentRuntimeSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
 import { buildAgentContextSnapshot, renderAgentWorkingContextPack } from '../../src/application/agent-context';
-import { recordRuntimeEvent, recordRuntimeException } from '../../src/application/runtime-events';
+import {
+  recordRuntimeEvent,
+  recordRuntimeException,
+  runtimeEventRevisionInDb,
+} from '../../src/application/runtime-events';
+import {
+  materializeDueScheduledRequirements,
+  nextScheduledRequirementWakeAt,
+} from '../../src/application/scheduled-requirements';
 import { loadAgentRuntime } from '../../src/application/agent-profiles';
 import {
   issueAgentCommandToken,
@@ -51,19 +59,39 @@ import {
   type AgentExecutionTempDirectory,
 } from '../../src/infrastructure/agent-workspace-temp';
 import { resolveAgentExecutionLimits } from '../../src/infrastructure/agent-execution-limits';
-import { paths } from '../../src/infrastructure/database';
+import { databaseConnection, paths } from '../../src/infrastructure/database';
 import { gitHead } from '../../src/infrastructure/git';
 import { createLangfuseTelemetry, sanitizeLangfuseValue } from '../../src/infrastructure/langfuse';
 import { InFlightWork } from '../../src/infrastructure/in-flight-work';
 import { waitForRunnerStartGate } from '../../src/infrastructure/run-process';
+import {
+  subscribeRuntimeEvents,
+  type RuntimeEventSubscription,
+  type RuntimeEventTopic,
+} from '../../src/infrastructure/runtime-event-hub';
+import { RunnerWakeCoordinator } from '../../src/infrastructure/runner-wake-coordinator';
 
 const runId = process.argv[2];
 if (!runId) throw new Error('missing run id');
 const backgroundEvaluations = new Set<Promise<void>>();
 const activeExecutionTemporaries = new Map<string, AgentExecutionTempDirectory>();
+const activeExecutionControllers = new Map<string, AbortController>();
+const runnerWake = new RunnerWakeCoordinator();
+const runnerAbort = new AbortController();
+let cancellationSweepRequested = false;
+const SAFETY_RECONCILE_MS = Number(process.env.LOOP_SAFETY_RECONCILE_MS || 30 * 60 * 1000);
+const RUNNER_EVENT_TOPICS = [
+  'dispatch.invalidated',
+  'schedule.invalidated',
+  'execution.cancel-requested',
+  'lifecycle.runner-stop-requested',
+] as const satisfies readonly RuntimeEventTopic[];
 
 function scheduleEvolution(evaluation: Promise<void>) {
-  const tracked = evaluation.finally(() => { backgroundEvaluations.delete(tracked); });
+  const tracked = evaluation.finally(() => {
+    backgroundEvaluations.delete(tracked);
+    runnerWake.wake('background-completed');
+  });
   backgroundEvaluations.add(tracked);
 }
 
@@ -181,22 +209,9 @@ async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit:
   return { prompt, runtime, contextSnapshot };
 }
 
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function isRunActive() {
   const run = await getRunStatus();
   return Boolean(run?.active && run.runId === runId);
-}
-
-async function sleepWhileRunActive(ms: number) {
-  const deadline = Date.now() + Math.max(0, ms);
-  while (Date.now() < deadline) {
-    await sleep(Math.min(5_000, deadline - Date.now()));
-    if (!await isRunActive()) return false;
-  }
-  return isRunActive();
 }
 
 function commandFromToolInput(input: unknown) {
@@ -283,6 +298,7 @@ async function runDelegation(
   commandToken: string,
   executor: AgentExecutor,
   executionOptions: AgentExecutionOptions,
+  cancellationSignal: AbortSignal,
 ) {
   const { maxRuntimeMs, idleTimeoutMs } = resolveAgentExecutionLimits(process.env);
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
@@ -329,7 +345,7 @@ async function runDelegation(
         LOOP_EXECUTION_TOKEN: commandToken,
         LOOP_AGENT_TMP_DIR: temporary.directory,
       },
-      cancellationRequested: async () => !await isRunActive() || await executionCancellationRequested(executionId),
+      cancellationSignal,
     });
     return { ...execution, diagnostics };
   } finally {
@@ -409,7 +425,7 @@ async function runEvolutionEvaluator(
         LOOP_INTERNAL_SESSION_ID: command.sessionId,
         LOOP_INTERNAL_COMMAND_TOKEN: command.token,
       },
-      cancellationRequested: async () => !await isRunActive(),
+      cancellationSignal: runnerAbort.signal,
     });
     const result = await readInternalAgentCommandSubmission('evolution', evolution.evolutionId);
     if (execution.exitCode !== 0 && !result) throw new Error(`Evaluator CLI 退出码 ${execution.exitCode}`);
@@ -523,14 +539,22 @@ async function executeDelegationStep(
     if (!commandToken) {
       throw new Error(`${delegation.agent}/${delegation.pipeline} 无法签发渐进式命令凭证`);
     }
-    const execution = await runDelegation(
-      delegation,
-      builtPrompt.prompt,
-      attempt.execution_id,
-      commandToken,
-      executor,
-      executionOptions,
-    );
+    const cancellation = new AbortController();
+    activeExecutionControllers.set(attempt.execution_id, cancellation);
+    let execution: Awaited<ReturnType<typeof runDelegation>>;
+    try {
+      execution = await runDelegation(
+        delegation,
+        builtPrompt.prompt,
+        attempt.execution_id,
+        commandToken,
+        executor,
+        executionOptions,
+        cancellation.signal,
+      );
+    } finally {
+      activeExecutionControllers.delete(attempt.execution_id);
+    }
     await progressDispatcher.executionExited({ reservationId: reservation.reservationId });
     if (execution.cancelled) {
       const currentTask = await getTask(delegation.taskId);
@@ -631,7 +655,7 @@ function launchDelegation(
   return inFlightExecutions.launch(
     key,
     reservation,
-    () => executeDelegationStep(reservation),
+    () => executeDelegationStep(reservation).finally(() => runnerWake.wake('execution-completed')),
     async (error) => {
       try {
         await appendLoopRunLog(runId, `[错误] requirement=${delegation.taskId} lane=${delegation.lane} agent=${delegation.agent} 执行器退出：${error instanceof Error ? error.message : String(error)}`);
@@ -657,6 +681,14 @@ async function drainQueuedAgentResults() {
     await appendLoopRunLog(runId, `[错误] 排队结果应用失败：${agentLabel(queued.agent)} ${queued.taskId}${queued.storyIndex ? ` · ${deliveryUnitLabel(queued.storyIndex)}` : ''} - ${queued.reason}`);
   }
   return waiting;
+}
+
+async function cancelInvalidExecutions() {
+  if (!cancellationSweepRequested) return;
+  cancellationSweepRequested = false;
+  for (const [executionId, controller] of activeExecutionControllers) {
+    if (await executionCancellationRequested(executionId)) controller.abort();
+  }
 }
 
 async function main() {
@@ -702,7 +734,17 @@ async function main() {
   }
 
   const inFlightExecutions = new InFlightWork<ReservedExecution>();
+  let safetyReconcileAt = Date.now() + SAFETY_RECONCILE_MS;
   while (await isRunActive()) {
+    const wakeRevision = runnerWake.revision();
+    await cancelInvalidExecutions();
+    const scheduled = await materializeDueScheduledRequirements();
+    for (const item of scheduled.created) {
+      await appendLoopRunLog(runId, `[定时需求] plan=${item.planId} 已创建 requirement=${item.taskId} scheduled_for=${item.scheduledFor}`);
+    }
+    for (const item of scheduled.failed) {
+      await appendLoopRunLog(runId, `[定时需求] plan=${item.planId} 创建失败，将在 ${item.retryAt} 重试：${item.error}`);
+    }
     const completionRevision = inFlightExecutions.revision();
     await drainQueuedAgentResults();
     const dispatch = await progressDispatcher.reserveNext({ runId });
@@ -721,33 +763,74 @@ async function main() {
       await appendLoopRunLog(runId, '[调度] Lane execution 已结束，立即重新计算可执行步骤');
       continue;
     }
-    if (inFlightExecutions.size) {
-      await inFlightExecutions.waitForNextCompletion(completionRevision);
-      await appendLoopRunLog(runId, '[调度] Lane execution 已结束，立即重新计算可执行步骤');
-      continue;
-    }
     if (launched) continue;
-    if (backgroundEvaluations.size) {
-      await Promise.race(backgroundEvaluations);
-      continue;
-    }
     if (dispatch.kind === 'run-stopped') return;
-    if (dispatch.kind === 'wait' && dispatch.wake.kind === 'retry-after') {
-      if (!await sleepWhileRunActive(Math.max(0, new Date(dispatch.wake.notBefore).getTime() - Date.now()))) return;
-      continue;
+    if (Date.now() >= safetyReconcileAt) safetyReconcileAt = Date.now() + SAFETY_RECONCILE_MS;
+    const scheduleWakeAt = await nextScheduledRequirementWakeAt();
+    const retryWakeAt = dispatch.kind === 'wait' && dispatch.wake.kind === 'retry-after'
+      ? new Date(dispatch.wake.notBefore).getTime()
+      : null;
+    const deadline = [scheduleWakeAt, retryWakeAt, safetyReconcileAt]
+      .filter((value): value is number => value !== null && Number.isFinite(value))
+      .reduce((earliest, value) => Math.min(earliest, value), Number.POSITIVE_INFINITY);
+    const waits: Promise<unknown>[] = [runnerWake.wait(wakeRevision, deadline)];
+    if (inFlightExecutions.size) waits.push(inFlightExecutions.waitForNextCompletion(completionRevision));
+    if (backgroundEvaluations.size) waits.push(Promise.race(backgroundEvaluations));
+    if (!inFlightExecutions.size && !backgroundEvaluations.size) {
+      const reason = scheduleWakeAt !== null && scheduleWakeAt === deadline
+        ? `下一定时需求 ${new Date(scheduleWakeAt).toISOString()}`
+        : retryWakeAt !== null && retryWakeAt === deadline
+          ? `下一重试 ${new Date(retryWakeAt).toISOString()}`
+          : '等待事件';
+      await appendLoopRunLog(runId, `[运行] 当前没有可执行 Agent，事件驱动休眠：${reason}`);
     }
-    const retryMs = Number(process.env.LOOP_EMPTY_DISPATCH_RETRY_MS || 5 * 60 * 1000);
-    await appendLoopRunLog(runId, `[运行] 当前没有可执行 Agent，${Math.max(1, Math.round(retryMs / 1000))} 秒后重新计算`);
-    if (!await sleepWhileRunActive(retryMs)) return;
+    await Promise.race(waits);
   }
 }
 
 async function run() {
   let stopHeartbeat: (() => void) | undefined;
+  let runtimeEvents: RuntimeEventSubscription | undefined;
   try {
     const startGateToken = process.env.LOOP_RUNNER_START_GATE_TOKEN;
     if (startGateToken) await waitForRunnerStartGate(runId, startGateToken);
     stopHeartbeat = await startRunHeartbeat(runId, 'agent-runner');
+    const eventRevisions = new Map<string, number>();
+    const synchronizeEventRevisions = async () => {
+      const db = await databaseConnection();
+      let changed = false;
+      for (const topic of RUNNER_EVENT_TOPICS) {
+        const revision = runtimeEventRevisionInDb(db, topic);
+        const seen = eventRevisions.get(topic) || 0;
+        if (revision <= seen) continue;
+        eventRevisions.set(topic, revision);
+        if (topic === 'execution.cancel-requested') cancellationSweepRequested = true;
+        changed = true;
+      }
+      if (changed) runnerWake.wake('runtime-event');
+    };
+    runtimeEvents = subscribeRuntimeEvents({
+      topics: RUNNER_EVENT_TOPICS,
+      onReady: synchronizeEventRevisions,
+      onEvent: (event) => {
+        const seen = eventRevisions.get(event.topic) || 0;
+        if (event.revision <= seen) return;
+        eventRevisions.set(event.topic, event.revision);
+        if (event.topic === 'execution.cancel-requested') cancellationSweepRequested = true;
+        if (event.topic === 'lifecycle.runner-stop-requested') {
+          runnerAbort.abort();
+          for (const controller of activeExecutionControllers.values()) controller.abort();
+        }
+        runnerWake.wake('runtime-event');
+      },
+    });
+    await Promise.race([
+      runtimeEvents.ready,
+      new Promise<never>((_, reject) => {
+        const timer = setTimeout(() => reject(new Error('等待 Runtime Event Hub 就绪超时')), 10_000);
+        timer.unref();
+      }),
+    ]);
     await main();
   } catch (error) {
     await appendLoopRunLog(runId, `[执行器错误] ${error instanceof Error ? error.message : String(error)}`);
@@ -758,6 +841,11 @@ async function run() {
     });
     await recordRunnerFailure(error);
   } finally {
+    runnerAbort.abort();
+    for (const controller of activeExecutionControllers.values()) controller.abort();
+    activeExecutionControllers.clear();
+    runtimeEvents?.close();
+    runnerWake.close();
     stopHeartbeat?.();
     for (const temporary of activeExecutionTemporaries.values()) {
       const cleanup = removeAgentExecutionTempDirectory(temporary);

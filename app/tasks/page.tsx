@@ -4,6 +4,7 @@ import { listCompletedTasks, listTasks, type TaskWithLanes } from '../../src/app
 import { agentLabel, itemTypeLabel, statusLabel } from '../../src/domain/terminology';
 import { requirementPriorityLabel } from '../../src/domain/requirement-priority';
 import CreateTaskDialog from './create-task-dialog';
+import { TaskAutoRefresh } from './task-auto-refresh';
 
 export const dynamic = 'force-dynamic';
 
@@ -39,6 +40,7 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
       <nav className="task-views" aria-label="需求视图">
         <Link href="/tasks" aria-current={!completedView ? 'page' : undefined}>进行中</Link>
         <Link href="/tasks?view=completed" aria-current={completedView ? 'page' : undefined}>已完成</Link>
+        <TaskAutoRefresh/>
       </nav>
       <div className="card table task-table">
         <div className="row heading"><span>标题</span><span>PIPELINE</span><span>状态</span><span>{completedView ? '时间' : '当前 Agent'}</span></div>
@@ -55,13 +57,18 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
             ? `${agentLabel(task.current_subagent)}（等待用户回答）`
             : businessAnalysisActive
               ? task.current_subagent ? agentLabel(task.current_subagent) : '等待用户阅读需求规格'
+            : task.item_type === 'direct'
+              ? agentLabel(task.current_subagent)
             : (task as TaskWithLanes).lanes.map((lane) => `${lane.lane === 'analysis' ? '交付分析' : '开发验证'}：${agentLabel(lane.current_agent)}（${laneStatusLabels[lane.status] || lane.status}）`).join(' · ');
           const businessAnalysisStatus = businessAnalysisActive
             ? task.agile_status === 'ready_to_close' ? '等待阅读规格'
               : task.current_subagent ? agentLabel(task.current_subagent).replace(' Agent', '')
                 : task.agile_status === 'backlog' ? '等待需求意图确认' : statusLabel(task.agile_status)
             : null;
-          const displayStatus = task.is_paused ? '已暂停' : waitingForRequirementAnswers ? '等待需求确认' : businessAnalysisStatus || statusLabel(task.agile_status);
+          const directStatus = task.item_type === 'direct'
+            ? task.agile_status === 'done' ? '已完成' : '直接执行'
+            : null;
+          const displayStatus = task.is_paused ? '已暂停' : waitingForRequirementAnswers ? '等待需求确认' : directStatus || businessAnalysisStatus || statusLabel(task.agile_status);
 
           return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}>
             <span><strong>{task.title}</strong><small>{task.task_id} · 优先级 {requirementPriorityLabel(task.priority)}</small></span>

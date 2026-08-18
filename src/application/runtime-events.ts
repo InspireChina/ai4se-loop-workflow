@@ -1,4 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
+import type Database from 'better-sqlite3';
+import {
+  createRuntimeEvent,
+  publishRuntimeEvent,
+  type RuntimeEventTopic,
+} from '../infrastructure/runtime-event-hub';
 import { databaseConnection } from '../infrastructure/database';
 import { toUtcIsoString } from './event-time';
 
@@ -152,4 +158,32 @@ export async function recordRuntimeException(input: { runId?: string; executionI
 
 export function newCorrelationId() {
   return randomUUID();
+}
+
+type Db = Database.Database;
+
+export function runtimeEventRevisionInDb(db: Db, topic: RuntimeEventTopic) {
+  const row = db.prepare('SELECT revision FROM runtime_event_revisions WHERE topic = ?').get(topic) as { revision: number } | undefined;
+  return row?.revision || 0;
+}
+
+export function advanceRuntimeEventRevisionInDb(db: Db, topic: RuntimeEventTopic) {
+  db.prepare(`
+    INSERT INTO runtime_event_revisions(topic, revision)
+    VALUES(?, 1)
+    ON CONFLICT(topic) DO UPDATE SET
+      revision = runtime_event_revisions.revision + 1,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(topic);
+  return runtimeEventRevisionInDb(db, topic);
+}
+
+export async function publishRuntimeInvalidation(topic: RuntimeEventTopic, revision: number, entityId?: string) {
+  return publishRuntimeEvent(createRuntimeEvent(topic, revision, entityId ? { entityId } : {}));
+}
+
+export async function advanceAndPublishRuntimeInvalidation(topic: RuntimeEventTopic, entityId?: string) {
+  const db = await databaseConnection();
+  const revision = db.transaction(() => advanceRuntimeEventRevisionInDb(db, topic))();
+  return publishRuntimeInvalidation(topic, revision, entityId);
 }

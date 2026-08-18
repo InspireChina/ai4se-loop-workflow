@@ -39,6 +39,7 @@ import {
 } from '../domain/task';
 import type { RecoveryItem } from './recovery-items';
 import { cancelFeedbackForTask } from './feedback';
+import { advanceAndPublishRuntimeInvalidation, advanceRuntimeEventRevisionInDb, publishRuntimeInvalidation } from './runtime-events';
 
 export type Task = TaskState & {
   title: string;
@@ -330,6 +331,7 @@ function appendActiveRunLog(db: Awaited<ReturnType<typeof databaseConnection>>, 
 }
 
 function refreshPages(...pagePaths: string[]) {
+  void advanceAndPublishRuntimeInvalidation('dispatch.invalidated').catch(() => undefined);
   for (const pagePath of pagePaths) {
     try {
       revalidatePath(pagePath);
@@ -498,7 +500,7 @@ const documentSchema = z.object({
   title: z.string().min(1).max(240).optional().nullable(),
   content: z.string().max(100000),
   format: z.enum(['markdown', 'json', 'text']).default('markdown'),
-  actor: z.enum(['human', 'idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent']).default('human'),
+  actor: z.enum(['human', 'direct-agent', 'idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent']).default('human'),
 });
 
 export async function upsertDocument(input: unknown) {
@@ -634,7 +636,7 @@ export type FeedbackVerificationDecision = {
   evidence: string[];
 };
 
-const createTaskSchema = z.object({
+export const createTaskSchema = z.object({
   title: z.string().min(1).max(300),
   // Story 2 persists and exposes this value to agents. Accept it here so the
   // creation boundary remains stable while title-only Tasks stay valid.
@@ -646,24 +648,30 @@ const createTaskSchema = z.object({
     key: z.string(),
     value: z.string(),
   })).optional().default([]),
-  itemType: z.enum(['business-analysis', 'end-to-end', 'feature', 'bug', 'tech', 'intake', 'other']).default('feature'),
+  itemType: z.enum(['direct', 'business-analysis', 'end-to-end', 'feature', 'bug', 'tech', 'intake', 'other']).default('feature'),
   priority: z.string().trim().optional().nullable(),
-  actor: z.enum(['human']).default('human'),
+  actor: z.enum(['human', 'system']).default('human'),
   status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'in feedback', 'ready_to_close', 'done', 'cancelled', 'blocked']).default('backlog'),
   currentSubagent: z.string().trim().optional().nullable(),
 });
 
-export async function createTask(input: unknown) {
-  const value = createTaskSchema.parse(input);
+export type ParsedCreateTaskInput = z.infer<typeof createTaskSchema>;
+
+export function createTaskInDb(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  value: ParsedCreateTaskInput,
+  taskId = `REQ-${randomUUID()}`,
+) {
   const metadata = parseRequirementMetadata(value.metadata);
   const priority = requirementPriority(value.priority || DEFAULT_REQUIREMENT_PRIORITY);
   const description = value.description?.trim() || null;
   const link = value.link || null;
-  const taskId = `REQ-${randomUUID()}`;
   const requestedSubagent = value.currentSubagent || null;
   assertActorCanCreate(value.actor, value.status, requestedSubagent);
   const currentSubagent = requestedSubagent
-    || (['business-analysis', 'end-to-end'].includes(value.itemType) ? 'idea-context-agent' : null);
+    || (value.itemType === 'direct'
+      ? 'direct-agent'
+      : ['business-analysis', 'end-to-end'].includes(value.itemType) ? 'idea-context-agent' : null);
   const state: TaskState = {
     task_id: taskId,
     item_type: value.itemType,
@@ -684,28 +692,36 @@ export async function createTask(input: unknown) {
     blocked_reason: value.status === 'blocked' ? '系统异常暂停' : null,
   };
   assertState(state);
+  db.prepare(`
+    INSERT INTO tasks(
+      task_id, title, description, link, external_id, external_status, item_type, priority,
+      agile_status, current_subagent, analysis_index, dev_index, test_index,
+      total_stories, spec_resolved_index, next_step,
+      work_dir, blocked_reason, last_actor
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, '', ?, ?)
+  `).run(taskId, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, priority, value.status, currentSubagent, value.itemType === 'direct' ? '新建需求，等待直接执行' : '新建需求，等待 Loop 梳理', state.blocked_reason, value.actor);
+  const insertMetadata = db.prepare(`
+    INSERT INTO requirement_metadata(task_id, metadata_key, metadata_value)
+    VALUES (?, ?, ?)
+  `);
+  for (const item of metadata) insertMetadata.run(taskId, item.key, item.value);
+  const task = fetchTask(db, taskId);
+  if (!task) throw new Error('需求创建失败');
+  ensureTaskLanesInDb(db, task);
+  addEvent(db, task.task_id, value.actor, 'TaskCreated', `创建需求：${task.title}`);
+  return task;
+}
+
+export async function createTask(input: unknown) {
+  const value = createTaskSchema.parse(input);
   const db = await databaseConnection();
   db.exec('BEGIN');
   try {
-    db.prepare(`
-      INSERT INTO tasks(
-        task_id, title, description, link, external_id, external_status, item_type, priority,
-        agile_status, current_subagent, analysis_index, dev_index, test_index,
-        total_stories, spec_resolved_index, next_step,
-        work_dir, blocked_reason, last_actor
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, '', ?, ?)
-    `).run(taskId, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, priority, value.status, currentSubagent, '新建需求，等待 Loop 梳理', state.blocked_reason, value.actor);
-    const insertMetadata = db.prepare(`
-      INSERT INTO requirement_metadata(task_id, metadata_key, metadata_value)
-      VALUES (?, ?, ?)
-    `);
-    for (const item of metadata) insertMetadata.run(taskId, item.key, item.value);
-    const task = fetchTask(db, taskId);
-    if (!task) throw new Error('需求创建失败');
-    ensureTaskLanesInDb(db, task);
-    addEvent(db, task.task_id, value.actor, 'TaskCreated', `创建需求：${task.title}`);
+    const task = createTaskInDb(db, value);
+    const dispatchRevision = advanceRuntimeEventRevisionInDb(db, 'dispatch.invalidated');
     db.exec('COMMIT');
     await syncTaskFiles(db, task.task_id);
+    await publishRuntimeInvalidation('dispatch.invalidated', dispatchRevision, task.task_id);
     refreshPages('/', '/tasks');
     return task.task_id;
   } catch (error) {
@@ -1600,7 +1616,10 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
     `).get(taskId, changes.dev_index);
     if (!resolvedSpec) throw new Error(`交付单元 ${changes.dev_index} 缺少已收敛的交付规格`);
   }
-  if (changes.agile_status === 'done' && before.closure_status !== 'acknowledged') throw new Error('当前版本的结卡报告尚未阅读');
+  if (changes.agile_status === 'done' && before.closure_status !== 'acknowledged'
+    && !(actor === 'direct-agent' && before.item_type === 'direct')) {
+    throw new Error('当前版本的结卡报告尚未阅读');
+  }
   const allowed = ['agile_status', 'current_subagent', 'analysis_index', 'dev_index', 'test_index', 'total_stories', 'spec_resolved_index', 'resume_status', 'blocked_reason', 'next_step', 'item_type', 'priority', 'title', 'run_state', 'closure_status', 'review_revision', 'review_document_id', 'closure_acknowledged_at'];
   const keys = allowed.filter((key) => key in changes);
   if (!keys.length) throw new Error('没有需要更新的字段');
@@ -1895,6 +1914,7 @@ export async function cancelTask(input: unknown) {
     db.exec('ROLLBACK');
     throw error;
   }
+  await advanceAndPublishRuntimeInvalidation('execution.cancel-requested', value.taskId);
   refreshPages('/', `/tasks/${value.taskId}`);
 }
 
@@ -1926,6 +1946,7 @@ export async function pauseTask(input: unknown) {
     `).run(value.taskId);
     addEvent(db, value.taskId, 'human', 'TaskPaused', `暂停推进：${reason}`);
   })();
+  await advanceAndPublishRuntimeInvalidation('execution.cancel-requested', value.taskId);
   refreshPages('/', '/tasks', `/tasks/${value.taskId}`);
 }
 

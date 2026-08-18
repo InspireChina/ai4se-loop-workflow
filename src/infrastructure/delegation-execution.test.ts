@@ -262,6 +262,29 @@ test('terminates the CLI when its requirement is cancelled', async () => {
   assert.ok(logs.some((line) => line.includes('已取消 lane=')));
 });
 
+test('terminates the CLI immediately when the Runner cancellation signal is aborted', async () => {
+  const cancellation = new AbortController();
+  const startedAt = Date.now();
+  const execution = run(
+    fixtureExecutor('codex', 'setInterval(() => {}, 1000)'),
+    recordedTelemetry().telemetry,
+    {
+      maxRuntimeMs: 5_000,
+      idleTimeoutMs: 5_000,
+      cancellationSignal: cancellation.signal,
+      cancellationRequested: () => false,
+    },
+  );
+  setTimeout(() => cancellation.abort(), 25);
+
+  const { result, logs } = await execution;
+
+  assert.equal(result.cancelled, true);
+  assert.notEqual(result.exitCode, 0);
+  assert.ok(Date.now() - startedAt < 1_000, 'AbortSignal cancellation should not wait for the legacy polling interval');
+  assert.ok(logs.some((line) => line.includes('需求已取消')));
+});
+
 test('telemetry initialization, event/update, network, and bounded flush failures cannot block the CLI or leak secrets', async () => {
   const diagnostics: string[] = [];
   const telemetry = createLangfuseTelemetry({

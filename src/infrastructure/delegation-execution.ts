@@ -26,6 +26,7 @@ export type DelegationExecutionInput = {
   resultKind?: AgentResultKind;
   environment?: AgentEnvironment;
   cancellationRequested?: () => boolean | Promise<boolean>;
+  cancellationSignal?: AbortSignal;
   spawn?: typeof crossSpawn;
 };
 
@@ -86,7 +87,6 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     model: executionOptions.model,
     reasoningEffort: executionOptions.reasoningEffort,
   });
-  let lastOutputAt = Date.now();
   let timedOut = false;
   let cancelled = false;
   let terminationRequested = false;
@@ -102,6 +102,8 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   let evidencePersistenceError: string | null = null;
   let temporaryPrompt: TemporaryPrompt | null = null;
   let resultChannel: AgentResultChannel | null = null;
+  let idleTimer: NodeJS.Timeout | undefined;
+  let armIdleTimer = () => undefined;
   const finalTextAccumulator = createAgentFinalTextAccumulator(executor.id);
   const metricsAccumulator = createAgentRunMetricsAccumulator(executor.id);
 
@@ -178,7 +180,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     const stdoutDecoder = new StringDecoder('utf8');
     const stderrDecoder = new StringDecoder('utf8');
     child.stdout?.on('data', (chunk: Buffer) => {
-      lastOutputAt = Date.now();
+      armIdleTimer();
       stdoutBuffer += stdoutDecoder.write(chunk);
       const lines = stdoutBuffer.split(/\r?\n/);
       stdoutBuffer = lines.pop() || '';
@@ -190,7 +192,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       }
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      lastOutputAt = Date.now();
+      armIdleTimer();
       stderrBuffer += stderrDecoder.write(chunk);
       const lines = stderrBuffer.split(/\r?\n/);
       stderrBuffer = lines.pop() || '';
@@ -209,10 +211,15 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       child.kill('SIGTERM');
       setTimeout(() => { if (!childExited) child.kill('SIGKILL'); }, 5000).unref();
     };
+    armIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        void terminate(`超过空闲时间 ${Math.round(idleTimeoutMs / 1000)} 秒`, 'timeout');
+      }, idleTimeoutMs);
+      idleTimer.unref();
+    };
     const maxTimer = setTimeout(() => void terminate(`超过最大运行时间 ${Math.round(maxRuntimeMs / 1000)} 秒`, 'timeout'), maxRuntimeMs);
-    const idleTimer = setInterval(() => {
-      if (Date.now() - lastOutputAt > idleTimeoutMs) void terminate(`超过空闲时间 ${Math.round(idleTimeoutMs / 1000)} 秒`, 'timeout');
-    }, Math.min(30000, idleTimeoutMs));
+    armIdleTimer();
     let cancellationCheckRunning = false;
     const checkCancellation = async () => {
       if (!input.cancellationRequested || cancellationCheckRunning || terminationRequested) return;
@@ -225,10 +232,13 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
         cancellationCheckRunning = false;
       }
     };
-    const cancellationTimer = input.cancellationRequested
+    const cancellationTimer = !input.cancellationSignal && input.cancellationRequested
       ? setInterval(() => void checkCancellation(), 500)
       : null;
     if (cancellationTimer) void checkCancellation();
+    const onCancellationSignal = () => void terminate('需求已取消', 'cancelled');
+    input.cancellationSignal?.addEventListener('abort', onCancellationSignal, { once: true });
+    if (input.cancellationSignal?.aborted) onCancellationSignal();
     try {
       terminalExitCode = await new Promise<number | null>((resolve, reject) => {
         if (launchError) {
@@ -248,8 +258,9 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       await appendLog(`[执行器错误] executor=${executor.id} agent=${context.agent} - ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       clearTimeout(maxTimer);
-      clearInterval(idleTimer);
+      if (idleTimer) clearTimeout(idleTimer);
       if (cancellationTimer) clearInterval(cancellationTimer);
+      input.cancellationSignal?.removeEventListener('abort', onCancellationSignal);
       if (child.pid && processStartMarker) {
         await markManagedAgentProcessExited(runId, child.pid, processStartMarker).catch(() => undefined);
       }

@@ -1,4 +1,4 @@
-export type RequirementPipelineId = 'business-analysis' | 'end-to-end' | 'feature' | 'bug';
+export type RequirementPipelineId = 'direct' | 'business-analysis' | 'end-to-end' | 'feature' | 'bug';
 
 export type RequirementPipelineStage = {
   key: string;
@@ -88,6 +88,17 @@ const businessAnalysisStages: readonly RequirementPipelineStage[] = [{
 }];
 
 export const REQUIREMENT_PIPELINES: readonly RequirementPipelineDefinition[] = [{
+  id: 'direct',
+  label: 'Direct',
+  summary: '把边界清晰的需求直接派发给 Direct Agent，提交结果后自动完成。',
+  stages: [{
+    key: 'direct',
+    title: '直接执行',
+    owner: 'Direct Agent',
+    lane: '控制',
+    description: '执行需求描述中的工作，并通过 submit 保存最终结果。',
+  }],
+}, {
   id: 'business-analysis',
   label: 'Business Analysis',
   summary: '用于把一个模糊想法发展为经过独立审查的需求规格说明书。',
@@ -122,6 +133,6 @@ export const REQUIREMENT_PIPELINES: readonly RequirementPipelineDefinition[] = [
 }];
 
 export function requirementPipeline(input: unknown): RequirementPipelineId {
-  if (input === 'business-analysis' || input === 'end-to-end' || input === 'feature' || input === 'bug') return input;
-  throw new Error('PIPELINE 只能选择 Business Analysis、End to End、Develop 或 Bug Fix');
+  if (input === 'direct' || input === 'business-analysis' || input === 'end-to-end' || input === 'feature' || input === 'bug') return input;
+  throw new Error('PIPELINE 只能选择 Direct、Business Analysis、End to End、Develop 或 Bug Fix');
 }

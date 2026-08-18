@@ -10,8 +10,8 @@ export type ResourceKey = keyof typeof RESOURCE_DEFINITIONS;
 
 export function resourcesForAgent(agent: string): ResourceKey[] {
   const resources: ResourceKey[] = [];
-  if (['dev-agent', 'test-agent'].includes(agent)) resources.push(CODE_WORKSPACE_RESOURCE);
-  if (['backlog-agent', 'repro-agent', 'dev-agent', 'test-agent'].includes(agent)) {
+  if (['dev-agent', 'test-agent', 'direct-agent'].includes(agent)) resources.push(CODE_WORKSPACE_RESOURCE);
+  if (['backlog-agent', 'repro-agent', 'dev-agent', 'test-agent', 'direct-agent'].includes(agent)) {
     resources.push(BROWSER_EXCLUSIVE_RESOURCE);
   }
   return resources;

@@ -10,7 +10,7 @@ import { deliverySpecSchema } from '../../../src/domain/agent-result';
 import { agentLabel, deliveryUnitLabel, documentKindLabel, feedbackBatchStatusLabel, feedbackWorkTypeLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
 import { requirementMetadataDefinition, requirementMetadataValueLabel } from '../../../src/domain/requirement-metadata';
 import { ArtifactDocument } from './artifact-document';
-import { TaskAutoRefresh } from './task-auto-refresh';
+import { TaskAutoRefresh } from '../task-auto-refresh';
 import { TaskContextChat } from './task-context-chat';
 import { TaskPriorityControl } from './task-priority-control';
 import {
@@ -41,6 +41,11 @@ const standardTaskSteps = [
   { label: '单元推进', statuses: ['ready for dev', 'in dev', 'in feedback'] },
   { label: '整体验收', statuses: ['in review'] },
   { label: '阅读结卡', statuses: ['ready_to_close'] },
+  { label: '完成', statuses: ['done'] },
+] as const;
+
+const directTaskSteps = [
+  { label: '执行', statuses: ['backlog'] },
   { label: '完成', statuses: ['done'] },
 ] as const;
 
@@ -159,8 +164,10 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const { task, metadata, lanes, stories, deliverySpecs, questions, runtimeInputs, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
   const isBusinessAnalysis = task.item_type === 'business-analysis';
   const isEndToEnd = task.item_type === 'end-to-end';
+  const isDirect = task.item_type === 'direct';
   const inBusinessAnalysisStage = isBusinessAnalysis
     || (isEndToEnd && businessAnalysisAgentIds.includes(task.current_subagent as typeof businessAnalysisAgentIds[number]));
+  const showDeliveryWorkflow = !inBusinessAnalysisStage && !isDirect;
   const analysisLane = lanes.find((lane) => lane.lane === 'analysis')!;
   const deliveryLane = lanes.find((lane) => lane.lane === 'delivery')!;
   const dispatch = await progressDispatchInspector.inspect({ requirementId: taskId });
@@ -191,7 +198,9 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       ? task.agile_status === 'ready_to_close' ? '需求规格已通过独立审查，等待阅读'
         : task.agile_status === 'done' ? 'Business Analysis 已完成'
           : `${agentLabel(task.current_subagent)}正在推进当前工作包`
-      : stepDetail(task, lanes);
+      : isDirect
+        ? task.agile_status === 'done' ? 'Direct Agent 已提交最终结果' : 'Direct Agent 正在执行当前需求'
+        : stepDetail(task, lanes);
   const unansweredRuntimeInputs = runtimeInputs.filter((input) => input.status === 'pending');
   const waitingRuntimeLanes = lanes.filter((lane) => lane.status === 'waiting_for_runtime_input');
   const waitingForRuntimeInput = waitingRuntimeLanes.length > 0;
@@ -202,12 +211,16 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const blockingFeedback = documentComments.filter((comment) => comment.feedback_status !== 'resolved');
   const deliveryDocuments = documents.filter((document) => document.document_id !== reviewDocument?.document_id);
   const progressStatus = task.agile_status === 'blocked' ? task.resume_status || 'backlog' : task.agile_status;
-  const taskSteps = isBusinessAnalysis
+  const taskSteps = isDirect
+    ? directTaskSteps
+    : isBusinessAnalysis
     ? businessAnalysisSteps
     : isEndToEnd
       ? endToEndSteps
       : task.item_type === 'bug' || progressStatus === 'in repro' ? bugTaskSteps : standardTaskSteps;
-  const currentStep = isBusinessAnalysis
+  const currentStep = isDirect
+    ? progressStatus === 'done' ? 1 : 0
+    : isBusinessAnalysis
     ? progressStatus === 'done' ? businessAnalysisSteps.length - 1
       : progressStatus === 'ready_to_close' ? businessAnalysisSteps.length - 2
         : Math.max(0, businessAnalysisSteps.findIndex((step) => step.agent === task.current_subagent))
@@ -232,14 +245,15 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           <p className="eyebrow">{task.task_id}</p>
           <h1>{task.title}</h1>
         </div>
-        <span className={`badge ${task.is_paused || task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{task.is_paused ? '已暂停' : waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : inBusinessAnalysisStage ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status)}</span>
+        <span className={`badge ${task.is_paused || task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{task.is_paused ? '已暂停' : waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : isDirect && task.agile_status !== 'done' ? '直接执行' : inBusinessAnalysisStage ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status)}</span>
       </div>
       <div className="chips" aria-label="需求运行上下文">
-        <TaskAutoRefresh/>
+        <TaskAutoRefresh taskId={task.task_id}/>
         <span>PIPELINE · {itemTypeLabel(task.item_type)}</span>
         <TaskPriorityControl taskId={task.task_id} priority={task.priority}/>
-        {!inBusinessAnalysisStage && <span>交付分析 · {agentLabel(analysisLane.current_agent)}</span>}
-        {!inBusinessAnalysisStage && <span>开发验证 · {agentLabel(deliveryLane.current_agent)}</span>}
+        {isDirect && <span>执行 Agent · {agentLabel(task.current_subagent)}</span>}
+        {showDeliveryWorkflow && <span>交付分析 · {agentLabel(analysisLane.current_agent)}</span>}
+        {showDeliveryWorkflow && <span>开发验证 · {agentLabel(deliveryLane.current_agent)}</span>}
       </div>
       {metadata.length > 0 && <dl className={`task-metadata count-${Math.min(metadata.length, 3)}`} aria-label="需求属性">
         {metadata.map((item) => {
@@ -315,9 +329,10 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
     </section>
 
     <section className="card task-summary">
-      {!inBusinessAnalysisStage && <><div><small>交付分析</small><b>{task.analysis_index} / {task.total_stories}</b></div>
+      {showDeliveryWorkflow && <><div><small>交付分析</small><b>{task.analysis_index} / {task.total_stories}</b></div>
       <div><small>实现</small><b>{task.dev_index} / {task.total_stories}</b></div>
       <div><small>验证</small><b>{task.test_index} / {task.total_stories}</b></div></>}
+      {isDirect && <div><small>执行节点</small><b>{task.agile_status === 'done' ? '已提交' : '运行中'}</b></div>}
       {inBusinessAnalysisStage && <div><small>当前阶段</small><b>{businessAnalysisSteps[currentStep]?.label}</b></div>}
       <div><small>待回答决策</small><b>{unansweredQuestions.length}</b></div>
       <div><small>待补充信息或验证协助</small><b>{unansweredRuntimeInputs.length}</b></div>
@@ -325,7 +340,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       <div className="summary-wide"><small>文档</small><p>{documents.length} 个数据库文档</p></div>
     </section>
 
-    {!inBusinessAnalysisStage && <section className="lane-grid" aria-label="任务并行 Lane 状态">
+    {showDeliveryWorkflow && <section className="lane-grid" aria-label="任务并行 Lane 状态">
       {[analysisLane, deliveryLane].map((lane) => <article className={`card lane-card ${lane.status}`} key={lane.lane}>
         <div className="lane-card-head">
           <div>
@@ -344,7 +359,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       </article>)}
     </section>}
 
-    <section className="task-decision-entry-section" id="decision-alignment">
+    {showDeliveryWorkflow && <section className="task-decision-entry-section" id="decision-alignment">
       <div className="section-head">
         <h2>决策对齐</h2>
         <small>任务级决策入口</small>
@@ -363,11 +378,11 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         </div>
         <Link href={`/decisions?taskId=${encodeURIComponent(task.task_id)}`} className="button secondary">打开决策对齐 <ArrowRight size={14}/></Link>
       </div>
-    </section>
+    </section>}
 
     <div className="task-detail-grid">
       <div className="task-main-column">
-        {!inBusinessAnalysisStage && <section className="task-section">
+        {showDeliveryWorkflow && <section className="task-section">
           <div className="section-head">
             <h2>交付单元</h2>
             <small>{stories.length ? `${stories.length} 个交付单元` : '尚未拆分'}</small>
@@ -406,14 +421,14 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                 revision={document.revision}
                 comments={documentComments.filter((comment) => comment.document_id === document.document_id)}
                 feedbackGroups={feedbackGroups}
-                allowReopen={!inBusinessAnalysisStage && task.agile_status !== 'done'}
-                allowComment={!inBusinessAnalysisStage && task.agile_status !== 'done'}
+                allowReopen={showDeliveryWorkflow && task.agile_status !== 'done'}
+                allowComment={showDeliveryWorkflow && task.agile_status !== 'done'}
               />
             </details>)}</div>
           </div>
         </section>
 
-        {!inBusinessAnalysisStage && feedbackBatches.length > 0 && <section className="task-section">
+        {showDeliveryWorkflow && feedbackBatches.length > 0 && <section className="task-section">
           <div className="section-head">
             <h2>反馈批次</h2>
             <small>{feedbackBatches.length} 个批次 · {feedbackBatches.filter((batch) => !['completed', 'cancelled'].includes(batch.status)).length} 个活动批次</small>
@@ -448,7 +463,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           </div>
         </section>}
 
-        {!inBusinessAnalysisStage && <section className="task-section">
+        {showDeliveryWorkflow && <section className="task-section">
           <div className="section-head">
             <h2>交付规格</h2>
             <small>{currentSpecs.length} 个当前规格</small>
@@ -488,7 +503,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           </div>
         </section>}
 
-        {!inBusinessAnalysisStage && <section className="task-section">
+        {showDeliveryWorkflow && <section className="task-section">
           <div className="section-head">
             <h2>运行信息与验证协助</h2>
             <small>{runtimeInputs.length} 个请求</small>

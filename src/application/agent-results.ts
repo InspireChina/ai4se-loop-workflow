@@ -43,6 +43,7 @@ import { forwardReviewClosureGaps } from './review-closure-gaps';
 import { publishReviewReport } from './review-report-publication';
 
 const artifactKinds: Record<string, string> = {
+  'direct-agent': 'direct_result',
   'idea-context-agent': 'ba_intent',
   'business-design-agent': 'ba_solution',
   'requirement-spec-agent': 'ba_spec',
@@ -67,7 +68,7 @@ async function saveArtifact(delegation: DelegationEnvelope, result: AgentResult)
   let artifact = result.artifact;
   if (!artifact && delegation.agent === 'backlog-agent') artifact = {
     title: '业务变化上下文',
-    content: `${result.summary}\n\n- 分类：${result.classification || '未确定'}\n- 路由：${result.route || '未确定'}`,
+    content: result.summary,
   };
   if (!artifact && delegation.agent === 'story-splitter-agent' && result.deliveryUnits?.length) artifact = {
     title: '交付单元拆分',
@@ -449,6 +450,18 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     : await saveArtifact(delegation, result);
   const actor = delegation.agent as Actor;
   switch (delegation.agent) {
+    case 'direct-agent': {
+      if (!artifactDocumentId) throw new Error('Direct Agent 缺少最终结果文档');
+      await updateTask(delegation.taskId, actor, {
+        agile_status: 'done',
+        current_subagent: null,
+        run_state: 'idle',
+        closure_status: 'acknowledged',
+        closure_acknowledged_at: new Date().toISOString(),
+        next_step: result.summary,
+      });
+      return 'advanced';
+    }
     case 'idea-context-agent': {
       if (result.questions.length) {
         await saveQuestions(delegation, result);
@@ -559,16 +572,11 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         await saveQuestions(delegation, result);
         return 'blocked' as const;
       }
-      if (!result.classification || !result.route) throw new Error('backlog-agent 结果缺少 classification 或 route');
       const detail = await getTask(delegation.taskId);
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
-      if (detail.task.item_type === 'end-to-end' && (result.classification !== 'feature' || result.route !== 'plan')) {
-        throw new Error('End to End 在 Business Analysis 后必须保持 Develop 路由');
-      }
       const retainsCodeSlot = detail.task.agile_status === 'in dev' && detail.task.total_stories === 0;
-      const nextRoute = result.route;
+      const nextRoute = detail.task.item_type === 'bug' ? 'repro' : 'plan';
       await updateTask(delegation.taskId, actor, {
-        item_type: detail.task.item_type === 'end-to-end' ? 'end-to-end' : result.classification,
         ...(retainsCodeSlot ? {} : { agile_status: nextRoute === 'repro' ? 'in repro' as const : 'in plan' as const }),
         current_subagent: nextRoute === 'repro' ? 'repro-agent' : 'story-splitter-agent',
         next_step: result.summary,

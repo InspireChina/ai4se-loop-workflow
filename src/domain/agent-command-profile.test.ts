@@ -41,6 +41,7 @@ test('shares one context command guide with prompt and help surfaces', () => {
 });
 
 test('advertises a role-specific command guide for every progressive flow Agent', () => {
+  const direct = agentCommandPrompt('/app', 'direct-agent', 'direct');
   const backlog = agentCommandPrompt('/app', 'backlog-agent', 'backlog');
   const splitter = agentCommandPrompt('/app', 'story-splitter-agent', 'split');
   const analyst = agentCommandPrompt('/app', 'analyst-agent', 'analysis');
@@ -51,6 +52,9 @@ test('advertises a role-specific command guide for every progressive flow Agent'
   const businessDesign = agentCommandPrompt('/app', 'business-design-agent', 'ba-design');
   const requirementSpec = agentCommandPrompt('/app', 'requirement-spec-agent', 'ba-spec');
   const specReview = agentCommandPrompt('/app', 'spec-review-agent', 'ba-review');
+  assert.match(direct || '', /direct run/);
+  assert.match(direct || '', /direct submit/);
+  assert.doesNotMatch(direct || '', /direct status|needs_input|request-input/);
   assert.match(backlog || '', /COMMAND RESULT.*NEXT WORK PACKET/);
   assert.match(backlog || '', /help <context\|assertion\|impact\|decision-proposal\|decision-resolution\|answer-review\|scope\|finish>/);
   assert.match(splitter || '', /help <context\|unit\|source\|dependency\|revision\|finish>/);
@@ -78,7 +82,7 @@ test('advertises a role-specific command guide for every progressive flow Agent'
   assert.doesNotMatch(development || '', /help <[^>]*handoff/);
   assert.match(development || '', /implementation fail --reason <原因与证据>/);
   assert.doesNotMatch(analyst || '', /--reason <原因与证据>/);
-  for (const prompt of [backlog, splitter, analyst, development, verification, review, ideaContext, businessDesign, requirementSpec, specReview]) {
+  for (const prompt of [direct, backlog, splitter, analyst, development, verification, review, ideaContext, businessDesign, requirementSpec, specReview]) {
     assert.doesNotMatch(prompt || '', /loop-agent\.mjs" help\n/);
   }
 });

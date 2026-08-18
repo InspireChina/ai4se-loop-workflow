@@ -3,11 +3,19 @@ export type AgentCommandProfile = {
   agent: string;
   pipelines: string[];
   namespace: string;
-  draftType: 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification' | 'feedback' | 'review' | 'business_analysis';
+  draftType: 'direct' | 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification' | 'feedback' | 'review' | 'business_analysis';
   terminalActions: string[];
 };
 
 const PROFILES: AgentCommandProfile[] = [
+  {
+    id: 'direct',
+    agent: 'direct-agent',
+    pipelines: ['direct'],
+    namespace: 'direct',
+    draftType: 'direct',
+    terminalActions: ['direct submit --summary-file <简短结论> [--result-file <完整结果>]'],
+  },
   {
     id: 'idea-context',
     agent: 'idea-context-agent',
@@ -235,6 +243,29 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
   const profile = agentCommandProfile(agent, pipeline);
   if (!profile) return null;
   const command = loopAgentCommandPrefix(appRoot);
+  if (profile.draftType === 'direct') {
+    return [
+      '# Agent Tool Contract',
+      '当前 execution 只有 RUN → SUBMIT 两步，不创建渐进式草稿。',
+      '',
+      '**第一步：**',
+      '```bash',
+      `${command} direct run`,
+      '```',
+      '',
+      'run 成功后直接完成需求描述中的真实工作。',
+      '',
+      '**第二步：**',
+      '```bash',
+      `${command} direct submit --summary-file <简短结论文件> --result-file <完整 Markdown 结果文件>`,
+      '```',
+      '',
+      'summary 和 result 文件必须位于 `$LOOP_AGENT_TMP_DIR`。result 可省略，此时使用 summary 作为结果文档。submit 成功后结束 execution；普通最终文本不会完成需求。',
+      '',
+      '# 冻结业务上下文（只读）',
+      ...agentContextHelpLines(appRoot),
+    ].join('\n');
+  }
   const helpTopics = profile.draftType === 'requirement_context'
     ? 'context|assertion|impact|decision-proposal|decision-resolution|answer-review|scope|finish'
     : profile.draftType === 'delivery_plan'

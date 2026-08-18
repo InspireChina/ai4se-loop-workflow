@@ -6,6 +6,7 @@ import { databaseConnection, paths } from '../infrastructure/database';
 import { startAgentRun } from '../infrastructure/agent-runner';
 import { inspectProcessCommand, inspectProcessIdentity, terminateProcessTree, waitForProcessIdentity } from '../infrastructure/process-tree';
 import { isProcessAlive } from '../infrastructure/run-process';
+import { RuntimeEventHub } from '../infrastructure/runtime-event-hub';
 
 export type LifecycleSource = {
   adapter: 'ui' | 'electron' | 'cli';
@@ -112,6 +113,7 @@ export type LoopRunLifecycleOptions = {
 export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
   let currentToken: number | null = null;
   let renewalTimer: NodeJS.Timeout | undefined;
+  let runtimeEventHub: RuntimeEventHub | undefined;
   let operation = Promise.resolve<unknown>(undefined);
 
   const serialize = <T>(work: () => Promise<T>) => {
@@ -146,6 +148,20 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     })();
     currentToken = token;
     return token;
+  }
+
+  async function ensureRuntimeEventHub(token: number) {
+    if (runtimeEventHub?.token === token) return;
+    if (runtimeEventHub) await runtimeEventHub.close();
+    const hub = new RuntimeEventHub(options.ownerId, token);
+    await hub.start();
+    runtimeEventHub = hub;
+  }
+
+  async function closeRuntimeEventHub() {
+    const hub = runtimeEventHub;
+    runtimeEventHub = undefined;
+    await hub?.close();
   }
 
   async function snapshot(): Promise<LifecycleSnapshot> {
@@ -337,7 +353,11 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
 
   async function reconcileOwned(): Promise<LifecycleReceipt> {
     const token = await acquireLease();
-    if (token === null) return { outcome: 'observer', snapshot: await snapshot() };
+    if (token === null) {
+      await closeRuntimeEventHub();
+      return { outcome: 'observer', snapshot: await snapshot() };
+    }
+    await ensureRuntimeEventHub(token);
     const db = await databaseConnection();
     const supersededResidual = await cleanupSupersededProcesses(token);
     if (supersededResidual.length) {
@@ -530,6 +550,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
       renewalTimer = undefined;
       await serialize(async () => {
         if (preserveIntent) await stopCurrent('监督宿主退出', true);
+        await closeRuntimeEventHub();
         const db = await databaseConnection();
         if (currentToken !== null) {
           db.prepare('DELETE FROM loop_supervisor_lease WHERE singleton = 1 AND owner_id = ? AND fencing_token = ?')
@@ -541,12 +562,25 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
   };
 }
 
-let webHost: ReturnType<typeof createLoopRunLifecycle> | undefined;
+type WebLoopRunLifecycle = ReturnType<typeof createLoopRunLifecycle>;
+type LoopWorkGlobal = typeof globalThis & {
+  __loopworkWebHost?: Promise<WebLoopRunLifecycle>;
+};
+
+const loopWorkGlobal = globalThis as LoopWorkGlobal;
 
 export async function webLoopRunLifecycle() {
-  if (!webHost) {
-    webHost = createLoopRunLifecycle({ ownerId: `web-${process.pid}-${randomUUID()}`, adapter: 'cli' });
-    await webHost.start();
+  if (!loopWorkGlobal.__loopworkWebHost) {
+    loopWorkGlobal.__loopworkWebHost = (async () => {
+      const host = createLoopRunLifecycle({ ownerId: `web-${process.pid}-${randomUUID()}`, adapter: 'cli' });
+      await host.start();
+      return host;
+    })();
   }
-  return webHost;
+  try {
+    return await loopWorkGlobal.__loopworkWebHost;
+  } catch (error) {
+    loopWorkGlobal.__loopworkWebHost = undefined;
+    throw error;
+  }
 }

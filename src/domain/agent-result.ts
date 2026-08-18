@@ -319,6 +319,12 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
     'requirement-spec-agent': 'specification',
     'spec-review-agent': 'review',
   } as Record<string, 'intent' | 'business_design' | 'specification' | 'review'>)[agent];
+  if (agent === 'direct-agent') {
+    if (result.outcome !== 'completed') throw new Error('Direct Agent 必须通过 submit 完成执行');
+    if (!result.artifact) throw new Error('Direct Agent 结果缺少最终结果文档');
+    if (result.questions.length || result.runtimeInputs.length) throw new Error('Direct Agent 不支持问题或运行信息请求');
+    return;
+  }
   if (businessAnalysisStage) {
     if (!result.businessAnalysis || result.businessAnalysis.stage !== businessAnalysisStage) {
       throw new Error(`${agent} 结果缺少匹配的 Business Analysis 阶段契约`);
@@ -427,7 +433,7 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
   switch (agent) {
     case 'backlog-agent':
       if (result.questions.length) break;
-      if (!result.classification || !result.route) throw new Error('backlog-agent 结果缺少 classification 或 route');
+      if (!result.artifact) throw new Error('backlog-agent 结果缺少业务变化上下文');
       break;
     case 'story-splitter-agent':
       if (!result.deliveryUnits?.length) throw new Error('交付规划 Agent 结果缺少 deliveryUnits');

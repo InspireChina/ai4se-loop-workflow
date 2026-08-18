@@ -1,6 +1,6 @@
 import { resourcesForAgent, type ResourceKey } from './resource';
 
-export const ACTORS = ['human', 'system', 'idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent', 'feedback-agent'] as const;
+export const ACTORS = ['human', 'system', 'direct-agent', 'idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent', 'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'repro-agent', 'dev-agent', 'test-agent', 'review-agent', 'feedback-agent'] as const;
 export const TASK_STATUSES = ['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'in feedback', 'ready_to_close', 'done', 'cancelled', 'blocked'] as const;
 export const RUN_STATES = ['runnable', 'waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked', 'idle'] as const;
 export type Actor = typeof ACTORS[number];
@@ -42,6 +42,7 @@ const transitions: Record<TaskStatus, TaskStatus[]> = {
 };
 
 const fieldPermissions: Partial<Record<Actor, string[]>> = {
+  'direct-agent': ['agile_status', 'current_subagent', 'next_step', 'run_state', 'closure_status', 'closure_acknowledged_at'],
   'idea-context-agent': ['agile_status', 'current_subagent', 'next_step'],
   'business-design-agent': ['agile_status', 'current_subagent', 'next_step'],
   'requirement-spec-agent': ['agile_status', 'current_subagent', 'next_step'],
@@ -56,6 +57,7 @@ const fieldPermissions: Partial<Record<Actor, string[]>> = {
 };
 
 const statusPermissions: Partial<Record<Actor, TaskStatus[]>> = {
+  'direct-agent': ['done'],
   'idea-context-agent': ['backlog'],
   'business-design-agent': ['backlog'],
   'requirement-spec-agent': ['backlog'],
@@ -70,6 +72,7 @@ const statusPermissions: Partial<Record<Actor, TaskStatus[]>> = {
 };
 
 const agentPermissions: Partial<Record<Actor, string[]>> = {
+  'direct-agent': ['direct-agent'],
   'idea-context-agent': ['idea-context-agent', 'business-design-agent'],
   'business-design-agent': ['idea-context-agent', 'business-design-agent', 'requirement-spec-agent'],
   'requirement-spec-agent': ['idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent'],
@@ -141,7 +144,11 @@ export function assertUpdate(before: TaskState, actor: Actor, next: Partial<Task
   if (before.agile_status === 'blocked' && next.agile_status && next.agile_status !== 'blocked') {
     throw new Error('系统阻塞必须通过恢复用例解除');
   }
-  if (next.agile_status && next.agile_status !== 'cancelled' && !transitions[before.agile_status].includes(next.agile_status)) {
+  const directCompletion = actor === 'direct-agent'
+    && before.item_type === 'direct'
+    && before.agile_status === 'backlog'
+    && next.agile_status === 'done';
+  if (next.agile_status && next.agile_status !== 'cancelled' && !directCompletion && !transitions[before.agile_status].includes(next.agile_status)) {
     throw new Error(`禁止状态回退 ${before.agile_status} -> ${next.agile_status}；请使用 rewind`);
   }
   for (const key of ['analysis_index', 'dev_index', 'test_index'] as const) {
@@ -155,8 +162,8 @@ export function assertUpdate(before: TaskState, actor: Actor, next: Partial<Task
 }
 
 export function assertActorCanCreate(actor: Actor, status: TaskStatus, currentSubagent: string | null) {
-  if (actor !== 'human') throw new Error(`${actor} 无权创建需求`);
-  if (status !== 'backlog' || currentSubagent) throw new Error('Web 新建需求只能进入待梳理状态且不预先分配 Agent');
+  if (actor !== 'human' && actor !== 'system') throw new Error(`${actor} 无权创建需求`);
+  if (status !== 'backlog' || currentSubagent) throw new Error('新建需求只能进入待梳理状态且不预先分配 Agent');
 }
 
 export type Delegation = {
@@ -185,6 +192,11 @@ export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Del
   });
   const { analysis_index: a, dev_index: d, test_index: t, total_stories: total, agile_status: status } = task;
   if (status === 'done' || status === 'cancelled' || status === 'blocked' || status === 'ready_to_close' || task.run_state !== 'runnable') return null;
+  if (task.item_type === 'direct') {
+    return status === 'backlog'
+      ? line('direct', 'direct-agent', null, '直接执行当前需求并提交最终结果')
+      : null;
+  }
   if (task.resume_pending) {
     const agent = task.current_subagent!;
     if (['analyst-agent', 'dev-agent', 'test-agent'].includes(agent)) return null;

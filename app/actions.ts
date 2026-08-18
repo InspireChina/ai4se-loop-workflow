@@ -27,6 +27,13 @@ import { paths } from '../src/infrastructure/database';
 import { requirementPipeline } from '../src/domain/pipeline-catalog';
 import { DEFAULT_REQUIREMENT_PRIORITY, requirementPriority } from '../src/domain/requirement-priority';
 import { parseRequirementMetadata } from '../src/domain/requirement-metadata';
+import {
+  createScheduledRequirement,
+  deleteScheduledRequirement,
+  pauseScheduledRequirement,
+  resumeScheduledRequirement,
+  updateScheduledRequirement,
+} from '../src/application/scheduled-requirements';
 
 export async function createTaskAction(formData: FormData) {
   const pipeline = requirementPipeline(formData.get('pipeline') || 'feature');
@@ -45,6 +52,52 @@ export async function createTaskAction(formData: FormData) {
     metadata,
   });
   redirect(`/tasks/${taskId}`);
+}
+
+function scheduledRequirementInput(formData: FormData) {
+  const metadataKeys = formData.getAll('metadataKey');
+  const metadataValues = formData.getAll('metadataValue');
+  const metadata = parseRequirementMetadata(metadataKeys.map((key, index) => ({
+    key,
+    value: metadataValues[index],
+  })));
+  const recurrenceKind = String(formData.get('recurrenceKind') || 'daily');
+  return {
+    recurrenceKind,
+    timezone: formData.get('timezone'),
+    localTime: recurrenceKind === 'once' ? undefined : formData.get('localTime'),
+    weekday: recurrenceKind === 'weekly' ? formData.get('weekday') : undefined,
+    dayOfMonth: recurrenceKind === 'monthly' ? formData.get('dayOfMonth') : undefined,
+    onceAtLocal: recurrenceKind === 'once' ? formData.get('onceAtLocal') : undefined,
+    title: formData.get('title'),
+    description: formData.get('description') || undefined,
+    pipeline: formData.get('pipeline'),
+    priority: formData.get('priority'),
+    metadata,
+  };
+}
+
+export async function saveScheduledRequirementAction(formData: FormData) {
+  const planId = String(formData.get('planId') || '');
+  const input = scheduledRequirementInput(formData);
+  if (planId) await updateScheduledRequirement({ ...input, planId });
+  else await createScheduledRequirement(input);
+  redirect('/schedules');
+}
+
+export async function pauseScheduledRequirementAction(formData: FormData) {
+  await pauseScheduledRequirement(String(formData.get('planId')));
+  redirect('/schedules');
+}
+
+export async function resumeScheduledRequirementAction(formData: FormData) {
+  await resumeScheduledRequirement(String(formData.get('planId')));
+  redirect('/schedules');
+}
+
+export async function deleteScheduledRequirementAction(formData: FormData) {
+  await deleteScheduledRequirement(String(formData.get('planId')));
+  redirect('/schedules');
 }
 
 export async function updateTaskPriorityAction(taskId: string, priority: string) {

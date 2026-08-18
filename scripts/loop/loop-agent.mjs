@@ -85,7 +85,7 @@ try {
   if ([
     'requirement-context', 'delivery-plan', 'delivery-analysis', 'implementation',
     'verification', 'review', 'idea-context', 'business-design',
-    'requirement-spec', 'spec-review',
+    'requirement-spec', 'spec-review', 'direct',
   ].includes(rawArgs[0])) {
     const namespace = rawArgs[0];
     const firstFlag = rawArgs.findIndex((argument) => argument.startsWith('--'));

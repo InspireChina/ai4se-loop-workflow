@@ -53,6 +53,7 @@ import {
   initializeBusinessAnalysisDraft,
   runBusinessAnalysisCommand,
 } from './business-analysis-command-drafts';
+import { directHelp, runDirectCommand } from './direct-command';
 
 type ExecutionRow = {
   execution_id: string;
@@ -1030,6 +1031,10 @@ function draftState(
   draft: DraftRow,
 ) {
   const context = contextDraft(db, draft.draft_id);
+  const requirement = db.prepare(`
+    SELECT item_type FROM tasks WHERE task_id = ?
+  `).get(draft.task_id) as { item_type: string } | undefined;
+  if (!requirement) throw new Error(`需求不存在：${draft.task_id}`);
   const assertions = db.prepare(`
     SELECT assertion_key, perspective, statement, evidence_status, source, decision_key,
            lifecycle_status, lifecycle_reason, superseded_by
@@ -1122,6 +1127,7 @@ function draftState(
   };
   return {
     context,
+    requirementPipeline: requirement.item_type,
     decisionMode: workflowDecisionMode(db.prepare(`
       SELECT metadata_key, metadata_value
       FROM requirement_metadata
@@ -1177,7 +1183,7 @@ function validationErrors(
   } else {
     const requiredPerspectives = [
       'actual',
-      ...(state.context.classification === 'bug' ? ['expected' as const] : []),
+      ...(state.requirementPipeline === 'bug' ? ['expected' as const] : []),
       'target',
     ] as const;
     for (const perspective of requiredPerspectives) {
@@ -1199,9 +1205,6 @@ function validationErrors(
     if (!activeAcceptance.length) {
       errors.push('至少需要一条需求级验收语义：使用 requirement-context acceptance upsert');
     }
-  }
-  if (terminal === 'complete' && !state.context.classification) {
-    errors.push('缺少需求分类：使用 requirement-context classification set <feature|bug|tech|other>');
   }
   errors.push(...questionStructureErrors(state));
   const unanswered = state.questions.filter((question) =>
@@ -1371,9 +1374,8 @@ function phaseValidationErrors(
 
   if (phase === 'acceptance') {
     if (!activeAcceptance.length) errors.push('至少需要一条需求级验收语义');
-    if (!state.context.classification) errors.push('缺少最终需求分类');
-    if (state.context.classification === 'bug' && !reliable('expected')) {
-      errors.push('Bug 必须具备可靠 Existing Expected');
+    if (state.requirementPipeline === 'bug' && !reliable('expected')) {
+      errors.push('Bug Fix Pipeline 必须具备可靠 Existing Expected');
     }
     return errors;
   }
@@ -1793,7 +1795,7 @@ function renderStatus(draft: DraftRow, state: ReturnType<typeof draftState>) {
     '',
     `业务意图：${state.context.intent || '未填写'}`,
     `变化摘要：${state.context.change_summary || '未填写'}`,
-    `分类：${state.context.classification || '未填写'}`,
+    `Pipeline：${state.requirementPipeline}`,
     '',
     `业务语义：Actual ${activeAssertions.filter((item) => item.perspective === 'actual').length}`
       + ` / Expected ${activeAssertions.filter((item) => item.perspective === 'expected').length}`
@@ -1902,7 +1904,7 @@ function renderArtifact(
     '',
     `状态：${action === 'complete' ? 'Aligned' : 'Needs Clarification'}`,
     `版本：v${draft.draft_version}`,
-    `需求类型：${state.context.classification || '待确认'}`,
+    `Pipeline：${state.requirementPipeline}`,
     `更新时间：${draft.updated_at}`,
     '',
     '## BUSINESS INTENT',
@@ -1919,7 +1921,7 @@ function renderArtifact(
     '',
     ...assertionSection(
       'expected',
-      action === 'complete' && state.context.classification !== 'bug'
+      action === 'complete' && state.requirementPipeline !== 'bug'
         ? '本需求未识别到独立于本次 TO-BE 的既有 Expected；变化按 Actual → TO-BE 表达'
         : '尚未形成可靠结论',
     ),
@@ -2051,10 +2053,6 @@ function buildResult(
       content: renderArtifact(draft, state, action),
     },
     questions,
-    ...(complete ? {
-      classification: state.context.classification,
-      route: state.context.classification === 'bug' ? 'repro' : 'plan',
-    } : {}),
   });
 }
 
@@ -2703,7 +2701,6 @@ const requirementContextCommandIndex = [
   '  requirement-context acceptance upsert --key <key> --text <验收语义> --source <来源>',
   '  requirement-context acceptance dismiss --key <key> --reason <理由>',
   '  requirement-context acceptance supersede --key <旧key> --by <新key> --reason <理由>',
-  '  requirement-context classification set <feature|bug|tech|other>',
   '  requirement-context constraint add --key <key> --text <内容>',
   '  requirement-context constraint remove --key <key>',
   '  requirement-context scope include|exclude --key <key> --text <内容>',
@@ -2837,13 +2834,7 @@ function requirementContextHelp(terminalActions: string[], topic?: string | null
       '  requirement-context scope exclude --key <稳定key> --text <明确不属于本轮的业务范围>',
       '  requirement-context scope remove --key <key>',
       '',
-      '分类：',
-      '  requirement-context classification set <feature|bug|tech|other>',
-      '  feature  主动改变业务能力或业务语义。',
-      '  bug      Actual 偏离已有明确 Expected。',
-      '  tech     主要改变工程属性并保持业务语义。',
-      '  other    确实不属于前三类的有效需求。',
-      '  分类只表达需求类型；bug 由 Application 路由到问题复现，其余类型路由到交付规划。',
+      'Pipeline 已在需求创建时确定；本阶段只维护业务范围与约束，不重新分类或选择后续节点。',
     ];
   }
   if (topic === 'finish') {
@@ -3044,6 +3035,17 @@ const LONG_TEXT_FILE_HELP = [
 function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?: string | null) {
   const appRoot = process.env.LOOP_APP_ROOT?.trim() || '<Loop App Root>';
   const command = loopAgentCommandPrefix(appRoot);
+  if (profile.draftType === 'direct') {
+    if (topic && topic !== 'context') throw new Error('Direct help 只支持 context 主题');
+    return [
+      `当前身份：${execution.agent} · ${execution.pipeline}`,
+      '',
+      ...directHelp().split('\n'),
+      '',
+      '只读上下文工具：',
+      ...agentContextHelpLines(appRoot),
+    ].join('\n');
+  }
   if (topic === 'context') {
     return [
       `当前身份：${execution.agent} · ${execution.pipeline}`,
@@ -3692,9 +3694,15 @@ export async function readAgentCommandSubmission(executionId: string): Promise<A
   const row = db.prepare(`
     SELECT result_json FROM execution_attempts
     WHERE execution_id = ? AND status = 'output_received' AND result_json IS NOT NULL
-      AND EXISTS (
-        SELECT 1 FROM agent_work_drafts
-        WHERE terminal_execution_id = execution_attempts.execution_id
+      AND (
+        EXISTS (
+          SELECT 1 FROM agent_work_drafts
+          WHERE terminal_execution_id = execution_attempts.execution_id
+        )
+        OR EXISTS (
+          SELECT 1 FROM direct_execution_state
+          WHERE execution_id = execution_attempts.execution_id AND submitted_at IS NOT NULL
+        )
       )
   `).get(executionId) as { result_json: string } | undefined;
   return row ? agentResultSchema.parse(JSON.parse(row.result_json)) : null;
@@ -3707,11 +3715,7 @@ export async function runAgentCommand(input: {
 }) {
   const { db, execution, profile, workKey } = await authorize(input.executionId, input.token);
   const { positionals, flags } = parseArgs(input.args);
-  const command = positionals[0] === 'requirement-context'
-      && positionals[1] === 'classification'
-      && positionals[2] === 'set'
-    ? positionals.slice(0, 3).join(' ')
-    : positionals.join(' ');
+  const command = positionals.join(' ');
 
   if (positionals[0] === 'help') {
     if (positionals.length > 2) throw new Error('help 最多接受一个主题');
@@ -3741,6 +3745,10 @@ export async function runAgentCommand(input: {
   }
   if (!command.startsWith(profile.namespace)) {
     throw new Error(`当前 execution 不允许命令：${command || '(empty)'}。请使用 loop-agent help`);
+  }
+
+  if (profile.draftType === 'direct') {
+    return runDirectCommand({ db, execution, command, flags });
   }
 
   let draft = ensureDraft(db, execution, profile, workKey);
@@ -4136,16 +4144,6 @@ export async function runAgentCommand(input: {
     });
     touchDraft(db, draft.draft_id);
     return accepted(`acceptance/${key} ${superseded ? 'superseded' : 'dismissed'}`);
-  }
-  if (command === 'requirement-context classification set') {
-    const classification = positionals[3];
-    if (!['feature', 'bug', 'tech', 'other'].includes(classification)) {
-      throw new Error('分类必须是 feature、bug、tech 或 other');
-    }
-    db.prepare('UPDATE requirement_context_drafts SET classification = ? WHERE draft_id = ?')
-      .run(classification, draft.draft_id);
-    touchDraft(db, draft.draft_id);
-    return accepted(`classification/${classification}`);
   }
   if (command === 'requirement-context constraint add') {
     upsertSimpleItem(

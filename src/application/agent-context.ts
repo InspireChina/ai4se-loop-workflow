@@ -697,7 +697,7 @@ export function renderAgentWorkingContextPack(snapshot: AgentContextSnapshot) {
   const requirement = authoritativeFacts.requirement;
   lines.push('', '## Requirement Input', '', `- Title: ${requirement.title}`);
   appendRequirementDescription(lines, requirement.description);
-  lines.push(`- Reported Type: ${requirement.itemType}`);
+  lines.push(`- Pipeline: ${requirement.itemType}`);
   if (requirement.priority) lines.push(`- Priority: ${requirement.priority}`);
   if (requirement.link) lines.push(`- Supporting Link: ${requirement.link}`);
 
