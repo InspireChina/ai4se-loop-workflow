@@ -252,7 +252,7 @@ function installLifecycleHandlers() {
 }
 
 function trayImage() {
-  return nativeImage.createFromDataURL('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAQAAAC1+jfqAAAAKElEQVR42mNgGAXUBv8ZGBgY/jMwMDAwMDEwMPxnYGBg+M/AwMAAAH9cBfQef4sAAAAASUVORK5CYII=');
+  return nativeImage.createFromPath(join(app.getAppPath(), 'assets', 'tray-icon.png'));
 }
 
 function showMainWindow() {
@@ -346,8 +346,7 @@ const hasLock = app.requestSingleInstanceLock();
 if (!hasLock) app.quit();
 else {
   app.on('second-instance', () => {
-    if (mainWindow?.isMinimized()) mainWindow.restore();
-    mainWindow?.focus();
+    showMainWindow();
   });
   app.whenReady().then(async () => {
     const root = runtimeRoot();

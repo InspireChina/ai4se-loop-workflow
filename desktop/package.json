@@ -27,6 +27,7 @@
       "main.mjs",
       "preload.cjs",
       "updater.mjs",
+      "assets/**/*",
       "package.json"
     ],
     "publish": [
