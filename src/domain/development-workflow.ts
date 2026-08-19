@@ -64,7 +64,7 @@ export const DEVELOPMENT_WORKFLOW: Record<DevelopmentPhase, DevelopmentWorkPacke
   },
   developer_verify: {
     title: 'DEVELOPER VERIFY',
-    objective: '以与风险相称的真实命令检查当前实现，绑定 Application 捕获的最新成功结果，并披露仍存在的风险。',
+    objective: '以与风险相称的真实命令检查当前实现，绑定当前 execution 捕获的最新成功结果，并披露仍存在的风险。',
     required: '至少一条有效成功检查；恢复修正周期中的检查必须来自当前 execution；没有尚未回答的运行信息请求。',
     prohibited: '不要手写 passed、exit code 或伪造 receipt；不要把开发者自检写成独立 Test Agent 已验收。发现实现缺口时回流 IMPLEMENT。',
     commands: [
@@ -89,9 +89,9 @@ export const DEVELOPMENT_WORKFLOW: Record<DevelopmentPhase, DevelopmentWorkPacke
   },
   commit: {
     title: 'COMMIT',
-    objective: '把当前交付单元的代码变化形成边界清晰的 Git 提交，并向 Application 确认提交步骤已经处理。',
-    required: '存在本单元代码变化时已经按仓库规范完成提交；没有代码变化时已经确认无需制造空提交。Application 只接收 Agent 的完成确认。',
-    prohibited: '不要混入已有的无关工作区改动，不要为了通过阶段制造空提交；Application 不校验 commit hash、HEAD、提交内容或工作区状态。',
+    objective: '把当前交付单元的代码变化形成边界清晰的 Git 提交，并显式确认提交步骤已经处理。',
+    required: '存在本单元代码变化时已经按仓库规范完成真实提交；没有代码变化时已经确认无需制造空提交。',
+    prohibited: '不要混入已有的无关工作区改动，不要为了通过阶段制造空提交，也不得用完成确认代替实际提交。',
     commands: [
       'implementation commit complete',
       'implementation commit reopen-verification',
@@ -102,7 +102,7 @@ export const DEVELOPMENT_WORKFLOW: Record<DevelopmentPhase, DevelopmentWorkPacke
       '有代码变化时，已经只提交当前交付单元相关文件，并使用符合仓库规范的提交说明。',
       '没有代码变化时，已经确认当前交付依赖现有实现，不制造空提交。',
       '已知无关工作区改动没有被加入本次提交。',
-      'Application 将信任本次确认，不会检查 commit hash、HEAD、提交内容或工作区状态。',
+      '有代码变化时，完成确认必须对应已经真实形成的相关提交。',
     ],
     submit: 'implementation commit complete',
   },

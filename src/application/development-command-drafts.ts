@@ -345,7 +345,7 @@ function developerVerificationErrors(current: DevelopmentState) {
   if (!checks.length) {
     errors.push(current.activeRecoveries.length
       ? '当前处于恢复修正周期，至少需要在本次 execution 重新执行并记录一条真实成功检查'
-      : '至少需要记录一条由 Application 捕获的真实成功检查');
+      : '至少需要记录一条当前 execution 捕获的真实成功检查');
   }
   const supersededChecks = checks.filter((item) =>
     current.capturedCommands.some((command) =>
@@ -570,7 +570,7 @@ function renderStatus(draft: DevelopmentDraftRow, current: DevelopmentState) {
       `- ${item.check_key}：${item.command} · ${item.summary}（execution=${item.source_execution_id.slice(0, 8)} receipt=${item.source_receipt_key}）`));
   }
   if (current.capturedCommands.length) {
-    lines.push('', 'Application 最近捕获的命令事实：', ...current.capturedCommands.slice(-8).map((item) =>
+    lines.push('', '当前 execution 最近捕获的命令事实：', ...current.capturedCommands.slice(-8).map((item) =>
       `- ${item.receiptKey} · ${item.passed ? '成功' : '失败'}：${item.command}${item.summary ? ` · ${item.summary}` : ''}`));
   }
   if (current.runtimeInputs.length) {
@@ -747,7 +747,7 @@ function terminalSubmit(
     '',
     '# NEXT',
     '',
-    '- Owner: Application',
+    '- Owner: Harness',
     `- Agent Action: ${action === 'complete' || action === 'fail' ? 'end_execution' : 'wait_for_human'}`,
   ].join('\n');
 }
@@ -882,7 +882,7 @@ const developmentCommandIndex = [
 export function developmentHelp(terminalActions: string[], topic?: string | null) {
   if (topic === 'evidence') {
     return [
-      'Agent 负责说明证据与交付语义的关系，Application 负责确认命令和 Git 事实确实发生。',
+      'Agent 负责说明证据与交付语义的关系，所选证据必须来自当前仓库中真实发生的命令或 Git 事实。',
       '',
       '验收证据：',
       '  implementation criterion satisfy --key <规格 criterion id> --evidence <可定位实现证据>',
@@ -892,7 +892,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
       '关键检查（DEVELOPER VERIFY）：',
       '  implementation check record --key <稳定 key> --receipt <status 中的 receipt> --summary <为什么所选检查能支持交付结论>',
       '  implementation check discard --key <稳定 key>',
-      '  在确认当前功能完整后，真实执行测试、构建或有意义的检查；随后重新执行 implementation status，从“Application 最近捕获的命令事实”选择明确成功的 receipt。Application 绑定该 receipt 的原始命令哈希；同一命令出现更新结果时必须选择最新结果。Git 历史、分支、HEAD 和未提交文件不使检查失效，也不参与完成校验。不要手抄 command、passed 或 exit code。',
+      '  在确认当前功能完整后，真实执行测试、构建或有意义的检查；随后重新执行 implementation status，从“当前 execution 最近捕获的命令事实”选择明确成功的 receipt。receipt 会绑定原始命令哈希；同一命令出现更新结果时必须选择最新结果。Git 历史、分支、HEAD 和未提交文件不使检查失效，也不参与完成校验。不要手抄 command、passed 或 exit code。',
       '',
       '可选披露：',
       '  implementation risk record --key <稳定 key> --content <仍存在但不否定当前交付的风险>',
@@ -920,7 +920,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
   }
   if (topic === 'commit') {
     return [
-      'COMMIT 是 DEVELOPER VERIFY 之后的独立提交步骤。Agent 负责执行，Application 只接收阶段完成确认。',
+      'COMMIT 是 DEVELOPER VERIFY 之后的独立提交步骤。Agent 负责真实执行，并在完成后提交阶段确认。',
       '',
       '有当前交付单元的代码变化时：',
       '  只暂存属于当前交付单元的文件，按仓库规范执行 Git commit，然后确认：',
@@ -932,7 +932,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
       '如果提交前发现实现或开发者验证需要修正：',
       '  implementation commit reopen-verification --reason <回流原因>',
       '',
-      'Application 不读取或校验 commit hash、HEAD、提交内容、暂存区、工作区状态，也不要求额外提交字段。阶段完成完全依赖 Agent 的显式确认。',
+      '阶段确认不要求额外提交字段；有代码变化时，确认必须对应已经真实形成的相关提交。',
     ];
   }
   if (topic === 'input') {
@@ -965,7 +965,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
       '  1. 每个规格 key 都有实现证据，并至少选择一条 Runner 已捕获的成功关键检查。',
       '  2. 没有未回答的运行信息。',
       '  3. Agent 已基于当前仓库重新检查功能完整性。',
-      '  4. COMMIT 阶段已经由 Agent 显式确认；Application 不校验 Git 历史、分支、HEAD、commit hash、提交内容或工作区状态。',
+      '  4. COMMIT 阶段已经由 Agent 显式确认；有代码变化时，确认对应真实完成的相关提交。',
       '',
       'validate 绑定当前草稿变更版本；验证后任何编辑或回流都会使它失效。',
       '代码审查或开发者验证发现实现问题时必须显式回流 IMPLEMENT，并重新经过 REVIEW。',
@@ -977,7 +977,7 @@ export function developmentHelp(terminalActions: string[], topic?: string | null
   }
   return [
     'Dev Agent 把当前交付单元落实为可由 Test Agent 独立验收的仓库状态。',
-    'Agent 只提交验收证据关系、关键检查选择和异常信息；Application 记录 Runner 命令事实并确定性生成完成摘要。',
+    'Agent 只提交验收证据关系、关键检查选择和异常信息；Harness 保留执行命令事实并生成完成摘要。',
     '',
     `阶段路径：${DEVELOPMENT_PHASE_SEQUENCE}`,
     '当前阶段的命令、readiness 和下一步以 implementation status 返回的工作包为准。',
@@ -1030,7 +1030,7 @@ export function runDevelopmentCommand(input: {
       '',
       '# NEXT',
       '',
-      '- Owner: Application',
+      '- Owner: Harness',
       '- Agent Action: end_execution',
     ].join('\n');
   }
@@ -1141,7 +1141,7 @@ export function runDevelopmentCommand(input: {
     if (!selected) {
       throw new Error(
         `当前 execution 没有可绑定的命令 receipt ${receiptKey}。`
-        + '请先执行 implementation status，使用“Application 最近捕获的命令事实”中列出的 receipt',
+        + '请先执行 implementation status，使用“当前 execution 最近捕获的命令事实”中列出的 receipt',
       );
     }
     if (!selected.commandHash) {

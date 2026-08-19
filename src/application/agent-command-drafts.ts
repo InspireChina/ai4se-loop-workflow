@@ -2101,7 +2101,7 @@ function terminalSubmit(
       '',
       '# NEXT',
       '',
-      '- Owner: Application',
+      '- Owner: Harness',
       '- Agent Action: end_execution',
     ].join('\n')
     : [
@@ -2109,7 +2109,7 @@ function terminalSubmit(
       '',
       '# NEXT',
       '',
-      '- Owner: Application',
+      '- Owner: Harness',
       '- Agent Action: end_execution',
       '- Resume Entry: `requirement-context status`',
     ].join('\n');
@@ -2678,7 +2678,7 @@ function submitDeliveryPlan(
     '',
     '# NEXT',
     '',
-    '- Owner: Application',
+    '- Owner: Harness',
     '- Agent Action: end_execution',
   ].join('\n');
 }
@@ -2933,7 +2933,7 @@ function deliveryPlanHelp(terminalActions: string[], topic?: string | null) {
   }
   if (topic === 'source') {
     return [
-      '规划输入由 Application 在草稿创建时冻结。Agent 不能创建或改写来源，只能把每项关联到真正承接它的交付单元。',
+      '规划输入已在草稿创建时由 Harness 冻结。Agent 不能创建或改写来源，只能把每项关联到真正承接它的交付单元。',
       '',
       '  delivery-plan unit source add --key <单元key> --source <规划输入key>',
       '  delivery-plan unit source remove --key <单元key> --source <规划输入key>',
@@ -3029,11 +3029,11 @@ function deliveryPlanHelp(terminalActions: string[], topic?: string | null) {
 const LONG_TEXT_FILE_HELP = [
   '长文本参数：',
   '  长文本必须写入 $LOOP_AGENT_TMP_DIR 指向的工作区 .tmp/agent-<execution-id> 目录，再使用对应的 --*-file 参数读取 UTF-8 文件；不要自行拼接路径。',
-  '  本次 Loop Run 结束后 Harness 会统一清理整个 Run 临时目录；不要把临时文件写入源码目录或提交到 Git。',
+  '  当前 execution 结束后 Harness 会清理临时目录；不要把临时文件写入源码目录或提交到 Git。',
 ];
 
 function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?: string | null) {
-  const appRoot = process.env.LOOP_APP_ROOT?.trim() || '<Loop App Root>';
+  const appRoot = process.env.LOOP_APP_ROOT?.trim() || '<Harness Command Root>';
   const command = loopAgentCommandPrefix(appRoot);
   if (profile.draftType === 'direct') {
     if (topic && topic !== 'context') throw new Error('Direct help 只支持 context 主题');
@@ -3263,7 +3263,7 @@ function runDeliveryPlanCommand(input: {
       '',
       '# NEXT',
       '',
-      '- Owner: Application',
+      '- Owner: Harness',
       '- Agent Action: end_execution',
     ].join('\n');
   }
@@ -3796,7 +3796,7 @@ export async function runAgentCommand(input: {
       '',
       '# NEXT',
       '',
-      '- Owner: Application',
+      '- Owner: Harness',
       '- Agent Action: end_execution',
     ].join('\n');
   }

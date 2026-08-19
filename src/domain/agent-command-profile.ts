@@ -309,7 +309,7 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
     '',
     '**编辑与提交规则：**',
     '',
-    '- 命令失败时，根据 Application 返回的错误修正后自行重试；不要因为一次校验失败就结束工作。',
+    '- 命令失败时，根据返回的错误修正后自行重试；不要因为一次校验失败就结束工作。',
     ...(['requirement-context', 'delivery-plan', 'delivery-analysis', 'implementation', 'verification', 'review', 'idea-context', 'business-design', 'requirement-spec', 'spec-review'].includes(profile.namespace)
       ? [`- ${profile.namespace} 命令统一返回 \`COMMAND RESULT\`；继续当前阶段时读取 \`NEXT\`，阶段切换时读取 \`NEXT WORK PACKET\`。`]
       : []),

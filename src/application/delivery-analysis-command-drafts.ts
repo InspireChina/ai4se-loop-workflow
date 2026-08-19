@@ -961,7 +961,7 @@ function submit(
     '',
     '# NEXT',
     '',
-    '- Owner: Application',
+    '- Owner: Harness',
     `- Agent Action: ${action === 'complete' ? 'end_execution' : 'wait_for_human'}`,
   ].join('\n');
 }
@@ -1184,7 +1184,7 @@ export function deliveryAnalysisHelp(terminalActions: string[], topic?: string |
       '可选验证关注点：',
       '  delivery-analysis verification-focus upsert --key <key> --expected <重点验证结果> --oracle <判定方法>',
       '  delivery-analysis verification-focus remove --key <key>',
-      '  unit-acceptance 是 Application 自动注入的交付单元验收 key，属于系统保留值，不能覆盖。',
+      '  unit-acceptance 是 Harness 注入的交付单元验收 key，属于保留值，不能覆盖。',
     ];
   }
   if (topic === 'finish') {
@@ -1287,7 +1287,7 @@ export function runDeliveryAnalysisCommand(input: {
       '',
       '# NEXT',
       '',
-      '- Owner: Application',
+      '- Owner: Harness',
       '- Agent Action: end_execution',
     ].join('\n');
   }

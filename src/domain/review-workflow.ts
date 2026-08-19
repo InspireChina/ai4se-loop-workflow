@@ -79,7 +79,7 @@ export const REVIEW_WORKFLOW: Record<ReviewPhase, ReviewWorkPacket> = {
     commands: ['review validate', 'review finalize reopen-report', 'review finalize reopen-forward-units', 'help finish'],
     reviewBeforeSubmit: [
       '无缺口分支只提交 report_ready；缺口分支只提交 closure_gap 与完整前向单元。',
-      'Application 可以直接落库新增单元并派发 Analysis，不需要 Story Splitter。',
+      '提交后由 Harness 创建新增单元并派发 Analysis，不需要 Story Splitter。',
     ],
     submit: 'review complete',
   },

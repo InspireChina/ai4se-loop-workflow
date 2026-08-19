@@ -832,7 +832,7 @@ test('inherits a persisted clarification draft after resume and forces status ag
     await command(first.executionId, first.token!, [
       'requirement-context', 'request-clarification',
     ]),
-    /Outcome: waiting_for_human.*Owner: Application.*Agent Action: end_execution.*Resume Entry: `requirement-context status`/s,
+    /Outcome: waiting_for_human.*Owner: Harness.*Agent Action: end_execution.*Resume Entry: `requirement-context status`/s,
   );
 
   const questionResult = await readAgentCommandSubmission(first.executionId);
@@ -1264,7 +1264,7 @@ test('story splitter help explains business units, source coverage, dependencies
 
   const finishHelp = await command(active.executionId, active.token!, ['help', 'finish']);
   assert.match(finishHelp, /\$LOOP_AGENT_TMP_DIR/);
-  assert.match(finishHelp, /Loop Run 结束后 Harness 会统一清理/);
+  assert.match(finishHelp, /当前 execution 结束后 Harness 会清理临时目录/);
   assert.match(finishHelp, /1 至 50 个有效交付单元/);
   assert.match(finishHelp, /交付规划 Agent 不向用户提问/);
   assert.match(finishHelp, /PLANNING BASIS.*DELIVERY UNITS.*COVERAGE & ORDER.*FINALIZE/s);

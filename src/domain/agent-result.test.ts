@@ -381,7 +381,7 @@ test('keeps feedback rewind decisions out of the Review Agent contract', () => {
   }));
   assert.throws(
     () => assertAgentResultRoleContract(result, 'review-agent'),
-    /Feedback Agent.*Application/,
+    /Feedback Agent.*Harness/,
   );
 });
 

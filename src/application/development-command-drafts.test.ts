@@ -194,7 +194,7 @@ async function recordCompletedImplementation(executionId: string, token: string)
   await command(executionId, token, ['implementation', 'validate']);
 }
 
-test('development help exposes judgments and a trusted commit confirmation phase', () => {
+test('development help exposes judgments and a real commit confirmation phase', () => {
   const terminalActions = [
     'implementation complete',
     'implementation request-input',
@@ -202,7 +202,7 @@ test('development help exposes judgments and a trusted commit confirmation phase
   ];
   const help = developmentHelp(terminalActions).join('\n');
   assert.match(help, /help evidence/);
-  assert.match(help, /Application 记录 Runner 命令事实/);
+  assert.match(help, /Harness 保留执行命令事实/);
   assert.match(help, /IMPLEMENT → REVIEW → DEVELOPER VERIFY → COMMIT → FINALIZE/);
   assert.match(help, /implementation review complete/);
   assert.match(help, /implementation commit complete/);
@@ -217,7 +217,7 @@ test('development help exposes judgments and a trusted commit confirmation phase
 
   const evidence = developmentHelp(terminalActions, 'evidence').join('\n');
   assert.match(evidence, /选择明确成功的 receipt/);
-  assert.match(evidence, /绑定该 receipt 的原始命令哈希/);
+  assert.match(evidence, /receipt 会绑定原始命令哈希/);
   assert.match(evidence, /Git 历史、分支、HEAD 和未提交文件不使检查失效/);
   assert.match(evidence, /不要手抄 command、passed 或 exit code/);
   assert.match(evidence, /复用系统给出的 RECOVERY id/);
@@ -234,12 +234,12 @@ test('development help exposes judgments and a trusted commit confirmation phase
   const commit = developmentHelp(terminalActions, 'commit').join('\n');
   assert.match(commit, /implementation commit complete/);
   assert.match(commit, /不制造空提交/);
-  assert.match(commit, /不读取或校验 commit hash、HEAD、提交内容、暂存区、工作区状态/);
+  assert.match(commit, /有代码变化时，确认必须对应已经真实形成的相关提交/);
 
   const finish = developmentHelp(terminalActions, 'finish').join('\n');
   assert.match(finish, /基于当前仓库重新检查功能完整性/);
   assert.match(finish, /COMMIT 阶段已经由 Agent 显式确认/);
-  assert.match(finish, /不校验 Git 历史、分支、HEAD、commit hash、提交内容或工作区状态/);
+  assert.match(finish, /确认对应真实完成的相关提交/);
 
   assert.throws(
     () => developmentHelp(terminalActions, 'unknown'),
@@ -247,7 +247,7 @@ test('development help exposes judgments and a trusted commit confirmation phase
   );
 });
 
-test('development agent confirms the commit phase without Application Git validation', async () => {
+test('development agent confirms the commit phase only after a real scoped commit', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
@@ -371,7 +371,7 @@ test('development agent confirms the commit phase without Application Git valida
     ['implementation', 'verify', 'complete'],
   );
   assert.match(commitPacket, /COMMIT · commit/);
-  assert.match(commitPacket, /Application 将信任本次确认/);
+  assert.match(commitPacket, /完成确认必须对应已经真实形成的相关提交/);
   assert.match(commitPacket, /COMMIT TRACEABILITY/);
   assert.match(commitPacket, /Requirement Card ID: `REQ-CARD-42`/);
   await assert.rejects(

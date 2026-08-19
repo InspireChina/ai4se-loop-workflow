@@ -55,6 +55,14 @@ test('persists normalized business execution events as ordered execution receipt
   assert.match(source, /本地执行证据写入失败，将自动重试/);
 });
 
+test('core contract constrains flow writes without prohibiting target database operations', () => {
+  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+
+  assert.match(source, /只使用下方声明的上下文与草稿命令读取和提交流程数据。/);
+  assert.doesNotMatch(source, /不要直接写数据库/);
+  assert.doesNotMatch(source, /`Loop App Root:/);
+});
+
 test('records a Dev code commit only for a completed result that declares changed files', () => {
   assert.equal(shouldRecordDevCodeCommit('dev-agent', {
     outcome: 'completed',

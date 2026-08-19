@@ -111,7 +111,7 @@ test('ships rigorous V13 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /在已关闭的业务和核心技术边界内行使工程自主权/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /可以在当前交付范围内进行必要重构/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /开发者自验证.*不能代替验证 Agent.*最终验收/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /报告分析契约冲突.*由 Application 决定后续路径/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /报告分析契约冲突.*提交冲突后由 Harness 管理后续路径/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /不得静默改变承诺、直接向用户提问或自行选择 goto、回退阶段/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /有代码变化时按目标仓库规范形成边界清晰、可审查、可追溯的独立提交/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /不因分支、HEAD、其他 Commit 或无关未提交变化拒绝工作/);
@@ -129,12 +129,13 @@ test('ships rigorous V13 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /API 场景.*可以独立形成实现失败、规格问题或环境阻塞的有效反例/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /浏览器、账号、设备条件或测试数据等执行资源不可获得时.*验证协助/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /用户可以补充缺失条件，也可以代为执行并提供实际观察/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /系统阻塞只用于 Runner、CLI、浏览器控制或 Application 自身故障/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /系统阻塞只用于执行器、命令协议或浏览器控制故障/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /凡用于判定.*都必须由.*前端/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /在执行待测业务行为之前，先冻结由 Oracle 推导的业务主张与预期/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /每个活动场景最终都必须有通过、失败或阻塞结论/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /目标是寻找反例，而不是证明开发者声明/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /不得修改目标仓库中的任何持久文件/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /可以准备和清理验证所需的隔离测试数据/);
+  assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /数据库/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /Dev Agent 的完成声明、自检、开发记录、变更说明、Commit message、恢复声明及其选择的测试都不能作为 Oracle 或通过依据/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /读取.*开发结果/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /verification (?:status|pass|fail|block|request-input)/);
@@ -151,7 +152,9 @@ test('ships rigorous V13 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /严格区分结卡缺口与残余风险/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /标准章节只是表达模板，不是角色目标/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /不得创造新的交付事实/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /交由 Application 决定如何向前追加验证或修订/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /提交后由 Harness 管理向前追加验证或修订/);
+  assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /流程数据库|Loop Runner|桌面服务|Application/);
+  assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /数据库|Application/);
   assert.match(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /若事实链不闭合，必须声明结卡缺口/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['review-agent'].prompt, /review (?:status|complete|request-input|section|evidence)/);
   assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /Triage/);

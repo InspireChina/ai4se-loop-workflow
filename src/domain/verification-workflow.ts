@@ -68,7 +68,7 @@ export const VERIFICATION_WORKFLOW: Record<VerificationPhase, VerificationWorkPa
     commands: ['verification validate', 'verification finalize reopen-evidence-review', 'help finish'],
     reviewBeforeSubmit: [
       '所有活动场景有结果且证据复核已经完成。',
-      'Application 可从结果确定性推导通过、回流或验证协助。',
+      '结果足以让 Harness 确定性推导通过、回流或验证协助。',
       '用户可见报告表达业务场景、Expected、Actual 与证据，不泄露内部稳定 key。',
     ],
     submit: 'verification complete',

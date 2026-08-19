@@ -649,7 +649,7 @@ function terminalSubmit(
   if (action === 'request-input') {
     return [
       renderCommandResult({ command: 'verification request-input', outcome: 'waiting_for_human' }),
-      '', '# NEXT', '', '- Owner: Application', '- Agent Action: wait_for_human',
+      '', '# NEXT', '', '- Owner: Harness', '- Agent Action: wait_for_human',
     ].join('\n');
   }
   const conclusion = deriveConclusion(current).action;
@@ -658,7 +658,7 @@ function terminalSubmit(
       command: 'verification complete',
       outcome: conclusion === 'pass' ? 'completed' : conclusion === 'fail' ? 'failed' : 'waiting_for_human',
     }),
-    '', '# NEXT', '', '- Owner: Application', `- Agent Action: ${conclusion === 'block' ? 'wait_for_human' : 'end_execution'}`,
+    '', '# NEXT', '', '- Owner: Harness', `- Agent Action: ${conclusion === 'block' ? 'wait_for_human' : 'end_execution'}`,
   ].join('\n');
 }
 
@@ -684,7 +684,7 @@ export function verificationHelp(
       '测试执行阶段：',
       '  verification result record --key <场景 key> --status <passed|failed|blocked> --evidence <独立证据> [--kind <implementation|specification|environment|inconclusive>] [--actual <实际行为或阻塞状态>]',
       '    按计划记录实际观察。failed 使用 implementation/specification；blocked 使用 environment/inconclusive。',
-      '    blocked 只报告当前无法完成的验证事实；Application 会自动请求用户补充条件或代为验证，不会把它当作系统故障。',
+      '    blocked 只报告当前无法完成的验证事实；Harness 会请求用户补充条件或代为验证，不会把它当作系统故障。',
       '  verification execute complete',
       '    全部活动场景都有独立结果后进入 EVIDENCE REVIEW。',
     ];
@@ -711,7 +711,7 @@ export function verificationHelp(
       '  verification validate',
       '  verification finalize reopen-evidence-review --reason <最终一致性问题>',
       '  verification complete',
-      '    validate 绑定当前草稿版本；之后无编辑或回流时，由 Application 根据结果确定通过、回流或验证协助。',
+      '    validate 绑定当前草稿版本；之后无编辑或回流时，由 Harness 根据结果确定通过、回流或验证协助。',
     ];
   }
   if (topic) {

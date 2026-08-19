@@ -579,7 +579,7 @@ test('Review help exposes only the new minimal command protocol', async () => {
     started.token,
     ['help', 'gap'],
   );
-  assert.match(gapHelp, /Application 会把缺口前向追加为新交付单元/);
+  assert.match(gapHelp, /Harness 会把缺口前向追加为新交付单元/);
   const assessmentHelp = await command(started.executionId, started.token, ['help', 'assessment']);
   assert.match(assessmentHelp, /review assessment complete/);
   const forwardHelp = await command(started.executionId, started.token, ['help', 'forward']);

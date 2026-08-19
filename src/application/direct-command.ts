@@ -90,7 +90,7 @@ export function runDirectCommand(input: {
         WHERE execution_id = ?
       `).run(execution.execution_id);
     })();
-    return '# DIRECT\n\n- Step: submit\n- Outcome: submitted\n- Owner: Application\n- Agent Action: end_execution';
+    return '# DIRECT\n\n- Step: submit\n- Outcome: submitted\n- Owner: Harness\n- Agent Action: end_execution';
   }
 
   throw new Error('Direct Pipeline 只支持 direct run 和 direct submit');

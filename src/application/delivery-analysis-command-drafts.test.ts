@@ -213,7 +213,7 @@ test('delivery analysis help separates proposal, resolution, and answer review i
 
   const contractHelp = await command(active.executionId, active.token!, ['help', 'contract']);
   assert.match(contractHelp, /共同依赖的冻结上游事实/);
-  assert.match(contractHelp, /unit-acceptance 是 Application 自动注入/);
+  assert.match(contractHelp, /unit-acceptance 是 Harness 注入/);
 
   const finishHelp = await command(active.executionId, active.token!, ['help', 'finish']);
   assert.match(finishHelp, /AS-IS & IMPACT SCAN → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → ANSWER REVIEW → DELIVERY CONTRACT → FINALIZE/);

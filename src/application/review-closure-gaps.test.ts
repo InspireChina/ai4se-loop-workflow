@@ -81,7 +81,7 @@ function closureGapResult() {
   }));
 }
 
-test('Review forward delivery units reject cyclic dependencies at the Application boundary', async () => {
+test('Review forward delivery units reject cyclic dependencies at the Harness boundary', async () => {
   const { taskId } = await reviewReadyRequirement('cyclic-units');
   const result = closureGapResult();
   const units = [{

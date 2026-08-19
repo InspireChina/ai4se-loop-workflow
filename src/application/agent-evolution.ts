@@ -61,7 +61,7 @@ export function buildEvolutionPrompt(evidence: EvolutionEvidence) {
     `每次启动必须先执行：${command} evolution status`,
     '之后逐项设置摘要、以稳定 observation key 增删观察；命令失败时根据完整错误自行修正并重试。',
     `完成时执行：${command} evolution complete`,
-    '只有 complete 会由 Application 生成结构化结果；普通最终文本和手写 JSON 都不推进流程。',
+    '只有 complete 会生成结构化结果；普通最终文本和手写 JSON 都不推进流程。',
     '',
     '执行证据：',
     JSON.stringify(evidence, null, 2),

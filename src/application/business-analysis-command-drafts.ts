@@ -488,7 +488,7 @@ function terminal(
 ) {
   const { db, draft, execution, command } = input;
   if (draft.terminal_execution_id === execution.execution_id && draft.terminal_action === action) {
-    return [commandResult(command, 'already_submitted'), '', '# NEXT', '', '- Owner: Application', '- Agent Action: end_execution'].join('\n');
+    return [commandResult(command, 'already_submitted'), '', '# NEXT', '', '- Owner: Harness', '- Agent Action: end_execution'].join('\n');
   }
   const result = agentResultSchema.parse(resultInput);
   db.transaction(() => {
@@ -504,7 +504,7 @@ function terminal(
       WHERE execution_id = ? AND status = 'running'
     `).run(JSON.stringify(result), execution.execution_id);
   })();
-  return [commandResult(command, waiting ? 'clarification_requested' : 'completed'), '', '# NEXT', '', '- Owner: Application', '- Agent Action: end_execution'].join('\n');
+  return [commandResult(command, waiting ? 'clarification_requested' : 'completed'), '', '# NEXT', '', '- Owner: Harness', '- Agent Action: end_execution'].join('\n');
 }
 
 function returnRevision(input: Input, stage: 'business_design' | 'specification' | 'review', forcedTarget?: 'intent') {

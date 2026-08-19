@@ -1173,7 +1173,7 @@ function terminalSubmit(
   })();
   return [
     renderCommandResult('review complete', activeGaps.length ? 'forward_work_submitted' : 'completed'),
-    '', '# NEXT', '', '- Owner: Application', '- Agent Action: end_execution',
+    '', '# NEXT', '', '- Owner: Harness', '- Agent Action: end_execution',
   ].join('\n');
 }
 
@@ -1190,14 +1190,14 @@ export function reviewHelp(terminalActions: string[], topic: string | null = nul
   const gaps = [
     '结卡缺口（仅普通结卡）：',
     '  review gap upsert --key <稳定 key> --subject <status 列出的 ref> --kind <missing_evidence|fact_conflict|unresolved_obligation> --reason <为何不能结卡> --boundary <已经确认与尚未确认的边界>',
-    '    记录事实链无法闭合的原因，不选择 Agent 或阶段；Application 会把缺口前向追加为新交付单元。',
+    '    记录事实链无法闭合的原因，不选择 Agent 或阶段；Harness 会把缺口前向追加为新交付单元。',
     '  review gap resolve --key <稳定 key> --reason <为何缺口已消失>',
     '    关闭草稿中的活动缺口；随后必须为对应 subject 保存对账。',
   ];
   const report = [
     '结卡报告：',
     `  review report section-upsert --kind <${SECTION_KINDS.join('|')}> --content <Markdown 正文>`,
-    '    渐进保存有事实内容的章节。标题由 Application 生成；至少需要 outcome、scope、implementation、verification、risks。',
+    '    渐进保存有事实内容的章节。标题由 Harness 生成；至少需要 outcome、scope、implementation、verification、risks。',
     '  review report section-remove --kind <章节类型>',
     '  review report reopen-assessment --reason <原因>',
     '  review report complete',
@@ -1217,7 +1217,7 @@ export function reviewHelp(terminalActions: string[], topic: string | null = nul
     '  review forward-unit dependency-remove --key <单元 key> --unit <前置单元 key>',
     '  review forward-units reopen-assessment --reason <原因>',
     '  review forward-units complete',
-    '    每个活动缺口必须恰好覆盖一次；Application 直接创建这些单元并派发 Analysis，不经过 Story Splitter。',
+    '    每个活动缺口必须恰好覆盖一次；提交后由 Harness 创建这些单元并派发 Analysis，不经过 Story Splitter。',
   ];
   const finish = [
     '最终提交：',

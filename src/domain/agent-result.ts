@@ -361,7 +361,7 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
     }
     if (result.outcome !== 'completed') throw new Error('Review Agent 必须以 completed 结束事实对账');
     if (result.rewindTo || result.rewindDeliveryUnit) {
-      throw new Error('Review Agent 不得返回回退决策；反馈判断由 Feedback Agent 负责，Application 只执行前向路由');
+      throw new Error('Review Agent 不得返回回退决策；反馈判断由 Feedback Agent 负责，后续前向路由由 Harness 管理');
     }
     const closureGaps = result.closureGaps || [];
     const closureGapUnits = result.closureGapUnits || [];
@@ -397,7 +397,7 @@ export function assertAgentResultRoleContract(result: AgentResult, agent: string
       if (hasDependencyCycle(closureGapUnits)) throw new Error('closure gap unit 依赖不能形成环');
       return;
     }
-    throw new Error('Review Agent 只能返回 verdict=report_ready 或 closure_gap；反馈判断由 Feedback Agent 负责，Application 执行路由');
+    throw new Error('Review Agent 只能返回 verdict=report_ready 或 closure_gap；反馈判断由 Feedback Agent 负责，后续路由由 Harness 管理');
   }
   if (result.closureGaps?.length || result.closureGapUnits?.length) throw new Error('只有 Review Agent 可以返回 closure gaps');
   if (agent === 'feedback-agent' && result.runtimeInputs.length) {

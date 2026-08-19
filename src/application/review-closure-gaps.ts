@@ -208,7 +208,7 @@ export async function forwardReviewClosureGaps(input: {
           const marked = db.prepare(`
             UPDATE review_gaps
             SET status = 'forwarded', forwarded_story_index = ?,
-                resolution = '已由 Application 转为前向交付单元'
+                resolution = '已由 Harness 转为前向交付单元'
             WHERE draft_id = ? AND gap_key = ? AND subject_ref = ?
               AND gap_kind = ? AND reason = ? AND boundary = ? AND status = 'active'
           `).run(
