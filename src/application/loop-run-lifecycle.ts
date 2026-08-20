@@ -4,7 +4,13 @@ import { join } from 'node:path';
 import { appendLoopRunLog, beginRun, endRun, getRunStatus } from './tasks';
 import { databaseConnection, paths } from '../infrastructure/database';
 import { startAgentRun } from '../infrastructure/agent-runner';
-import { inspectProcessCommand, inspectProcessIdentity, terminateProcessTree, waitForProcessIdentity } from '../infrastructure/process-tree';
+import {
+  inspectProcessCommand,
+  inspectProcessIdentity,
+  processIdentityMatches,
+  terminateProcessTree,
+  waitForProcessIdentity,
+} from '../infrastructure/process-tree';
 import { isProcessAlive } from '../infrastructure/run-process';
 import { RuntimeEventHub } from '../infrastructure/runtime-event-hub';
 
@@ -217,17 +223,12 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     const residual: Array<{ kind: string; pid: number }> = [];
     for (const row of rows) {
       if (!includeUiServer && row.process_kind === 'ui-server') continue;
-      if (process.platform === 'win32') {
-        if (isProcessAlive(row.pid)) residual.push({ kind: row.process_kind, pid: row.pid });
-        else db.prepare(`UPDATE loop_managed_processes SET status = 'exited', exited_at = CURRENT_TIMESTAMP WHERE process_id = ?`).run(row.process_id);
-        continue;
-      }
       const identity = inspectProcessIdentity(row.pid);
       if (!identity && isProcessAlive(row.pid)) {
         residual.push({ kind: row.process_kind, pid: row.pid });
         continue;
       }
-      if (!identity || identity.startMarker !== row.process_start_marker) {
+      if (!identity || !processIdentityMatches(identity, row.process_start_marker)) {
         db.prepare(`UPDATE loop_managed_processes SET status = 'exited', exited_at = CURRENT_TIMESTAMP WHERE pid = ? AND process_start_marker = ?`)
           .run(row.pid, row.process_start_marker);
         continue;
@@ -247,22 +248,12 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     `).all(token) as ManagedProcessRow[];
     const residual: Array<{ kind: string; pid: number }> = [];
     for (const row of rows) {
-      if (process.platform === 'win32') {
-        if (!isProcessAlive(row.pid)) {
-          db.prepare(`UPDATE loop_managed_processes SET status = 'exited', exited_at = CURRENT_TIMESTAMP WHERE process_id = ?`).run(row.process_id);
-        } else if (row.pid === process.pid || !await terminateProcessTree(row.pid, 10_000)) {
-          residual.push({ kind: row.process_kind, pid: row.pid });
-        } else {
-          db.prepare(`UPDATE loop_managed_processes SET status = 'exited', exited_at = CURRENT_TIMESTAMP WHERE process_id = ?`).run(row.process_id);
-        }
-        continue;
-      }
       const identity = inspectProcessIdentity(row.pid);
       if (!identity && isProcessAlive(row.pid)) {
         residual.push({ kind: `${row.process_kind}-unverified`, pid: row.pid });
         continue;
       }
-      if (!identity || identity.startMarker !== row.process_start_marker) {
+      if (!identity || !processIdentityMatches(identity, row.process_start_marker)) {
         db.prepare(`UPDATE loop_managed_processes SET status = 'exited', exited_at = CURRENT_TIMESTAMP WHERE process_id = ?`)
           .run(row.process_id);
         continue;

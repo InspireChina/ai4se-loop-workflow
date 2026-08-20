@@ -1,11 +1,28 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { inspectProcessIdentity, waitForProcessIdentity, windowsTaskkillCommand } from './process-tree';
+import {
+  inspectProcessIdentity,
+  processIdentityCommand,
+  processIdentityMatches,
+  waitForProcessIdentity,
+  windowsTaskkillCommand,
+} from './process-tree';
 
-test('does not require PowerShell process identity during Windows startup', () => {
-  const source = String(inspectProcessIdentity);
-  assert.match(source, /windows-pid/);
-  assert.doesNotMatch(source, /powershell|Get-Process|Get-CimInstance/i);
+test('uses the Windows process start time as the stable process identity', () => {
+  const lookup = processIdentityCommand(4321, 'win32');
+
+  assert.equal(lookup.command, 'powershell.exe');
+  assert.match(lookup.args.at(-1) || '', /Get-Process -Id 4321/);
+  assert.match(lookup.args.at(-1) || '', /StartTime\.ToUniversalTime\(\)\.ToString\('o'\)/);
+  assert.doesNotMatch(lookup.args.at(-1) || '', /Get-CimInstance/);
+});
+
+test('distinguishes reused Windows PIDs by their process start time', () => {
+  const identity = { pid: 4321, startMarker: '2026-08-21T10:11:12.1234567Z' };
+
+  assert.equal(processIdentityMatches(identity, identity.startMarker), true);
+  assert.equal(processIdentityMatches(identity, '2026-08-20T03:24:41.0000000Z'), false);
+  assert.equal(processIdentityMatches(identity, 'windows-pid:4321'), false);
 });
 
 test('uses the v0.1.4-compatible Windows whole-tree cleanup command', () => {

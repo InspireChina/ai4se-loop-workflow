@@ -1,6 +1,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 
 export type ProcessIdentity = { pid: number; startMarker: string };
+type ProcessIdentityPlatform = NodeJS.Platform;
 type WaitForProcessIdentityOptions = {
   timeoutMs?: number;
   pollIntervalMs?: number;
@@ -16,11 +17,32 @@ function commandOutput(command: string, args: string[]) {
   }
 }
 
+export function processIdentityCommand(pid: number, platform: ProcessIdentityPlatform = process.platform) {
+  return platform === 'win32'
+    ? {
+      command: 'powershell.exe',
+      args: [
+        '-NoProfile', '-NonInteractive', '-Command',
+        // Get-Process exposes a newly spawned process sooner than the eventually consistent CIM view.
+        `$target = Get-Process -Id ${pid} -ErrorAction Stop; $target.StartTime.ToUniversalTime().ToString('o')`,
+      ],
+    }
+    : { command: 'ps', args: ['-o', 'lstart=', '-p', String(pid)] };
+}
+
 export function inspectProcessIdentity(pid: number): ProcessIdentity | null {
   if (!Number.isInteger(pid) || pid <= 0) return null;
-  if (process.platform === 'win32') return processExists(pid) ? { pid, startMarker: `windows-pid:${pid}` } : null;
-  const startMarker = commandOutput('ps', ['-o', 'lstart=', '-p', String(pid)]).replace(/\s+/g, ' ');
+  const lookup = processIdentityCommand(pid);
+  const output = commandOutput(lookup.command, lookup.args);
+  const startMarker = process.platform === 'win32' ? output : output.replace(/\s+/g, ' ');
   return startMarker ? { pid, startMarker } : null;
+}
+
+export function processIdentityMatches(
+  identity: ProcessIdentity,
+  expectedStartMarker: string,
+) {
+  return identity.startMarker === expectedStartMarker;
 }
 
 function processExists(pid: number) {
@@ -104,6 +126,11 @@ export function windowsTaskkillCommand(pid: number) {
 export async function terminateProcessTree(pid: number, timeoutMs = 5_000, expectedStartMarker?: string) {
   if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return true;
   if (process.platform === 'win32') {
+    if (expectedStartMarker) {
+      const identity = inspectProcessIdentity(pid);
+      if (!identity) return !processExists(pid);
+      if (!processIdentityMatches(identity, expectedStartMarker)) return true;
+    }
     const launch = windowsTaskkillCommand(pid);
     await new Promise<void>((resolve) => {
       const killer = spawn(launch.command, launch.args, {
@@ -127,7 +154,7 @@ export async function terminateProcessTree(pid: number, timeoutMs = 5_000, expec
       return (error as NodeJS.ErrnoException).code === 'ESRCH';
     }
   }
-  if (expectedStartMarker && identity.startMarker !== expectedStartMarker) return true;
+  if (expectedStartMarker && !processIdentityMatches(identity, expectedStartMarker)) return true;
   const tree = processTreePids(pid);
   if (!tree) return false;
   for (const processId of tree) {
