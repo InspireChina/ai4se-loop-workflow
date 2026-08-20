@@ -51,7 +51,7 @@ export async function createTaskAction(formData: FormData) {
     priority,
     metadata,
   });
-  redirect(`/tasks/${taskId}`);
+  return taskId;
 }
 
 function scheduledRequirementInput(formData: FormData) {

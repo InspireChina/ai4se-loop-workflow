@@ -722,7 +722,7 @@ export async function createTask(input: unknown) {
     db.exec('COMMIT');
     await syncTaskFiles(db, task.task_id);
     await publishRuntimeInvalidation('dispatch.invalidated', dispatchRevision, task.task_id);
-    refreshPages('/', '/tasks');
+    refreshPages('/', '/tasks', `/tasks/${task.task_id}`);
     return task.task_id;
   } catch (error) {
     db.exec('ROLLBACK');
