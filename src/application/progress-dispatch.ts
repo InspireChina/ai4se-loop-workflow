@@ -6,7 +6,11 @@ import { releaseExecutionResourceClaimsInDb } from './resource-claims';
 import { laneForAgent, markTaskLaneRunningInDb, settleTaskLaneInDb, setTaskLaneStateInDb, type TaskLaneKind } from './task-lanes';
 import { planDispatchInDb } from './dispatch-planner';
 import type { DelegationEnvelope, Task } from './tasks';
-import type { ExecutionAttempt } from './executions';
+import {
+  EXECUTION_FAILURE_MAX_RETRIES,
+  recordExecutionFailureActivityInDb,
+  type ExecutionAttempt,
+} from './executions';
 
 export type DispatchWaitReason =
   | 'active-execution'
@@ -485,16 +489,28 @@ async function preparationFailed(input: { reservationId: string; error: string }
       WHERE execution_id = ? AND dispatch_reservation_json IS NOT NULL
     `).get(input.reservationId) as (ExecutionAttempt & { dispatch_reservation_json: string }) | undefined;
     if (!attempt || attempt.status !== 'planned') return { kind: 'ignored' } as const;
-    const blocked = attempt.attempt >= 3;
+    const blocked = attempt.attempt > EXECUTION_FAILURE_MAX_RETRIES;
     const reservation = JSON.parse(attempt.dispatch_reservation_json) as StoredReservation;
     db.prepare(`
       UPDATE execution_attempts
-      SET status = ?, last_error = ?, finished_at = CURRENT_TIMESTAMP,
+      SET status = ?, last_error = ?, failure_kind = 'agent-preparation', finished_at = CURRENT_TIMESTAMP,
           dispatch_retry_consumed = 1,
           heartbeat_at = CURRENT_TIMESTAMP, dispatch_execution_exited_at = CURRENT_TIMESTAMP,
           dispatch_settled_at = CURRENT_TIMESTAMP
       WHERE execution_id = ? AND status = 'planned'
     `).run(blocked ? 'system_blocked' : 'retryable_failed', input.error, attempt.execution_id);
+    recordExecutionFailureActivityInDb(db, {
+      executionId: attempt.execution_id,
+      taskId: attempt.task_id,
+      lane: attempt.lane,
+      agent: attempt.agent,
+      storyIndex: attempt.story_index,
+      failureKind: 'agent-preparation',
+      failureAttempt: attempt.attempt,
+      maxRetries: EXECUTION_FAILURE_MAX_RETRIES,
+      willRetry: !blocked,
+      error: input.error,
+    });
     releaseExecutionResourceClaimsInDb(db, attempt.execution_id);
     releaseAcquiredReservationClaims(db, reservation);
     if (attempt.lane && attempt.lane !== 'control') {

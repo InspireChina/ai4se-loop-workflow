@@ -20,7 +20,8 @@ import {
 import {
   applyEvolutionResult,
   beginEvolutionRun,
-  failEvolutionRun,
+  cancelEvolutionRun,
+  recordEvolutionFailureAttempt,
   recordExecutionFailureObservation,
   updatePromptCanary,
   type EvolutionEvidence,
@@ -29,12 +30,13 @@ import {
   issueInternalAgentCommandToken,
   readInternalAgentCommandSubmission,
 } from '../../src/application/internal-agent-command-drafts';
-import { applyAgentResult, applyNextQueuedAgentResult, blockDelegation } from '../../src/application/agent-results';
+import { applyAgentResult, applyNextQueuedAgentResult } from '../../src/application/agent-results';
 import {
   cancelExecution,
   completeExecution,
+  deferExecutionResult,
   executionCancellationRequested,
-  failExecution,
+  EXECUTION_FAILURE_MAX_RETRIES,
   failExecutionWithRetryPolicy,
   markExecutionOutput,
   markExecutionStage,
@@ -400,58 +402,76 @@ async function runEvolutionEvaluator(
 ) {
   const evolution = await beginEvolutionRun(evidence);
   if (!evolution?.prompt || !evolution.evaluatorDirectory) return;
-  try {
-    const command = await issueInternalAgentCommandToken('evolution', evolution.evolutionId);
-    await appendLoopRunLog(runId, `[演化] 开始总结 ${agentLabel(evidence.agentId)} execution=${evidence.executionId}`);
-    const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
-    const execution = await executeDelegation({
-      runId,
-      prompt: evolution.prompt,
-      workspaceRoot: evolution.evaluatorDirectory,
-      executor,
-      executionOptions,
-      context: { agent: 'prompt-evolution-agent', taskId: evidence.taskId, storyIndex: evidence.storyIndex, pipeline: 'evolution' },
-      description: `总结 ${evidence.agentId} 的可复用经验`,
-      telemetry,
-      appendLog: (message) => appendLoopRunLog(runId, message),
-      maxRuntimeMs: Number(process.env.EVOLUTION_EVALUATOR_TIMEOUT_MS || 5 * 60 * 1000),
-      idleTimeoutMs: Number(process.env.EVOLUTION_EVALUATOR_IDLE_TIMEOUT_MS || 2 * 60 * 1000),
-      environment: {
-        LOOP_APP_ROOT: paths.appRoot,
-        LOOP_DATA_ROOT: paths.dataRoot,
-        LOOP_INTERNAL_WORK_TYPE: 'evolution',
-        LOOP_INTERNAL_WORK_ID: evolution.evolutionId,
-        LOOP_INTERNAL_SESSION_ID: command.sessionId,
-        LOOP_INTERNAL_COMMAND_TOKEN: command.token,
-      },
-      cancellationSignal: runnerAbort.signal,
-    });
-    const result = await readInternalAgentCommandSubmission('evolution', evolution.evolutionId);
-    if (execution.exitCode !== 0 && !result) throw new Error(`Evaluator CLI 退出码 ${execution.exitCode}`);
-    if (!result) throw new Error('Evolution Evaluator 未通过 evolution complete 提交结果');
-    await applyEvolutionResult(evolution.evolutionId, evidence, result);
-    await appendLoopRunLog(runId, `[演化] ${agentLabel(evidence.agentId)} 产生 ${result.observations.length} 条结构化观察`);
-  } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    await failEvolutionRun(evolution.evolutionId, reason);
-    await appendLoopRunLog(runId, `[演化] Evaluator 失败但不阻塞开发流程：${reason}`);
+  for (let failureAttempt = 1; failureAttempt <= EXECUTION_FAILURE_MAX_RETRIES + 1; failureAttempt += 1) {
+    try {
+      const command = await issueInternalAgentCommandToken('evolution', evolution.evolutionId);
+      await appendLoopRunLog(runId, `[演化] 开始总结 ${agentLabel(evidence.agentId)} execution=${evidence.executionId}`);
+      const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
+      const execution = await executeDelegation({
+        runId,
+        prompt: evolution.prompt,
+        workspaceRoot: evolution.evaluatorDirectory,
+        executor,
+        executionOptions,
+        context: { agent: 'prompt-evolution-agent', taskId: evidence.taskId, storyIndex: evidence.storyIndex, pipeline: 'evolution' },
+        description: `总结 ${evidence.agentId} 的可复用经验`,
+        telemetry,
+        appendLog: (message) => appendLoopRunLog(runId, message),
+        maxRuntimeMs: Number(process.env.EVOLUTION_EVALUATOR_TIMEOUT_MS || 5 * 60 * 1000),
+        idleTimeoutMs: Number(process.env.EVOLUTION_EVALUATOR_IDLE_TIMEOUT_MS || 2 * 60 * 1000),
+        environment: {
+          LOOP_APP_ROOT: paths.appRoot,
+          LOOP_DATA_ROOT: paths.dataRoot,
+          LOOP_INTERNAL_WORK_TYPE: 'evolution',
+          LOOP_INTERNAL_WORK_ID: evolution.evolutionId,
+          LOOP_INTERNAL_SESSION_ID: command.sessionId,
+          LOOP_INTERNAL_COMMAND_TOKEN: command.token,
+        },
+        cancellationSignal: runnerAbort.signal,
+      });
+      if (execution.cancelled) {
+        await cancelEvolutionRun(evolution.evolutionId, 'Runner 已停止，取消后台 Evolution Evaluator');
+        await appendLoopRunLog(runId, `[演化] Runner 已停止，取消 ${agentLabel(evidence.agentId)} 的后台总结`);
+        return;
+      }
+      const result = await readInternalAgentCommandSubmission('evolution', evolution.evolutionId);
+      if (execution.exitCode !== 0 && !result) throw new Error(`Evaluator CLI 退出码 ${execution.exitCode}`);
+      if (!result) throw new Error('Evolution Evaluator 未通过 evolution complete 提交结果');
+      await applyEvolutionResult(evolution.evolutionId, evidence, result);
+      await appendLoopRunLog(runId, `[演化] ${agentLabel(evidence.agentId)} 产生 ${result.observations.length} 条结构化观察`);
+      return;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      const retry = await recordEvolutionFailureAttempt({
+        evolutionId: evolution.evolutionId,
+        evidence,
+        error: reason,
+        failureAttempt,
+        maxRetries: EXECUTION_FAILURE_MAX_RETRIES,
+      });
+      await appendLoopRunLog(
+        runId,
+        retry.willRetry
+          ? `[演化] Evaluator 第 ${failureAttempt} 次失败，将自动重试 ${failureAttempt}/${EXECUTION_FAILURE_MAX_RETRIES}：${reason}`
+          : `[演化] Evaluator ${EXECUTION_FAILURE_MAX_RETRIES} 次自动重试已耗尽，但不阻塞开发流程：${reason}`,
+      );
+      if (!retry.willRetry) return;
+    }
   }
 }
-
-type FailureRetryPolicy = { kind: string; maxRetries: number };
 
 async function handleExecutionFailure(
   attempt: ExecutionAttempt,
   delegation: DelegationEnvelope,
   reason: string,
-  retryPolicy?: FailureRetryPolicy,
+  failureKind = 'agent-execution',
 ) {
-  const retry = retryPolicy
-    ? await failExecutionWithRetryPolicy(attempt.execution_id, reason, retryPolicy)
-    : null;
-  if (retry?.ignored) return;
-  const willRetry = Boolean(retry?.willRetry);
-  if (!retryPolicy) await failExecution(attempt.execution_id, reason, true);
+  const retry = await failExecutionWithRetryPolicy(attempt.execution_id, reason, {
+    kind: failureKind,
+    maxRetries: EXECUTION_FAILURE_MAX_RETRIES,
+  });
+  if (retry.ignored) return;
+  const willRetry = retry.willRetry;
   try {
     await updatePromptCanary(delegation.agent, false, attempt.execution_id);
     await recordExecutionFailureObservation({ executionId: attempt.execution_id, taskId: delegation.taskId, agentId: delegation.agent, reason });
@@ -461,12 +481,11 @@ async function handleExecutionFailure(
   if (willRetry) {
     await appendLoopRunLog(
       runId,
-      `[恢复] ${retryPolicy?.kind} 同类失败 ${retry?.failureAttempt}/${(retry?.maxRetries || 0) + 1}，将重新启动 CLI：${reason}`,
+      `[恢复] ${failureKind} 执行失败，将自动重试 ${retry.failureAttempt}/${retry.maxRetries}：${reason}`,
     );
     return;
   }
   await appendLoopRunLog(runId, `[错误] ${agentLabel(delegation.agent)} ${reason}`);
-  await blockDelegation(delegation, reason);
 }
 
 async function executeDelegationStep(
@@ -567,7 +586,7 @@ async function executeDelegationStep(
         attempt,
         delegation,
         `本地执行证据写入失败，将自动重试：${execution.evidencePersistenceError}`,
-        { kind: 'evidence-persistence', maxRetries: 2 },
+        'evidence-persistence',
       );
       return;
     }
@@ -577,7 +596,7 @@ async function executeDelegationStep(
         attempt,
         delegation,
         `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`,
-        { kind: 'agent-cli-exit', maxRetries: 1 },
+        'agent-cli-exit',
       );
       return;
     }
@@ -591,7 +610,7 @@ async function executeDelegationStep(
       await appendLoopRunLog(runId, `[Agent 命令] requirement=${delegation.taskId} ${delegation.agent} 已通过领域终止命令提交结果`);
     } catch (error) {
       const reason = `Agent 未通过角色终止命令提交结果：${error instanceof Error ? error.message : String(error)}`;
-      await handleExecutionFailure(attempt, delegation, reason, { kind: 'agent-missing-terminal-command', maxRetries: 2 });
+      await handleExecutionFailure(attempt, delegation, reason, 'agent-missing-terminal-command');
       return;
     }
     await markExecutionOutput(attempt.execution_id, result);
@@ -612,7 +631,7 @@ async function executeDelegationStep(
       }, executor, executionOptions));
     } catch (error) {
       if (error instanceof CodeSlotBusyError) {
-        await failExecution(attempt.execution_id, error.message, false);
+        await deferExecutionResult(attempt.execution_id, error.message);
         await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 结果已进入队列，等待 ${error.ownerTaskId} 释放代码槽`);
         return;
       }
@@ -621,17 +640,17 @@ async function executeDelegationStep(
         attempt,
         delegation,
         reason,
-        error instanceof AgentResultContractError ? { kind: 'agent-result-contract', maxRetries: 2 } : undefined,
+        error instanceof AgentResultContractError ? 'agent-result-contract' : 'agent-result-application',
       );
     }
   } catch (error) {
     unexpectedFailure = error;
     const reason = `任务级 Agent 执行异常：${error instanceof Error ? error.message : String(error)}`;
-    if (attempt) await handleExecutionFailure(attempt, delegation, reason);
+    if (attempt) await handleExecutionFailure(attempt, delegation, reason, 'agent-execution');
     else {
       const preparation = await progressDispatcher.preparationFailed({ reservationId: reservation.reservationId, error: reason });
       await appendLoopRunLog(runId, preparation.kind === 'retry'
-        ? `[恢复] requirement=${delegation.taskId} prompt 准备失败 ${preparation.attempt}/3，将重新保留并重试：${reason}`
+        ? `[恢复] requirement=${delegation.taskId} prompt 准备失败，执行第 ${preparation.attempt}/3 次重试：${reason}`
         : `[错误] requirement=${delegation.taskId} agent=${delegation.agent} ${reason}`);
     }
   } finally {
@@ -677,7 +696,12 @@ async function drainQueuedAgentResults() {
       await appendLoopRunLog(runId, `[运行] 排队结果等待代码槽释放：${agentLabel(queued.agent)} ${queued.taskId}${queued.storyIndex ? ` · ${deliveryUnitLabel(queued.storyIndex)}` : ''}，当前占用=${queued.ownerTaskId}`);
       break;
     }
-    await appendLoopRunLog(runId, `[错误] 排队结果应用失败：${agentLabel(queued.agent)} ${queued.taskId}${queued.storyIndex ? ` · ${deliveryUnitLabel(queued.storyIndex)}` : ''} - ${queued.reason}`);
+    await appendLoopRunLog(
+      runId,
+      queued.willRetry
+        ? `[恢复] 排队结果应用失败，已计入统一重试：${agentLabel(queued.agent)} ${queued.taskId}${queued.storyIndex ? ` · ${deliveryUnitLabel(queued.storyIndex)}` : ''} - ${queued.reason}`
+        : `[错误] 排队结果应用失败且重试已耗尽：${agentLabel(queued.agent)} ${queued.taskId}${queued.storyIndex ? ` · ${deliveryUnitLabel(queued.storyIndex)}` : ''} - ${queued.reason}`,
+    );
   }
   return waiting;
 }
@@ -723,7 +747,7 @@ async function main() {
         recoverable,
         delegation,
         reason,
-        error instanceof AgentResultContractError ? { kind: 'agent-result-contract', maxRetries: 2 } : undefined,
+        error instanceof AgentResultContractError ? 'agent-result-contract' : 'agent-result-application',
       );
     } finally {
       await progressDispatcher.settleRecoveredExecution({ executionId: recoverable.execution_id });

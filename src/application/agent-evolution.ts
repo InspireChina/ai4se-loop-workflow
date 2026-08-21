@@ -330,9 +330,45 @@ export async function applyEvolutionResult(evolutionId: string, evidence: Evolut
   }
 }
 
-export async function failEvolutionRun(evolutionId: string, error: string) {
+export async function recordEvolutionFailureAttempt(input: {
+  evolutionId: string;
+  evidence: EvolutionEvidence;
+  error: string;
+  failureAttempt: number;
+  maxRetries: number;
+}) {
   const db = await databaseConnection();
-  db.prepare("UPDATE agent_evolution_runs SET status = 'failed', error = ?, finished_at = CURRENT_TIMESTAMP WHERE evolution_id = ?").run(error, evolutionId);
+  const willRetry = input.failureAttempt <= input.maxRetries;
+  db.transaction(() => {
+    db.prepare(`
+      UPDATE agent_evolution_runs
+      SET status = ?, error = ?,
+          finished_at = CASE WHEN ? THEN NULL ELSE CURRENT_TIMESTAMP END
+      WHERE evolution_id = ?
+    `).run(willRetry ? 'running' : 'failed', input.error, willRetry ? 1 : 0, input.evolutionId);
+    const outcome = willRetry
+      ? `第 ${input.failureAttempt} 次失败，自动重试 ${input.failureAttempt}/${input.maxRetries}`
+      : `第 ${input.failureAttempt} 次失败，${input.maxRetries} 次自动重试已耗尽`;
+    db.prepare(`
+      INSERT INTO task_events(event_id, task_id, actor, event_type, summary)
+      VALUES(?, ?, 'system', ?, ?)
+    `).run(
+      randomUUID(),
+      input.evidence.taskId,
+      willRetry ? 'AgentExecutionRetryScheduled' : 'AgentExecutionRetriesExhausted',
+      `background · prompt-evolution-agent · ${outcome} · evolution-evaluator · evolution=${input.evolutionId} · source-execution=${input.evidence.executionId}：${input.error}`,
+    );
+  }).immediate();
+  return { willRetry, failureAttempt: input.failureAttempt, maxRetries: input.maxRetries };
+}
+
+export async function cancelEvolutionRun(evolutionId: string, reason: string) {
+  const db = await databaseConnection();
+  db.prepare(`
+    UPDATE agent_evolution_runs
+    SET status = 'failed', error = ?, finished_at = CURRENT_TIMESTAMP
+    WHERE evolution_id = ? AND status = 'running'
+  `).run(reason, evolutionId);
 }
 
 export async function recordExecutionFailureObservation(input: { executionId: string; taskId: string; agentId: string; reason: string }) {

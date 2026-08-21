@@ -2011,6 +2011,13 @@ async function reconcileDispatchLanes() {
   return progressDispatcher.reconcileStaleLanes();
 }
 
+function interruptedExecutionRecoveryLog(recovered: Awaited<ReturnType<typeof import('./executions')['reconcileInterruptedExecutions']>>) {
+  return `${recovered.retryableCount} 个无结果执行转为可重试，`
+    + `${recovered.blockedCount} 个无结果执行因重试耗尽而阻塞，`
+    + `${recovered.cancelledReservationCount} 个未启动派发已取消，`
+    + `${recovered.recoverableCount + recovered.pendingResultCount} 个已有结果执行等待恢复`;
+}
+
 export async function beginRun(owner = 'ui', options: BeginRunOptions = {}) {
   const { ensureAgentRuntimeWorkspace } = await import('./agent-profiles');
   await ensureAgentRuntimeWorkspace();
@@ -2023,7 +2030,7 @@ export async function beginRun(owner = 'ui', options: BeginRunOptions = {}) {
     const { stopAgentRun } = await import('../infrastructure/agent-runner');
     const { reconcileInterruptedExecutions } = await import('./executions');
     await stopAgentRun(current.runId);
-    const recovered = await reconcileInterruptedExecutions(current.runId, 'Runner 异常退出，执行尚未返回结构化结果，可安全重试');
+    const recovered = await reconcileInterruptedExecutions(current.runId, 'Runner 异常退出，执行尚未返回结构化结果');
     db.prepare(`
       UPDATE loop_runs
       SET status = 'crashed', finished_at = CURRENT_TIMESTAMP,
@@ -2032,10 +2039,10 @@ export async function beginRun(owner = 'ui', options: BeginRunOptions = {}) {
     `).run(current.runId);
     db.prepare("DELETE FROM loop_meta WHERE key = 'active_run'").run();
     await reconcileDispatchLanes();
-    await appendLoopRunLog(current.runId, `[恢复] 检测到旧 Runner 已退出：${recovered.failedCount} 个无结果执行转为可重试，${recovered.recoverableCount + recovered.pendingResultCount} 个已有结果执行等待恢复`);
+    await appendLoopRunLog(current.runId, `[恢复] 检测到旧 Runner 已退出：${interruptedExecutionRecoveryLog(recovered)}`);
   } else {
     const { reconcileInterruptedExecutions } = await import('./executions');
-    const recovered = await reconcileInterruptedExecutions(null, '未找到所属 Runner，执行尚未返回结构化结果，可安全重试');
+    const recovered = await reconcileInterruptedExecutions(null, '未找到所属 Runner，执行尚未返回结构化结果');
     if (recovered.failedCount) await reconcileDispatchLanes();
   }
   const runId = randomUUID();
@@ -2080,10 +2087,10 @@ export async function endRun(runId: string, force = false, options: { stopRunner
   if (current?.runId) {
     const reason = options.reason || (force ? '异常终止' : '用户停止');
     const { reconcileInterruptedExecutions } = await import('./executions');
-    const recovered = await reconcileInterruptedExecutions(current.runId, `Loop 已停止（${reason}），执行尚未返回结构化结果，可安全重试`);
+    const recovered = await reconcileInterruptedExecutions(current.runId, `Loop 已停止（${reason}），执行尚未返回结构化结果`);
     await reconcileDispatchLanes();
     await appendLoopRunLog(current.runId, `[运行] Loop 已停止：${reason}`);
-    await appendLoopRunLog(current.runId, `[恢复] ${recovered.failedCount} 个无结果执行转为可重试，${recovered.recoverableCount + recovered.pendingResultCount} 个已有结果执行将在下次运行继续`);
+    await appendLoopRunLog(current.runId, `[恢复] ${interruptedExecutionRecoveryLog(recovered)}，将在下次运行继续`);
     db.prepare(`
       UPDATE loop_runs
       SET status = ?, finished_at = CURRENT_TIMESTAMP, failure_reason = ?

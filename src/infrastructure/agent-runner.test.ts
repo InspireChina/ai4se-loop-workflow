@@ -125,6 +125,15 @@ test('keeps the Runner behind its start gate until process registration complete
   assert.ok(heartbeat < dispatch);
 });
 
+test('retries every Agent execution failure three times before blocking its lane', () => {
+  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+
+  assert.match(source, /EXECUTION_FAILURE_MAX_RETRIES/);
+  assert.match(source, /failExecutionWithRetryPolicy\(attempt\.execution_id, reason/);
+  assert.doesNotMatch(source, /maxRetries:\s*[12]\b/);
+  assert.doesNotMatch(source, /if \(!retryPolicy\).*failExecution/s);
+});
+
 test('uses Event Hub revisions and schedule deadlines instead of fixed business polling', () => {
   const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
   const subscription = source.indexOf('subscribeRuntimeEvents({');

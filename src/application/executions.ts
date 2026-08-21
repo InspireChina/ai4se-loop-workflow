@@ -6,7 +6,7 @@ import {
   releaseExecutionResourceClaimsInDb,
   releaseRunExecutionResourceClaimsInDb,
 } from './resource-claims';
-import { settleTaskLaneInDb, type TaskLaneKind } from './task-lanes';
+import { setTaskLaneStateInDb, settleTaskLaneInDb, type TaskLaneKind } from './task-lanes';
 import type { Task } from './tasks';
 import type { ResourceKey } from '../domain/resource';
 
@@ -20,6 +20,8 @@ export type ExecutionStatus =
   | 'retryable_failed'
   | 'system_blocked'
   | 'cancelled';
+
+export const EXECUTION_FAILURE_MAX_RETRIES = 3;
 
 export type ExecutionAttempt = {
   execution_id: string;
@@ -56,6 +58,40 @@ export type ExecutionAttempt = {
   started_at: string | null;
   finished_at: string | null;
 };
+
+type ExecutionFailureActivityInput = {
+  executionId: string;
+  taskId: string;
+  lane: string | null;
+  agent: string;
+  storyIndex: number | null;
+  failureKind: string;
+  failureAttempt: number;
+  maxRetries: number;
+  willRetry: boolean;
+  error: string;
+};
+
+export function recordExecutionFailureActivityInDb(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  input: ExecutionFailureActivityInput,
+) {
+  const scope = input.lane ? `${input.lane} Lane` : 'control';
+  const unit = input.storyIndex === null ? '' : ` · 交付单元 ${input.storyIndex}`;
+  const outcome = input.willRetry
+    ? `第 ${input.failureAttempt} 次失败，自动重试 ${input.failureAttempt}/${input.maxRetries}`
+    : `第 ${input.failureAttempt} 次失败，${input.maxRetries} 次自动重试已耗尽`;
+  const summary = `${scope} · ${input.agent}${unit} · ${outcome} · ${input.failureKind} · execution=${input.executionId}：${input.error}`;
+  db.prepare(`
+    INSERT INTO task_events(event_id, task_id, actor, event_type, summary)
+    VALUES(?, ?, 'system', ?, ?)
+  `).run(
+    randomUUID(),
+    input.taskId,
+    input.willRetry ? 'AgentExecutionRetryScheduled' : 'AgentExecutionRetriesExhausted',
+    summary,
+  );
+}
 
 export function shouldRecordDevCodeCommit(
   agent: string,
@@ -147,12 +183,9 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
       if (task) settleTaskLaneInDb(db, task, orphan.lane as TaskLaneKind);
     }
   }
-  const failedExecutionCount = db.prepare(`
-    UPDATE execution_attempts
-    SET status = 'retryable_failed',
-        last_error = ?,
-        finished_at = CURRENT_TIMESTAMP,
-        heartbeat_at = CURRENT_TIMESTAMP
+  const interruptedExecutions = db.prepare(`
+    SELECT execution_id, task_id, lane, agent, story_index, attempt
+    FROM execution_attempts
     WHERE status = 'running'
       AND result_json IS NULL
       ${scope}
@@ -161,8 +194,56 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
         WHERE agent_results.execution_id = execution_attempts.execution_id
           AND agent_results.application_status = 'pending'
       )
-  `).run(reason, ...(runId ? [runId] : [])).changes;
-  const failedCount = failedExecutionCount + orphanReservations.length;
+  `).all(...(runId ? [runId] : [])) as Array<{
+    execution_id: string;
+    task_id: string;
+    lane: string | null;
+    agent: string;
+    story_index: number | null;
+    attempt: number;
+  }>;
+  for (const interrupted of interruptedExecutions) {
+    const willRetry = interrupted.attempt <= EXECUTION_FAILURE_MAX_RETRIES;
+    db.prepare(`
+      UPDATE execution_attempts
+      SET status = ?, last_error = ?, failure_kind = 'runner-interrupted',
+          finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
+      WHERE execution_id = ? AND status = 'running'
+    `).run(willRetry ? 'retryable_failed' : 'system_blocked', reason, interrupted.execution_id);
+    recordExecutionFailureActivityInDb(db, {
+      executionId: interrupted.execution_id,
+      taskId: interrupted.task_id,
+      lane: interrupted.lane,
+      agent: interrupted.agent,
+      storyIndex: interrupted.story_index,
+      failureKind: 'runner-interrupted',
+      failureAttempt: interrupted.attempt,
+      maxRetries: EXECUTION_FAILURE_MAX_RETRIES,
+      willRetry,
+      error: reason,
+    });
+    if (!willRetry && interrupted.lane && interrupted.lane !== 'control') {
+      setTaskLaneStateInDb(db, {
+        taskId: interrupted.task_id,
+        lane: interrupted.lane as TaskLaneKind,
+        status: 'system_blocked',
+        currentAgent: interrupted.agent,
+        currentStoryIndex: interrupted.story_index,
+        blockedReason: reason,
+      });
+    } else if (!willRetry) {
+      db.prepare(`
+        UPDATE tasks SET agile_status = 'blocked', run_state = 'system_blocked',
+          resume_status = CASE WHEN agile_status != 'blocked' THEN agile_status ELSE resume_status END,
+          current_subagent = ?, blocked_reason = ?, next_step = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ?
+      `).run(interrupted.agent, reason, `系统阻塞：${reason}`, interrupted.task_id);
+    }
+  }
+  const retryableCount = interruptedExecutions.filter((execution) => execution.attempt <= EXECUTION_FAILURE_MAX_RETRIES).length;
+  const blockedCount = interruptedExecutions.length - retryableCount;
+  const failedCount = interruptedExecutions.length;
+  const cancelledReservationCount = orphanReservations.length;
   const recoverableCount = (db.prepare(`
     SELECT COUNT(*) AS count
     FROM execution_attempts
@@ -171,7 +252,14 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
       ${scope}
   `).get(...(runId ? [runId] : [])) as { count: number }).count;
   releaseRunExecutionResourceClaimsInDb(db, runId);
-    return { failedCount, recoverableCount, pendingResultCount };
+    return {
+      failedCount,
+      retryableCount,
+      blockedCount,
+      cancelledReservationCount,
+      recoverableCount,
+      pendingResultCount,
+    };
   }).immediate();
 }
 
@@ -242,14 +330,14 @@ export async function cancelExecution(executionId: string, reason = '需求已�
   releaseExecutionResourceClaimsInDb(db, executionId);
 }
 
-export async function failExecution(executionId: string, error: string, blocked = false) {
+export async function deferExecutionResult(executionId: string, reason: string) {
   const db = await databaseConnection();
   db.prepare(`
     UPDATE execution_attempts
-    SET status = ?, last_error = ?, finished_at = CURRENT_TIMESTAMP,
+    SET status = 'output_received', last_error = ?, finished_at = NULL,
         heartbeat_at = CURRENT_TIMESTAMP
     WHERE execution_id = ? AND status NOT IN ('cancelled', 'applied')
-  `).run(blocked ? 'system_blocked' : 'retryable_failed', error, executionId);
+  `).run(reason, executionId);
   releaseExecutionResourceClaimsInDb(db, executionId);
 }
 
@@ -266,26 +354,21 @@ export async function failExecutionWithRetryPolicy(
   const db = await databaseConnection();
   return db.transaction(() => {
     const current = db.prepare(`
-      SELECT dispatch_generation_key, delegation_key, status
+      SELECT execution_id, task_id, lane, agent, story_index, attempt, status
       FROM execution_attempts WHERE execution_id = ?
     `).get(executionId) as {
-      dispatch_generation_key: string | null;
-      delegation_key: string;
+      execution_id: string;
+      task_id: string;
+      lane: string | null;
+      agent: string;
+      story_index: number | null;
+      attempt: number;
       status: ExecutionStatus;
     } | undefined;
     if (!current || ['cancelled', 'applied'].includes(current.status)) {
       return { ignored: true as const, willRetry: false, failureAttempt: 0, maxRetries: policy.maxRetries };
     }
-    const generationKey = current.dispatch_generation_key || current.delegation_key;
-    const previous = generationKey
-      ? (db.prepare(`
-          SELECT COUNT(*) AS count
-          FROM execution_attempts
-          WHERE COALESCE(dispatch_generation_key, delegation_key) = ? AND failure_kind = ?
-            AND execution_id != ? AND status IN ('retryable_failed', 'system_blocked')
-        `).get(generationKey, policy.kind, executionId) as { count: number }).count
-      : 0;
-    const failureAttempt = previous + 1;
+    const failureAttempt = current.attempt;
     const willRetry = failureAttempt <= policy.maxRetries;
     db.prepare(`
       UPDATE execution_attempts
@@ -293,6 +376,35 @@ export async function failExecutionWithRetryPolicy(
           heartbeat_at = CURRENT_TIMESTAMP
       WHERE execution_id = ? AND status NOT IN ('cancelled', 'applied')
     `).run(willRetry ? 'retryable_failed' : 'system_blocked', error, policy.kind, executionId);
+    recordExecutionFailureActivityInDb(db, {
+      executionId: current.execution_id,
+      taskId: current.task_id,
+      lane: current.lane,
+      agent: current.agent,
+      storyIndex: current.story_index,
+      failureKind: policy.kind,
+      failureAttempt,
+      maxRetries: policy.maxRetries,
+      willRetry,
+      error,
+    });
+    if (!willRetry && current.lane && current.lane !== 'control') {
+      setTaskLaneStateInDb(db, {
+        taskId: current.task_id,
+        lane: current.lane as TaskLaneKind,
+        status: 'system_blocked',
+        currentAgent: current.agent,
+        currentStoryIndex: current.story_index,
+        blockedReason: error,
+      });
+    } else if (!willRetry) {
+      db.prepare(`
+        UPDATE tasks SET agile_status = 'blocked', run_state = 'system_blocked',
+          resume_status = CASE WHEN agile_status != 'blocked' THEN agile_status ELSE resume_status END,
+          current_subagent = ?, blocked_reason = ?, next_step = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ?
+      `).run(current.agent, error, `系统阻塞：${error}`, current.task_id);
+    }
     releaseExecutionResourceClaimsInDb(db, executionId);
     return { ignored: false as const, willRetry, failureAttempt, maxRetries: policy.maxRetries };
   }).immediate();

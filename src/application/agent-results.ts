@@ -41,6 +41,7 @@ import {
 } from './feedback';
 import { forwardReviewClosureGaps } from './review-closure-gaps';
 import { publishReviewReport } from './review-report-publication';
+import { EXECUTION_FAILURE_MAX_RETRIES, failExecutionWithRetryPolicy } from './executions';
 
 const artifactKinds: Record<string, string> = {
   'direct-agent': 'direct_result',
@@ -840,7 +841,7 @@ export type QueuedApplicationResult =
   | { status: 'none' }
   | { status: 'applied'; resultId: string; taskId: string; storyIndex: number | null; agent: string; outcome: ApplyOutcome }
   | { status: 'waiting'; resultId: string; taskId: string; storyIndex: number | null; agent: string; ownerTaskId: string }
-  | { status: 'failed'; resultId: string; taskId: string; storyIndex: number | null; agent: string; reason: string };
+  | { status: 'failed'; resultId: string; taskId: string; storyIndex: number | null; agent: string; reason: string; willRetry: boolean };
 
 const LEGACY_FEEDBACK_PLAN_REJECTION = '反馈新增范围当前不能追加交付单元';
 
@@ -980,6 +981,23 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
     }
     const reason = error instanceof Error ? error.message : String(error);
     await markApplication(row.result_id, 'failed', reason);
-    return { status: 'failed', resultId: row.result_id, taskId: row.task_id, storyIndex: row.story_index, agent: row.agent, reason };
+    let willRetry = false;
+    if (row.execution_id) {
+      const retry = await failExecutionWithRetryPolicy(
+        row.execution_id,
+        `应用排队中的 Agent 结果失败：${reason}`,
+        { kind: 'agent-result-application', maxRetries: EXECUTION_FAILURE_MAX_RETRIES },
+      );
+      willRetry = !retry.ignored && retry.willRetry;
+    }
+    return {
+      status: 'failed',
+      resultId: row.result_id,
+      taskId: row.task_id,
+      storyIndex: row.story_index,
+      agent: row.agent,
+      reason,
+      willRetry,
+    };
   }
 }

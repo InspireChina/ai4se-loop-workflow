@@ -3,6 +3,7 @@ import test from 'node:test';
 import { databaseConnection } from '../infrastructure/database';
 import { reconcileInterruptedExecutions } from './executions';
 import { createTask } from './tasks';
+import { applyNextQueuedAgentResult } from './agent-results';
 import {
   BROWSER_EXCLUSIVE_RESOURCE,
   CODE_WORKSPACE_RESOURCE,
@@ -39,7 +40,14 @@ test('recovers interrupted executions by durable checkpoint instead of a lease',
   `).run(taskId);
 
   const recovered = await reconcileInterruptedExecutions('run-interrupted', 'runner crashed');
-  assert.deepEqual(recovered, { failedCount: 1, recoverableCount: 1, pendingResultCount: 1 });
+  assert.deepEqual(recovered, {
+    failedCount: 1,
+    retryableCount: 1,
+    blockedCount: 0,
+    cancelledReservationCount: 0,
+    recoverableCount: 1,
+    pendingResultCount: 1,
+  });
   const statuses = db.prepare(`
     SELECT execution_id, status FROM execution_attempts
     WHERE run_id = 'run-interrupted' ORDER BY execution_id
@@ -51,7 +59,50 @@ test('recovers interrupted executions by durable checkpoint instead of a lease',
   ]);
   assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, taskId);
+  const failureEvent = db.prepare(`
+    SELECT event_type, summary FROM task_events
+    WHERE task_id = ? AND event_type = 'AgentExecutionRetryScheduled'
+    ORDER BY rowid DESC LIMIT 1
+  `).get(taskId) as { event_type: string; summary: string };
+  assert.match(failureEvent.summary, /runner-interrupted.*execution=execution-no-output：runner crashed/);
   releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, taskId);
+});
+
+test('blocks an interrupted execution after three retries and records the exact error', async () => {
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Interrupted execution retry limit' });
+  db.prepare(`
+    INSERT INTO execution_attempts(
+      execution_id, run_id, task_id, agent, pipeline, lane, delegation_key,
+      attempt, status, input_hash, input_json
+    ) VALUES('execution-interrupted-limit', 'run-interrupted-limit', ?, 'dev-agent', 'dev', 'delivery',
+      'key-interrupted-limit', 4, 'running', 'hash-interrupted-limit', '{}')
+  `).run(taskId);
+
+  const recovered = await reconcileInterruptedExecutions('run-interrupted-limit', 'runner crashed after retries');
+
+  assert.deepEqual(recovered, {
+    failedCount: 1,
+    retryableCount: 0,
+    blockedCount: 1,
+    cancelledReservationCount: 0,
+    recoverableCount: 0,
+    pendingResultCount: 0,
+  });
+  assert.deepEqual(
+    db.prepare("SELECT status, failure_kind, last_error FROM execution_attempts WHERE execution_id = 'execution-interrupted-limit'").get(),
+    { status: 'system_blocked', failure_kind: 'runner-interrupted', last_error: 'runner crashed after retries' },
+  );
+  assert.equal(
+    (db.prepare("SELECT status FROM task_lanes WHERE task_id = ? AND lane = 'delivery'").get(taskId) as { status: string }).status,
+    'system_blocked',
+  );
+  const failureEvent = db.prepare(`
+    SELECT event_type, summary FROM task_events
+    WHERE task_id = ? AND event_type = 'AgentExecutionRetriesExhausted'
+    ORDER BY rowid DESC LIMIT 1
+  `).get(taskId) as { event_type: string; summary: string };
+  assert.match(failureEvent.summary, /第 4 次失败，3 次自动重试已耗尽.*runner-interrupted.*runner crashed after retries/);
 });
 
 test('releases a cancelled requirement execution when its runner has already exited', async () => {
@@ -68,9 +119,71 @@ test('releases a cancelled requirement execution when its runner has already exi
 
   const recovered = await reconcileInterruptedExecutions('run-cancelled', 'runner crashed');
 
-  assert.deepEqual(recovered, { failedCount: 0, recoverableCount: 0, pendingResultCount: 0 });
+  assert.deepEqual(recovered, {
+    failedCount: 0,
+    retryableCount: 0,
+    blockedCount: 0,
+    cancelledReservationCount: 0,
+    recoverableCount: 0,
+    pendingResultCount: 0,
+  });
   assert.equal(
     (db.prepare("SELECT status FROM execution_attempts WHERE execution_id = 'execution-cancelled-run'").get() as { status: string }).status,
     'cancelled',
   );
+});
+
+test('routes queued result application failures through the same retry policy and activity log', async () => {
+  const db = await databaseConnection();
+  const insertFailure = async (suffix: string, attempt: number) => {
+    const taskId = await createTask({ title: `Queued result failure ${suffix}` });
+    const executionId = `execution-queued-failure-${suffix}`;
+    db.prepare(`
+      INSERT INTO execution_attempts(
+        execution_id, run_id, task_id, agent, pipeline, lane, delegation_key,
+        attempt, status, input_hash, input_json, result_json
+      ) VALUES(?, ?, ?, 'backlog-agent', 'backlog', 'control', ?, ?, 'output_received', ?, '{}', 'not-json')
+    `).run(executionId, `run-queued-failure-${suffix}`, taskId, `key-queued-failure-${suffix}`, attempt, `hash-queued-failure-${suffix}`);
+    db.prepare(`
+      INSERT INTO agent_results(
+        result_id, run_id, task_id, agent, pipeline, outcome, result_json,
+        application_status, execution_id
+      ) VALUES(?, ?, ?, 'backlog-agent', 'backlog', 'completed', 'not-json', 'pending', ?)
+    `).run(`result-queued-failure-${suffix}`, `run-queued-failure-${suffix}`, taskId, executionId);
+    return { taskId, executionId };
+  };
+
+  const retryable = await insertFailure('retryable', 1);
+  const first = await applyNextQueuedAgentResult();
+  assert.equal(first.status, 'failed');
+  if (first.status === 'failed') assert.equal(first.willRetry, true);
+  assert.deepEqual(
+    db.prepare('SELECT status, failure_kind FROM execution_attempts WHERE execution_id = ?').get(retryable.executionId),
+    { status: 'retryable_failed', failure_kind: 'agent-result-application' },
+  );
+  const retryEvent = db.prepare(`
+    SELECT summary FROM task_events
+    WHERE task_id = ? AND event_type = 'AgentExecutionRetryScheduled'
+    ORDER BY rowid DESC LIMIT 1
+  `).get(retryable.taskId) as { summary: string };
+  assert.match(retryEvent.summary, /应用排队中的 Agent 结果失败.*JSON/);
+
+  const exhausted = await insertFailure('exhausted', 4);
+  const fourth = await applyNextQueuedAgentResult();
+  assert.equal(fourth.status, 'failed');
+  if (fourth.status === 'failed') assert.equal(fourth.willRetry, false);
+  assert.deepEqual(
+    db.prepare('SELECT status, failure_kind FROM execution_attempts WHERE execution_id = ?').get(exhausted.executionId),
+    { status: 'system_blocked', failure_kind: 'agent-result-application' },
+  );
+  assert.equal(
+    (db.prepare('SELECT run_state FROM tasks WHERE task_id = ?').get(exhausted.taskId) as { run_state: string }).run_state,
+    'system_blocked',
+  );
+  const exhaustedEvent = db.prepare(`
+    SELECT summary FROM task_events
+    WHERE task_id = ? AND event_type = 'AgentExecutionRetriesExhausted'
+    ORDER BY rowid DESC LIMIT 1
+  `).get(exhausted.taskId) as { summary: string };
+  assert.match(exhaustedEvent.summary, /第 4 次失败，3 次自动重试已耗尽.*应用排队中的 Agent 结果失败.*JSON/);
 });

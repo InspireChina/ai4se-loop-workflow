@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AgentExecutorId } from '../domain/agent-executor';
 import { databaseConnection, hash } from '../infrastructure/database';
+import { EXECUTION_FAILURE_MAX_RETRIES } from './executions';
 
 const messageSchema = z.string().trim().min(1, '请输入问题').max(20_000, '单条消息不能超过 20000 个字符');
 
@@ -274,12 +275,39 @@ export async function completeTaskContextChatTurn(input: {
   })();
 }
 
-export async function failTaskContextChatTurn(sessionId: string, error: unknown) {
-  const reason = error instanceof Error ? error.message : String(error);
+export async function recordTaskContextChatFailureAttempt(input: {
+  sessionId: string;
+  error: unknown;
+  failureAttempt: number;
+  maxRetries?: number;
+}) {
+  const maxRetries = input.maxRetries ?? EXECUTION_FAILURE_MAX_RETRIES;
+  const willRetry = input.failureAttempt <= maxRetries;
+  const reason = input.error instanceof Error ? input.error.message : String(input.error);
   const db = await databaseConnection();
-  db.prepare(`
-    UPDATE task_context_chat_sessions
-    SET state = 'idle', command_token_hash = NULL, last_error = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE session_id = ?
-  `).run(reason.slice(0, 4000), sessionId);
+  db.transaction(() => {
+    const session = db.prepare(`
+      SELECT task_id, executor FROM task_context_chat_sessions WHERE session_id = ?
+    `).get(input.sessionId) as { task_id: string; executor: AgentExecutorId } | undefined;
+    if (!session) return;
+    db.prepare(`
+      UPDATE task_context_chat_sessions
+      SET state = ?, command_token_hash = CASE WHEN ? THEN command_token_hash ELSE NULL END,
+          last_error = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE session_id = ?
+    `).run(willRetry ? 'running' : 'idle', willRetry ? 1 : 0, reason.slice(0, 4000), input.sessionId);
+    const outcome = willRetry
+      ? `第 ${input.failureAttempt} 次失败，自动重试 ${input.failureAttempt}/${maxRetries}`
+      : `第 ${input.failureAttempt} 次失败，${maxRetries} 次自动重试已耗尽`;
+    db.prepare(`
+      INSERT INTO task_events(event_id, task_id, actor, event_type, summary)
+      VALUES(?, ?, 'system', ?, ?)
+    `).run(
+      randomUUID(),
+      session.task_id,
+      willRetry ? 'AgentExecutionRetryScheduled' : 'AgentExecutionRetriesExhausted',
+      `context-chat · context-chat-agent(${session.executor}) · ${outcome} · context-chat-execution · session=${input.sessionId}：${reason}`,
+    );
+  }).immediate();
+  return { willRetry, failureAttempt: input.failureAttempt, maxRetries, reason };
 }

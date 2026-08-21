@@ -160,3 +160,42 @@ test('rejects empty or oversized context chat input', async () => {
   await assert.rejects(() => beginTaskContextChatTurn(taskId, '   ', 'codex'));
   await assert.rejects(() => beginTaskContextChatTurn(taskId, 'x'.repeat(20_001), 'codex'));
 });
+
+test('records every context Chat failure and only releases the session after three retries', async () => {
+  const { createTask } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const {
+    beginTaskContextChatTurn,
+    getTaskContextChat,
+    recordTaskContextChatFailureAttempt,
+  } = await import('./task-context-chat');
+  const taskId = await createTask({ title: 'Context chat retry activity' });
+  const claimed = await beginTaskContextChatTurn(taskId, 'Explain the failure', 'codex');
+  const db = await databaseConnection();
+
+  for (let failureAttempt = 1; failureAttempt <= 4; failureAttempt += 1) {
+    const result = await recordTaskContextChatFailureAttempt({
+      sessionId: claimed.session.sessionId,
+      error: new Error(`provider failure ${failureAttempt}: exact diagnostic`),
+      failureAttempt,
+      maxRetries: 3,
+    });
+    assert.equal(result.willRetry, failureAttempt <= 3);
+    assert.equal((await getTaskContextChat(taskId)).session?.state, failureAttempt <= 3 ? 'running' : 'idle');
+  }
+
+  const events = db.prepare(`
+    SELECT event_type, summary FROM task_events
+    WHERE task_id = ? AND event_type IN ('AgentExecutionRetryScheduled', 'AgentExecutionRetriesExhausted')
+    ORDER BY rowid
+  `).all(taskId) as Array<{ event_type: string; summary: string }>;
+  assert.deepEqual(events.map((event) => event.event_type), [
+    'AgentExecutionRetryScheduled',
+    'AgentExecutionRetryScheduled',
+    'AgentExecutionRetryScheduled',
+    'AgentExecutionRetriesExhausted',
+  ]);
+  assert.match(events[0].summary, /context-chat-execution.*provider failure 1: exact diagnostic/);
+  assert.match(events[3].summary, /第 4 次失败，3 次自动重试已耗尽.*provider failure 4: exact diagnostic/);
+  assert.equal((await getTaskContextChat(taskId)).session?.lastError, 'provider failure 4: exact diagnostic');
+});

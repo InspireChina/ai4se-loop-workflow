@@ -1283,7 +1283,7 @@ test('story splitter progressively restores, validates and submits an ordered de
   const { applyAgentResult } = await import('./agent-results');
   const {
     completeExecution,
-    failExecution,
+    failExecutionWithRetryPolicy,
   } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { taskId, delegation } = await taskReadyForSplit('渐进式交付拆分');
@@ -1318,7 +1318,10 @@ test('story splitter progressively restores, validates and submits an ordered de
     '--outcome', '浏览器下载只包含筛选命中数据的 CSV 文件',
     '--acceptance', '下载文件的记录与字段均和当前筛选结果一致',
   ]);
-  await failExecution(first.executionId, '模拟 Agent 进程中断');
+  await failExecutionWithRetryPolicy(first.executionId, '模拟 Agent 进程中断', {
+    kind: 'agent-execution',
+    maxRetries: 3,
+  });
 
   const resumed = await beginDelegation(delegation, 'delivery-plan-retry');
   await assert.rejects(

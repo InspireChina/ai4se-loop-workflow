@@ -88,15 +88,17 @@ test('reserves runnable work atomically and exposes the active reservation to in
   }
 });
 
-test('limits preparation failures to three persisted attempts before blocking the requirement', async () => {
+test('retries preparation failures three times before blocking the requirement', async () => {
   const { createTask, beginRun, cancelTask, endRun, releaseBlock } = await import('./tasks');
   const { progressDispatcher } = await import('./progress-dispatch');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
   const taskId = await createTask({ title: 'Finite preparation retries' });
   const runId = await beginRun('progress-dispatch-retry-test');
 
   try {
     const outcomes: unknown[] = [];
-    for (let expectedAttempt = 1; expectedAttempt <= 3; expectedAttempt += 1) {
+    for (let expectedAttempt = 1; expectedAttempt <= 4; expectedAttempt += 1) {
       const dispatch = await progressDispatcher.reserveNext({ runId });
       assert.equal(dispatch.kind, 'reserved');
       const reservation = dispatch.reservations.find((item) => item.work.taskId === taskId);
@@ -109,8 +111,22 @@ test('limits preparation failures to three persisted attempts before blocking th
     assert.deepEqual(outcomes, [
       { kind: 'retry', attempt: 1 },
       { kind: 'retry', attempt: 2 },
-      { kind: 'blocked', attempt: 3 },
+      { kind: 'retry', attempt: 3 },
+      { kind: 'blocked', attempt: 4 },
     ]);
+    const failureEvents = db.prepare(`
+      SELECT event_type, summary FROM task_events
+      WHERE task_id = ? AND event_type IN ('AgentExecutionRetryScheduled', 'AgentExecutionRetriesExhausted')
+      ORDER BY rowid
+    `).all(taskId) as Array<{ event_type: string; summary: string }>;
+    assert.deepEqual(failureEvents.map((event) => event.event_type), [
+      'AgentExecutionRetryScheduled',
+      'AgentExecutionRetryScheduled',
+      'AgentExecutionRetryScheduled',
+      'AgentExecutionRetriesExhausted',
+    ]);
+    assert.match(failureEvents[0].summary, /agent-preparation.*prompt preparation 1/);
+    assert.match(failureEvents[3].summary, /第 4 次失败，3 次自动重试已耗尽.*prompt preparation 4/);
 
     const afterLimit = await progressDispatcher.reserveNext({ runId });
     assert.equal(afterLimit.kind, 'wait');
