@@ -22,6 +22,7 @@ export type DelegationExecutionInput = {
   appendLog: (message: string) => Promise<unknown>;
   recordTelemetryEvent?: (event: AgentTelemetryEvent & { sequence: number }) => Promise<unknown>;
   maxRuntimeMs: number;
+  startupTimeoutMs: number;
   idleTimeoutMs: number;
   resultKind?: AgentResultKind;
   environment?: AgentEnvironment;
@@ -36,6 +37,7 @@ export type DelegationExecutionResult = {
   submittedResult?: string | null;
   resultSubmissionError?: string | null;
   evidencePersistenceError?: string | null;
+  terminationReason?: string;
   cancelled?: true;
 };
 
@@ -78,7 +80,20 @@ export function buildAgentProcessLaunch(executor: AgentExecutor, prompt: string,
  * every client failure is contained by the facade and cannot change this result.
  */
 export async function executeDelegation(input: DelegationExecutionInput): Promise<DelegationExecutionResult> {
-  const { runId, prompt, workspaceRoot, executor, executionOptions, context, description, telemetry, appendLog, maxRuntimeMs, idleTimeoutMs } = input;
+  const {
+    runId,
+    prompt,
+    workspaceRoot,
+    executor,
+    executionOptions,
+    context,
+    description,
+    telemetry,
+    appendLog,
+    maxRuntimeMs,
+    startupTimeoutMs,
+    idleTimeoutMs,
+  } = input;
   const spawn = input.spawn ?? crossSpawn;
   const telemetryContext = { ...context, runToken: runId };
   const trace = await telemetry.startDelegationTrace(telemetryContext, {
@@ -90,6 +105,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   let timedOut = false;
   let cancelled = false;
   let terminationRequested = false;
+  let terminationReason = '';
   let logQueue = Promise.resolve();
   let telemetryQueue = Promise.resolve();
   let telemetrySequence = 0;
@@ -102,8 +118,10 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   let evidencePersistenceError: string | null = null;
   let temporaryPrompt: TemporaryPrompt | null = null;
   let resultChannel: AgentResultChannel | null = null;
+  let startupTimer: NodeJS.Timeout | undefined;
   let idleTimer: NodeJS.Timeout | undefined;
   let armIdleTimer = () => undefined;
+  let receivedProcessOutput = false;
   const finalTextAccumulator = createAgentFinalTextAccumulator(executor.id);
   const metricsAccumulator = createAgentRunMetricsAccumulator(executor.id);
 
@@ -179,8 +197,13 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     let stderrBuffer = '';
     const stdoutDecoder = new StringDecoder('utf8');
     const stderrDecoder = new StringDecoder('utf8');
-    child.stdout?.on('data', (chunk: Buffer) => {
+    const noteProcessOutput = () => {
+      receivedProcessOutput = true;
+      if (startupTimer) clearTimeout(startupTimer);
       armIdleTimer();
+    };
+    child.stdout?.on('data', (chunk: Buffer) => {
+      noteProcessOutput();
       stdoutBuffer += stdoutDecoder.write(chunk);
       const lines = stdoutBuffer.split(/\r?\n/);
       stdoutBuffer = lines.pop() || '';
@@ -192,7 +215,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       }
     });
     child.stderr?.on('data', (chunk: Buffer) => {
-      armIdleTimer();
+      noteProcessOutput();
       stderrBuffer += stderrDecoder.write(chunk);
       const lines = stderrBuffer.split(/\r?\n/);
       stderrBuffer = lines.pop() || '';
@@ -205,21 +228,34 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     const terminate = async (reason: string, kind: 'timeout' | 'cancelled') => {
       if (terminationRequested) return;
       terminationRequested = true;
+      terminationReason = reason;
       timedOut = kind === 'timeout';
       cancelled = kind === 'cancelled';
       await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - ${reason}，正在终止`);
-      child.kill('SIGTERM');
-      setTimeout(() => { if (!childExited) child.kill('SIGKILL'); }, 5000).unref();
+      if (child.pid) {
+        const expectedStartMarker = processStartMarker?.startsWith('test-') ? undefined : processStartMarker || undefined;
+        const terminated = await terminateProcessTree(child.pid, 5_000, expectedStartMarker).catch(() => false);
+        if (!terminated && !childExited) child.kill('SIGKILL');
+      } else {
+        child.kill('SIGTERM');
+      }
     };
     armIdleTimer = () => {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
-        void terminate(`超过空闲时间 ${Math.round(idleTimeoutMs / 1000)} 秒`, 'timeout');
+        void terminate(`超过空闲时间 ${Math.ceil(idleTimeoutMs / 1000)} 秒`, 'timeout');
       }, idleTimeoutMs);
       idleTimer.unref();
     };
     const maxTimer = setTimeout(() => void terminate(`超过最大运行时间 ${Math.round(maxRuntimeMs / 1000)} 秒`, 'timeout'), maxRuntimeMs);
-    armIdleTimer();
+    if (receivedProcessOutput) {
+      armIdleTimer();
+    } else {
+      startupTimer = setTimeout(() => {
+        void terminate(`启动后 ${Math.ceil(startupTimeoutMs / 1000)} 秒内没有任何输出`, 'timeout');
+      }, startupTimeoutMs);
+      startupTimer.unref();
+    }
     let cancellationCheckRunning = false;
     const checkCancellation = async () => {
       if (!input.cancellationRequested || cancellationCheckRunning || terminationRequested) return;
@@ -258,6 +294,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       await appendLog(`[执行器错误] executor=${executor.id} agent=${context.agent} - ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       clearTimeout(maxTimer);
+      if (startupTimer) clearTimeout(startupTimer);
       if (idleTimer) clearTimeout(idleTimer);
       if (cancellationTimer) clearInterval(cancellationTimer);
       input.cancellationSignal?.removeEventListener('abort', onCancellationSignal);
@@ -301,6 +338,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       finalText,
       ...(input.resultKind ? { submittedResult, resultSubmissionError } : {}),
       ...(evidencePersistenceError ? { evidencePersistenceError } : {}),
+      ...(terminationReason ? { terminationReason } : {}),
       ...(cancelled ? { cancelled: true as const } : {}),
     };
   } finally {

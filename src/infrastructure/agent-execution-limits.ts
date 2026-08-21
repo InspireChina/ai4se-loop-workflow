@@ -1,4 +1,5 @@
 export const DEFAULT_AGENT_EXECUTOR_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+export const DEFAULT_AGENT_EXECUTOR_STARTUP_TIMEOUT_MS = 20 * 60 * 1000;
 export const DEFAULT_AGENT_EXECUTOR_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
 
 type RuntimeLimitEnvironment = Record<string, string | undefined>;
@@ -13,8 +14,11 @@ export function resolveAgentExecutionLimits(env: RuntimeLimitEnvironment = proce
   const maxRuntimeMs = positiveNumber(env.AGENT_EXECUTOR_TIMEOUT_MS)
     ?? positiveNumber(env.CURSOR_AGENT_TIMEOUT_MS)
     ?? DEFAULT_AGENT_EXECUTOR_TIMEOUT_MS;
+  const startupTimeoutMs = positiveNumber(env.AGENT_EXECUTOR_STARTUP_TIMEOUT_MS)
+    ?? positiveNumber(env.CURSOR_AGENT_STARTUP_TIMEOUT_MS)
+    ?? DEFAULT_AGENT_EXECUTOR_STARTUP_TIMEOUT_MS;
   const idleTimeoutMs = positiveNumber(env.AGENT_EXECUTOR_IDLE_TIMEOUT_MS)
     ?? positiveNumber(env.CURSOR_AGENT_IDLE_TIMEOUT_MS)
     ?? DEFAULT_AGENT_EXECUTOR_IDLE_TIMEOUT_MS;
-  return { maxRuntimeMs, idleTimeoutMs };
+  return { maxRuntimeMs, startupTimeoutMs, idleTimeoutMs };
 }

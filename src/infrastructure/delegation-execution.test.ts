@@ -119,7 +119,7 @@ async function run(executor: AgentExecutor, telemetry = recordedTelemetry().tele
   const result = await executeDelegation({
     runId: 'run-story-4', prompt: 'Authorization: Bearer definitely-not-a-real-secret', workspaceRoot: process.cwd(), executor,
     executionOptions: {}, context, description: 'offline fixture', telemetry, appendLog: async (message) => { logs.push(message); },
-    maxRuntimeMs: 1_000, idleTimeoutMs: 1_000, ...overrides,
+    maxRuntimeMs: 1_000, startupTimeoutMs: 1_000, idleTimeoutMs: 1_000, ...overrides,
   });
   return { result, logs };
 }
@@ -239,6 +239,31 @@ test('maps non-zero, spawn error, timeout, and signal exits without telemetry af
     assert.deepEqual(record.updates.at(-1), { output: { exitCode: item.name === 'non-zero' ? 7 : null, timedOut: item.name === 'timeout' }, metadata: { executionStatus: item.expected } }, item.name);
     assert.ok(logs.length > 0, item.name);
   }
+});
+
+test('terminates a CLI that produces no startup output and preserves the exact timeout reason', async () => {
+  const { result, logs } = await run(
+    fixtureExecutor('claude', 'setInterval(() => {}, 1000)'),
+    recordedTelemetry().telemetry,
+    { maxRuntimeMs: 1_000, startupTimeoutMs: 25, idleTimeoutMs: 500 },
+  );
+
+  assert.notEqual(result.exitCode, 0);
+  assert.equal(result.terminationReason, '启动后 1 秒内没有任何输出');
+  assert.ok(logs.some((line) => line.includes('启动后 1 秒内没有任何输出')));
+});
+
+test('switches from startup timeout to idle timeout after the first process output', async () => {
+  const { result, logs } = await run(
+    fixtureExecutor('claude', 'console.log("started"); setInterval(() => {}, 1000)'),
+    recordedTelemetry().telemetry,
+    { maxRuntimeMs: 1_000, startupTimeoutMs: 500, idleTimeoutMs: 50 },
+  );
+
+  assert.notEqual(result.exitCode, 0);
+  assert.equal(result.terminationReason, '超过空闲时间 1 秒');
+  assert.ok(logs.some((line) => line.includes('stdout:started')));
+  assert.ok(logs.some((line) => line.includes('超过空闲时间 1 秒')));
 });
 
 test('terminates the CLI when its requirement is cancelled', async () => {

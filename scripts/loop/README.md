@@ -24,7 +24,7 @@ Runner 启动 execution 前会初始化项目隔离的 `data/<repo-hash>/agent-r
 
 验证 Agent 使用四阶段调用链：`PLAN → EXECUTE → EVIDENCE REVIEW → FINALIZE`。先通过 `verification plan upsert` 维护 `frontend` 或 `api` 黑盒场景，覆盖完整后调用 `verification plan complete` 冻结 Expected；再逐项用 `verification result record` 保存独立观察并调用 `verification execute complete`；证据复核通过后进入 FINALIZE，依次执行 `verification validate` 与 `verification complete`。每项交付单元验收语义必须有真实前端业务闭环场景；API 场景可以补充业务边界、错误反馈和数据语义，也可以直接形成失败证据，但不能替代前端闭环的通过证据。测试资源不足时使用运行信息请求，仍无法获得则记录环境阻塞。角色帮助按 `context|plan|execute|evidence|input|finish` 组织。
 
-流程 Agent 默认最多运行 4 小时，完全无输出 30 分钟后终止；可分别通过 `AGENT_EXECUTOR_TIMEOUT_MS` 和 `AGENT_EXECUTOR_IDLE_TIMEOUT_MS` 覆盖。Runner 持续写入 heartbeat 与持久化 execution checkpoint；进程异常退出后由恢复逻辑判断未完成 execution 并继续处理，不依赖长期租约。
+流程 Agent 默认最多运行 4 小时；CLI 启动后 20 分钟内没有任何输出会被判定为启动超时，收到首包后连续 30 分钟无输出则判定为空闲超时。可分别通过 `AGENT_EXECUTOR_TIMEOUT_MS`、`AGENT_EXECUTOR_STARTUP_TIMEOUT_MS` 和 `AGENT_EXECUTOR_IDLE_TIMEOUT_MS` 覆盖。Runner 持续写入 heartbeat 与持久化 execution checkpoint；进程异常退出后由恢复逻辑判断未完成 execution 并继续处理，不依赖长期租约。
 
 `agent-runner.ts` 为 execution 保存已脱敏的结构化运行事件与文本日志；日志失败不会覆盖 Agent 的原始执行结果。自主修改 LoopWork 源码的维护进程已经移除，源码诊断和修复由安装包之外的开发工作流完成。
 

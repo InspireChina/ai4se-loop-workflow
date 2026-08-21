@@ -301,7 +301,7 @@ async function runDelegation(
   executionOptions: AgentExecutionOptions,
   cancellationSignal: AbortSignal,
 ) {
-  const { maxRuntimeMs, idleTimeoutMs } = resolveAgentExecutionLimits(process.env);
+  const { maxRuntimeMs, startupTimeoutMs, idleTimeoutMs } = resolveAgentExecutionLimits(process.env);
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
   const durableToolEvent = createDurableToolEventNormalizer();
   const diagnostics: string[] = [];
@@ -338,6 +338,7 @@ async function runDelegation(
         );
       },
       maxRuntimeMs,
+      startupTimeoutMs,
       idleTimeoutMs,
       environment: {
         LOOP_EXECUTION_ID: executionId,
@@ -418,6 +419,7 @@ async function runEvolutionEvaluator(
         telemetry,
         appendLog: (message) => appendLoopRunLog(runId, message),
         maxRuntimeMs: Number(process.env.EVOLUTION_EVALUATOR_TIMEOUT_MS || 5 * 60 * 1000),
+        startupTimeoutMs: Number(process.env.EVOLUTION_EVALUATOR_STARTUP_TIMEOUT_MS || 20 * 60 * 1000),
         idleTimeoutMs: Number(process.env.EVOLUTION_EVALUATOR_IDLE_TIMEOUT_MS || 2 * 60 * 1000),
         environment: {
           LOOP_APP_ROOT: paths.appRoot,
@@ -435,7 +437,11 @@ async function runEvolutionEvaluator(
         return;
       }
       const result = await readInternalAgentCommandSubmission('evolution', evolution.evolutionId);
-      if (execution.exitCode !== 0 && !result) throw new Error(`Evaluator CLI 退出码 ${execution.exitCode}`);
+      if (execution.exitCode !== 0 && !result) {
+        throw new Error(execution.terminationReason
+          ? `Evaluator CLI ${execution.terminationReason}`
+          : `Evaluator CLI 退出码 ${execution.exitCode}`);
+      }
       if (!result) throw new Error('Evolution Evaluator 未通过 evolution complete 提交结果');
       await applyEvolutionResult(evolution.evolutionId, evidence, result);
       await appendLoopRunLog(runId, `[演化] ${agentLabel(evidence.agentId)} 产生 ${result.observations.length} 条结构化观察`);
@@ -595,8 +601,10 @@ async function executeDelegationStep(
       await handleExecutionFailure(
         attempt,
         delegation,
-        `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`,
-        'agent-cli-exit',
+        execution.terminationReason
+          ? `${executor.label} CLI ${execution.terminationReason}`
+          : `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`,
+        execution.terminationReason ? 'agent-timeout' : 'agent-cli-exit',
       );
       return;
     }

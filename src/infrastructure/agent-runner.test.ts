@@ -130,6 +130,7 @@ test('retries every Agent execution failure three times before blocking its lane
 
   assert.match(source, /EXECUTION_FAILURE_MAX_RETRIES/);
   assert.match(source, /failExecutionWithRetryPolicy\(attempt\.execution_id, reason/);
+  assert.match(source, /execution\.terminationReason \? 'agent-timeout' : 'agent-cli-exit'/);
   assert.doesNotMatch(source, /maxRetries:\s*[12]\b/);
   assert.doesNotMatch(source, /if \(!retryPolicy\).*failExecution/s);
 });

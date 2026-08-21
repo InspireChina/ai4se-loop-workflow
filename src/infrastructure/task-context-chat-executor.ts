@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { createAgentFinalTextAccumulator, resolveCursorAgentLaunch } from './agent-executor';
+import { resolveAgentExecutionLimits } from './agent-execution-limits';
 import { createTemporaryPrompt, removeTemporaryPrompt } from './delegation-execution';
+import { terminateProcessTree } from './process-tree';
 import type { AgentExecutorId } from '../domain/agent-executor';
 import type { AgentExecutionOptions } from './agent-executor';
 import { paths } from './database';
@@ -17,7 +19,7 @@ type ContextChatRun = {
   executionOptions: AgentExecutionOptions;
 };
 
-type ProcessResult = { exitCode: number; stdout: string; stderr: string };
+type ProcessResult = { exitCode: number; stdout: string; stderr: string; terminationReason?: string };
 
 export function taskContextChatPermissionArgs(executor: AgentExecutorId) {
   if (executor === 'cursor') return ['--force', '--trust'];
@@ -26,7 +28,15 @@ export function taskContextChatPermissionArgs(executor: AgentExecutorId) {
   return ['--dangerously-bypass-approvals-and-sandbox'];
 }
 
-function runProcess(command: string, args: string[], input?: string, timeoutMs = 10 * 60 * 1000, envOverrides: Record<string, string | undefined> = {}) {
+function runProcess(
+  command: string,
+  args: string[],
+  input?: string,
+  timeoutMs = 4 * 60 * 60 * 1000,
+  envOverrides: Record<string, string | undefined> = {},
+  startupTimeoutMs = 20 * 60 * 1000,
+  idleTimeoutMs = 30 * 60 * 1000,
+) {
   return new Promise<ProcessResult>((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: paths.root,
@@ -36,16 +46,43 @@ function runProcess(command: string, args: string[], input?: string, timeoutMs =
     });
     let stdout = '';
     let stderr = '';
-    child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString('utf8'); });
-    child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8'); });
+    let terminationReason = '';
+    let startupTimer: NodeJS.Timeout | undefined;
+    let idleTimer: NodeJS.Timeout | undefined;
+    let terminationRequested = false;
+    const terminate = async (reason: string) => {
+      if (terminationRequested) return;
+      terminationRequested = true;
+      terminationReason = reason;
+      const terminated = child.pid
+        ? await terminateProcessTree(child.pid, 5_000).catch(() => false)
+        : false;
+      if (!terminated) child.kill('SIGKILL');
+    };
+    const noteOutput = () => {
+      if (startupTimer) clearTimeout(startupTimer);
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        void terminate(`超过空闲时间 ${Math.ceil(idleTimeoutMs / 1000)} 秒`);
+      }, idleTimeoutMs);
+      idleTimer.unref();
+    };
+    child.stdout?.on('data', (chunk: Buffer) => { noteOutput(); stdout += chunk.toString('utf8'); });
+    child.stderr?.on('data', (chunk: Buffer) => { noteOutput(); stderr += chunk.toString('utf8'); });
     child.once('error', reject);
+    startupTimer = setTimeout(() => {
+      void terminate(`启动后 ${Math.ceil(startupTimeoutMs / 1000)} 秒内没有任何输出`);
+    }, startupTimeoutMs);
+    startupTimer.unref();
     const timer = setTimeout(() => {
-      child.kill('SIGTERM');
-      setTimeout(() => child.kill('SIGKILL'), 5000).unref();
+      void terminate(`超过最大运行时间 ${Math.ceil(timeoutMs / 1000)} 秒`);
     }, timeoutMs);
+    timer.unref();
     child.once('close', (exitCode) => {
+      if (startupTimer) clearTimeout(startupTimer);
+      if (idleTimer) clearTimeout(idleTimer);
       clearTimeout(timer);
-      resolve({ exitCode: exitCode ?? 1, stdout, stderr });
+      resolve({ exitCode: exitCode ?? 1, stdout, stderr, ...(terminationReason ? { terminationReason } : {}) });
     });
     if (input !== undefined) child.stdin?.end(input);
   });
@@ -126,6 +163,13 @@ function ompSessionId(stdout: string) {
 }
 
 export async function runTaskContextChatTurn(input: ContextChatRun) {
+  const { maxRuntimeMs, startupTimeoutMs, idleTimeoutMs } = resolveAgentExecutionLimits(process.env);
+  const runChatProcess = (
+    command: string,
+    args: string[],
+    processInput?: string,
+    environment: Record<string, string | undefined> = {},
+  ) => runProcess(command, args, processInput, maxRuntimeMs, environment, startupTimeoutMs, idleTimeoutMs);
   const firstTurn = !input.providerSessionId;
   const prompt = buildTaskContextChatPrompt(input.taskId, input.message, firstTurn);
   const chatCommandEnv = {
@@ -139,36 +183,36 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
   if (input.executor === 'cursor') {
     const launch = resolveCursorAgentLaunch();
     if (!providerSessionId) {
-      const created = await runProcess(launch.command, [...launch.prefixArgs, 'create-chat'], undefined, 10 * 60 * 1000, launch.env);
+      const created = await runChatProcess(launch.command, [...launch.prefixArgs, 'create-chat'], undefined, launch.env);
       if (created.exitCode !== 0) throw new Error(`Cursor 无法创建上下文会话：${created.stderr.trim() || `exit ${created.exitCode}`}`);
       providerSessionId = created.stdout.trim().split(/\s+/).at(-1) || '';
       if (!providerSessionId) throw new Error('Cursor 未返回会话 ID');
     }
     const temporary = createTemporaryPrompt(prompt);
     try {
-      result = await runProcess(launch.command, [
+      result = await runChatProcess(launch.command, [
         ...launch.prefixArgs,
         '--print', '--output-format', 'stream-json', ...taskContextChatPermissionArgs('cursor'), '--resume', providerSessionId,
         temporary.reference,
-      ], undefined, 10 * 60 * 1000, { ...launch.env, ...chatCommandEnv });
+      ], undefined, { ...launch.env, ...chatCommandEnv });
     } finally {
       removeTemporaryPrompt(temporary);
     }
   } else if (input.executor === 'claude') {
     providerSessionId ||= randomUUID();
-    result = await runProcess(process.env.CLAUDE_CLI || 'claude', [
+    result = await runChatProcess(process.env.CLAUDE_CLI || 'claude', [
       '--print', '--input-format', 'text', '--output-format', 'stream-json', '--verbose',
       ...taskContextChatPermissionArgs('claude'), '--tools', 'Read,Glob,Grep,Bash',
       ...(input.executionOptions.model ? ['--model', input.executionOptions.model] : []),
       ...(firstTurn ? ['--session-id', providerSessionId] : ['--resume', providerSessionId]),
-    ], prompt, 10 * 60 * 1000, chatCommandEnv);
+    ], prompt, chatCommandEnv);
   } else if (input.executor === 'omp') {
-    result = await runProcess(process.env.OMP_CLI || 'omp', [
+    result = await runChatProcess(process.env.OMP_CLI || 'omp', [
       '--mode', 'json', ...taskContextChatPermissionArgs('omp'),
       ...(input.executionOptions.model ? ['--model', input.executionOptions.model] : []),
       ...(input.executionOptions.reasoningEffort ? ['--thinking', input.executionOptions.reasoningEffort] : []),
       ...(!firstTurn && providerSessionId ? ['--resume', providerSessionId] : []),
-    ], prompt, 10 * 60 * 1000, chatCommandEnv);
+    ], prompt, chatCommandEnv);
     if (firstTurn) providerSessionId = ompSessionId(result.stdout);
   } else {
     const common = [
@@ -178,14 +222,14 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
     ];
     const search = input.executionOptions.webSearch ? ['--search'] : [];
     result = firstTurn
-      ? await runProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', ...common, '-C', paths.root, '-'], prompt, 10 * 60 * 1000, chatCommandEnv)
-      : await runProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', 'resume', ...common, providerSessionId, '-'], prompt, 10 * 60 * 1000, chatCommandEnv);
+      ? await runChatProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', ...common, '-C', paths.root, '-'], prompt, chatCommandEnv)
+      : await runChatProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', 'resume', ...common, providerSessionId, '-'], prompt, chatCommandEnv);
     if (firstTurn) providerSessionId = codexSessionId(result.stdout);
   }
 
   if (result.exitCode !== 0) {
     const diagnostic = result.stderr.trim().split(/\r?\n/).slice(-8).join('\n');
-    throw new Error(`${input.executor} 上下文 Agent 执行失败：${diagnostic || `exit ${result.exitCode}`}`);
+    throw new Error(`${input.executor} 上下文 Agent 执行失败：${result.terminationReason || diagnostic || `exit ${result.exitCode}`}`);
   }
   if (!providerSessionId) throw new Error(`${input.executor} 未返回可恢复的会话 ID`);
   const answer = finalText(input.executor, result.stdout);
