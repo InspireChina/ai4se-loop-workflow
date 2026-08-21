@@ -6,6 +6,7 @@ import { formatEventTime } from '../../../src/application/event-time';
 import { getTask } from '../../../src/application/tasks';
 import { progressDispatchInspector, type DispatchWaitReason } from '../../../src/application/progress-dispatch';
 import { getTaskContextChat } from '../../../src/application/task-context-chat';
+import { taskDetailVisibility } from '../../../src/application/task-detail-visibility';
 import { deliverySpecSchema } from '../../../src/domain/agent-result';
 import { agentLabel, deliveryUnitLabel, documentKindLabel, feedbackBatchStatusLabel, feedbackWorkTypeLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
 import { requirementMetadataDefinition, requirementMetadataValueLabel } from '../../../src/domain/requirement-metadata';
@@ -64,9 +65,6 @@ const businessAnalysisSteps = [
   { label: '完成', agent: null, statuses: ['done'] },
 ] as const;
 
-const businessAnalysisAgentIds = businessAnalysisSteps
-  .map((step) => step.agent)
-  .filter((agent): agent is NonNullable<typeof agent> => Boolean(agent));
 const endToEndSteps = [...businessAnalysisSteps.slice(0, 4), ...standardTaskSteps];
 
 function stepDetail(task: { agile_status: string; run_state: string; current_subagent: string | null; analysis_index: number; dev_index: number; test_index: number; total_stories: number; is_paused: number; paused_reason: string | null }, lanes: { lane: string; status: string; current_agent: string | null }[]) {
@@ -162,12 +160,17 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const detail = await getTask(taskId);
   if (!detail) notFound();
   const { task, metadata, lanes, stories, deliverySpecs, questions, runtimeInputs, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
-  const isBusinessAnalysis = task.item_type === 'business-analysis';
-  const isEndToEnd = task.item_type === 'end-to-end';
-  const isDirect = task.item_type === 'direct';
-  const inBusinessAnalysisStage = isBusinessAnalysis
-    || (isEndToEnd && businessAnalysisAgentIds.includes(task.current_subagent as typeof businessAnalysisAgentIds[number]));
-  const showDeliveryWorkflow = !inBusinessAnalysisStage && !isDirect;
+  const {
+    isBusinessAnalysis,
+    isEndToEnd,
+    isDirect,
+    inBusinessAnalysisStage,
+    showDeliveryWorkflow,
+    showDecisionAlignment,
+  } = taskDetailVisibility({
+    itemType: task.item_type,
+    currentSubagent: task.current_subagent,
+  });
   const analysisLane = lanes.find((lane) => lane.lane === 'analysis')!;
   const deliveryLane = lanes.find((lane) => lane.lane === 'delivery')!;
   const dispatch = await progressDispatchInspector.inspect({ requirementId: taskId });
@@ -359,7 +362,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       </article>)}
     </section>}
 
-    {showDeliveryWorkflow && <section className="task-decision-entry-section" id="decision-alignment">
+    {showDecisionAlignment && <section className="task-decision-entry-section" id="decision-alignment">
       <div className="section-head">
         <h2>决策对齐</h2>
         <small>任务级决策入口</small>
