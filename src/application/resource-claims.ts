@@ -37,9 +37,9 @@ export function resourceClaimInDb(db: Db, resourceKey: ResourceKey) {
 export function activeResourceClaimInDb(db: Db, resourceKey: ResourceKey) {
   const claim = resourceClaimInDb(db, resourceKey);
   if (!claim) return undefined;
-  const owner = db.prepare('SELECT agile_status FROM tasks WHERE task_id = ?')
-    .get(claim.owner_task_id) as { agile_status: string } | undefined;
-  if (!owner || ['done', 'cancelled'].includes(owner.agile_status)) {
+  const owner = db.prepare('SELECT agile_status, is_paused FROM tasks WHERE task_id = ?')
+    .get(claim.owner_task_id) as { agile_status: string; is_paused: number } | undefined;
+  if (!owner || owner.is_paused || ['done', 'cancelled'].includes(owner.agile_status)) {
     releaseResourceClaimInDb(db, resourceKey, claim.owner_task_id);
     return undefined;
   }

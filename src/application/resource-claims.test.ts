@@ -80,6 +80,30 @@ test('a terminal task cannot retain a resource claim', async () => {
   db.prepare('DELETE FROM resource_claims WHERE resource_key = ?').run(CODE_WORKSPACE_RESOURCE);
 });
 
+test('a paused task cannot retain a legacy resource claim', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const {
+    CODE_WORKSPACE_RESOURCE,
+    activeResourceClaimInDb,
+    resourceClaimInDb,
+  } = await import('./resource-claims');
+  const db = await databaseConnection();
+  db.prepare('DELETE FROM resource_claims WHERE resource_key = ?').run(CODE_WORKSPACE_RESOURCE);
+  const taskId = 'TASK-resource-paused-owner';
+  db.prepare(`
+    INSERT OR REPLACE INTO tasks(
+      task_id, title, item_type, agile_status, is_paused, work_dir
+    ) VALUES(?, 'Paused resource owner', 'feature', 'in dev', 1, '')
+  `).run(taskId);
+  db.prepare(`
+    INSERT INTO resource_claims(resource_key, owner_task_id, owner_lane)
+    VALUES(?, ?, 'delivery')
+  `).run(CODE_WORKSPACE_RESOURCE, taskId);
+
+  assert.equal(activeResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE), undefined);
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE), undefined);
+});
+
 test('browser claims are execution-scoped and multi-resource acquisition is atomic', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const {

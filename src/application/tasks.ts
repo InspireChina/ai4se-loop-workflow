@@ -1943,22 +1943,36 @@ export async function pauseTask(input: unknown) {
   const task = fetchTask(db, value.taskId);
   if (!task) throw new Error('需求不存在');
   if (['done', 'cancelled'].includes(task.agile_status)) throw new Error('已结束需求不能暂停');
-  if (task.is_paused) return;
   const reason = value.reason || '暂缓推进';
   db.transaction(() => {
-    db.prepare(`
-      UPDATE tasks
-      SET is_paused = 1, paused_reason = ?, paused_at = CURRENT_TIMESTAMP,
-          last_actor = 'human', updated_at = CURRENT_TIMESTAMP
-      WHERE task_id = ?
-    `).run(reason, value.taskId);
+    if (!task.is_paused) {
+      db.prepare(`
+        UPDATE tasks
+        SET is_paused = 1, paused_reason = ?, paused_at = CURRENT_TIMESTAMP,
+            last_actor = 'human', updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ?
+      `).run(reason, value.taskId);
+    }
     db.prepare(`
       UPDATE execution_attempts
       SET status = 'cancelled', last_error = '需求已暂停',
           finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
       WHERE task_id = ? AND status IN ('planned', 'running')
     `).run(value.taskId);
-    addEvent(db, value.taskId, 'human', 'TaskPaused', `暂停推进：${reason}`);
+    const resources = (db.prepare(`
+      SELECT resource_key FROM resource_claims
+      WHERE owner_task_id = ? ORDER BY resource_key
+    `).all(value.taskId) as Array<{ resource_key: string }>).map((row) => row.resource_key);
+    releaseTaskResourceClaimsInDb(db, value.taskId);
+    if (!task.is_paused) {
+      addEvent(
+        db,
+        value.taskId,
+        'human',
+        'TaskPaused',
+        `暂停推进：${reason}${resources.length ? `；已立即释放资源：${resources.join('、')}` : ''}`,
+      );
+    }
   })();
   await advanceAndPublishRuntimeInvalidation('execution.cancel-requested', value.taskId);
   refreshPages('/', '/tasks', `/tasks/${value.taskId}`);

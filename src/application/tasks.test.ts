@@ -1328,6 +1328,12 @@ test('cancels an active Dev requirement and automatically releases both of its r
 test('pauses one requirement without changing its workflow state and resumes it from the same step', async () => {
   const { executionCancellationRequested } = await import('./executions');
   const { createTask, getTask, pauseTask, resumeTask } = await import('./tasks');
+  const {
+    acquireResourceClaimsInDb,
+    BROWSER_EXCLUSIVE_RESOURCE,
+    CODE_WORKSPACE_RESOURCE,
+    resourceClaimInDb,
+  } = await import('./resource-claims');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
@@ -1342,6 +1348,15 @@ test('pauses one requirement without changing its workflow state and resumes it 
     delegation,
     prompt: 'This execution should stop when its requirement is paused.',
   });
+  acquireResourceClaimsInDb(db, {
+    resourceKeys: [CODE_WORKSPACE_RESOURCE, BROWSER_EXCLUSIVE_RESOURCE],
+    taskId,
+    lane: delegation.lane,
+    storyIndex: delegation.storyIndex,
+    executionId: execution.attempt.execution_id,
+  });
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, taskId);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_task_id, taskId);
 
   await pauseTask({ taskId, reason: '等待下周排期' });
 
@@ -1355,6 +1370,9 @@ test('pauses one requirement without changing its workflow state and resumes it 
   assert.equal(await executionCancellationRequested(execution.attempt.execution_id), true);
   const pausedExecution = db.prepare('SELECT status, last_error FROM execution_attempts WHERE execution_id = ?').get(execution.attempt.execution_id) as { status: string; last_error: string };
   assert.deepEqual(pausedExecution, { status: 'cancelled', last_error: '需求已暂停' });
+  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE), undefined);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
+  assert.match(detail?.events[0]?.summary || '', /已立即释放资源：browser:exclusive、code:workspace/);
 
   await resumeTask({ taskId });
 
