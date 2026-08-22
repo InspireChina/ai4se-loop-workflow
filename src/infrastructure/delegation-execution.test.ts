@@ -241,6 +241,19 @@ test('maps non-zero, spawn error, timeout, and signal exits without telemetry af
   }
 });
 
+test('returns a bounded redacted stderr tail for exact failure activity', async () => {
+  const secret = 'definitely-private-bearer-value';
+  const { result } = await run(fixtureExecutor(
+    'claude',
+    `console.error("Authorization: Bearer ${secret}"); console.error("provider unavailable"); process.exit(7)`,
+  ));
+
+  assert.equal(result.exitCode, 7);
+  assert.match(result.stderrTail || '', /Authorization: \[REDACTED\]/);
+  assert.match(result.stderrTail || '', /provider unavailable/);
+  assert.doesNotMatch(result.stderrTail || '', new RegExp(secret));
+});
+
 test('terminates a CLI that produces no startup output and preserves the exact timeout reason', async () => {
   const { result, logs } = await run(
     fixtureExecutor('claude', 'setInterval(() => {}, 1000)'),

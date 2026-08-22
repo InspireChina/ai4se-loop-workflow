@@ -41,9 +41,12 @@ import {
   markExecutionOutput,
   markExecutionStage,
   recordExecutionReceipt,
+  recordTerminalCommandRecoveryActivity,
   shouldRecordDevCodeCommit,
   type ExecutionAttempt,
 } from '../../src/application/executions';
+import { buildTerminalCommandRecoveryPrompt, shouldAttemptTerminalCommandRecovery } from '../../src/application/terminal-command-recovery';
+import { shouldRetryReportedFailure, waitForExecutionRetryBackoff } from '../../src/application/execution-retry-policy';
 import { appendLoopRunLog, CodeSlotBusyError, endRun, getRunStatus, getTask, getTaskContext, recordRuntimeEventWithFallback, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
 import { progressDispatcher, type ReservedExecution } from '../../src/application/progress-dispatch';
 import {
@@ -300,8 +303,10 @@ async function runDelegation(
   executor: AgentExecutor,
   executionOptions: AgentExecutionOptions,
   cancellationSignal: AbortSignal,
+  limitOverrides?: Partial<ReturnType<typeof resolveAgentExecutionLimits>>,
 ) {
-  const { maxRuntimeMs, startupTimeoutMs, idleTimeoutMs } = resolveAgentExecutionLimits(process.env);
+  const limits = { ...resolveAgentExecutionLimits(process.env), ...limitOverrides };
+  const { maxRuntimeMs, startupTimeoutMs, idleTimeoutMs } = limits;
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
   const durableToolEvent = createDurableToolEventNormalizer();
   const diagnostics: string[] = [];
@@ -462,6 +467,7 @@ async function runEvolutionEvaluator(
           : `[演化] Evaluator ${EXECUTION_FAILURE_MAX_RETRIES} 次自动重试已耗尽，但不阻塞开发流程：${reason}`,
       );
       if (!retry.willRetry) return;
+      await waitForExecutionRetryBackoff(failureAttempt, runnerAbort.signal);
     }
   }
 }
@@ -566,6 +572,7 @@ async function executeDelegationStep(
     const cancellation = new AbortController();
     activeExecutionControllers.set(attempt.execution_id, cancellation);
     let execution: Awaited<ReturnType<typeof runDelegation>>;
+    let commandSubmission: Awaited<ReturnType<typeof readAgentCommandSubmission>>;
     try {
       execution = await runDelegation(
         delegation,
@@ -576,6 +583,55 @@ async function executeDelegationStep(
         executionOptions,
         cancellation.signal,
       );
+      commandSubmission = await readAgentCommandSubmission(attempt.execution_id);
+      if (shouldAttemptTerminalCommandRecovery({
+        exitCode: execution.exitCode,
+        finalText: execution.finalText,
+        hasSubmission: Boolean(commandSubmission),
+        cancelled: Boolean(execution.cancelled),
+        evidencePersistenceError: execution.evidencePersistenceError,
+      })) {
+        const commandPrompt = agentCommandPrompt(paths.appRoot, delegation.agent, delegation.pipeline);
+        if (!commandPrompt) throw new Error(`${delegation.agent}/${delegation.pipeline} 没有配置渐进式命令协议`);
+        await recordTerminalCommandRecoveryActivity(attempt.execution_id, 'started');
+        await appendLoopRunLog(runId, `[自动修复] requirement=${delegation.taskId} execution=${attempt.execution_id} 缺少角色终止命令，启动一次仅限提交的补交`);
+        let recoveryExecution: Awaited<ReturnType<typeof runDelegation>>;
+        try {
+          recoveryExecution = await runDelegation(
+            delegation,
+            buildTerminalCommandRecoveryPrompt({ commandPrompt, previousFinalText: execution.finalText }),
+            attempt.execution_id,
+            commandToken,
+            executor,
+            executionOptions,
+            cancellation.signal,
+            {
+              maxRuntimeMs: Number(process.env.TERMINAL_RECOVERY_MAX_RUNTIME_MS || 10 * 60 * 1000),
+              startupTimeoutMs: Number(process.env.TERMINAL_RECOVERY_STARTUP_TIMEOUT_MS || 5 * 60 * 1000),
+              idleTimeoutMs: Number(process.env.TERMINAL_RECOVERY_IDLE_TIMEOUT_MS || 5 * 60 * 1000),
+            },
+          );
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          await recordTerminalCommandRecoveryActivity(attempt.execution_id, 'failed', reason);
+          throw error;
+        }
+        commandSubmission = await readAgentCommandSubmission(attempt.execution_id);
+        execution = {
+          ...recoveryExecution,
+          diagnostics: [...execution.diagnostics, ...recoveryExecution.diagnostics],
+          stderrTail: recoveryExecution.stderrTail || execution.stderrTail,
+        };
+        if (commandSubmission) {
+          await recordTerminalCommandRecoveryActivity(attempt.execution_id, 'succeeded');
+          await appendLoopRunLog(runId, `[自动修复] requirement=${delegation.taskId} execution=${attempt.execution_id} 角色终止命令补交成功`);
+        } else {
+          const recoveryReason = recoveryExecution.terminationReason
+            || (recoveryExecution.exitCode !== 0 ? `CLI 退出码 ${recoveryExecution.exitCode}` : '仍未执行角色终止命令');
+          await recordTerminalCommandRecoveryActivity(attempt.execution_id, 'failed', recoveryReason);
+          await appendLoopRunLog(runId, `[自动修复] requirement=${delegation.taskId} execution=${attempt.execution_id} 补交未成功：${recoveryReason}`);
+        }
+      }
     } finally {
       activeExecutionControllers.delete(attempt.execution_id);
     }
@@ -596,14 +652,19 @@ async function executeDelegationStep(
       );
       return;
     }
-    const commandSubmission = await readAgentCommandSubmission(attempt.execution_id);
+    commandSubmission ||= await readAgentCommandSubmission(attempt.execution_id);
     if (execution.exitCode !== 0 && !commandSubmission) {
+      const exitDiagnostic = [
+        `退出码 ${execution.exitCode}`,
+        execution.signal ? `signal ${execution.signal}` : '',
+        execution.stderrTail ? `stderr：${execution.stderrTail}` : '',
+      ].filter(Boolean).join('；');
       await handleExecutionFailure(
         attempt,
         delegation,
         execution.terminationReason
-          ? `${executor.label} CLI ${execution.terminationReason}`
-          : `${executor.label} CLI 执行失败，退出码 ${execution.exitCode}`,
+          ? `${executor.label} CLI ${execution.terminationReason}${execution.stderrTail ? `；stderr：${execution.stderrTail}` : ''}`
+          : `${executor.label} CLI 执行失败，${exitDiagnostic}`,
         execution.terminationReason ? 'agent-timeout' : 'agent-cli-exit',
       );
       return;
@@ -619,6 +680,11 @@ async function executeDelegationStep(
     } catch (error) {
       const reason = `Agent 未通过角色终止命令提交结果：${error instanceof Error ? error.message : String(error)}`;
       await handleExecutionFailure(attempt, delegation, reason, 'agent-missing-terminal-command');
+      return;
+    }
+    if (shouldRetryReportedFailure(result, attempt.attempt)) {
+      const reason = `Agent 提交失败结果，将按统一策略重试：${result.summary || result.outcome || result.verdict || '未提供摘要'}`;
+      await handleExecutionFailure(attempt, delegation, reason, 'agent-reported-failure');
       return;
     }
     await markExecutionOutput(attempt.execution_id, result);
@@ -864,13 +930,16 @@ async function run() {
     ]);
     await main();
   } catch (error) {
-    await appendLoopRunLog(runId, `[执行器错误] ${error instanceof Error ? error.message : String(error)}`);
+    const detail = error instanceof Error ? error.stack || error.message : String(error);
+    try { process.stderr.write(`[Runner 错误] run=${runId}\n${detail}\n`); } catch { /* raw diagnostic is best-effort */ }
+    await appendLoopRunLog(runId, `[执行器错误] ${detail}`);
     await endRun(runId, true, {
       stopRunner: false,
       preserveRunIntent: true,
       reason: error instanceof Error ? error.message : String(error),
     });
     await recordRunnerFailure(error);
+    process.exitCode = 1;
   } finally {
     runnerAbort.abort();
     for (const controller of activeExecutionControllers.values()) controller.abort();
@@ -888,4 +957,24 @@ async function run() {
   }
 }
 
-void run();
+let fatalExitStarted = false;
+
+function fatalRunnerExit(origin: 'uncaughtException' | 'unhandledRejection' | 'topLevelRejection', error: unknown) {
+  if (fatalExitStarted) return;
+  fatalExitStarted = true;
+  const detail = error instanceof Error ? error.stack || error.message : String(error);
+  const message = `[Runner 致命错误] run=${runId} origin=${origin}\n${detail}`;
+  try { process.stderr.write(`${message}\n`); } catch { /* parent-owned diagnostic file remains best-effort */ }
+  const forcedExit = setTimeout(() => process.exit(1), 2_000);
+  void appendLoopRunLog(runId, message)
+    .catch(() => undefined)
+    .finally(() => {
+      clearTimeout(forcedExit);
+      process.exit(1);
+    });
+}
+
+process.on('uncaughtException', (error) => fatalRunnerExit('uncaughtException', error));
+process.on('unhandledRejection', (error) => fatalRunnerExit('unhandledRejection', error));
+
+void run().catch((error) => fatalRunnerExit('topLevelRejection', error));

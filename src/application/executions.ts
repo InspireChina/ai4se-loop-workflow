@@ -9,6 +9,10 @@ import {
 import { setTaskLaneStateInDb, settleTaskLaneInDb, type TaskLaneKind } from './task-lanes';
 import type { Task } from './tasks';
 import type { ResourceKey } from '../domain/resource';
+import {
+  EXECUTION_FAILURE_MAX_RETRIES,
+  retryNotBeforeForFailure,
+} from './execution-retry-policy';
 
 export type ExecutionStatus =
   | 'planned'
@@ -21,7 +25,7 @@ export type ExecutionStatus =
   | 'system_blocked'
   | 'cancelled';
 
-export const EXECUTION_FAILURE_MAX_RETRIES = 3;
+export { EXECUTION_FAILURE_MAX_RETRIES } from './execution-retry-policy';
 
 export type ExecutionAttempt = {
   execution_id: string;
@@ -44,6 +48,7 @@ export type ExecutionAttempt = {
   heartbeat_at: string | null;
   last_error: string | null;
   failure_kind: string | null;
+  retry_not_before: string | null;
   prompt_version: number | null;
   prompt_template_version: number | null;
   prompt_hash: string | null;
@@ -69,6 +74,7 @@ type ExecutionFailureActivityInput = {
   failureAttempt: number;
   maxRetries: number;
   willRetry: boolean;
+  retryNotBefore?: string | null;
   error: string;
 };
 
@@ -79,7 +85,7 @@ export function recordExecutionFailureActivityInDb(
   const scope = input.lane ? `${input.lane} Lane` : 'control';
   const unit = input.storyIndex === null ? '' : ` · 交付单元 ${input.storyIndex}`;
   const outcome = input.willRetry
-    ? `第 ${input.failureAttempt} 次失败，自动重试 ${input.failureAttempt}/${input.maxRetries}`
+    ? `第 ${input.failureAttempt} 次失败，自动重试 ${input.failureAttempt}/${input.maxRetries}${input.retryNotBefore ? `，不早于 ${input.retryNotBefore}` : ''}`
     : `第 ${input.failureAttempt} 次失败，${input.maxRetries} 次自动重试已耗尽`;
   const summary = `${scope} · ${input.agent}${unit} · ${outcome} · ${input.failureKind} · execution=${input.executionId}：${input.error}`;
   db.prepare(`
@@ -204,12 +210,13 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
   }>;
   for (const interrupted of interruptedExecutions) {
     const willRetry = interrupted.attempt <= EXECUTION_FAILURE_MAX_RETRIES;
+    const retryNotBefore = willRetry ? retryNotBeforeForFailure(interrupted.attempt) : null;
     db.prepare(`
       UPDATE execution_attempts
-      SET status = ?, last_error = ?, failure_kind = 'runner-interrupted',
+      SET status = ?, last_error = ?, failure_kind = 'runner-interrupted', retry_not_before = ?,
           finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
       WHERE execution_id = ? AND status = 'running'
-    `).run(willRetry ? 'retryable_failed' : 'system_blocked', reason, interrupted.execution_id);
+    `).run(willRetry ? 'retryable_failed' : 'system_blocked', reason, retryNotBefore, interrupted.execution_id);
     recordExecutionFailureActivityInDb(db, {
       executionId: interrupted.execution_id,
       taskId: interrupted.task_id,
@@ -220,6 +227,7 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
       failureAttempt: interrupted.attempt,
       maxRetries: EXECUTION_FAILURE_MAX_RETRIES,
       willRetry,
+      retryNotBefore,
       error: reason,
     });
     if (!willRetry && interrupted.lane && interrupted.lane !== 'control') {
@@ -297,6 +305,42 @@ export async function recordExecutionReceipt(executionId: string, kind: string, 
   }
 }
 
+export async function recordTerminalCommandRecoveryActivity(
+  executionId: string,
+  phase: 'started' | 'succeeded' | 'failed',
+  detail?: string,
+) {
+  const db = await databaseConnection();
+  const attempt = db.prepare(`
+    SELECT task_id, lane, agent, story_index
+    FROM execution_attempts WHERE execution_id = ?
+  `).get(executionId) as {
+    task_id: string;
+    lane: string | null;
+    agent: string;
+    story_index: number | null;
+  } | undefined;
+  if (!attempt) return;
+  const scope = attempt.lane ? `${attempt.lane} Lane` : 'control';
+  const unit = attempt.story_index === null ? '' : ` · 交付单元 ${attempt.story_index}`;
+  const outcome = phase === 'started'
+    ? '检测到普通最终文本但缺少角色终止命令，启动一次自动补交（不消耗重试次数）'
+    : phase === 'succeeded'
+      ? '自动补交成功，已收到结构化结果'
+      : `自动补交未成功${detail ? `：${detail}` : ''}`;
+  db.prepare(`
+    INSERT INTO task_events(event_id, task_id, actor, event_type, summary)
+    VALUES(?, ?, 'system', ?, ?)
+  `).run(
+    randomUUID(),
+    attempt.task_id,
+    phase === 'started' ? 'AgentTerminalRecoveryStarted'
+      : phase === 'succeeded' ? 'AgentTerminalRecoverySucceeded'
+        : 'AgentTerminalRecoveryFailed',
+    `${scope} · ${attempt.agent}${unit} · execution=${executionId} · ${outcome}`,
+  );
+}
+
 export async function completeExecution(executionId: string) {
   const db = await databaseConnection();
   db.prepare(`
@@ -370,12 +414,13 @@ export async function failExecutionWithRetryPolicy(
     }
     const failureAttempt = current.attempt;
     const willRetry = failureAttempt <= policy.maxRetries;
+    const retryNotBefore = willRetry ? retryNotBeforeForFailure(failureAttempt) : null;
     db.prepare(`
       UPDATE execution_attempts
-      SET status = ?, last_error = ?, failure_kind = ?, finished_at = CURRENT_TIMESTAMP,
+      SET status = ?, last_error = ?, failure_kind = ?, retry_not_before = ?, finished_at = CURRENT_TIMESTAMP,
           heartbeat_at = CURRENT_TIMESTAMP
       WHERE execution_id = ? AND status NOT IN ('cancelled', 'applied')
-    `).run(willRetry ? 'retryable_failed' : 'system_blocked', error, policy.kind, executionId);
+    `).run(willRetry ? 'retryable_failed' : 'system_blocked', error, policy.kind, retryNotBefore, executionId);
     recordExecutionFailureActivityInDb(db, {
       executionId: current.execution_id,
       taskId: current.task_id,
@@ -386,6 +431,7 @@ export async function failExecutionWithRetryPolicy(
       failureAttempt,
       maxRetries: policy.maxRetries,
       willRetry,
+      retryNotBefore,
       error,
     });
     if (!willRetry && current.lane && current.lane !== 'control') {

@@ -1,7 +1,8 @@
 import { spawn } from 'node:child_process';
+import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { appendLoopRunLog, registerRunProcess } from '../application/tasks';
 import { databaseConnection, paths } from './database';
 import { inspectProcessCommand, terminateProcessTree, waitForProcessIdentity } from './process-tree';
@@ -33,22 +34,51 @@ function waitForSpawn(child: ReturnType<typeof spawn>) {
   });
 }
 
+export function runnerDiagnosticPath(runId: string) {
+  if (!/^[a-zA-Z0-9-]+$/.test(runId)) throw new Error('invalid run id');
+  return join(paths.dataDir, 'run-diagnostics', runId, 'runner.stderr.log');
+}
+
+function openRunnerDiagnostic(runId: string) {
+  const diagnosticPath = runnerDiagnosticPath(runId);
+  mkdirSync(dirname(diagnosticPath), { recursive: true });
+  return { diagnosticPath, fd: openSync(diagnosticPath, 'a', 0o600) };
+}
+
 async function startManagedRunner(runId: string, scriptName: string, supervisionToken: number) {
   const launch = resolveRunnerCommand(runId, scriptName);
   const gate = await createRunnerStartGate(runId);
-  const child = spawn(launch.command, launch.args, {
-    cwd: paths.appRoot,
-    detached: false,
-    stdio: 'ignore',
-    windowsHide: true,
-    env: {
-      ...process.env,
-      ...runtimeNodeEnvironment(),
-      LOOP_APP_ROOT: paths.appRoot,
-      LOOP_WORKSPACE_ROOT_OVERRIDE: paths.root,
-      LOOP_SUPERVISION_TOKEN: String(supervisionToken),
-      LOOP_RUNNER_START_GATE_TOKEN: gate.token,
-    },
+  let diagnostic: ReturnType<typeof openRunnerDiagnostic>;
+  try {
+    diagnostic = openRunnerDiagnostic(runId);
+  } catch (error) {
+    await cancelRunnerStartGate(gate);
+    throw error;
+  }
+  let child: ReturnType<typeof spawn>;
+  try {
+    child = spawn(launch.command, launch.args, {
+      cwd: paths.appRoot,
+      detached: false,
+      stdio: ['ignore', 'ignore', diagnostic.fd],
+      windowsHide: true,
+      env: {
+        ...process.env,
+        ...runtimeNodeEnvironment(),
+        LOOP_APP_ROOT: paths.appRoot,
+        LOOP_WORKSPACE_ROOT_OVERRIDE: paths.root,
+        LOOP_SUPERVISION_TOKEN: String(supervisionToken),
+        LOOP_RUNNER_START_GATE_TOKEN: gate.token,
+      },
+    });
+  } finally {
+    closeSync(diagnostic.fd);
+  }
+  child.once('exit', (code, signal) => {
+    void appendLoopRunLog(
+      runId,
+      `[Runner 进程] pid=${child.pid || '-'} 已退出 code=${code ?? '-'} signal=${signal || '-'} diagnostic=${diagnostic.diagnosticPath}`,
+    ).catch(() => undefined);
   });
   try {
     await waitForSpawn(child);
@@ -120,7 +150,7 @@ export async function stopAgentRun(runId: string) {
     if (!await terminateProcessTree(pid, 10_000)) throw new Error(`无法停止旧 Runner 进程树 pid=${pid}`);
     return;
   }
-  const command = inspectProcessCommand(pid);
+  const command = await inspectProcessCommand(pid);
   if (!command && !isProcessAlive(pid)) return;
   const knownLegacyRunner = command.includes('agent-runner') || command.includes('dispatch-waiter');
   if (!knownLegacyRunner || !command.includes(runId)) {

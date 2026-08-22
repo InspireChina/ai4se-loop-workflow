@@ -136,6 +136,9 @@ test('retries preparation failures three times before blocking the requirement',
     assert.equal(afterRelease.kind, 'reserved');
     const resumed = afterRelease.reservations.find((item) => item.work.taskId === taskId);
     assert.ok(resumed);
+    const resumedAttempt = db.prepare('SELECT attempt FROM execution_attempts WHERE execution_id = ?')
+      .get(resumed.executionId) as { attempt: number };
+    assert.equal(resumedAttempt.attempt, 1);
     await progressDispatcher.settle({ reservationId: resumed.reservationId });
   } finally {
     await cancelTask({ taskId, reason: 'test cleanup' });
@@ -168,5 +171,48 @@ test('cancels an unactivated reservation from a dead runner without consuming a 
   } finally {
     await cancelTask({ taskId, reason: 'test cleanup' });
     await endRun(activeRunId, true, { stopRunner: false });
+  }
+});
+
+test('waits for the universal retry backoff deadline before redispatching', async () => {
+  const { createTask, beginRun, cancelTask, endRun } = await import('./tasks');
+  const { progressDispatcher } = await import('./progress-dispatch');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const previousScale = process.env.LOOP_RETRY_BACKOFF_SCALE;
+  process.env.LOOP_RETRY_BACKOFF_SCALE = '1';
+  const taskId = await createTask({ title: 'Retry backoff deadline' });
+  const runId = await beginRun('progress-dispatch-backoff-test');
+
+  try {
+    const first = await progressDispatcher.reserveNext({ runId });
+    assert.equal(first.kind, 'reserved');
+    const reservation = first.reservations.find((item) => item.work.taskId === taskId);
+    assert.ok(reservation);
+    assert.deepEqual(await progressDispatcher.preparationFailed({
+      reservationId: reservation.reservationId,
+      error: 'transient preparation failure',
+    }), { kind: 'retry', attempt: 1 });
+
+    const waiting = await progressDispatcher.reserveNext({ runId });
+    assert.equal(waiting.kind, 'wait');
+    assert.equal(waiting.wake.kind, 'retry-after');
+    if (waiting.wake.kind === 'retry-after') assert.ok(Date.parse(waiting.wake.notBefore) > Date.now());
+
+    db.prepare("UPDATE execution_attempts SET retry_not_before = '2000-01-01T00:00:00.000Z' WHERE execution_id = ?")
+      .run(reservation.executionId);
+    const retried = await progressDispatcher.reserveNext({ runId });
+    assert.equal(retried.kind, 'reserved');
+    const retryReservation = retried.reservations.find((item) => item.work.taskId === taskId);
+    assert.ok(retryReservation);
+    const retryAttempt = db.prepare('SELECT attempt FROM execution_attempts WHERE execution_id = ?')
+      .get(retryReservation.executionId) as { attempt: number };
+    assert.equal(retryAttempt.attempt, 2);
+    await progressDispatcher.settle({ reservationId: retryReservation.reservationId });
+  } finally {
+    if (previousScale === undefined) delete process.env.LOOP_RETRY_BACKOFF_SCALE;
+    else process.env.LOOP_RETRY_BACKOFF_SCALE = previousScale;
+    await cancelTask({ taskId, reason: 'test cleanup' });
+    await endRun(runId, true, { stopRunner: false });
   }
 });

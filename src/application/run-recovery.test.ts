@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { databaseConnection } from '../infrastructure/database';
-import { reconcileInterruptedExecutions } from './executions';
+import { reconcileInterruptedExecutions, recordTerminalCommandRecoveryActivity } from './executions';
 import { createTask } from './tasks';
 import { applyNextQueuedAgentResult } from './agent-results';
 import {
@@ -66,6 +66,7 @@ test('recovers interrupted executions by durable checkpoint instead of a lease',
   `).get(taskId) as { event_type: string; summary: string };
   assert.match(failureEvent.summary, /runner-interrupted.*execution=execution-no-output：runner crashed/);
   releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, taskId);
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE result_id = 'result-queued-output'").run();
 });
 
 test('blocks an interrupted execution after three retries and records the exact error', async () => {
@@ -186,4 +187,35 @@ test('routes queued result application failures through the same retry policy an
     ORDER BY rowid DESC LIMIT 1
   `).get(exhausted.taskId) as { summary: string };
   assert.match(exhaustedEvent.summary, /第 4 次失败，3 次自动重试已耗尽.*应用排队中的 Agent 结果失败.*JSON/);
+});
+
+test('records terminal-command auto-recovery phases in the requirement activity feed', async () => {
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Terminal recovery activity' });
+  const executionId = 'execution-terminal-recovery-activity';
+  db.prepare(`
+    INSERT INTO execution_attempts(
+      execution_id, run_id, task_id, agent, pipeline, lane, delegation_key,
+      attempt, status, input_hash, input_json
+    ) VALUES(?, 'run-terminal-recovery', ?, 'dev-agent', 'dev', 'delivery',
+      'key-terminal-recovery', 1, 'running', 'hash-terminal-recovery', '{}')
+  `).run(executionId, taskId);
+
+  await recordTerminalCommandRecoveryActivity(executionId, 'started');
+  await recordTerminalCommandRecoveryActivity(executionId, 'failed', 'CLI 退出码 1');
+  await recordTerminalCommandRecoveryActivity(executionId, 'succeeded');
+
+  const events = db.prepare(`
+    SELECT event_type, summary FROM task_events
+    WHERE task_id = ? AND event_type LIKE 'AgentTerminalRecovery%'
+    ORDER BY rowid
+  `).all(taskId) as Array<{ event_type: string; summary: string }>;
+  assert.deepEqual(events.map((event) => event.event_type), [
+    'AgentTerminalRecoveryStarted',
+    'AgentTerminalRecoveryFailed',
+    'AgentTerminalRecoverySucceeded',
+  ]);
+  assert.match(events[0].summary, /不消耗重试次数/);
+  assert.match(events[1].summary, /CLI 退出码 1/);
+  assert.match(events[2].summary, /结构化结果/);
 });

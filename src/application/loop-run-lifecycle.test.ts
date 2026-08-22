@@ -2,7 +2,14 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { databaseConnection } from '../infrastructure/database';
-import { canReclaimSupervisorLease, createLoopRunLifecycle, lifecycleRestartDelayMs } from './loop-run-lifecycle';
+import {
+  canReclaimSupervisorLease,
+  createLoopRunLifecycle,
+  lifecycleRestartDelayMs,
+  RUNNER_STALE_GRACE_MS,
+  runnerHealthDisposition,
+  runnerHealthReason,
+} from './loop-run-lifecycle';
 
 test('uses the agreed bounded Runner restart backoff', () => {
   assert.equal(lifecycleRestartDelayMs(1), 5_000);
@@ -10,6 +17,25 @@ test('uses the agreed bounded Runner restart backoff', () => {
   assert.equal(lifecycleRestartDelayMs(3), 30_000);
   assert.equal(lifecycleRestartDelayMs(4), 300_000);
   assert.equal(lifecycleRestartDelayMs(40), 300_000);
+});
+
+test('graces a live Runner with a stale heartbeat before declaring it failed', () => {
+  const now = Date.now();
+  const stale = {
+    runId: 'RUN-stale', owner: 'test', startedAt: new Date(now - 120_000).toISOString(),
+    heartbeatAt: new Date(now - 50_000).toISOString(), processKind: 'agent-runner' as const,
+    status: 'running' as const, pid: 4321, active: false,
+    health: {
+      starting: false, pidAlive: true, heartbeatFresh: false,
+      heartbeatAgeMs: 50_000, generationActive: true,
+    },
+  };
+
+  assert.equal(runnerHealthDisposition(stale, null, now).kind, 'suspect');
+  assert.equal(runnerHealthDisposition(stale, new Date(now - RUNNER_STALE_GRACE_MS + 1).toISOString(), now).kind, 'suspect');
+  assert.equal(runnerHealthDisposition(stale, new Date(now - RUNNER_STALE_GRACE_MS).toISOString(), now).kind, 'failed');
+  assert.match(runnerHealthReason(stale), /pid_alive=true.*heartbeat_age_ms=50000.*generation_active=true/);
+  assert.equal(runnerHealthDisposition({ ...stale, health: { ...stale.health, pidAlive: false } }, null, now).kind, 'failed');
 });
 
 test('reclaims an unexpired lease only when the previous local supervisor is provably gone', () => {
@@ -54,6 +80,9 @@ test('migrates lifecycle facts and removes autonomous maintenance tables', async
   assert.ok(['running', 'stopped'].includes(state.desired_intent));
   assert.equal(state.mode, 'normal');
   assert.ok(['crashed', 'stopped'].includes(state.actual_phase));
+  const lifecycleColumns = db.prepare(`PRAGMA table_info('loop_lifecycle_state')`).all() as { name: string }[];
+  assert.equal(lifecycleColumns.some((column) => column.name === 'runner_suspect_since'), true);
+  assert.equal(lifecycleColumns.some((column) => column.name === 'last_health_json'), true);
   const maintenanceTables = db.prepare(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'software_maintenance%'",
   ).all();

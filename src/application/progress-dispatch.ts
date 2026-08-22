@@ -11,6 +11,7 @@ import {
   recordExecutionFailureActivityInDb,
   type ExecutionAttempt,
 } from './executions';
+import { retryNotBeforeForFailure } from './execution-retry-policy';
 
 export type DispatchWaitReason =
   | 'active-execution'
@@ -114,6 +115,7 @@ function dispatchGenerationKey(work: DelegationEnvelope) {
     specResolvedIndex: work.specResolvedIndex,
     reviewRevision: work.reviewRevision,
     resumePending: work.resumePending,
+    ...(work.retryCycle && work.retryCycle > 1 ? { retryCycle: work.retryCycle } : {}),
   }));
 }
 
@@ -151,10 +153,23 @@ async function reserveNext(input: { runId: string }): Promise<ReserveNextResult>
     }
 
     const reservations: ReservedExecution[] = [];
+    let earliestRetryNotBefore: string | null = null;
     for (const work of workItems) {
       const executionId = randomUUID();
       const reservationId = executionId;
       const generationKey = dispatchGenerationKey(work);
+      const retryWindow = db.prepare(`
+        SELECT retry_not_before
+        FROM execution_attempts
+        WHERE dispatch_generation_key = ? AND status = 'retryable_failed' AND retry_not_before IS NOT NULL
+        ORDER BY attempt DESC LIMIT 1
+      `).get(generationKey) as { retry_not_before: string } | undefined;
+      if (retryWindow && Date.parse(retryWindow.retry_not_before) > Date.now()) {
+        if (!earliestRetryNotBefore || retryWindow.retry_not_before < earliestRetryNotBefore) {
+          earliestRetryNotBefore = retryWindow.retry_not_before;
+        }
+        continue;
+      }
       const previous = db.prepare(`
         SELECT MAX(attempt) AS attempt
         FROM execution_attempts
@@ -215,6 +230,9 @@ async function reserveNext(input: { runId: string }): Promise<ReserveNextResult>
       reservations.push({ reservationId, executionId, runId: input.runId, work, claimedResources: work.resources });
     }
     db.exec('COMMIT');
+    if (!reservations.length && earliestRetryNotBefore) {
+      return { kind: 'wait', reason: 'no-runnable-work', wake: { kind: 'retry-after', notBefore: earliestRetryNotBefore } };
+    }
     return { kind: 'reserved', reservations };
   } catch (error) {
     if (db.inTransaction) db.exec('ROLLBACK');
@@ -490,15 +508,16 @@ async function preparationFailed(input: { reservationId: string; error: string }
     `).get(input.reservationId) as (ExecutionAttempt & { dispatch_reservation_json: string }) | undefined;
     if (!attempt || attempt.status !== 'planned') return { kind: 'ignored' } as const;
     const blocked = attempt.attempt > EXECUTION_FAILURE_MAX_RETRIES;
+    const retryNotBefore = blocked ? null : retryNotBeforeForFailure(attempt.attempt);
     const reservation = JSON.parse(attempt.dispatch_reservation_json) as StoredReservation;
     db.prepare(`
       UPDATE execution_attempts
-      SET status = ?, last_error = ?, failure_kind = 'agent-preparation', finished_at = CURRENT_TIMESTAMP,
+      SET status = ?, last_error = ?, failure_kind = 'agent-preparation', retry_not_before = ?, finished_at = CURRENT_TIMESTAMP,
           dispatch_retry_consumed = 1,
           heartbeat_at = CURRENT_TIMESTAMP, dispatch_execution_exited_at = CURRENT_TIMESTAMP,
           dispatch_settled_at = CURRENT_TIMESTAMP
       WHERE execution_id = ? AND status = 'planned'
-    `).run(blocked ? 'system_blocked' : 'retryable_failed', input.error, attempt.execution_id);
+    `).run(blocked ? 'system_blocked' : 'retryable_failed', input.error, retryNotBefore, attempt.execution_id);
     recordExecutionFailureActivityInDb(db, {
       executionId: attempt.execution_id,
       taskId: attempt.task_id,
@@ -509,6 +528,7 @@ async function preparationFailed(input: { reservationId: string; error: string }
       failureAttempt: attempt.attempt,
       maxRetries: EXECUTION_FAILURE_MAX_RETRIES,
       willRetry: !blocked,
+      retryNotBefore,
       error: input.error,
     });
     releaseExecutionResourceClaimsInDb(db, attempt.execution_id);

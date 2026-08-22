@@ -13,6 +13,7 @@ import {
 } from '../infrastructure/process-tree';
 import { isProcessAlive } from '../infrastructure/run-process';
 import { RuntimeEventHub } from '../infrastructure/runtime-event-hub';
+import { registerManagedProcessInDb } from '../infrastructure/managed-process-registry';
 
 export type LifecycleSource = {
   adapter: 'ui' | 'electron' | 'cli';
@@ -68,6 +69,8 @@ type LifecycleStateRow = {
   retry_at: string | null;
   healthy_since: string | null;
   last_error: string | null;
+  runner_suspect_since: string | null;
+  last_health_json: string | null;
 };
 
 type LeaseRow = { owner_id: string; fencing_token: number; expires_at: string };
@@ -75,6 +78,7 @@ type ManagedProcessRow = { process_id: string; supervision_token: number; proces
 
 const LEASE_MS = 30_000;
 const HEALTHY_RESET_MS = 10 * 60_000;
+export const RUNNER_STALE_GRACE_MS = 60_000;
 
 function timestamp(value: string | null | undefined) {
   if (!value) return 0;
@@ -86,6 +90,40 @@ export function lifecycleRestartDelayMs(restartCount: number) {
   if (restartCount === 2) return 15_000;
   if (restartCount === 3) return 30_000;
   return 5 * 60_000;
+}
+
+type ObservedRun = NonNullable<Awaited<ReturnType<typeof getRunStatus>>>;
+
+export function runnerHealthReason(run: ObservedRun | null) {
+  if (!run) return 'active_run 记录不存在';
+  return [
+    `run=${run.runId}`,
+    `pid=${run.pid ?? '-'}`,
+    `pid_alive=${run.health.pidAlive}`,
+    `heartbeat_at=${run.heartbeatAt || '-'}`,
+    `heartbeat_age_ms=${run.health.heartbeatAgeMs ?? '-'}`,
+    `heartbeat_fresh=${run.health.heartbeatFresh}`,
+    `starting=${run.health.starting}`,
+    `generation_active=${run.health.generationActive}`,
+    `status=${run.status}`,
+  ].join(' ');
+}
+
+export function runnerHealthDisposition(
+  run: ObservedRun | null,
+  suspectSince: string | null,
+  now = Date.now(),
+) {
+  if (run?.active) return { kind: 'healthy' as const, reason: runnerHealthReason(run) };
+  const reason = runnerHealthReason(run);
+  if (!run || !run.health.pidAlive || !run.health.generationActive) {
+    return { kind: 'failed' as const, reason };
+  }
+  const suspectAt = timestamp(suspectSince);
+  if (!suspectAt || now - suspectAt < RUNNER_STALE_GRACE_MS) {
+    return { kind: 'suspect' as const, reason, suspectSince: suspectAt || now };
+  }
+  return { kind: 'failed' as const, reason };
 }
 
 function stateRow(db: Awaited<ReturnType<typeof databaseConnection>>) {
@@ -174,7 +212,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     const db = await databaseConnection();
     const state = stateRow(db);
     const lease = leaseRow(db);
-    const run = await getRunStatus();
+    const run = await getRunStatus(currentToken ?? undefined);
     return {
       intent: { desired: state.desired_intent, revision: state.intent_revision },
       mode: state.mode === 'normal'
@@ -200,7 +238,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
 
   async function stopCurrent(reason: string, preserveIntent: boolean) {
     const db = await databaseConnection();
-    const run = await getRunStatus();
+    const run = await getRunStatus(currentToken ?? undefined);
     db.prepare(`UPDATE loop_lifecycle_state SET actual_phase = 'stopping', updated_at = CURRENT_TIMESTAMP WHERE singleton = 1`).run();
     if (run?.runId) {
       await endRun(run.runId, false, { preserveRunIntent: true, reason });
@@ -208,6 +246,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     db.prepare(`
       UPDATE loop_lifecycle_state
       SET actual_phase = 'stopped', active_run_id = NULL, healthy_since = NULL,
+          runner_suspect_since = NULL,
           retry_at = CASE WHEN ? THEN retry_at ELSE NULL END,
           updated_at = CURRENT_TIMESTAMP
       WHERE singleton = 1
@@ -223,7 +262,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     const residual: Array<{ kind: string; pid: number }> = [];
     for (const row of rows) {
       if (!includeUiServer && row.process_kind === 'ui-server') continue;
-      const identity = inspectProcessIdentity(row.pid);
+      const identity = await inspectProcessIdentity(row.pid);
       if (!identity && isProcessAlive(row.pid)) {
         residual.push({ kind: row.process_kind, pid: row.pid });
         continue;
@@ -248,7 +287,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     `).all(token) as ManagedProcessRow[];
     const residual: Array<{ kind: string; pid: number }> = [];
     for (const row of rows) {
-      const identity = inspectProcessIdentity(row.pid);
+      const identity = await inspectProcessIdentity(row.pid);
       if (!identity && isProcessAlive(row.pid)) {
         residual.push({ kind: `${row.process_kind}-unverified`, pid: row.pid });
         continue;
@@ -285,13 +324,13 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
       await unlink(pidPath).catch(() => undefined);
       return null;
     }
-    const identity = inspectProcessIdentity(pid);
+    const identity = await inspectProcessIdentity(pid);
     if (!identity) {
       if (isProcessAlive(pid)) return { kind: 'legacy-maintenance-unverified', pid };
       await unlink(pidPath).catch(() => undefined);
       return null;
     }
-    const command = inspectProcessCommand(pid);
+    const command = await inspectProcessCommand(pid);
     if (!command.includes('maintenance-runner')) {
       return { kind: 'legacy-maintenance-unverified', pid };
     }
@@ -310,12 +349,13 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     const identity = await waitForProcessIdentity(pid);
     if (!identity) throw new Error(`无法验证 ${processKind} 进程身份 pid=${pid}`);
     const db = await databaseConnection();
-    const processId = randomUUID();
-    db.prepare(`
-      INSERT INTO loop_managed_processes(
-        process_id, supervision_token, process_kind, pid, process_start_marker
-      ) VALUES(?, ?, ?, ?, ?)
-    `).run(processId, token, processKind, pid, identity.startMarker);
+    const processId = registerManagedProcessInDb(db, {
+      processId: randomUUID(),
+      supervisionToken: token,
+      processKind,
+      pid,
+      processStartMarker: identity.startMarker,
+    });
     return { processId, processStartMarker: identity.startMarker };
   }
 
@@ -373,7 +413,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
       return { outcome: 'stopped', snapshot: await snapshot() };
     }
 
-    let run = await getRunStatus();
+    let run = await getRunStatus(token);
     if (run?.active) {
       const runGeneration = db.prepare('SELECT supervision_token FROM loop_runs WHERE run_id = ?').get(run.runId) as { supervision_token: number | null } | undefined;
       if (runGeneration?.supervision_token !== token) {
@@ -388,39 +428,57 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
         }
       }
     }
-    if (run?.active) {
+    let health = runnerHealthDisposition(run, state.runner_suspect_since);
+    if (health.kind === 'healthy' && run) {
       const healthySince = state.healthy_since || new Date().toISOString();
       const reset = Date.now() - timestamp(healthySince) >= HEALTHY_RESET_MS;
       db.prepare(`
         UPDATE loop_lifecycle_state
         SET actual_phase = 'running', active_run_id = ?, healthy_since = ?,
+            runner_suspect_since = NULL, last_health_json = ?,
             restart_count = CASE WHEN ? THEN 0 ELSE restart_count END,
             retry_at = CASE WHEN ? THEN NULL ELSE retry_at END,
             last_error = CASE WHEN ? THEN NULL ELSE last_error END,
             updated_at = CURRENT_TIMESTAMP
         WHERE singleton = 1
-      `).run(run.runId, healthySince, reset ? 1 : 0, reset ? 1 : 0, reset ? 1 : 0);
+      `).run(run.runId, healthySince, JSON.stringify(run.health), reset ? 1 : 0, reset ? 1 : 0, reset ? 1 : 0);
       return { outcome: 'healthy', snapshot: await snapshot() };
+    }
+
+    if (health.kind === 'suspect' && run) {
+      const firstObservation = !state.runner_suspect_since;
+      const suspectSince = new Date(health.suspectSince).toISOString();
+      db.prepare(`
+        UPDATE loop_lifecycle_state
+        SET actual_phase = 'running', runner_suspect_since = COALESCE(runner_suspect_since, ?),
+            last_health_json = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE singleton = 1
+      `).run(suspectSince, JSON.stringify(run.health), `Runner 健康检查进入宽限：${health.reason}`);
+      if (firstObservation) {
+        await appendLoopRunLog(run.runId, `[生命周期] Runner 心跳过期但进程仍存活，进入 ${RUNNER_STALE_GRACE_MS / 1000} 秒宽限：${health.reason}`);
+      }
+      return { outcome: 'backoff', warning: `Runner 心跳暂时过期，正在宽限观察：${health.reason}`, snapshot: await snapshot() };
     }
 
     if (state.retry_at && timestamp(state.retry_at) > Date.now()) {
       return { outcome: 'backoff', snapshot: await snapshot() };
     }
-    if (run?.runId) await endRun(run.runId, true, { preserveRunIntent: true, reason: 'Runner 心跳或进程失效' });
+    const failureReason = `Runner 健康检查失败：${health.reason}`;
+    if (run?.runId) await endRun(run.runId, true, { preserveRunIntent: true, reason: failureReason });
     state = stateRow(db);
     const restartCount = state.restart_count + 1;
     const retryAt = new Date(Date.now() + lifecycleRestartDelayMs(restartCount)).toISOString();
     db.prepare(`
       UPDATE loop_lifecycle_state
       SET actual_phase = 'starting', restart_count = ?, retry_at = ?, healthy_since = NULL,
-          last_error = NULL, updated_at = CURRENT_TIMESTAMP
+          runner_suspect_since = NULL, last_health_json = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP
       WHERE singleton = 1
-    `).run(restartCount, retryAt);
+    `).run(restartCount, retryAt, run ? JSON.stringify(run.health) : null, failureReason);
     let runId: string | undefined;
     try {
       runId = await beginRun(`${options.adapter}-supervisor`, { preserveRunIntent: true });
       await startAgentRun(runId, token);
-      db.prepare(`UPDATE loop_lifecycle_state SET actual_phase = 'running', active_run_id = ?, healthy_since = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1`)
+      db.prepare(`UPDATE loop_lifecycle_state SET actual_phase = 'running', active_run_id = ?, healthy_since = CURRENT_TIMESTAMP, runner_suspect_since = NULL, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1`)
         .run(runId);
       await appendLoopRunLog(runId, `[生命周期] supervision=${token} 已启动受管 Runner`);
       return { outcome: 'started', snapshot: await snapshot() };

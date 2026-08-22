@@ -30,7 +30,7 @@ const dispatchTaskSelect = `
          resume_pending, next_step, blocked_reason, run_state, closure_status,
          review_revision, review_document_id, closure_acknowledged_at,
          last_actor, owner, evidence, risk, is_paused, paused_reason, paused_at,
-         created_at, updated_at, completed_at
+         created_at, updated_at, completed_at, retry_cycle
   FROM tasks
 `;
 
@@ -59,7 +59,7 @@ function feedbackCanDispatch(task: Task, lanes: TaskLane[]) {
     || ['waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked'].includes(lane.status));
 }
 
-function toEnvelope(task: Task, delegation: Delegation): DelegationEnvelope {
+function toEnvelope(task: Task, delegation: Delegation, retryCycle = task.retry_cycle): DelegationEnvelope {
   return {
     ...delegation,
     title: task.title || '',
@@ -87,6 +87,7 @@ function toEnvelope(task: Task, delegation: Delegation): DelegationEnvelope {
     owner: task.owner || '',
     evidence: task.evidence || '',
     risk: task.risk || '',
+    retryCycle,
   };
 }
 
@@ -294,7 +295,7 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
     const deliveryWork = laneLine(task, delivery, taskCodeAvailable);
     if (!deliveryWork || !resourcesAvailable(deliveryWork, resourceClaims, reservedResources)) continue;
     reserveResources(deliveryWork, reservedResources);
-    lines.push(toEnvelope(task, deliveryWork));
+    lines.push(toEnvelope(task, deliveryWork, delivery.retry_cycle));
   }
 
   for (const candidate of analysisCandidates.sort(compareAnalysisCandidates)) {
@@ -302,7 +303,7 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
     const work = laneLine(candidate.task, candidate.lane, true);
     if (!work || !resourcesAvailable(work, resourceClaims, reservedResources)) continue;
     reserveResources(work, reservedResources);
-    lines.push(toEnvelope(candidate.task, work));
+    lines.push(toEnvelope(candidate.task, work, candidate.lane.retry_cycle));
     analysisSlots -= 1;
   }
   return lines;

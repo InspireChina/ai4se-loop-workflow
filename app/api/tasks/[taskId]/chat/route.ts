@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { agentExecutionOptions, getAgentExecutorSettings } from '../../../../../src/application/project-settings';
 import { beginTaskContextChatTurn, completeTaskContextChatTurn, getTaskContextChat, recordTaskContextChatFailureAttempt } from '../../../../../src/application/task-context-chat';
 import { EXECUTION_FAILURE_MAX_RETRIES } from '../../../../../src/application/executions';
+import { waitForExecutionRetryBackoff } from '../../../../../src/application/execution-retry-policy';
 import { runTaskContextChatTurn } from '../../../../../src/infrastructure/task-context-chat-executor';
 
 export const runtime = 'nodejs';
@@ -53,6 +54,7 @@ export async function POST(request: Request, context: { params: Promise<{ taskId
           maxRetries: EXECUTION_FAILURE_MAX_RETRIES,
         });
         if (!retry.willRetry) throw error;
+        await waitForExecutionRetryBackoff(failureAttempt, request.signal);
       }
     }
     throw new Error('上下文 Agent 重试状态异常');

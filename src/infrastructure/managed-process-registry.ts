@@ -2,6 +2,41 @@ import { randomUUID } from 'node:crypto';
 import { databaseConnection } from './database';
 import { waitForProcessIdentity } from './process-tree';
 
+export type ManagedProcessKind = 'ui-server' | 'agent-runner' | 'agent-cli';
+
+export function registerManagedProcessInDb(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  input: {
+    processId: string;
+    supervisionToken: number;
+    processKind: ManagedProcessKind;
+    pid: number;
+    processStartMarker: string;
+    runId?: string | null;
+  },
+) {
+  const registered = db.prepare(`
+    INSERT INTO loop_managed_processes(
+      process_id, supervision_token, process_kind, pid, process_start_marker, run_id
+    ) VALUES(?, ?, ?, ?, ?, ?)
+    ON CONFLICT(supervision_token, process_kind, pid, process_start_marker)
+    DO UPDATE SET status = 'running', exited_at = NULL, run_id = excluded.run_id
+    WHERE COALESCE(loop_managed_processes.run_id, '') = COALESCE(excluded.run_id, '')
+    RETURNING process_id
+  `).get(
+    input.processId,
+    input.supervisionToken,
+    input.processKind,
+    input.pid,
+    input.processStartMarker,
+    input.runId ?? null,
+  ) as { process_id: string } | undefined;
+  if (!registered) {
+    throw new Error(`受管进程身份已属于其他运行：kind=${input.processKind} pid=${input.pid}`);
+  }
+  return registered.process_id;
+}
+
 export async function registerManagedAgentProcess(runId: string, pid: number) {
   const supervisionToken = Number(process.env.LOOP_SUPERVISION_TOKEN || 0);
   if (process.env.LOOP_TEST === '1' && supervisionToken <= 0) return `test-${pid}`;
@@ -23,12 +58,15 @@ export async function registerManagedAgentProcess(runId: string, pid: number) {
       || state?.desired_intent !== 'running' || state.mode !== 'normal') {
       throw new Error('Agent CLI 登记被拒绝：监督代次已经失效');
     }
-    db.prepare(`
-      INSERT INTO loop_managed_processes(
-        process_id, supervision_token, process_kind, pid, process_start_marker, run_id
-      ) VALUES(?, ?, 'agent-cli', ?, ?, ?)
-    `).run(randomUUID(), supervisionToken, pid, identity.startMarker, runId);
-  })();
+    registerManagedProcessInDb(db, {
+      processId: randomUUID(),
+      supervisionToken,
+      processKind: 'agent-cli',
+      pid,
+      processStartMarker: identity.startMarker,
+      runId,
+    });
+  }).immediate();
   return identity.startMarker;
 }
 

@@ -21,6 +21,7 @@ export type TaskLane = {
   current_story_index: number | null;
   blocked_reason: string | null;
   resume_pending: number;
+  retry_cycle: number;
   ready_at: string | null;
   updated_at: string;
 };

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
 import { shouldRecordDevCodeCommit } from '../application/executions';
-import { resolveRunnerCommand } from './agent-runner';
+import { resolveRunnerCommand, runnerDiagnosticPath } from './agent-runner';
 
 test('starts the TypeScript Runner through Node and the local tsx CLI', () => {
   const launch = resolveRunnerCommand('RUN-123', 'agent-runner.ts');
@@ -37,6 +37,21 @@ test('starts bundled desktop runners through Electron in Node mode', () => {
     if (previous.root === undefined) delete process.env.LOOP_APP_ROOT;
     else process.env.LOOP_APP_ROOT = previous.root;
   }
+});
+
+test('routes Runner stderr to a run-owned diagnostic file and installs fatal handlers', () => {
+  assert.match(runnerDiagnosticPath('RUN-123'), /run-diagnostics[/\\]RUN-123[/\\]runner\.stderr\.log$/);
+  assert.throws(() => runnerDiagnosticPath('../escape'), /invalid run id/);
+  const launcher = readFileSync(resolve(process.cwd(), 'src/infrastructure/agent-runner.ts'), 'utf8');
+  const runner = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+
+  assert.match(launcher, /stdio:\s*\['ignore', 'ignore', diagnostic\.fd\]/);
+  assert.match(launcher, /Runner 进程.*已退出 code=/);
+  assert.doesNotMatch(launcher, /stdio:\s*'ignore'/);
+  assert.match(runner, /process\.on\('uncaughtException'/);
+  assert.match(runner, /process\.on\('unhandledRejection'/);
+  assert.match(runner, /error\.stack \|\| error\.message/);
+  assert.match(runner, /process\.exitCode = 1/);
 });
 
 test('persists normalized business execution events as ordered execution receipts', () => {
@@ -131,8 +146,21 @@ test('retries every Agent execution failure three times before blocking its lane
   assert.match(source, /EXECUTION_FAILURE_MAX_RETRIES/);
   assert.match(source, /failExecutionWithRetryPolicy\(attempt\.execution_id, reason/);
   assert.match(source, /execution\.terminationReason \? 'agent-timeout' : 'agent-cli-exit'/);
+  assert.match(source, /shouldRetryReportedFailure\(result, attempt\.attempt\)/);
+  assert.match(source, /execution\.stderrTail \? `stderr：\$\{execution\.stderrTail\}`/);
   assert.doesNotMatch(source, /maxRetries:\s*[12]\b/);
   assert.doesNotMatch(source, /if \(!retryPolicy\).*failExecution/s);
+});
+
+test('attempts terminal-command recovery before releasing execution resources', () => {
+  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+  const recovery = source.indexOf('shouldAttemptTerminalCommandRecovery({');
+  const release = source.indexOf('await progressDispatcher.executionExited({ reservationId: reservation.reservationId });', recovery);
+  assert.ok(recovery >= 0);
+  assert.ok(release > recovery);
+  assert.match(source, /recordTerminalCommandRecoveryActivity\(attempt\.execution_id, 'started'\)/);
+  assert.match(source, /recordTerminalCommandRecoveryActivity\(attempt\.execution_id, 'succeeded'\)/);
+  assert.match(source, /启动一次仅限提交的补交/);
 });
 
 test('uses Event Hub revisions and schedule deadlines instead of fixed business polling', () => {

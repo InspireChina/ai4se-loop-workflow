@@ -9,6 +9,7 @@ import { agentResultChannelEnv, createAgentResultChannel, readAgentResultChannel
 import type { LangfuseTelemetry } from './langfuse';
 import { markManagedAgentProcessExited, registerManagedAgentProcess } from './managed-process-registry';
 import { terminateProcessTree } from './process-tree';
+import { sanitizeDiagnosticText } from './diagnostic-text';
 
 export type DelegationExecutionInput = {
   runId: string;
@@ -33,6 +34,8 @@ export type DelegationExecutionInput = {
 
 export type DelegationExecutionResult = {
   exitCode: number;
+  signal?: string;
+  stderrTail?: string;
   finalText: string;
   submittedResult?: string | null;
   resultSubmissionError?: string | null;
@@ -113,6 +116,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   let terminalExitCode: number | null | undefined;
   let executionFailed = false;
   let finalText = '';
+  let stderrTail = '';
   let submittedResult: string | null = null;
   let resultSubmissionError: string | null = null;
   let evidencePersistenceError: string | null = null;
@@ -216,6 +220,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     });
     child.stderr?.on('data', (chunk: Buffer) => {
       noteProcessOutput();
+      stderrTail = `${stderrTail}${chunk.toString('utf8')}`.slice(-24_000);
       stderrBuffer += stderrDecoder.write(chunk);
       const lines = stderrBuffer.split(/\r?\n/);
       stderrBuffer = lines.pop() || '';
@@ -335,6 +340,8 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     if (evidencePersistenceError) traceStatus = 'execution_error';
     return {
       exitCode: terminalExitCode ?? 1,
+      ...(child.signalCode ? { signal: child.signalCode } : {}),
+      ...(stderrTail.trim() ? { stderrTail: sanitizeDiagnosticText(stderrTail.trim()) } : {}),
       finalText,
       ...(input.resultKind ? { submittedResult, resultSubmissionError } : {}),
       ...(evidencePersistenceError ? { evidencePersistenceError } : {}),

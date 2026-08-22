@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { AlertTriangle, ArrowRight, Bot, Check, CheckCircle2, Clock3, ExternalLink, FileText, GitBranch, Hash, Link2, PauseCircle, Play, Tag } from 'lucide-react';
 import { decisionAlignmentQuestions } from '../../../src/application/decision-alignment';
+import { remainingExecutionRetries } from '../../../src/application/execution-retry-policy';
 import { formatEventTime } from '../../../src/application/event-time';
 import { getTask } from '../../../src/application/tasks';
 import { progressDispatchInspector, type DispatchWaitReason } from '../../../src/application/progress-dispatch';
@@ -650,7 +651,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         </summary>
         <div className="document-list">
           {executionAttempts.length === 0 ? <div className="empty">尚无执行审计记录。</div> : executionAttempts.map((attempt) => <details key={attempt.execution_id} className="document-item">
-            <summary><GitBranch size={15}/><span>{attempt.lane ? `${attempt.lane === 'analysis' ? '交付分析' : attempt.lane === 'delivery' ? '开发验证' : '控制'} · ` : ''}{deliveryUnitLabel(attempt.story_index)} · {agentLabel(attempt.agent)} · attempt {attempt.attempt}</span><small>{attempt.status}</small></summary>
+            <summary><GitBranch size={15}/><span>{attempt.lane ? `${attempt.lane === 'analysis' ? '交付分析' : attempt.lane === 'delivery' ? '开发验证' : '控制'} · ` : ''}{deliveryUnitLabel(attempt.story_index)} · {agentLabel(attempt.agent)} · attempt {attempt.attempt}{['planned', 'running', 'retryable_failed', 'system_blocked'].includes(attempt.status) ? ` · 剩余自动重试 ${remainingExecutionRetries(attempt.attempt)}` : ''}</span><small>{attempt.status}</small></summary>
             <pre>{[
               `execution: ${attempt.execution_id}`,
               attempt.dispatch_generation_key ? `reservation: ${attempt.execution_id} · run ${attempt.run_id}` : '',
@@ -664,6 +665,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               attempt.prompt_version ? `prompt: Project r${attempt.prompt_version} · template v${attempt.prompt_template_version || 1} · ${attempt.prompt_hash || ''}` : '',
               attempt.memory_revision ? `memory: r${attempt.memory_revision} · ${attempt.memory_hash || ''}` : '',
               attempt.last_error ? `error: ${attempt.last_error}` : '',
+              attempt.retry_not_before ? `retry not before: ${attempt.retry_not_before}` : '',
             ].filter(Boolean).join('\n')}</pre>
           </details>)}
         </div>

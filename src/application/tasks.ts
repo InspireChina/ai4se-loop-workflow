@@ -8,6 +8,7 @@ import { DEFAULT_REQUIREMENT_PRIORITY, requirementPriority, requirementPriorityR
 import { AgentResultContractError, assertDeliverySpecDecisionCoverage, deliverySpecSchema } from '../domain/agent-result';
 import { agentCommandProfile } from '../domain/agent-command-profile';
 import { databaseConnection, paths } from '../infrastructure/database';
+import { registerManagedProcessInDb } from '../infrastructure/managed-process-registry';
 import { isProcessAlive, readRunPid } from '../infrastructure/run-process';
 import { toUtcIsoString } from './event-time';
 import { recordLoopLogEventInDb } from './runtime-events';
@@ -60,6 +61,7 @@ export type Task = TaskState & {
   created_at: string;
   updated_at: string;
   completed_at: string | null;
+  retry_cycle: number;
 };
 export type TaskWithLanes = Task & { lanes: TaskLane[] };
 
@@ -215,7 +217,7 @@ export type RuntimeInputRequest = {
   resolved_at: string | null;
 };
 export type ClosureAcknowledgement = { acknowledgement_id: string; task_id: string; review_document_id: string; review_revision: number; acknowledged_by: string; acknowledged_at: string };
-export type ExecutionAttemptView = { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; lane: string | null; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_template_version: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; executor_id: string | null; configured_model: string | null; reasoning_effort: string | null; result_outcome: string | null; result_verdict: string | null; result_summary: string | null; last_error: string | null; dispatch_generation_key: string | null; dispatch_execution_exited_at: string | null; dispatch_settled_at: string | null; claimed_resources: string | null; created_at: string; started_at: string | null; finished_at: string | null };
+export type ExecutionAttemptView = { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; lane: string | null; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_template_version: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; executor_id: string | null; configured_model: string | null; reasoning_effort: string | null; result_outcome: string | null; result_verdict: string | null; result_summary: string | null; last_error: string | null; retry_not_before: string | null; dispatch_generation_key: string | null; dispatch_execution_exited_at: string | null; dispatch_settled_at: string | null; claimed_resources: string | null; created_at: string; started_at: string | null; finished_at: string | null };
 export type Event = { event_id: string; actor: string; event_type: string; summary: string; created_at: string };
 export type RunStatus = {
   runId: string;
@@ -226,6 +228,13 @@ export type RunStatus = {
   status: 'starting' | 'running' | 'stopping' | 'stopped' | 'crashed';
   pid: number | null;
   active: boolean;
+  health: {
+    starting: boolean;
+    pidAlive: boolean;
+    heartbeatFresh: boolean;
+    heartbeatAgeMs: number | null;
+    generationActive: boolean;
+  };
 } | null;
 export type RunLogChunk = { lastId: number; raw: string };
 export type DelegationEnvelope = Delegation & {
@@ -254,6 +263,7 @@ export type DelegationEnvelope = Delegation & {
   owner: string;
   evidence: string;
   risk: string;
+  retryCycle?: number;
 };
 
 const taskSelect = `
@@ -263,7 +273,7 @@ const taskSelect = `
          resume_pending, next_step, blocked_reason, run_state, closure_status,
          review_revision, review_document_id, closure_acknowledged_at,
          last_actor, owner, evidence, risk, is_paused, paused_reason, paused_at,
-         created_at, updated_at, completed_at
+         created_at, updated_at, completed_at, retry_cycle
   FROM tasks
 `;
 
@@ -449,7 +459,7 @@ export async function getTask(taskId: string) {
     SELECT execution_id, run_id, task_id, story_index, agent, pipeline, lane, attempt, status,
            input_hash, base_commit, code_commit, verification_id,
            prompt_version, prompt_template_version, prompt_hash, memory_revision, memory_hash, evolution_candidate_id,
-           executor_id, configured_model, reasoning_effort, last_error,
+           executor_id, configured_model, reasoning_effort, last_error, retry_not_before,
            dispatch_generation_key, dispatch_execution_exited_at, dispatch_settled_at,
            (SELECT GROUP_CONCAT(value, ', ')
             FROM json_each(execution_attempts.dispatch_reservation_json, '$.claimedResources')) AS claimed_resources,
@@ -1484,6 +1494,10 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
         currentStoryIndex: lane.current_story_index,
         resumePending: 1,
       });
+      db.prepare(`
+        UPDATE task_lanes SET retry_cycle = retry_cycle + 1, updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ? AND lane = ?
+      `).run(taskId, lane.lane);
       const otherBlocked = (db.prepare(`
         SELECT COUNT(*) AS count FROM task_lanes
         WHERE task_id = ? AND status = 'system_blocked'
@@ -1524,7 +1538,7 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
     db.prepare(`
       UPDATE tasks
       SET agile_status = ?, run_state = 'runnable', resume_status = NULL, resume_pending = ?, blocked_reason = NULL,
-          next_step = ?,
+          next_step = ?, retry_cycle = retry_cycle + 1,
           last_actor = 'system', updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(
@@ -2118,7 +2132,10 @@ function databaseTimestampMs(value: string | null | undefined) {
   return new Date(value.includes('T') ? value : `${value.replace(' ', 'T')}Z`).getTime();
 }
 
-function getRunStatusFromDb(db: Awaited<ReturnType<typeof databaseConnection>>) {
+function getRunStatusFromDb(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  expectedSupervisionToken = Number(process.env.LOOP_SUPERVISION_TOKEN || 0),
+) {
   const row = db.prepare("SELECT value FROM loop_meta WHERE key = 'active_run'").get() as { value: string } | undefined;
   if (!row) return null;
   try {
@@ -2128,9 +2145,11 @@ function getRunStatusFromDb(db: Awaited<ReturnType<typeof databaseConnection>>) 
     const startedAt = persisted?.started_at || parsed.startedAt;
     const heartbeatAt = persisted?.heartbeat_at || null;
     const starting = !heartbeatAt && Date.now() - databaseTimestampMs(startedAt) < 15_000;
-    const heartbeatFresh = Boolean(heartbeatAt) && Date.now() - databaseTimestampMs(heartbeatAt) <= RUN_HEARTBEAT_TIMEOUT_MS;
+    const heartbeatAgeMs = heartbeatAt ? Math.max(0, Date.now() - databaseTimestampMs(heartbeatAt)) : null;
+    const heartbeatFresh = heartbeatAgeMs !== null && heartbeatAgeMs <= RUN_HEARTBEAT_TIMEOUT_MS;
+    const pidAlive = isProcessAlive(pid);
     let generationActive = true;
-    const runnerToken = Number(process.env.LOOP_SUPERVISION_TOKEN || 0);
+    const runnerToken = expectedSupervisionToken;
     if (runnerToken > 0) {
       const lifecycle = db.prepare(`SELECT desired_intent, mode FROM loop_lifecycle_state WHERE singleton = 1`).get() as { desired_intent: string; mode: string } | undefined;
       const lease = db.prepare(`SELECT fencing_token, expires_at FROM loop_supervisor_lease WHERE singleton = 1`).get() as { fencing_token: number; expires_at: string } | undefined;
@@ -2141,7 +2160,7 @@ function getRunStatusFromDb(db: Awaited<ReturnType<typeof databaseConnection>>) 
         && databaseTimestampMs(lease.expires_at) + 15_000 > Date.now();
     }
     const active = generationActive && persisted?.status !== 'stopped' && persisted?.status !== 'crashed'
-      && (starting || (isProcessAlive(pid) && heartbeatFresh));
+      && (starting || (pidAlive && heartbeatFresh));
     return {
       runId: parsed.runId,
       owner: persisted?.owner || parsed.owner,
@@ -2151,15 +2170,16 @@ function getRunStatusFromDb(db: Awaited<ReturnType<typeof databaseConnection>>) 
       status: persisted?.status || 'starting',
       pid,
       active,
+      health: { starting, pidAlive, heartbeatFresh, heartbeatAgeMs, generationActive },
     } satisfies NonNullable<RunStatus>;
   } catch {
     return null;
   }
 }
 
-export async function getRunStatus(): Promise<RunStatus> {
+export async function getRunStatus(expectedSupervisionToken?: number): Promise<RunStatus> {
   const db = await databaseConnection();
-  return getRunStatusFromDb(db);
+  return getRunStatusFromDb(db, expectedSupervisionToken);
 }
 
 export async function registerRunProcess(runId: string, processKind: 'agent-runner', pid: number, supervisionToken: number, processStartMarker: string) {
@@ -2177,12 +2197,15 @@ export async function registerRunProcess(runId: string, processKind: 'agent-runn
       WHERE run_id = ? AND status IN ('starting', 'running')
     `).run(processKind, pid, supervisionToken, runId);
     if (updated.changes !== 1) throw new Error('Runner 登记被拒绝：运行状态已经变化');
-    db.prepare(`
-      INSERT INTO loop_managed_processes(
-        process_id, supervision_token, process_kind, pid, process_start_marker, run_id
-      ) VALUES(?, ?, 'agent-runner', ?, ?, ?)
-    `).run(randomUUID(), supervisionToken, pid, processStartMarker, runId);
-  })();
+    registerManagedProcessInDb(db, {
+      processId: randomUUID(),
+      supervisionToken,
+      processKind: 'agent-runner',
+      pid,
+      processStartMarker,
+      runId,
+    });
+  }).immediate();
 }
 
 export async function heartbeatRun(runId: string, processKind: 'agent-runner') {

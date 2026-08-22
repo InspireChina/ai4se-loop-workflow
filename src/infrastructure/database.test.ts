@@ -32,9 +32,12 @@ test('materializes persistent task lanes and execution lane correlation', async 
   const runColumns = db.prepare('PRAGMA table_info(loop_runs)').all() as { name: string }[];
   assert.deepEqual(laneColumns.map((column) => column.name), [
     'task_id', 'lane', 'status', 'current_agent', 'current_story_index',
-    'blocked_reason', 'resume_pending', 'ready_at', 'updated_at',
+    'blocked_reason', 'resume_pending', 'ready_at', 'updated_at', 'retry_cycle',
   ]);
   assert.equal(executionColumns.some((column) => column.name === 'lane'), true);
+  assert.equal(executionColumns.some((column) => column.name === 'retry_not_before'), true);
+  const taskColumns = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
+  assert.equal(taskColumns.some((column) => column.name === 'retry_cycle'), true);
   assert.equal(executionColumns.some((column) => column.name === 'lease_owner'), false);
   assert.equal(executionColumns.some((column) => column.name === 'lease_expires_at'), false);
   assert.equal(runColumns.some((column) => column.name === 'heartbeat_at'), true);

@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import test from 'node:test';
 import {
   inspectProcessIdentity,
@@ -15,6 +17,14 @@ test('uses the Windows process start time as the stable process identity', () =>
   assert.match(lookup.args.at(-1) || '', /Get-Process -Id 4321/);
   assert.match(lookup.args.at(-1) || '', /StartTime\.ToUniversalTime\(\)\.ToString\('o'\)/);
   assert.doesNotMatch(lookup.args.at(-1) || '', /Get-CimInstance/);
+});
+
+test('keeps Windows identity lookup asynchronous, single-flight, and concurrency bounded', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/infrastructure/process-tree.ts'), 'utf8');
+  assert.doesNotMatch(source, /execFileSync|spawnSync|execSync/);
+  assert.match(source, /WINDOWS_IDENTITY_CONCURRENCY = 2/);
+  assert.match(source, /processIdentityInFlight = new Map/);
+  assert.match(source, /withWindowsIdentitySlot/);
 });
 
 test('distinguishes reused Windows PIDs by their process start time', () => {
@@ -64,9 +74,9 @@ test('stops waiting when the spawned process has already exited', async () => {
   assert.equal(attempts, 1);
 });
 
-test('reads a stable identity for the current process', () => {
-  const first = inspectProcessIdentity(process.pid);
-  const second = inspectProcessIdentity(process.pid);
+test('reads a stable identity for the current process', async () => {
+  const first = await inspectProcessIdentity(process.pid);
+  const second = await inspectProcessIdentity(process.pid);
 
   assert.ok(first);
   assert.deepEqual(second, first);
