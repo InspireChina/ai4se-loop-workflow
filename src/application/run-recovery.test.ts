@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { databaseConnection } from '../infrastructure/database';
-import { reconcileInterruptedExecutions, recordTerminalCommandRecoveryActivity } from './executions';
+import { reconcileInterruptedExecutions, recordCleanExitContinuationActivity } from './executions';
 import { createTask } from './tasks';
 import { applyNextQueuedAgentResult } from './agent-results';
 import {
@@ -189,7 +189,7 @@ test('routes queued result application failures through the same retry policy an
   assert.match(exhaustedEvent.summary, /第 4 次失败，3 次自动重试已耗尽.*应用排队中的 Agent 结果失败.*JSON/);
 });
 
-test('records terminal-command auto-recovery phases in the requirement activity feed', async () => {
+test('records clean-exit continuation phases in the requirement activity feed', async () => {
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Terminal recovery activity' });
   const executionId = 'execution-terminal-recovery-activity';
@@ -201,21 +201,24 @@ test('records terminal-command auto-recovery phases in the requirement activity 
       'key-terminal-recovery', 1, 'running', 'hash-terminal-recovery', '{}')
   `).run(executionId, taskId);
 
-  await recordTerminalCommandRecoveryActivity(executionId, 'started');
-  await recordTerminalCommandRecoveryActivity(executionId, 'failed', 'CLI 退出码 1');
-  await recordTerminalCommandRecoveryActivity(executionId, 'succeeded');
+  await recordCleanExitContinuationActivity(executionId, 'scheduled', 1);
+  await recordCleanExitContinuationActivity(executionId, 'scheduled', 2);
+  await recordCleanExitContinuationActivity(executionId, 'failed', 2, 'CLI 退出码 1');
+  await recordCleanExitContinuationActivity(executionId, 'succeeded', 2);
 
   const events = db.prepare(`
     SELECT event_type, summary FROM task_events
-    WHERE task_id = ? AND event_type LIKE 'AgentTerminalRecovery%'
+    WHERE task_id = ? AND event_type LIKE 'AgentCleanExitContinuation%'
     ORDER BY rowid
   `).all(taskId) as Array<{ event_type: string; summary: string }>;
   assert.deepEqual(events.map((event) => event.event_type), [
-    'AgentTerminalRecoveryStarted',
-    'AgentTerminalRecoveryFailed',
-    'AgentTerminalRecoverySucceeded',
+    'AgentCleanExitContinuationScheduled',
+    'AgentCleanExitContinuationScheduled',
+    'AgentCleanExitContinuationFailed',
+    'AgentCleanExitContinuationSucceeded',
   ]);
-  assert.match(events[0].summary, /不消耗重试次数/);
-  assert.match(events[1].summary, /CLI 退出码 1/);
-  assert.match(events[2].summary, /结构化结果/);
+  assert.match(events[0].summary, /exit 0.*第 1 次.*不消耗失败重试额度/);
+  assert.match(events[1].summary, /第 2 次/);
+  assert.match(events[2].summary, /CLI 退出码 1/);
+  assert.match(events[3].summary, /角色终止提交/);
 });

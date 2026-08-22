@@ -16,6 +16,7 @@ import { loadAgentRuntime } from '../../src/application/agent-profiles';
 import {
   issueAgentCommandToken,
   readAgentCommandSubmission,
+  resetAgentCommandStatusForContinuation,
 } from '../../src/application/agent-command-drafts';
 import {
   applyEvolutionResult,
@@ -41,11 +42,11 @@ import {
   markExecutionOutput,
   markExecutionStage,
   recordExecutionReceipt,
-  recordTerminalCommandRecoveryActivity,
+  recordCleanExitContinuationActivity,
   shouldRecordDevCodeCommit,
   type ExecutionAttempt,
 } from '../../src/application/executions';
-import { buildTerminalCommandRecoveryPrompt, shouldAttemptTerminalCommandRecovery } from '../../src/application/terminal-command-recovery';
+import { buildCleanExitContinuationPrompt, shouldContinueAfterCleanExit } from '../../src/application/terminal-command-recovery';
 import { shouldRetryReportedFailure, waitForExecutionRetryBackoff } from '../../src/application/execution-retry-policy';
 import { appendLoopRunLog, CodeSlotBusyError, endRun, getRunStatus, getTask, getTaskContext, recordRuntimeEventWithFallback, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
 import { progressDispatcher, type ReservedExecution } from '../../src/application/progress-dispatch';
@@ -573,63 +574,74 @@ async function executeDelegationStep(
     activeExecutionControllers.set(attempt.execution_id, cancellation);
     let execution: Awaited<ReturnType<typeof runDelegation>>;
     let commandSubmission: Awaited<ReturnType<typeof readAgentCommandSubmission>>;
+    let continuationCount = 0;
     try {
-      execution = await runDelegation(
-        delegation,
-        builtPrompt.prompt,
-        attempt.execution_id,
-        commandToken,
-        executor,
-        executionOptions,
-        cancellation.signal,
-      );
-      commandSubmission = await readAgentCommandSubmission(attempt.execution_id);
-      if (shouldAttemptTerminalCommandRecovery({
-        exitCode: execution.exitCode,
-        finalText: execution.finalText,
-        hasSubmission: Boolean(commandSubmission),
-        cancelled: Boolean(execution.cancelled),
-        evidencePersistenceError: execution.evidencePersistenceError,
-      })) {
-        const commandPrompt = agentCommandPrompt(paths.appRoot, delegation.agent, delegation.pipeline);
-        if (!commandPrompt) throw new Error(`${delegation.agent}/${delegation.pipeline} 没有配置渐进式命令协议`);
-        await recordTerminalCommandRecoveryActivity(attempt.execution_id, 'started');
-        await appendLoopRunLog(runId, `[自动修复] requirement=${delegation.taskId} execution=${attempt.execution_id} 缺少角色终止命令，启动一次仅限提交的补交`);
-        let recoveryExecution: Awaited<ReturnType<typeof runDelegation>>;
+      let nextPrompt = builtPrompt.prompt;
+      let combinedDiagnostics: string[] = [];
+      let previousStderrTail: string | undefined;
+      while (true) {
+        let currentExecution: Awaited<ReturnType<typeof runDelegation>>;
         try {
-          recoveryExecution = await runDelegation(
+          currentExecution = await runDelegation(
             delegation,
-            buildTerminalCommandRecoveryPrompt({ commandPrompt, previousFinalText: execution.finalText }),
+            nextPrompt,
             attempt.execution_id,
             commandToken,
             executor,
             executionOptions,
             cancellation.signal,
-            {
-              maxRuntimeMs: Number(process.env.TERMINAL_RECOVERY_MAX_RUNTIME_MS || 10 * 60 * 1000),
-              startupTimeoutMs: Number(process.env.TERMINAL_RECOVERY_STARTUP_TIMEOUT_MS || 5 * 60 * 1000),
-              idleTimeoutMs: Number(process.env.TERMINAL_RECOVERY_IDLE_TIMEOUT_MS || 5 * 60 * 1000),
-            },
           );
         } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
-          await recordTerminalCommandRecoveryActivity(attempt.execution_id, 'failed', reason);
+          if (continuationCount > 0) {
+            const reason = error instanceof Error ? error.message : String(error);
+            await recordCleanExitContinuationActivity(attempt.execution_id, 'failed', continuationCount, reason);
+          }
           throw error;
         }
-        commandSubmission = await readAgentCommandSubmission(attempt.execution_id);
+        combinedDiagnostics = [...combinedDiagnostics, ...currentExecution.diagnostics];
         execution = {
-          ...recoveryExecution,
-          diagnostics: [...execution.diagnostics, ...recoveryExecution.diagnostics],
-          stderrTail: recoveryExecution.stderrTail || execution.stderrTail,
+          ...currentExecution,
+          diagnostics: combinedDiagnostics,
+          stderrTail: currentExecution.stderrTail || previousStderrTail,
         };
+        previousStderrTail = execution.stderrTail;
+        commandSubmission = await readAgentCommandSubmission(attempt.execution_id);
+        if (!shouldContinueAfterCleanExit({
+          exitCode: execution.exitCode,
+          hasSubmission: Boolean(commandSubmission),
+          cancelled: Boolean(execution.cancelled),
+          evidencePersistenceError: execution.evidencePersistenceError,
+        })) break;
+
+        continuationCount += 1;
+        await recordCleanExitContinuationActivity(attempt.execution_id, 'scheduled', continuationCount);
+        try {
+          const statusGateReset = await resetAgentCommandStatusForContinuation(attempt.execution_id);
+          await appendLoopRunLog(runId, `[自动续跑] requirement=${delegation.taskId} execution=${attempt.execution_id} CLI exit 0 但没有角色终止提交，立即继续同一 execution（第 ${continuationCount} 次，不消耗失败重试额度${statusGateReset ? '，已要求重新读取 status' : ''}）`);
+          nextPrompt = buildCleanExitContinuationPrompt({
+            originalPrompt: builtPrompt.prompt,
+            previousFinalText: execution.finalText,
+            continuationNumber: continuationCount,
+          });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          await recordCleanExitContinuationActivity(attempt.execution_id, 'failed', continuationCount, `准备续跑失败：${reason}`);
+          throw error;
+        }
+      }
+      if (continuationCount > 0) {
         if (commandSubmission) {
-          await recordTerminalCommandRecoveryActivity(attempt.execution_id, 'succeeded');
-          await appendLoopRunLog(runId, `[自动修复] requirement=${delegation.taskId} execution=${attempt.execution_id} 角色终止命令补交成功`);
+          await recordCleanExitContinuationActivity(attempt.execution_id, 'succeeded', continuationCount);
+          await appendLoopRunLog(runId, `[自动续跑] requirement=${delegation.taskId} execution=${attempt.execution_id} 经过 ${continuationCount} 次续跑后收到角色终止提交`);
+        } else if (execution.cancelled) {
+          await recordCleanExitContinuationActivity(attempt.execution_id, 'stopped', continuationCount, '需求已暂停或取消');
         } else {
-          const recoveryReason = recoveryExecution.terminationReason
-            || (recoveryExecution.exitCode !== 0 ? `CLI 退出码 ${recoveryExecution.exitCode}` : '仍未执行角色终止命令');
-          await recordTerminalCommandRecoveryActivity(attempt.execution_id, 'failed', recoveryReason);
-          await appendLoopRunLog(runId, `[自动修复] requirement=${delegation.taskId} execution=${attempt.execution_id} 补交未成功：${recoveryReason}`);
+          const reason = execution.evidencePersistenceError
+            ? `本地执行证据写入失败：${execution.evidencePersistenceError}`
+            : execution.terminationReason
+              ? `${executor.label} CLI ${execution.terminationReason}`
+              : `CLI 退出码 ${execution.exitCode}`;
+          await recordCleanExitContinuationActivity(attempt.execution_id, 'failed', continuationCount, reason);
         }
       }
     } finally {

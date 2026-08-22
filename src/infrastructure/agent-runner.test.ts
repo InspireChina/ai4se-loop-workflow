@@ -152,15 +152,18 @@ test('retries every Agent execution failure three times before blocking its lane
   assert.doesNotMatch(source, /if \(!retryPolicy\).*failExecution/s);
 });
 
-test('attempts terminal-command recovery before releasing execution resources', () => {
+test('continues every clean exit without a terminal submission before releasing resources', () => {
   const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
-  const recovery = source.indexOf('shouldAttemptTerminalCommandRecovery({');
-  const release = source.indexOf('await progressDispatcher.executionExited({ reservationId: reservation.reservationId });', recovery);
-  assert.ok(recovery >= 0);
-  assert.ok(release > recovery);
-  assert.match(source, /recordTerminalCommandRecoveryActivity\(attempt\.execution_id, 'started'\)/);
-  assert.match(source, /recordTerminalCommandRecoveryActivity\(attempt\.execution_id, 'succeeded'\)/);
-  assert.match(source, /启动一次仅限提交的补交/);
+  const continuation = source.indexOf('shouldContinueAfterCleanExit({');
+  const release = source.indexOf('await progressDispatcher.executionExited({ reservationId: reservation.reservationId });', continuation);
+  assert.ok(continuation >= 0);
+  assert.ok(release > continuation);
+  assert.match(source, /while \(true\)/);
+  assert.match(source, /resetAgentCommandStatusForContinuation\(attempt\.execution_id\)/);
+  assert.match(source, /recordCleanExitContinuationActivity\(attempt\.execution_id, 'scheduled', continuationCount\)/);
+  assert.match(source, /recordCleanExitContinuationActivity\(attempt\.execution_id, 'succeeded', continuationCount\)/);
+  assert.match(source, /不消耗失败重试额度/);
+  assert.doesNotMatch(source, /TERMINAL_RECOVERY_MAX_RUNTIME_MS|启动一次仅限提交的补交/);
 });
 
 test('uses Event Hub revisions and schedule deadlines instead of fixed business polling', () => {

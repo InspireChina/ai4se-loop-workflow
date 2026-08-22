@@ -134,6 +134,35 @@ async function taskReadyForSplit(title: string) {
   return { taskId, delegation: delegation! };
 }
 
+test('clean-exit continuation requires a progressive role to read status again', async () => {
+  const { createTask } = await import('./tasks');
+  const { resetAgentCommandStatusForContinuation } = await import('./agent-command-drafts');
+  const taskId = await createTask({
+    title: '自动续跑重新读取阶段',
+    description: 'CLI 正常退出但尚未提交时继续当前执行。',
+  });
+  const active = await begin(taskId);
+
+  await command(active.executionId, active.token!, ['requirement-context', 'status']);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'intent', 'set', '--text', '继续尚未完成的角色工作',
+  ]);
+
+  assert.equal(await resetAgentCommandStatusForContinuation(active.executionId), true);
+  await assert.rejects(
+    command(active.executionId, active.token!, [
+      'requirement-context', 'intent', 'set', '--text', '不能沿用上一轮读取的状态',
+    ]),
+    /尚未查看草稿状态/,
+  );
+
+  const resumed = await command(active.executionId, active.token!, ['requirement-context', 'status']);
+  assert.match(resumed, /继续尚未完成的角色工作/);
+  await command(active.executionId, active.token!, [
+    'requirement-context', 'intent', 'set', '--text', '重新读取后继续工作',
+  ]);
+});
+
 test('requires status first, accepts progressive edits, and submits context without Agent routing', async () => {
   const { createTask, getTask } = await import('./tasks');
   const { applyAgentResult } = await import('./agent-results');

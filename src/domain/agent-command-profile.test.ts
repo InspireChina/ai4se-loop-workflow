@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   agentCommandPrompt,
+  agentCommandProfiles,
   agentContextHelpLines,
 } from './agent-command-profile';
 
@@ -28,6 +29,21 @@ test('injects the complete read-only context and submission contract before Agen
   assert.match(prompt, /当前 execution 结束后 Harness 会清理该目录/);
   assert.doesNotMatch(prompt, /## 工具选择顺序|## 命令行为/);
   assert.doesNotMatch(prompt, /implementation complete/);
+});
+
+test('every configured role chain renders all terminal actions and forbids intermediate exit', () => {
+  for (const profile of agentCommandProfiles()) {
+    assert.ok(profile.terminalActions.length > 0, `${profile.id} has no terminal action`);
+    for (const pipeline of profile.pipelines) {
+      const prompt = agentCommandPrompt('/app', profile.agent, pipeline);
+      assert.ok(prompt, `${profile.agent}/${pipeline} has no command prompt`);
+      for (const action of profile.terminalActions) {
+        assert.match(prompt, new RegExp(action.split(' --')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      }
+      assert.match(prompt, /CLI exit 0/);
+      assert.match(prompt, /只有.*(?:submit|终止命令).*才能结束 execution|不能在角色终止命令成功前主动结束 execution/);
+    }
+  }
 });
 
 test('shares one context command guide with prompt and help surfaces', () => {

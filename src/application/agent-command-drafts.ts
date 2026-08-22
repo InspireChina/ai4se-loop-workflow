@@ -285,6 +285,24 @@ async function authorize(executionId: string, token: string) {
   return { db, execution, profile, workKey };
 }
 
+export async function resetAgentCommandStatusForContinuation(executionId: string) {
+  const db = await databaseConnection();
+  const execution = executionInDb(db, executionId);
+  if (!execution) throw new Error('当前 execution 不存在，无法准备自动续跑');
+  const profile = agentCommandProfile(execution.agent, execution.pipeline);
+  if (!profile) throw new Error(`${execution.agent}/${execution.pipeline} 尚未启用 Agent 命令`);
+  if (profile.draftType === 'direct') return false;
+
+  const result = db.prepare(`
+    UPDATE agent_work_drafts
+    SET status_viewed_execution_id = NULL, updated_at = CURRENT_TIMESTAMP
+    WHERE status_viewed_execution_id = ?
+      AND last_execution_id = ?
+      AND status = 'editing'
+  `).run(executionId, executionId);
+  return result.changes > 0;
+}
+
 function latestDraft(db: Awaited<ReturnType<typeof databaseConnection>>, workKey: string) {
   return db.prepare(`
     SELECT * FROM agent_work_drafts

@@ -305,9 +305,10 @@ export async function recordExecutionReceipt(executionId: string, kind: string, 
   }
 }
 
-export async function recordTerminalCommandRecoveryActivity(
+export async function recordCleanExitContinuationActivity(
   executionId: string,
-  phase: 'started' | 'succeeded' | 'failed',
+  phase: 'scheduled' | 'succeeded' | 'failed' | 'stopped',
+  continuationCount: number,
   detail?: string,
 ) {
   const db = await databaseConnection();
@@ -323,20 +324,23 @@ export async function recordTerminalCommandRecoveryActivity(
   if (!attempt) return;
   const scope = attempt.lane ? `${attempt.lane} Lane` : 'control';
   const unit = attempt.story_index === null ? '' : ` · 交付单元 ${attempt.story_index}`;
-  const outcome = phase === 'started'
-    ? '检测到普通最终文本但缺少角色终止命令，启动一次自动补交（不消耗重试次数）'
+  const outcome = phase === 'scheduled'
+    ? `CLI exit 0 但尚无角色终止提交，立即续跑同一 execution（第 ${continuationCount} 次，不消耗失败重试额度）`
     : phase === 'succeeded'
-      ? '自动补交成功，已收到结构化结果'
-      : `自动补交未成功${detail ? `：${detail}` : ''}`;
+      ? `经过 ${continuationCount} 次正常退出续跑后收到角色终止提交`
+      : phase === 'stopped'
+        ? `正常退出续跑在第 ${continuationCount} 次后停止${detail ? `：${detail}` : ''}`
+        : `正常退出续跑在第 ${continuationCount} 次后转为真实失败${detail ? `：${detail}` : ''}`;
   db.prepare(`
     INSERT INTO task_events(event_id, task_id, actor, event_type, summary)
     VALUES(?, ?, 'system', ?, ?)
   `).run(
     randomUUID(),
     attempt.task_id,
-    phase === 'started' ? 'AgentTerminalRecoveryStarted'
-      : phase === 'succeeded' ? 'AgentTerminalRecoverySucceeded'
-        : 'AgentTerminalRecoveryFailed',
+    phase === 'scheduled' ? 'AgentCleanExitContinuationScheduled'
+      : phase === 'succeeded' ? 'AgentCleanExitContinuationSucceeded'
+        : phase === 'stopped' ? 'AgentCleanExitContinuationStopped'
+          : 'AgentCleanExitContinuationFailed',
     `${scope} · ${attempt.agent}${unit} · execution=${executionId} · ${outcome}`,
   );
 }

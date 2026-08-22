@@ -153,6 +153,14 @@ export function agentCommandProfile(agent: string, pipeline: string) {
     profile.agent === agent && profile.pipelines.includes(pipeline)) || null;
 }
 
+export function agentCommandProfiles() {
+  return PROFILES.map((profile) => ({
+    ...profile,
+    pipelines: [...profile.pipelines],
+    terminalActions: [...profile.terminalActions],
+  }));
+}
+
 export function agentCommandWorkKey(
   agent: string,
   pipeline: string,
@@ -254,13 +262,14 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
       '```',
       '',
       'run 成功后直接完成需求描述中的真实工作。',
+      'RUN、真实工作或普通总结完成都不是 execution 终点；即使过程命令成功，也必须继续到下一步 SUBMIT。',
       '',
       '**第二步：**',
       '```bash',
       `${command} direct submit --summary-file <简短结论文件> --result-file <完整 Markdown 结果文件>`,
       '```',
       '',
-      'summary 和 result 文件必须位于 `$LOOP_AGENT_TMP_DIR`。result 可省略，此时使用 summary 作为结果文档。submit 成功后结束 execution；普通最终文本不会完成需求。',
+      'summary 和 result 文件必须位于 `$LOOP_AGENT_TMP_DIR`。result 可省略，此时使用 summary 作为结果文档。只有 submit 成功后才能结束 execution；普通最终文本、阶段完成或 CLI exit 0 都不会完成需求。',
       '',
       '# 冻结业务上下文（只读）',
       ...agentContextHelpLines(appRoot),
@@ -309,6 +318,7 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
     '',
     '**编辑与提交规则：**',
     '',
+    '- `status`、任意编辑命令、阶段校验、测试完成或 `COMMAND RESULT` 成功都只是中间状态。每次读取 `NEXT` 或 `NEXT WORK PACKET` 后必须继续整条命令链，不能在角色终止命令成功前主动结束 execution。',
     '- 命令失败时，根据返回的错误修正后自行重试；不要因为一次校验失败就结束工作。',
     ...(['requirement-context', 'delivery-plan', 'delivery-analysis', 'implementation', 'verification', 'review', 'idea-context', 'business-design', 'requirement-spec', 'spec-review'].includes(profile.namespace)
       ? [`- ${profile.namespace} 命令统一返回 \`COMMAND RESULT\`；继续当前阶段时读取 \`NEXT\`，阶段切换时读取 \`NEXT WORK PACKET\`。`]
@@ -317,7 +327,7 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
     '- 长文本参数必须写入 `$LOOP_AGENT_TMP_DIR` 指向的工作区 `.tmp/agent-<execution-id>` 目录，再使用 `--text-file <UTF-8 文件路径>`；其他长文本参数同样支持对应的 `-file` 形式。不要自行拼接临时目录，不要把临时文件写入源码目录或提交到 Git；当前 execution 结束后 Harness 会清理该目录。',
     '- 只有成功执行下列终止命令，当前工作才算提交：',
     ...profile.terminalActions.map((action) => `  - \`${command} ${terminalActionUsage(action)}\``),
-    '- 普通最终回复、Markdown 代码块和自由文本不会推进流程。终止命令成功后，只需简短结束本轮。',
+    '- 普通最终回复、Markdown 代码块、自由文本、阶段完成和 CLI exit 0 都不会推进或结束流程。终止命令成功后，只需简短结束本轮。',
     '',
     '## 2. 冻结业务上下文（只读）',
     '先阅读 Prompt 已内联的 Working Context Pack 和 Required Context Refs。需要完整内容或发现更多资料时，使用下面的只读命令；它们不会修改需求、草稿或流程状态：',
