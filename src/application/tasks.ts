@@ -46,6 +46,7 @@ import {
   requirementDependenciesInDb,
   requirementDependencyCandidatesInDb,
   requirementDependencyGateOpenInDb,
+  requirementDependencySatisfied,
   type RequirementDependency,
 } from './task-dependencies';
 
@@ -791,13 +792,13 @@ export function createTaskInDb(
   ensureTaskLanesInDb(db, task);
   addEvent(db, task.task_id, value.actor, 'TaskCreated', `创建需求：${task.title}`);
   if (dependencies.length) {
-    const waiting = dependencies.filter((dependency) => dependency.agile_status !== 'done');
+    const waiting = dependencies.filter((dependency) => !requirementDependencySatisfied(dependency.agile_status));
     addEvent(
       db,
       task.task_id,
       value.actor,
       'TaskDependenciesConfigured',
-      `配置 ${dependencies.length} 个前置需求${waiting.length ? `，等待完成：${waiting.map((dependency) => dependency.title).join('、')}` : '，创建时均已完成'}`,
+      `配置 ${dependencies.length} 个前置需求${waiting.length ? `，等待进入结卡：${waiting.map((dependency) => dependency.title).join('、')}` : '，创建时依赖条件均已满足'}`,
     );
   }
   return task;

@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { formatEventTime } from '../../src/application/event-time';
+import { requirementDependencySatisfied } from '../../src/application/task-dependencies';
 import { listCompletedTasks, listRequirementDependencyCandidates, listTasks, type TaskWithLanes } from '../../src/application/tasks';
 import { agentLabel, itemTypeLabel, statusLabel } from '../../src/domain/terminology';
 import { requirementPriorityLabel } from '../../src/domain/requirement-priority';
@@ -56,7 +57,7 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
             && ['idea-context-agent', 'business-design-agent', 'backlog-agent'].includes(task.current_subagent || '');
           const pendingDependencies = completedView ? [] : (task as TaskWithLanes).dependency_gate_open
             ? []
-            : (task as TaskWithLanes).dependencies.filter((dependency) => dependency.agile_status !== 'done');
+            : (task as TaskWithLanes).dependencies.filter((dependency) => !requirementDependencySatisfied(dependency.agile_status));
           const waitingForDependencies = pendingDependencies.length > 0;
           const laneSummary = completedView ? '' : task.is_paused
             ? `暂停推进${task.paused_reason ? ` · ${task.paused_reason}` : ''}`

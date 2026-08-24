@@ -10,7 +10,7 @@ import {
 } from './task-dependencies';
 import { createTask, getTask } from './tasks';
 
-test('holds a requirement until every prerequisite is done, then permanently opens its first-dispatch gate', async () => {
+test('holds a requirement until every prerequisite is ready for reading, then permanently opens its first-dispatch gate', async () => {
   const db = await databaseConnection();
   const firstId = await createTask({ title: 'Dependency first' });
   const secondId = await createTask({ title: 'Dependency second' });
@@ -26,10 +26,10 @@ test('holds a requirement until every prerequisite is done, then permanently ope
   assert.deepEqual(await inspectTaskDispatch(dependentId), []);
   assert.equal((await progressDispatchInspector.inspect({ requirementId: dependentId })).decisions[0]?.reason, 'dependencies-pending');
 
-  db.prepare("UPDATE tasks SET agile_status = 'done', completed_at = CURRENT_TIMESTAMP WHERE task_id = ?").run(firstId);
+  db.prepare("UPDATE tasks SET agile_status = 'ready_to_close', closure_status = 'awaiting_read' WHERE task_id = ?").run(firstId);
   assert.equal(requirementDependencyCandidatesInDb(db).some((candidate) => candidate.task_id === firstId), false);
   assert.equal(requirementDependencyGateOpenInDb(db, dependentId), false);
-  db.prepare("UPDATE tasks SET agile_status = 'done', completed_at = CURRENT_TIMESTAMP WHERE task_id = ?").run(secondId);
+  db.prepare("UPDATE tasks SET agile_status = 'ready_to_close', closure_status = 'awaiting_read' WHERE task_id = ?").run(secondId);
   assert.equal(requirementDependencyGateOpenInDb(db, dependentId), true);
   assert.equal((await inspectTaskDispatch(dependentId))[0]?.agent, 'direct-agent');
 

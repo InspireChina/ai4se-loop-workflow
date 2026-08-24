@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { AlertTriangle, ArrowRight, CircleDot } from 'lucide-react';
 import { listTasks } from '../src/application/tasks';
 import { progressDispatchInspector } from '../src/application/progress-dispatch';
+import { requirementDependencySatisfied } from '../src/application/task-dependencies';
 import { agentLabel, statusLabel, terminologyText } from '../src/domain/terminology';
 import { requirementPriorityLabel } from '../src/domain/requirement-priority';
 
@@ -40,7 +41,7 @@ export default async function Home() {
       const blockedLane = task.lanes.find((lane) => lane.status === 'system_blocked');
       const pendingDependencies = task.dependency_gate_open
         ? []
-        : task.dependencies.filter((dependency) => dependency.agile_status !== 'done');
+        : task.dependencies.filter((dependency) => !requirementDependencySatisfied(dependency.agile_status));
       const waitingForDependencies = pendingDependencies.length > 0;
       const requirementAnswers = task.run_state === 'waiting_for_answers'
         && ['idea-context-agent', 'business-design-agent', 'backlog-agent'].includes(task.current_subagent || '');
@@ -58,12 +59,12 @@ export default async function Home() {
       const progress = task.is_paused
         ? `暂停推进 · ${task.paused_reason || '暂缓推进'}`
         : waitingForDependencies
-          ? `等待 ${pendingDependencies.length} 个前置需求完成`
+          ? `等待 ${pendingDependencies.length} 个前置需求进入等待阅读`
           : phase(task);
       const nextStep = task.is_paused
         ? '恢复后从原步骤继续'
         : waitingForDependencies
-          ? `前置需求完成后自动调度 · ${pendingDependencies.map((dependency) => dependency.title).join('、')}`
+          ? `前置需求进入等待阅读后自动调度 · ${pendingDependencies.map((dependency) => dependency.title).join('、')}`
           : terminologyText(task.next_step);
       return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}><span><strong>{task.title}</strong><small>{task.task_id} · 优先级 {requirementPriorityLabel(task.priority)}</small></span><span className={`badge ${task.is_paused || waitingForDependencies || task.agile_status === 'blocked' || needsAttention ? 'amber' : 'blue'}`}><CircleDot size={13}/>{label}</span><span>{progress}</span><span>{nextStep}</span></Link>;
     })}</div></section></>;

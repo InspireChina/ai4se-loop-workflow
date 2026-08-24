@@ -9,6 +9,7 @@ import { getTask, listRequirementDependencyCandidates } from '../../../src/appli
 import { progressDispatchInspector, type DispatchWaitReason } from '../../../src/application/progress-dispatch';
 import { getTaskContextChat } from '../../../src/application/task-context-chat';
 import { taskDetailVisibility } from '../../../src/application/task-detail-visibility';
+import { requirementDependencySatisfied } from '../../../src/application/task-dependencies';
 import { deliverySpecSchema, type DeliverySpec } from '../../../src/domain/agent-result';
 import { agentLabel, deliveryUnitLabel, documentKindLabel, feedbackBatchStatusLabel, feedbackWorkTypeLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
 import { requirementMetadataDefinition, requirementMetadataValueLabel } from '../../../src/domain/requirement-metadata';
@@ -194,7 +195,7 @@ function dispatchReasonLabel(reason: DispatchWaitReason | undefined) {
     'paused-only': '需求已暂停',
     'waiting-for-input': '等待人工输入',
     'system-blocked': '系统阻塞，等待处理',
-    'dependencies-pending': '等待前置需求完成',
+    'dependencies-pending': '等待前置需求进入结卡',
     'lower-priority': '当前由更高优先级工作先推进',
     'no-runnable-work': '当前没有可派发步骤',
   } as Record<DispatchWaitReason, string>)[reason || 'no-runnable-work'];
@@ -220,7 +221,7 @@ export default async function TaskDetail({
   const dependencyCandidates = canEditOriginalInput ? await listRequirementDependencyCandidates() : [];
   const pendingDependencies = dependencyGateOpen
     ? []
-    : dependencies.filter((dependency) => dependency.agile_status !== 'done');
+    : dependencies.filter((dependency) => !requirementDependencySatisfied(dependency.agile_status));
   const waitingForDependencies = pendingDependencies.length > 0;
   const {
     isBusinessAnalysis,
@@ -250,14 +251,14 @@ export default async function TaskDetail({
   const nextStepText = task.is_paused
     ? `暂停期间不会派发 Agent；恢复后继续：${terminologyText(task.next_step) || '等待重新调度'}`
     : waitingForDependencies
-    ? `等待前置需求完成：${pendingDependencies.map((dependency) => dependency.title).join('、')}`
+    ? `等待前置需求进入等待阅读：${pendingDependencies.map((dependency) => dependency.title).join('、')}`
     : waitingForAnswers && unansweredQuestions.length === 0
     ? `回答已保存，提交后交回 ${agentLabel(waitingForControlAnswers ? task.current_subagent : 'analyst-agent')}`
     : terminologyText(task.next_step) || '—';
   const currentStepDetail = task.is_paused
     ? `已暂停推进 · ${task.paused_reason || '暂缓推进'}`
     : waitingForDependencies
-    ? `尚未进入首次调度 · 等待 ${pendingDependencies.length} 个前置需求完成`
+    ? `尚未进入首次调度 · 等待 ${pendingDependencies.length} 个前置需求进入等待阅读`
     : waitingForAnswers && unansweredQuestions.length === 0
     ? `回答已保存，等待提交 · ${agentLabel(waitingForControlAnswers ? task.current_subagent : 'analyst-agent')}`
     : inBusinessAnalysisStage
@@ -399,19 +400,22 @@ export default async function TaskDetail({
     {dependencies.length > 0 && <section className="task-section task-dependencies-section" aria-labelledby="task-dependencies-title">
       <div className="section-head">
         <h2 id="task-dependencies-title">前置需求</h2>
-        <small>{waitingForDependencies ? `等待 ${pendingDependencies.length} 个需求完成后自动调度` : dependencyGateOpen ? '调度门禁已解除' : '全部已完成'}</small>
+        <small>{waitingForDependencies ? `等待 ${pendingDependencies.length} 个需求进入等待阅读后自动调度` : dependencyGateOpen ? '调度门禁已解除' : '依赖条件已满足'}</small>
       </div>
       <div className="card story-list">
-        {dependencies.map((dependency) => <Link className="story task-dependency-link" href={`/tasks/${encodeURIComponent(dependency.depends_on_task_id)}`} key={dependency.depends_on_task_id}>
-          <span className={dependency.agile_status === 'done' ? 'done' : 'active'}>
-            {dependency.agile_status === 'done' ? <CheckCircle2 size={16}/> : <Clock3 size={16}/>}
-          </span>
-          <div>
-            <strong>{dependency.title}</strong>
-            <small>{dependency.depends_on_task_id}</small>
-          </div>
-          <em>{dependency.agile_status === 'done' ? '已完成' : statusLabel(dependency.agile_status)}</em>
-        </Link>)}
+        {dependencies.map((dependency) => {
+          const satisfied = requirementDependencySatisfied(dependency.agile_status);
+          return <Link className="story task-dependency-link" href={`/tasks/${encodeURIComponent(dependency.depends_on_task_id)}`} key={dependency.depends_on_task_id}>
+            <span className={satisfied ? 'done' : 'active'}>
+              {satisfied ? <CheckCircle2 size={16}/> : <Clock3 size={16}/>}
+            </span>
+            <div>
+              <strong>{dependency.title}</strong>
+              <small>{dependency.depends_on_task_id}</small>
+            </div>
+            <em>{dependency.agile_status === 'done' ? '已完成' : satisfied ? '已满足依赖' : statusLabel(dependency.agile_status)}</em>
+          </Link>;
+        })}
       </div>
     </section>}
 

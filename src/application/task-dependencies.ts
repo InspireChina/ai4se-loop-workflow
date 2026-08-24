@@ -15,6 +15,10 @@ export type RequirementDependencyCandidate = {
   updated_at: string;
 };
 
+export function requirementDependencySatisfied(agileStatus: string) {
+  return agileStatus === 'ready_to_close' || agileStatus === 'done';
+}
+
 export function requirementDependenciesInDb(db: Database.Database, taskId: string) {
   return db.prepare(`
     SELECT dependency.task_id, dependency.depends_on_task_id,
@@ -27,8 +31,9 @@ export function requirementDependenciesInDb(db: Database.Database, taskId: strin
 }
 
 /**
- * Dependencies gate only the first dispatch. Once an execution has been
- * reserved, later upstream feedback must not interrupt this requirement.
+ * Dependencies gate only the first dispatch and are satisfied once upstream
+ * delivery is ready for human reading. Once an execution has been reserved,
+ * later upstream feedback must not interrupt this requirement.
  */
 export function requirementDependencyGateOpenInDb(db: Database.Database, taskId: string) {
   const started = db.prepare(`
@@ -39,7 +44,8 @@ export function requirementDependencyGateOpenInDb(db: Database.Database, taskId:
     SELECT 1
     FROM task_dependencies dependency
     JOIN tasks upstream ON upstream.task_id = dependency.depends_on_task_id
-    WHERE dependency.task_id = ? AND upstream.agile_status <> 'done'
+    WHERE dependency.task_id = ?
+      AND upstream.agile_status NOT IN ('ready_to_close', 'done')
     LIMIT 1
   `).get(taskId);
   return !unmet;
@@ -82,7 +88,7 @@ export function requirementDependencyCandidatesInDb(db: Database.Database) {
   return db.prepare(`
     SELECT task_id, title, agile_status, updated_at
     FROM tasks
-    WHERE agile_status NOT IN ('done', 'cancelled')
+    WHERE agile_status NOT IN ('ready_to_close', 'done', 'cancelled')
     ORDER BY updated_at DESC, task_id DESC
   `).all() as RequirementDependencyCandidate[];
 }
