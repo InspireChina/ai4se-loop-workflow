@@ -8,9 +8,10 @@ import { getTask } from '../../../src/application/tasks';
 import { progressDispatchInspector, type DispatchWaitReason } from '../../../src/application/progress-dispatch';
 import { getTaskContextChat } from '../../../src/application/task-context-chat';
 import { taskDetailVisibility } from '../../../src/application/task-detail-visibility';
-import { deliverySpecSchema } from '../../../src/domain/agent-result';
+import { deliverySpecSchema, type DeliverySpec } from '../../../src/domain/agent-result';
 import { agentLabel, deliveryUnitLabel, documentKindLabel, feedbackBatchStatusLabel, feedbackWorkTypeLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
 import { requirementMetadataDefinition, requirementMetadataValueLabel } from '../../../src/domain/requirement-metadata';
+import { CopyButton } from '../../../src/ui/copy-button';
 import { ArtifactDocument } from './artifact-document';
 import { TaskAutoRefresh } from '../task-auto-refresh';
 import { TaskContextChat } from './task-context-chat';
@@ -35,6 +36,41 @@ function parseDeliverySpec(content: string) {
   } catch {
     return null;
   }
+}
+
+function deliverySpecMarkdown(spec: DeliverySpec) {
+  const decisions = spec.decisions.length
+    ? spec.decisions.map((decision) => decision.status === 'resolved'
+      ? `### ${decision.type === 'business' ? '业务决策' : '技术决策'} · ${decision.title}\n\n- 决定：${decision.decision}\n- 理由：${decision.rationale}\n- 权限：${decision.authority}\n- 证据：${decision.evidence}`
+      : `### 待用户决策 · ${decision.title}\n\n${decision.question}\n\n- 影响：${decision.impact}\n- 推荐：${decision.recommendationOption}\n- 推荐理由：${decision.recommendationReason}`)
+      .join('\n\n')
+    : '无待记录决策。';
+  const guardrails = spec.handoff.guardrails.length
+    ? spec.handoff.guardrails.map((item) => `- ${item.content}（${item.rationale}）`).join('\n')
+    : '无额外保护约束。';
+  const verification = spec.handoff.verificationFocus.length
+    ? spec.handoff.verificationFocus.map((item) => `- ${item.expected}\n  - Oracle：${item.oracle}`).join('\n')
+    : '无额外验证重点。';
+  return [
+    `# ${spec.unit.title}`,
+    '## 交付单元',
+    `- 参与者：${spec.unit.actor}`,
+    `- 触发条件：${spec.unit.trigger}`,
+    `- 可观察结果：${spec.unit.observableOutcome}`,
+    `- 验收语义：${spec.unit.acceptance}`,
+    '## 分析结论',
+    spec.summary,
+    '## 影响分析',
+    spec.impacts.map((item) => `### ${item.disposition} · ${item.area}\n\n${item.finding}\n\n- 证据：${item.evidence}`).join('\n\n'),
+    '## 决策',
+    decisions,
+    '## 交付契约',
+    spec.handoff.implementationGuidance,
+    '### 保护约束',
+    guardrails,
+    '### 验证重点',
+    verification,
+  ].join('\n\n');
 }
 
 const standardTaskSteps = [
@@ -510,8 +546,10 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
                     <div className="empty">这条记录不符合当前交付规格协议。页面已隔离该记录；新的交付分析会生成可验证的正式规格。</div>
                   </details>;
                 }
+                const copyContent = deliverySpecMarkdown(parsed);
                 return <details key={spec.spec_id} className="document-item" open={spec.status === 'waiting_for_answers'}>
                   <summary><FileText size={15}/><span>{deliveryUnitLabel(spec.story_index)} · 交付分析 v{spec.revision}</span><small>{spec.status === 'resolved' ? '已收敛' : '等待关键决策'}</small></summary>
+                  <div className="artifact-copy-toolbar delivery-spec-copy-toolbar"><span>可读 Markdown · revision {spec.revision}</span><CopyButton content={copyContent} label="复制 Markdown"/></div>
                   <div className="answer"><b>{parsed.unit.title}</b><br/>{parsed.unit.actor} 在 {parsed.unit.trigger} 时，{parsed.unit.observableOutcome}<br/><small>验收语义：{parsed.unit.acceptance}</small></div>
                   <div className="answer"><b>分析结论：</b>{parsed.summary}</div>
                   <pre>{parsed.impacts.map((item) =>

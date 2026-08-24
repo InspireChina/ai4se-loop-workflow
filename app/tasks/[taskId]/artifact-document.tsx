@@ -4,6 +4,7 @@ import { useRef, useState } from 'react';
 import { MessageSquare, Quote, RotateCcw } from 'lucide-react';
 import type { DocumentComment, FeedbackGroup } from '../../../src/application/tasks';
 import { feedbackWorkTypeLabel } from '../../../src/domain/terminology';
+import { CopyButton } from '../../../src/ui/copy-button';
 import { MarkdownContent } from '../../../src/ui/markdown-content';
 import { addDocumentCommentAction, reopenDocumentCommentAction } from '../../actions';
 
@@ -53,6 +54,10 @@ export function ArtifactDocument({
   }
 
   return <div className="artifact-document">
+    <div className="artifact-copy-toolbar">
+      <span>{format === 'markdown' ? 'Markdown 文档' : '文本产物'} · revision {revision}</span>
+      <CopyButton content={content} label={format === 'markdown' ? '复制 Markdown' : '复制内容'}/>
+    </div>
     <div className="artifact-preview" ref={previewRef} onMouseUp={captureSelection}>
       {format === 'markdown' ? <MarkdownContent content={content}/> : <pre>{content}</pre>}
     </div>
