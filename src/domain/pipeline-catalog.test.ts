@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { REQUIREMENT_PIPELINES, requirementPipeline } from './pipeline-catalog';
+import { FLOW_AGENT_IDS } from './agent-profile';
 
 test('exposes standalone, end-to-end, and engineering delivery pipelines', () => {
   assert.deepEqual(REQUIREMENT_PIPELINES.map((pipeline) => pipeline.id), ['direct', 'business-analysis', 'end-to-end', 'feature', 'bug']);
@@ -33,6 +34,19 @@ test('exposes standalone, end-to-end, and engineering delivery pipelines', () =>
     REQUIREMENT_PIPELINES.find((pipeline) => pipeline.id === 'bug')?.stages[1]?.key,
     'reproduction',
   );
+});
+
+test('maps every automated pipeline stage to a configurable Agent profile', () => {
+  const validAgentIds = new Set<string>(FLOW_AGENT_IDS);
+  for (const pipeline of REQUIREMENT_PIPELINES) {
+    for (const stage of pipeline.stages) {
+      if (stage.lane === '人工') {
+        assert.equal(stage.agentId, undefined, `${pipeline.id}/${stage.key} should remain a human stage`);
+      } else {
+        assert.ok(stage.agentId && validAgentIds.has(stage.agentId), `${pipeline.id}/${stage.key} has no configurable Agent`);
+      }
+    }
+  }
 });
 
 test('accepts only pipelines available from requirement creation', () => {

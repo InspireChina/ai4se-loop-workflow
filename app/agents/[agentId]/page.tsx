@@ -16,6 +16,12 @@ const agentSections = [
   { id: 'diagnostics', label: '诊断', description: '生效输入与 Runtime 文件', icon: Activity },
 ] as const;
 
+const agentSectionGroups = [
+  { label: '角色与运行', items: agentSections.slice(0, 2) },
+  { label: '知识与优化', items: agentSections.slice(2, 4) },
+  { label: '诊断', items: agentSections.slice(4) },
+] as const;
+
 type AgentSection = typeof agentSections[number]['id'];
 
 function selectedSection(input: string | string[] | undefined): AgentSection {
@@ -59,23 +65,29 @@ export default async function AgentDetailPage({ params, searchParams }: { params
   return <>
     <header className="page-header agent-page-header"><div><Link className="crumb" href="/agents">Agent 配置</Link><p className="eyebrow">{agentId}</p><h1>{detail.definition.label}</h1><p className="muted">{detail.definition.description}</p></div><span className={`badge ${detail.candidatePrompt ? 'amber' : detail.profile.auto_evolve ? 'green' : 'blue'}`}>{detail.candidatePrompt ? `Prompt Canary r${detail.candidatePrompt.revision}` : detail.profile.auto_evolve ? '自动演化已开启' : '自动演化已关闭'}</span></header>
 
-    <section className="agent-profile-summary" aria-label="Agent 配置摘要">
-      <div><span>Runtime</span><strong>{runtimeSettings.executorId}</strong><small>{runtimeSettings.source === 'project_default' ? '跟随项目默认' : 'Agent 独立覆盖'}</small></div>
-      <div><span>Project Prompt</span><strong>r{detail.currentPrompt.version}</strong><small>{detail.candidatePrompt ? `Canary r${detail.candidatePrompt.revision}` : '当前生效版本'}</small></div>
-      <div><span>Durable Memory</span><strong>r{detail.currentMemory.revision}</strong><small>{detail.dailyFiles.length} 个 daily 文件</small></div>
-      <div><span>演化证据</span><strong>{detail.observations.length}</strong><small>条可复用观察</small></div>
-    </section>
+    <div className="settings-layout agent-settings-layout">
+      <nav className="card settings-navigation agent-section-nav" aria-label="Agent 配置目录">
+        <div className="settings-navigation-head"><strong>配置目录</strong><small>管理当前 Agent</small></div>
+        {agentSectionGroups.map((group, groupIndex) => <section className="settings-navigation-section" key={group.label}>
+          <div className="settings-navigation-group"><span>{groupIndex + 1}</span><strong>{group.label}</strong></div>
+          <div className="settings-navigation-items">
+            {group.items.map((item) => {
+              const Icon = item.icon;
+              return <Link className="agent-section-link" key={item.id} href={`/agents/${agentId}?section=${item.id}`} aria-current={section === item.id ? 'page' : undefined}>
+                <Icon size={16}/><span><strong>{item.label}</strong><small>{item.description}</small></span>
+              </Link>;
+            })}
+          </div>
+        </section>)}
+      </nav>
 
-    <nav className="card agent-section-nav" aria-label="Agent 详情分区">
-      {agentSections.map((item) => {
-        const Icon = item.icon;
-        return <Link key={item.id} href={`/agents/${agentId}?section=${item.id}`} aria-current={section === item.id ? 'page' : undefined}>
-          <Icon size={17}/><span><strong>{item.label}</strong><small>{item.description}</small></span>
-        </Link>;
-      })}
-    </nav>
-
-    <div className="agent-workspace">
+      <div className="agent-workspace">
+        <section className="agent-profile-summary" aria-label="Agent 配置摘要">
+          <div><span>Runtime</span><strong>{runtimeSettings.executorId}</strong><small>{runtimeSettings.source === 'project_default' ? '跟随项目默认' : 'Agent 独立覆盖'}</small></div>
+          <div><span>Project Prompt</span><strong>r{detail.currentPrompt.version}</strong><small>{detail.candidatePrompt ? `Canary r${detail.candidatePrompt.revision}` : '当前生效版本'}</small></div>
+          <div><span>Durable Memory</span><strong>r{detail.currentMemory.revision}</strong><small>{detail.dailyFiles.length} 个 daily 文件</small></div>
+          <div><span>演化证据</span><strong>{detail.observations.length}</strong><small>条可复用观察</small></div>
+        </section>
       {section === 'runtime' && !editingIndependentRuntime && <section className="card settings agent-section-card">
         <div className="settings-section-head"><span className="executor-icon"><Bot size={18}/></span><div><strong>Agent Runtime</strong><p className="muted settings-description">当前 Agent 跟随项目默认 Runtime；项目默认值发生变化时会自动生效。</p></div><span className="badge green">项目默认</span></div>
         <div><strong>当前生效配置</strong><p className="path-line">{flowRuntimeSummary}</p></div>
@@ -198,6 +210,7 @@ export default async function AgentDetailPage({ params, searchParams }: { params
           <section className="card settings"><strong>输入版本</strong><div className="diagnostic-facts"><span>Prompt</span><b>r{detail.currentPrompt.version}</b><span>Memory</span><b>r{detail.currentMemory.revision}</b><span>Template</span><b>V{detail.currentPrompt.template_version}</b></div></section>
         </aside>
       </div>}
+      </div>
     </div>
   </>;
 }

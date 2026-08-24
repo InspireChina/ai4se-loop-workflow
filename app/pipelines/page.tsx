@@ -1,4 +1,5 @@
-import { ArrowDown, ArrowRight, GitMerge } from 'lucide-react';
+import Link from 'next/link';
+import { ArrowDown, ArrowRight, ExternalLink, GitMerge } from 'lucide-react';
 import { REQUIREMENT_PIPELINES, type RequirementPipelineStage } from '../../src/domain/pipeline-catalog';
 
 const pipelines = new Map(REQUIREMENT_PIPELINES.map((pipeline) => [pipeline.id, pipeline] as const));
@@ -18,10 +19,15 @@ const featureEntryStages = feature.stages.slice(0, feature.stages.length - share
 const bugEntryStages = bug.stages.slice(0, bug.stages.length - sharedStages.length);
 
 function StageNode({ stage, tone }: { stage: RequirementPipelineStage; tone?: 'feature' | 'bug' | 'analysis' | 'end-to-end' }) {
-  return <article className={`pipeline-stage ${tone || ''}`} title={`${stage.owner}：${stage.description}`}>
+  const content = <>
     <strong>{stage.title}</strong>
-    <small>{stage.owner}</small>
-  </article>;
+    <small>{stage.owner}{stage.agentId && <ExternalLink size={11} aria-hidden="true"/>}</small>
+  </>;
+  const className = `pipeline-stage ${tone || ''}${stage.agentId ? ' linked' : ''}`;
+  const title = stage.agentId ? `${stage.owner}：${stage.description}。点击打开 Agent 配置。` : `${stage.owner}：${stage.description}`;
+  return stage.agentId
+    ? <Link className={className} href={`/agents/${stage.agentId}`} title={title} aria-label={`${stage.title}：打开${stage.owner}配置`}>{content}</Link>
+    : <article className={className} title={title}>{content}</article>;
 }
 
 function StageSequence({ stages, tone }: { stages: readonly RequirementPipelineStage[]; tone?: 'feature' | 'bug' | 'analysis' | 'end-to-end' }) {

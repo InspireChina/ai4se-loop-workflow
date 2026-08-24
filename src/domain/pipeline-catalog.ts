@@ -1,9 +1,12 @@
+import type { FlowAgentId } from './agent-profile';
+
 export type RequirementPipelineId = 'direct' | 'business-analysis' | 'end-to-end' | 'feature' | 'bug';
 
 export type RequirementPipelineStage = {
   key: string;
   title: string;
   owner: string;
+  agentId?: FlowAgentId;
   lane: '控制' | '交付分析' | '开发验证' | '人工';
   description: string;
 };
@@ -19,6 +22,7 @@ const requirementContext: RequirementPipelineStage = {
   key: 'requirement-context',
   title: '需求梳理',
   owner: '需求梳理 Agent',
+  agentId: 'backlog-agent',
   lane: '控制',
   description: '确认 AS IS 与代码事实，校验既有需求规格或业务方案，并补齐 TO BE、SCOPE、真实影响与验收语义。',
 };
@@ -27,30 +31,35 @@ const deliveryStages: readonly RequirementPipelineStage[] = [{
   key: 'delivery-plan',
   title: '交付规划',
   owner: '交付规划 Agent',
+  agentId: 'story-splitter-agent',
   lane: '控制',
   description: '拆分为具备稳定身份、业务触发、可观察结果和验收语义的交付单元。',
 }, {
   key: 'delivery-analysis',
   title: '交付分析',
   owner: '交付分析 Agent',
+  agentId: 'analyst-agent',
   lane: '交付分析',
   description: '逐个单元确认实际影响、关键决策并冻结可执行交付契约。',
 }, {
   key: 'implementation',
   title: '开发实现',
   owner: '开发实现 Agent',
+  agentId: 'dev-agent',
   lane: '开发验证',
   description: '实现已冻结的业务承诺，并完成代码审查、开发者验证和提交确认。',
 }, {
   key: 'verification',
   title: '独立验证',
   owner: '验证 Agent',
+  agentId: 'test-agent',
   lane: '开发验证',
   description: '从用户入口独立验证交付契约、相邻回归与失败边界。',
 }, {
   key: 'review',
   title: '结卡报告',
   owner: '结卡报告 Agent',
+  agentId: 'review-agent',
   lane: '控制',
   description: '对账需求级最终事实；有缺口时直接形成新增交付单元，否则生成结卡报告。',
 }, {
@@ -65,24 +74,28 @@ const businessAnalysisStages: readonly RequirementPipelineStage[] = [{
   key: 'idea-context',
   title: '需求意图确认',
   owner: '需求意图 Agent',
+  agentId: 'idea-context-agent',
   lane: '控制',
   description: '调查原始想法，批量关闭目标、参与者、成功结果、约束和权威资料中的歧义。',
 }, {
   key: 'business-design',
   title: '业务方案设计',
   owner: '业务方案 Agent',
+  agentId: 'business-design-agent',
   lane: '控制',
   description: '探索业务场景，分离提出与回答决策树，并形成唯一业务方案。',
 }, {
   key: 'requirement-spec',
   title: '需求规格编写',
   owner: '需求规格 Agent',
+  agentId: 'requirement-spec-agent',
   lane: '控制',
   description: '把已确认意图和业务方案编译为完整、一致、可验证的需求规格说明书。',
 }, {
   key: 'spec-review',
   title: '规格独立审查',
   owner: '规格审查 Agent',
+  agentId: 'spec-review-agent',
   lane: '控制',
   description: '独立检查目标、决策、场景、规则、范围、验收和来源追踪，批准或结构化回流。',
 }];
@@ -95,6 +108,7 @@ export const REQUIREMENT_PIPELINES: readonly RequirementPipelineDefinition[] = [
     key: 'direct',
     title: '直接执行',
     owner: 'Direct Agent',
+    agentId: 'direct-agent',
     lane: '控制',
     description: '执行需求描述中的工作，并通过 submit 保存最终结果。',
   }],
@@ -127,6 +141,7 @@ export const REQUIREMENT_PIPELINES: readonly RequirementPipelineDefinition[] = [
     key: 'reproduction',
     title: '问题复现',
     owner: '问题复现 Agent',
+    agentId: 'repro-agent',
     lane: '控制',
     description: '确认实际异常、成立条件和证据边界，再进入交付规划。',
   }, ...deliveryStages],
