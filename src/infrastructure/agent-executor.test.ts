@@ -3,7 +3,7 @@ import test from 'node:test';
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, extractAgentFinalText, getAgentExecutor, parseAgentTelemetryStderr, parseAgentTelemetryStdout, parseAgentTelemetryStdoutEvents, resolveCursorAgentLaunch } from './agent-executor';
+import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, extractAgentFailureDetail, extractAgentFinalText, getAgentExecutor, parseAgentTelemetryStderr, parseAgentTelemetryStdout, parseAgentTelemetryStdoutEvents, resolveCursorAgentLaunch } from './agent-executor';
 
 test('normalizes Cursor tool calls without retaining raw log lines', () => {
   const event = parseAgentTelemetryStdout('cursor', JSON.stringify({
@@ -116,6 +116,16 @@ test('coalesces output separately while mapping errors and stderr at the correct
     ),
     null,
   );
+});
+
+test('extracts exact provider failures carried in structured stdout', () => {
+  const detail = 'upstream overloaded\nrequest failed after 3 attempts';
+  assert.equal(extractAgentFailureDetail('claude', JSON.stringify({
+    type: 'result', subtype: 'error_during_execution', is_error: true, result: detail,
+  })), detail);
+  assert.equal(extractAgentFailureDetail('claude', JSON.stringify({
+    type: 'result', subtype: 'success', is_error: false, result: 'done',
+  })), null);
 });
 
 test('labels command-driven draft updates as Agent domain commands', () => {

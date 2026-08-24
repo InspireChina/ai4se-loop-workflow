@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
 import crossSpawn from 'cross-spawn';
-import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, parseAgentTelemetryStderr, parseAgentTelemetryStdoutEvents, type AgentEnvironment, type AgentExecutionContext, type AgentExecutionOptions, type AgentExecutor, type AgentTelemetryEvent } from './agent-executor';
+import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, extractAgentFailureDetail, parseAgentTelemetryStderr, parseAgentTelemetryStdoutEvents, type AgentEnvironment, type AgentExecutionContext, type AgentExecutionOptions, type AgentExecutor, type AgentTelemetryEvent } from './agent-executor';
 import { agentResultChannelEnv, createAgentResultChannel, readAgentResultChannel, removeAgentResultChannel, type AgentResultChannel, type AgentResultKind } from './agent-result-channel';
 import type { LangfuseTelemetry } from './langfuse';
 import { markManagedAgentProcessExited, registerManagedAgentProcess } from './managed-process-registry';
@@ -36,6 +36,7 @@ export type DelegationExecutionResult = {
   exitCode: number;
   signal?: string;
   stderrTail?: string;
+  failureDetail?: string;
   finalText: string;
   submittedResult?: string | null;
   resultSubmissionError?: string | null;
@@ -117,6 +118,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   let executionFailed = false;
   let finalText = '';
   let stderrTail = '';
+  let structuredErrorTail = '';
   let submittedResult: string | null = null;
   let resultSubmissionError: string | null = null;
   let evidencePersistenceError: string | null = null;
@@ -147,6 +149,11 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       }
       try { await trace.event(sequenced); } catch { /* telemetry is best-effort and must not block the CLI */ }
     }).catch(() => undefined);
+  };
+  const captureStructuredError = (line: string) => {
+    const detail = extractAgentFailureDetail(executor.id, line);
+    if (!detail) return;
+    structuredErrorTail = `${structuredErrorTail}${structuredErrorTail ? '\n' : ''}${detail}`.slice(-24_000);
   };
 
   try {
@@ -212,7 +219,9 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       const lines = stdoutBuffer.split(/\r?\n/);
       stdoutBuffer = lines.pop() || '';
       for (const line of lines.filter(Boolean)) {
-        enqueueLog(executor.parseStdout(line, context));
+        const message = executor.parseStdout(line, context);
+        captureStructuredError(line);
+        enqueueLog(message);
         for (const event of parseAgentTelemetryStdoutEvents(executor.id, line)) enqueueTelemetry(event);
         finalTextAccumulator.ingest(line);
         metricsAccumulator.ingest(line);
@@ -310,7 +319,9 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     stdoutBuffer += stdoutDecoder.end();
     stderrBuffer += stderrDecoder.end();
     if (stdoutBuffer.trim()) {
-      enqueueLog(executor.parseStdout(stdoutBuffer, context));
+      const message = executor.parseStdout(stdoutBuffer, context);
+      captureStructuredError(stdoutBuffer);
+      enqueueLog(message);
       for (const event of parseAgentTelemetryStdoutEvents(executor.id, stdoutBuffer)) enqueueTelemetry(event);
       finalTextAccumulator.ingest(stdoutBuffer);
       metricsAccumulator.ingest(stdoutBuffer);
@@ -338,10 +349,15 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     else await appendLog(`[Agent] 完成 lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - 处理完成`);
     traceStatus = timedOut ? 'timed_out' : executionFailed ? 'execution_error' : terminalExitCode === 0 ? 'completed' : terminalExitCode === null ? 'cancelled' : 'failed';
     if (evidencePersistenceError) traceStatus = 'execution_error';
+    const failureDetail = [
+      structuredErrorTail.trim(),
+      stderrTail.trim() ? `stderr：${stderrTail.trim()}` : '',
+    ].filter(Boolean).join('\n');
     return {
       exitCode: terminalExitCode ?? 1,
       ...(child.signalCode ? { signal: child.signalCode } : {}),
       ...(stderrTail.trim() ? { stderrTail: sanitizeDiagnosticText(stderrTail.trim()) } : {}),
+      ...(failureDetail ? { failureDetail: sanitizeDiagnosticText(failureDetail) } : {}),
       finalText,
       ...(input.resultKind ? { submittedResult, resultSubmissionError } : {}),
       ...(evidencePersistenceError ? { evidencePersistenceError } : {}),

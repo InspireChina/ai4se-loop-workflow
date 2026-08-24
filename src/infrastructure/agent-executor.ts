@@ -268,6 +268,30 @@ function stringifyValue(value: unknown) {
   try { return JSON.stringify(value); } catch { return String(value); }
 }
 
+/** Extracts provider-declared CLI failures that are transported in JSONL stdout. */
+export function extractAgentFailureDetail(executor: AgentExecutorId, line: string) {
+  try {
+    const event = JSON.parse(line) as Record<string, unknown>;
+    const type = String(event.type || '').toLowerCase();
+    const subtype = String(event.subtype || '').toLowerCase();
+    if (executor === 'claude' && (event.is_error === true || (type === 'result' && subtype.startsWith('error')))) {
+      return stringifyValue(event.error || event.result || event.errors || event.message || line);
+    }
+    if (executor === 'codex' && (type === 'error' || type === 'turn.failed')) {
+      return stringifyValue(event.message || event.error || line);
+    }
+    if (executor === 'omp' && type === 'error') {
+      return stringifyValue(event.error || event.message || line);
+    }
+    if (executor === 'cursor' && (type === 'error' || event.is_error === true)) {
+      return stringifyValue(event.error || event.message || event.result || line);
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function classifyAgentTool(tool: string): AgentToolClass {
   const normalized = tool.trim().toLowerCase();
   return normalized === 'shell' || normalized === 'bash' ? 'shell' : normalized ? 'other' : 'unknown';

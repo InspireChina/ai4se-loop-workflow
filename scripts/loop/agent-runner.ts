@@ -445,8 +445,8 @@ async function runEvolutionEvaluator(
       const result = await readInternalAgentCommandSubmission('evolution', evolution.evolutionId);
       if (execution.exitCode !== 0 && !result) {
         throw new Error(execution.terminationReason
-          ? `Evaluator CLI ${execution.terminationReason}`
-          : `Evaluator CLI 退出码 ${execution.exitCode}`);
+          ? `Evaluator CLI ${execution.terminationReason}${execution.failureDetail ? `；${execution.failureDetail}` : ''}`
+          : `Evaluator CLI 退出码 ${execution.exitCode}${execution.failureDetail ? `；${execution.failureDetail}` : ''}`);
       }
       if (!result) throw new Error('Evolution Evaluator 未通过 evolution complete 提交结果');
       await applyEvolutionResult(evolution.evolutionId, evidence, result);
@@ -579,6 +579,7 @@ async function executeDelegationStep(
       let nextPrompt = builtPrompt.prompt;
       let combinedDiagnostics: string[] = [];
       let previousStderrTail: string | undefined;
+      let previousFailureDetail: string | undefined;
       while (true) {
         let currentExecution: Awaited<ReturnType<typeof runDelegation>>;
         try {
@@ -603,8 +604,10 @@ async function executeDelegationStep(
           ...currentExecution,
           diagnostics: combinedDiagnostics,
           stderrTail: currentExecution.stderrTail || previousStderrTail,
+          failureDetail: currentExecution.failureDetail || previousFailureDetail,
         };
         previousStderrTail = execution.stderrTail;
+        previousFailureDetail = execution.failureDetail;
         commandSubmission = await readAgentCommandSubmission(attempt.execution_id);
         if (!shouldContinueAfterCleanExit({
           exitCode: execution.exitCode,
@@ -639,8 +642,8 @@ async function executeDelegationStep(
           const reason = execution.evidencePersistenceError
             ? `本地执行证据写入失败：${execution.evidencePersistenceError}`
             : execution.terminationReason
-              ? `${executor.label} CLI ${execution.terminationReason}`
-              : `CLI 退出码 ${execution.exitCode}`;
+              ? `${executor.label} CLI ${execution.terminationReason}${execution.failureDetail ? `；${execution.failureDetail}` : ''}`
+              : `CLI 退出码 ${execution.exitCode}${execution.failureDetail ? `；${execution.failureDetail}` : ''}`;
           await recordCleanExitContinuationActivity(attempt.execution_id, 'failed', continuationCount, reason);
         }
       }
@@ -669,13 +672,13 @@ async function executeDelegationStep(
       const exitDiagnostic = [
         `退出码 ${execution.exitCode}`,
         execution.signal ? `signal ${execution.signal}` : '',
-        execution.stderrTail ? `stderr：${execution.stderrTail}` : '',
+        execution.failureDetail || '',
       ].filter(Boolean).join('；');
       await handleExecutionFailure(
         attempt,
         delegation,
         execution.terminationReason
-          ? `${executor.label} CLI ${execution.terminationReason}${execution.stderrTail ? `；stderr：${execution.stderrTail}` : ''}`
+          ? `${executor.label} CLI ${execution.terminationReason}${execution.failureDetail ? `；${execution.failureDetail}` : ''}`
           : `${executor.label} CLI 执行失败，${exitDiagnostic}`,
         execution.terminationReason ? 'agent-timeout' : 'agent-cli-exit',
       );

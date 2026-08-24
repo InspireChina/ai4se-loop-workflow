@@ -252,6 +252,29 @@ test('returns a bounded redacted stderr tail for exact failure activity', async 
   assert.match(result.stderrTail || '', /Authorization: \[REDACTED\]/);
   assert.match(result.stderrTail || '', /provider unavailable/);
   assert.doesNotMatch(result.stderrTail || '', new RegExp(secret));
+  assert.match(result.failureDetail || '', /provider unavailable/);
+  assert.doesNotMatch(result.failureDetail || '', new RegExp(secret));
+});
+
+test('captures a Claude stream-json error from stdout for exact failure activity', async () => {
+  const secret = 'private-claude-token';
+  const installed = getAgentExecutor('claude');
+  const executor: AgentExecutor = {
+    ...installed,
+    command: process.execPath,
+    promptMode: 'argument',
+    buildArgs: () => ['-e', [
+      `console.log(JSON.stringify({type:"result",is_error:true,result:"model overloaded token=${secret}"}));`,
+      'process.exit(1);',
+    ].join('')],
+    formatCommand: () => 'claude fixture',
+  };
+  const { result } = await run(executor);
+
+  assert.equal(result.exitCode, 1);
+  assert.match(result.failureDetail || '', /model overloaded/);
+  assert.doesNotMatch(result.failureDetail || '', new RegExp(secret));
+  assert.equal(result.stderrTail, undefined);
 });
 
 test('terminates a CLI that produces no startup output and preserves the exact timeout reason', async () => {
