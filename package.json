@@ -1,9 +1,10 @@
 {
   "name": "loop-engineering",
   "private": true,
-  "version": "0.1.16",
+  "version": "0.1.17",
   "type": "module",
   "scripts": {
+    "version:check": "node scripts/check-release-version.mjs",
     "dev": "next dev",
     "build": "next build",
     "build:desktop-runtime": "node scripts/build-desktop-runtime.mjs",

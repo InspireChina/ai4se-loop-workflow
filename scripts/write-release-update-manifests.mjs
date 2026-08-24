@@ -47,6 +47,11 @@ function manifest(files) {
 }
 
 const allFiles = await filesBelow(root);
+const packagePaths = allFiles.filter((path) => /\.(?:exe|dmg|zip)$/i.test(basename(path)));
+const mismatchedPackagePaths = packagePaths.filter((path) => !basename(path).includes(`-${version}-`));
+if (mismatchedPackagePaths.length) {
+  throw new Error(`Release artifacts do not match v${version}: ${mismatchedPackagePaths.map((path) => basename(path)).join(', ')}`);
+}
 const windowsPaths = allFiles.filter((path) => /Setup.*\.exe$/i.test(basename(path)));
 const macZipPaths = allFiles.filter((path) => /-mac-(?:arm64|x64)\.zip$/i.test(basename(path))).sort((a, b) => basename(a).localeCompare(basename(b)));
 
