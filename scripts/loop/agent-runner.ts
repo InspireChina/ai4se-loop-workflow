@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { agentExecutionOptions, getAgentRuntimeSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
 import { buildAgentContextSnapshot, renderAgentWorkingContextPack } from '../../src/application/agent-context';
 import {
+  advanceAndPublishRuntimeInvalidation,
   recordRuntimeEvent,
   recordRuntimeException,
   runtimeEventRevisionInDb,
@@ -343,6 +344,10 @@ async function runDelegation(
           String(event.sequence).padStart(8, '0'),
           receipt,
         );
+        const input = (receipt as Record<string, unknown>).input as Record<string, unknown> | undefined;
+        if (typeof input?.command === 'string' && /loop-agent\.(?:mjs|cjs)/i.test(input.command)) {
+          await advanceAndPublishRuntimeInvalidation('task.progressed', delegation.taskId);
+        }
       },
       maxRuntimeMs,
       startupTimeoutMs,

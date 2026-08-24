@@ -1,6 +1,7 @@
 import {
   subscribeRuntimeEvents,
   type RuntimeEvent,
+  type RuntimeEventTopic,
 } from '../../../../src/infrastructure/runtime-event-hub';
 import { databaseConnection } from '../../../../src/infrastructure/database';
 import { runtimeEventRevisionInDb } from '../../../../src/application/runtime-events';
@@ -20,7 +21,8 @@ export async function GET(request: Request) {
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       let closed = false;
-      let lastRevision: number | undefined;
+      const topics = ['dispatch.invalidated', 'task.progressed'] as const satisfies readonly RuntimeEventTopic[];
+      const lastRevisions = new Map<RuntimeEventTopic, number>();
       const enqueue = (value: Uint8Array) => {
         if (closed) return;
         try {
@@ -30,19 +32,24 @@ export async function GET(request: Request) {
         }
       };
       const subscription = subscribeRuntimeEvents({
-        topics: ['dispatch.invalidated'],
+        topics,
         onReady: async () => {
           const db = await databaseConnection();
-          const revision = runtimeEventRevisionInDb(db, 'dispatch.invalidated');
-          if (lastRevision !== undefined && revision !== lastRevision) {
-            enqueue(serverSentEvent('refresh', { revision }));
+          let changed = false;
+          const revisions: Partial<Record<RuntimeEventTopic, number>> = {};
+          for (const topic of topics) {
+            const revision = runtimeEventRevisionInDb(db, topic);
+            if (lastRevisions.has(topic) && revision !== lastRevisions.get(topic)) changed = true;
+            lastRevisions.set(topic, revision);
+            revisions[topic] = revision;
           }
-          lastRevision = Math.max(lastRevision ?? revision, revision);
-          enqueue(serverSentEvent('ready', { connected: true, revision }));
+          if (changed) enqueue(serverSentEvent('refresh', { revisions }));
+          enqueue(serverSentEvent('ready', { connected: true, revisions }));
         },
         onEvent: (event: RuntimeEvent) => {
-          lastRevision = Math.max(lastRevision ?? event.revision, event.revision);
+          lastRevisions.set(event.topic, Math.max(lastRevisions.get(event.topic) ?? event.revision, event.revision));
           enqueue(serverSentEvent('refresh', {
+            topic: event.topic,
             revision: event.revision,
             entityId: event.entityId,
           }));

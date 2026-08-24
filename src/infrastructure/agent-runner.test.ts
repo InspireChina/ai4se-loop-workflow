@@ -61,6 +61,7 @@ test('persists normalized business execution events as ordered execution receipt
   assert.match(source, /createDurableToolEventNormalizer\(\)/);
   assert.match(source, /durableToolEvent\(event\)/);
   assert.match(source, /'tool_event'/);
+  assert.match(source, /advanceAndPublishRuntimeInvalidation\('task\.progressed', delegation\.taskId\)/);
   assert.match(source, /String\(event\.sequence\)\.padStart\(8,\s*'0'\)/);
   assert.match(source, /isCompleted && event\.success === true/);
   assert.match(source, /success:\s*event\.success === true/);

@@ -7,6 +7,7 @@ import { paths } from './database';
 
 export const RUNTIME_EVENT_TOPICS = [
   'dispatch.invalidated',
+  'task.progressed',
   'schedule.invalidated',
   'execution.cancel-requested',
   'lifecycle.runner-stop-requested',

@@ -57,11 +57,16 @@ function authorityClass(question: Question) {
   return 'human';
 }
 
-function viewHref(taskId: string, view: DecisionView, source: DecisionSource) {
-  const params = new URLSearchParams({ taskId });
+function viewHref(taskId: string, view: DecisionView, source: DecisionSource, embedded: boolean) {
+  const params = new URLSearchParams();
+  if (!embedded) params.set('taskId', taskId);
+  if (embedded) params.set('section', 'decisions');
   if (view !== 'all') params.set('view', view);
   if (source !== 'all') params.set('source', source);
-  return `/decisions?${params.toString()}`;
+  const query = params.toString();
+  return embedded
+    ? `/tasks/${encodeURIComponent(taskId)}${query ? `?${query}` : ''}`
+    : `/decisions?${query}`;
 }
 
 function visibleForSource(question: Question, source: DecisionSource) {
@@ -110,10 +115,12 @@ function DecisionCard({
   question,
   taskId,
   questionByKey,
+  embedded,
 }: {
   question: Question;
   taskId: string;
   questionByKey: Map<string, Question>;
+  embedded: boolean;
 }) {
   const options = parseJsonArray<DecisionOption>(question.alternatives_json);
   const activations = parseJsonArray<Activation>(question.activation_json);
@@ -157,6 +164,7 @@ function DecisionCard({
                 <input type="hidden" name="taskId" value={taskId}/>
                 <input type="hidden" name="questionId" value={question.question_id}/>
                 <input type="hidden" name="selectedOptionId" value={option.id}/>
+                {embedded && <input type="hidden" name="returnTo" value="task-detail"/>}
                 <button type="submit" className={`decision-demo-option${recommended ? ' recommended' : ''}`}>
                   <span className="decision-demo-radio"/>
                   <span>
@@ -171,6 +179,7 @@ function DecisionCard({
           <form action={answerDecisionQuestionAction} className="decision-demo-custom-answer">
             <input type="hidden" name="taskId" value={taskId}/>
             <input type="hidden" name="questionId" value={question.question_id}/>
+            {embedded && <input type="hidden" name="returnTo" value="task-detail"/>}
             <label>
               <strong>{options.length ? '自定义答案' : '填写答案'}</strong>
               <small>{options.length ? '输入不在现有选项中的业务规则，后续分支将由负责 Agent 重新判断。' : '填写需要负责 Agent 纳入上下文的明确决定。'}</small>
@@ -202,11 +211,12 @@ function DecisionCard({
 export default async function DecisionsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ taskId?: string | string[]; view?: string | string[]; source?: string | string[] }>;
+  searchParams: Promise<{ taskId?: string | string[]; view?: string | string[]; source?: string | string[]; embedded?: string | string[] }>;
 }) {
   const params = await searchParams;
   const taskId = typeof params.taskId === 'string' ? params.taskId : null;
   if (!taskId) notFound();
+  const embedded = params.embedded === 'task';
   const detail = await getTask(taskId);
   if (!detail) notFound();
 
@@ -215,11 +225,21 @@ export default async function DecisionsPage({
     ? requestedView as DecisionView
     : 'all';
   const requestedSource = typeof params.source === 'string' ? params.source : 'all';
-  const source: DecisionSource = ['intent', 'business-design', 'backlog', 'analysis'].includes(requestedSource)
+  const requestedDecisionSource: DecisionSource = ['intent', 'business-design', 'backlog', 'analysis'].includes(requestedSource)
     ? requestedSource as DecisionSource
     : 'all';
   const { task, events, lanes } = detail;
   const questions = decisionAlignmentQuestions(detail.questions, detail.deliverySpecs);
+  const sourceFilters = ([
+    { id: 'intent', label: '需求意图 Agent' },
+    { id: 'business-design', label: '业务方案 Agent' },
+    { id: 'backlog', label: '需求梳理 Agent' },
+    { id: 'analysis', label: '交付分析 Agent' },
+  ] as const).filter((filter) => questions.some((question) => visibleForSource(question, filter.id)));
+  const source: DecisionSource = requestedDecisionSource !== 'all'
+    && !sourceFilters.some((filter) => filter.id === requestedDecisionSource)
+    ? 'all'
+    : requestedDecisionSource;
   const sourceQuestions = questions.filter((question) => visibleForSource(question, source));
   const orderedQuestions = orderDecisionTree(sourceQuestions);
   const questionByKey = new Map(
@@ -248,8 +268,8 @@ export default async function DecisionsPage({
         : source === 'analysis' ? '交付分析 Agent'
           : '全部来源';
 
-  return <div className="decision-demo-page">
-    <header className="decision-demo-header">
+  return <div className={`decision-demo-page${embedded ? ' embedded' : ''}`}>
+    {!embedded && <header className="decision-demo-header">
       <div>
         <Link href={`/tasks/${encodeURIComponent(taskId)}`} className="decision-demo-back"><ArrowLeft size={14}/>返回需求详情</Link>
         <p className="eyebrow">DECISION ALIGNMENT · TASK LEVEL</p>
@@ -257,7 +277,7 @@ export default async function DecisionsPage({
         <p className="muted">{task.title} · 展示真实决策树、责任归属和审计状态</p>
       </div>
       <span className="decision-demo-static"><CircleDot size={13}/>实时任务数据</span>
-    </header>
+    </header>}
 
     <section className="decision-demo-metrics">
       <div><span className="decision-demo-metric-icon human"><UserRound size={17}/></span><small>需要我决策</small><b>{humanPending.length}</b></div>
@@ -268,20 +288,21 @@ export default async function DecisionsPage({
 
     <section className="decision-demo-toolbar card">
       <nav className="decision-demo-tabs" aria-label="决策筛选">
-        <Link className={view === 'mine' ? 'active' : ''} href={viewHref(taskId, 'mine', source)}>需要我决策 <b>{humanPending.length}</b></Link>
-        <Link className={view === 'agent' ? 'active' : ''} href={viewHref(taskId, 'agent', source)}>Agent 已处理 <b>{agentResolved.length}</b></Link>
-        <Link className={view === 'answered' ? 'active' : ''} href={viewHref(taskId, 'answered', source)}>用户已决定 <b>{humanResolved.length}</b></Link>
-        <Link className={view === 'all' ? 'active' : ''} href={viewHref(taskId, 'all', source)}>全部当前 <b>{current.length}</b></Link>
-        <Link className={view === 'audit' ? 'active' : ''} href={viewHref(taskId, 'audit', source)}>失效分支 <b>{historical.length}</b></Link>
+        <Link className={view === 'mine' ? 'active' : ''} href={viewHref(taskId, 'mine', source, embedded)}>需要我决策 <b>{humanPending.length}</b></Link>
+        <Link className={view === 'agent' ? 'active' : ''} href={viewHref(taskId, 'agent', source, embedded)}>Agent 已处理 <b>{agentResolved.length}</b></Link>
+        <Link className={view === 'answered' ? 'active' : ''} href={viewHref(taskId, 'answered', source, embedded)}>用户已决定 <b>{humanResolved.length}</b></Link>
+        <Link className={view === 'all' ? 'active' : ''} href={viewHref(taskId, 'all', source, embedded)}>全部当前 <b>{current.length}</b></Link>
+        <Link className={view === 'audit' ? 'active' : ''} href={viewHref(taskId, 'audit', source, embedded)}>失效分支 <b>{historical.length}</b></Link>
       </nav>
       <div className="decision-demo-filter-row">
         <span className="decision-demo-filter-label"><ListFilter size={14}/>当前视图：{viewTitle}</span>
         <nav className="decision-demo-source-filter" aria-label="决策来源筛选">
-          <Link className={source === 'all' ? 'active' : ''} href={viewHref(taskId, view, 'all')}>全部来源</Link>
-          <Link className={source === 'intent' ? 'active' : ''} href={viewHref(taskId, view, 'intent')}>需求意图 Agent</Link>
-          <Link className={source === 'business-design' ? 'active' : ''} href={viewHref(taskId, view, 'business-design')}>业务方案 Agent</Link>
-          <Link className={source === 'backlog' ? 'active' : ''} href={viewHref(taskId, view, 'backlog')}>需求梳理 Agent</Link>
-          <Link className={source === 'analysis' ? 'active' : ''} href={viewHref(taskId, view, 'analysis')}>交付分析 Agent</Link>
+          <Link className={source === 'all' ? 'active' : ''} href={viewHref(taskId, view, 'all', embedded)}>全部来源</Link>
+          {sourceFilters.map((filter) => <Link
+            className={source === filter.id ? 'active' : ''}
+            href={viewHref(taskId, view, filter.id, embedded)}
+            key={filter.id}
+          >{filter.label}</Link>)}
         </nav>
         <span className="decision-demo-version">{sourceTitle} · 决策图 v{version} · {sourceQuestions.length} 个节点</span>
       </div>
@@ -299,6 +320,7 @@ export default async function DecisionsPage({
             question={question}
             taskId={taskId}
             questionByKey={questionByKey}
+            embedded={embedded}
             key={question.question_id}
           />)}
 
@@ -310,6 +332,7 @@ export default async function DecisionsPage({
           {allHumanPending.length === 0
             ? <form action={submitDecisionAnswersAction}>
               <input type="hidden" name="taskId" value={taskId}/>
+              {embedded && <input type="hidden" name="returnTo" value="task-detail"/>}
               <button type="submit" className="button success">提交本批决策并交回 {agentLabel(targetAgent)}</button>
             </form>
             : <span className="button disabled" aria-disabled="true">尚有未回答决策</span>}
@@ -343,7 +366,7 @@ export default async function DecisionsPage({
           {auditEvents.length === 0 ? <div className="empty">暂无决策审计事件。</div> : auditEvents.map((event) => <div key={event.event_id}>
             <span/><p><b>{agentLabel(event.actor)}</b>{terminologyText(event.summary)}<small>{formatEventTime(event.created_at)}</small></p>
           </div>)}
-          <Link className="decision-demo-audit-link" href={viewHref(taskId, 'audit', source)}><FileClock size={13}/>查看失效分支与被取代节点</Link>
+          <Link className="decision-demo-audit-link" href={viewHref(taskId, 'audit', source, embedded)}><FileClock size={13}/>查看失效分支与被取代节点</Link>
         </section>
 
         <section className="decision-demo-note">

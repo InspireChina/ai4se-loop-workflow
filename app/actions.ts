@@ -280,7 +280,9 @@ export async function answerDecisionQuestionAction(formData: FormData) {
     answer: formData.get('answer') || '',
     selectedOptionId: formData.get('selectedOptionId') || null,
   });
-  redirect(`/decisions?taskId=${encodeURIComponent(taskId)}`);
+  redirect(formData.get('returnTo') === 'task-detail'
+    ? `/tasks/${encodeURIComponent(taskId)}?section=decisions`
+    : `/decisions?taskId=${encodeURIComponent(taskId)}`);
 }
 
 export async function answerRuntimeInputAction(formData: FormData) {
@@ -327,7 +329,9 @@ export async function submitClarificationAnswersAction(formData: FormData) {
 export async function submitDecisionAnswersAction(formData: FormData) {
   const taskId = String(formData.get('taskId'));
   await submitClarificationAnswers(taskId);
-  redirect(`/decisions?taskId=${encodeURIComponent(taskId)}`);
+  redirect(formData.get('returnTo') === 'task-detail'
+    ? `/tasks/${encodeURIComponent(taskId)}?section=decisions`
+    : `/decisions?taskId=${encodeURIComponent(taskId)}`);
 }
 
 export async function submitRuntimeInputsAction(formData: FormData) {

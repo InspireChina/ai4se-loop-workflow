@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { AlertTriangle, ArrowRight, Bot, Check, CheckCircle2, Clock3, ExternalLink, FileText, GitBranch, Hash, Link2, PauseCircle, Play, Tag } from 'lucide-react';
+import { AlertTriangle, Bot, Check, CheckCircle2, Clock3, ExternalLink, FileText, GitBranch, Hash, Link2, PauseCircle, Play, Tag } from 'lucide-react';
+import { getAgentCommandProgress } from '../../../src/application/agent-command-progress';
 import { decisionAlignmentQuestions } from '../../../src/application/decision-alignment';
 import { remainingExecutionRetries } from '../../../src/application/execution-retry-policy';
 import { formatEventTime } from '../../../src/application/event-time';
@@ -15,10 +16,13 @@ import { REQUIREMENT_PIPELINES, type RequirementPipelineId } from '../../../src/
 import { DEFAULT_REQUIREMENT_PRIORITY } from '../../../src/domain/requirement-priority';
 import { CopyButton } from '../../../src/ui/copy-button';
 import { ArtifactDocument } from './artifact-document';
+import { AgentCommandProgress } from './agent-command-progress';
 import { TaskAutoRefresh } from '../task-auto-refresh';
 import { TaskContextChat } from './task-context-chat';
 import { TaskPriorityControl } from './task-priority-control';
 import { EditTaskInputDialog } from './edit-task-input-dialog';
+import { TaskDetailNavigator, type TaskDetailNavigationItem } from './task-detail-navigator';
+import DecisionsPage from '../../decisions/page';
 import {
   acknowledgeClosureAction,
   addStoryAction,
@@ -196,12 +200,22 @@ function dispatchReasonLabel(reason: DispatchWaitReason | undefined) {
   } as Record<DispatchWaitReason, string>)[reason || 'no-runnable-work'];
 }
 
-export default async function TaskDetail({ params }: { params: Promise<{ taskId: string }> }) {
+export default async function TaskDetail({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ taskId: string }>;
+  searchParams: Promise<{ section?: string | string[]; view?: string | string[]; source?: string | string[] }>;
+}) {
   const { taskId } = await params;
+  const detailParams = await searchParams;
   const detail = await getTask(taskId);
   if (!detail) notFound();
   const { task, metadata, dependencies, dependencyGateOpen, lanes, stories, deliverySpecs, questions, runtimeInputs, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
-  const contextChat = await getTaskContextChat(taskId);
+  const [contextChat, commandProgress] = await Promise.all([
+    getTaskContextChat(taskId),
+    getAgentCommandProgress(taskId),
+  ]);
   const canEditOriginalInput = executionAttempts.length === 0 && !contextChat.session && !['done', 'cancelled'].includes(task.agile_status);
   const dependencyCandidates = canEditOriginalInput ? await listRequirementDependencyCandidates() : [];
   const pendingDependencies = dependencyGateOpen
@@ -230,8 +244,6 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const unansweredQuestions = questions.filter((question) => question.status === 'pending');
   const alignedDecisions = decisionAlignmentQuestions(questions, deliverySpecs);
   const pendingDecisions = alignedDecisions.filter((question) => question.decision_authority === 'human' && question.status === 'pending');
-  const agentHandledDecisions = alignedDecisions.filter((question) => question.decision_authority === 'agent' && ['answered', 'resolved'].includes(question.status));
-  const userDecisions = alignedDecisions.filter((question) => question.decision_authority === 'human' && ['answered', 'resolved'].includes(question.status));
   const waitingForControlAnswers = task.run_state === 'waiting_for_answers'
     && ['idea-context-agent', 'business-design-agent', 'backlog-agent', 'repro-agent', 'feedback-agent'].includes(task.current_subagent || '');
   const waitingForAnswers = waitingForControlAnswers || analysisLane.status === 'waiting_for_answers';
@@ -290,6 +302,22 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const originalDescriptionPreview = shouldCollapseOriginalDescription
     ? `${originalDescription.slice(0, 320).trimEnd()}…`
     : originalDescription;
+  const deliveryFeedbackCount = deliveryDocuments.reduce((count, document) => count
+    + documentComments.filter((comment) => comment.document_id === document.document_id && comment.feedback_status !== 'resolved').length, 0);
+  const closureFeedbackCount = reviewDocument
+    ? documentComments.filter((comment) => comment.document_id === reviewDocument.document_id && comment.feedback_status !== 'resolved').length
+    : 0;
+  const collaborationAttentionCount = unansweredRuntimeInputs.length + closureFeedbackCount;
+  const navigationItems: TaskDetailNavigationItem[] = [
+    { id: 'overview', label: '概览', description: '输入、进度与当前状态', value: statusLabel(task.agile_status) },
+    ...(showDecisionAlignment ? [{ id: 'decisions' as const, label: '决策对齐', description: '任务级决策与处理记录', value: pendingDecisions.length ? `${pendingDecisions.length} 项待处理` : `${alignedDecisions.length} 项`, attention: pendingDecisions.length > 0 }] : []),
+    { id: 'deliverables', label: '交付产物', description: '单元、文档与规格', value: deliveryFeedbackCount ? `${deliveryFeedbackCount} 条反馈待处理` : `${deliveryDocuments.length + currentSpecs.length} 项`, attention: deliveryFeedbackCount > 0 },
+    { id: 'collaboration', label: '运行协助与结卡', description: '补充信息与最终报告', value: collaborationAttentionCount ? `${collaborationAttentionCount} 项待处理` : '暂无待处理', attention: collaborationAttentionCount > 0 },
+    { id: 'activity', label: '活动记录', description: '需求推进时间线', value: `${events.length} 条` },
+    { id: 'actions', label: '推进控制', description: '对话、调度与运行状态', value: pipeline.length ? `${pipeline.length} 个待派发` : '当前状态' },
+    { id: 'audit', label: '执行审计', description: 'Agent 输入与验证追溯', value: `${executionAttempts.length} 次` },
+  ];
+  const initialNavigationId = detailParams.section === 'decisions' && showDecisionAlignment ? 'decisions' : 'overview';
 
   return <>
     <header className="task-header">
@@ -330,6 +358,8 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       </dl>}
     </header>
 
+    <TaskDetailNavigator items={navigationItems} initialActiveId={initialNavigationId}>
+    <div className="task-detail-panel-stack">
     <section className="card task-original-input" aria-labelledby="task-original-input-title">
       <div className="task-original-input-head">
         <div>
@@ -413,16 +443,18 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       </div>
     </section>
 
-    <section className="card task-summary">
+    <AgentCommandProgress chains={commandProgress}/>
+
+    <section className={`card task-summary${showDeliveryWorkflow ? ' delivery-summary' : ''}`}>
       {showDeliveryWorkflow && <><div><small>交付分析</small><b>{task.analysis_index} / {task.total_stories}</b></div>
       <div><small>实现</small><b>{task.dev_index} / {task.total_stories}</b></div>
       <div><small>验证</small><b>{task.test_index} / {task.total_stories}</b></div></>}
       {isDirect && <div><small>执行节点</small><b>{task.agile_status === 'done' ? '已提交' : '运行中'}</b></div>}
       {inBusinessAnalysisStage && <div><small>当前阶段</small><b>{businessAnalysisSteps[currentStep]?.label}</b></div>}
       <div><small>待回答决策</small><b>{unansweredQuestions.length}</b></div>
-      <div><small>待补充信息或验证协助</small><b>{unansweredRuntimeInputs.length}</b></div>
+      <div><small>待运行协助</small><b>{unansweredRuntimeInputs.length}</b></div>
       <div className="summary-wide"><small>下一步</small><p>{nextStepText}</p></div>
-      <div className="summary-wide"><small>文档</small><p>{documents.length} 个数据库文档</p></div>
+      <div className="summary-wide"><small>文档</small><p>{documents.length} 个交付文档</p></div>
     </section>
 
     {showDeliveryWorkflow && <section className="lane-grid" aria-label="任务并行 Lane 状态">
@@ -444,29 +476,18 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       </article>)}
     </section>}
 
-    {showDecisionAlignment && <section className="task-decision-entry-section" id="decision-alignment">
-      <div className="section-head">
-        <h2>决策对齐</h2>
-        <small>任务级决策入口</small>
-      </div>
-      <div className="decision-alignment-entry card">
-        <span className="decision-alignment-entry-icon"><GitBranch size={18}/></span>
-        <div>
-          <p className="eyebrow">DECISION ALIGNMENT · LIVE</p>
-          <strong>查看任务级决策清单</strong>
-          <small>集中查看并处理需要你决定、Agent 已关闭和历史失效的决策节点。</small>
-          <div className="decision-alignment-entry-counts">
-            <span className="amber">需要我决策 {pendingDecisions.length}</span>
-            <span>Agent 已处理 {agentHandledDecisions.length}</span>
-            <span className="green">用户已决定 {userDecisions.length}</span>
-          </div>
-        </div>
-        <Link href={`/decisions?taskId=${encodeURIComponent(task.task_id)}`} className="button secondary">打开决策对齐 <ArrowRight size={14}/></Link>
-      </div>
-    </section>}
+    </div>
 
-    <div className="task-detail-grid">
-      <div className="task-main-column">
+    {showDecisionAlignment && <div className="task-detail-panel-stack task-detail-decisions" id="decision-alignment">
+      <DecisionsPage searchParams={Promise.resolve({
+        taskId: task.task_id,
+        view: detailParams.view,
+        source: detailParams.source,
+        embedded: 'task',
+      })}/>
+    </div>}
+
+    <div className="task-detail-panel-stack">
         {showDeliveryWorkflow && <section className="task-section">
           <div className="section-head">
             <h2>交付单元</h2>
@@ -589,7 +610,9 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
             </>}
           </div>
         </section>}
+    </div>
 
+    <div className="task-detail-panel-stack">
         {showDeliveryWorkflow && <section className="task-section">
           <div className="section-head">
             <h2>运行信息与验证协助</h2>
@@ -656,12 +679,16 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           </form>}
         </section>}
 
+    </div>
+
+    <div className="task-detail-panel-stack">
         <section className="task-section">
           <div className="section-head"><h2>活动记录</h2><small>{events.length} 条</small></div>
           <div className="card timeline">{events.length === 0 ? <div className="empty">暂无活动记录。</div> : events.map((event) => <div key={event.event_id}><span/><p><b>{agentLabel(event.actor)}</b> · {terminologyText(event.summary)}</p><small>{formatEventTime(event.created_at)}</small></div>)}</div>
         </section>
-      </div>
+    </div>
 
+    <div className="task-detail-panel-stack">
       <aside className="task-action-column">
         <TaskContextChat taskId={task.task_id} initialSession={contextChat.session} initialMessages={contextChat.messages}/>
 
@@ -721,6 +748,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
       </aside>
     </div>
 
+    <div className="task-detail-panel-stack">
     <section className="task-section task-audit-section">
       <div className="section-head">
         <h2>执行审计</h2>
@@ -754,5 +782,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         </div>
       </details>
     </section>
+    </div>
+    </TaskDetailNavigator>
   </>;
 }
