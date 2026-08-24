@@ -82,8 +82,7 @@ export function requirementDependencyCandidatesInDb(db: Database.Database) {
   return db.prepare(`
     SELECT task_id, title, agile_status, updated_at
     FROM tasks
-    WHERE agile_status <> 'cancelled'
-    ORDER BY CASE WHEN agile_status = 'done' THEN 1 ELSE 0 END,
-             updated_at DESC, task_id DESC
+    WHERE agile_status NOT IN ('done', 'cancelled')
+    ORDER BY updated_at DESC, task_id DESC
   `).all() as RequirementDependencyCandidate[];
 }

@@ -313,7 +313,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
         : <p className="task-original-input-empty">创建时未填写补充描述，原始需求仅包含标题。</p>}
     </section>
 
-    {dependencies.length > 0 && <section className="task-section" aria-labelledby="task-dependencies-title">
+    {dependencies.length > 0 && <section className="task-section task-dependencies-section" aria-labelledby="task-dependencies-title">
       <div className="section-head">
         <h2 id="task-dependencies-title">前置需求</h2>
         <small>{waitingForDependencies ? `等待 ${pendingDependencies.length} 个需求完成后自动调度` : dependencyGateOpen ? '调度门禁已解除' : '全部已完成'}</small>

@@ -5,6 +5,7 @@ import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import { progressDispatchInspector } from './progress-dispatch';
 import {
   configureRequirementDependenciesInDb,
+  requirementDependencyCandidatesInDb,
   requirementDependencyGateOpenInDb,
 } from './task-dependencies';
 import { createTask, getTask } from './tasks';
@@ -26,6 +27,7 @@ test('holds a requirement until every prerequisite is done, then permanently ope
   assert.equal((await progressDispatchInspector.inspect({ requirementId: dependentId })).decisions[0]?.reason, 'dependencies-pending');
 
   db.prepare("UPDATE tasks SET agile_status = 'done', completed_at = CURRENT_TIMESTAMP WHERE task_id = ?").run(firstId);
+  assert.equal(requirementDependencyCandidatesInDb(db).some((candidate) => candidate.task_id === firstId), false);
   assert.equal(requirementDependencyGateOpenInDb(db, dependentId), false);
   db.prepare("UPDATE tasks SET agile_status = 'done', completed_at = CURRENT_TIMESTAMP WHERE task_id = ?").run(secondId);
   assert.equal(requirementDependencyGateOpenInDb(db, dependentId), true);

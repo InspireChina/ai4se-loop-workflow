@@ -113,7 +113,7 @@ export default function CreateTaskDialog({ dependencyCandidates }: { dependencyC
               />
               <span>
                 <strong>{candidate.title}</strong>
-                <small>{candidate.task_id} · {candidate.agile_status === 'done' ? '已完成' : '进行中'}</small>
+                <small>{candidate.task_id} · 进行中</small>
               </span>
             </label>)}
             {dependencyCandidates.length === 0
