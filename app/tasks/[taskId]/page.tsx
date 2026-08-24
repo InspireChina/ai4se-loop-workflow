@@ -4,18 +4,21 @@ import { AlertTriangle, ArrowRight, Bot, Check, CheckCircle2, Clock3, ExternalLi
 import { decisionAlignmentQuestions } from '../../../src/application/decision-alignment';
 import { remainingExecutionRetries } from '../../../src/application/execution-retry-policy';
 import { formatEventTime } from '../../../src/application/event-time';
-import { getTask } from '../../../src/application/tasks';
+import { getTask, listRequirementDependencyCandidates } from '../../../src/application/tasks';
 import { progressDispatchInspector, type DispatchWaitReason } from '../../../src/application/progress-dispatch';
 import { getTaskContextChat } from '../../../src/application/task-context-chat';
 import { taskDetailVisibility } from '../../../src/application/task-detail-visibility';
 import { deliverySpecSchema, type DeliverySpec } from '../../../src/domain/agent-result';
 import { agentLabel, deliveryUnitLabel, documentKindLabel, feedbackBatchStatusLabel, feedbackWorkTypeLabel, flowLabel, itemTypeLabel, statusLabel, terminologyText } from '../../../src/domain/terminology';
 import { requirementMetadataDefinition, requirementMetadataValueLabel } from '../../../src/domain/requirement-metadata';
+import { REQUIREMENT_PIPELINES, type RequirementPipelineId } from '../../../src/domain/pipeline-catalog';
+import { DEFAULT_REQUIREMENT_PRIORITY } from '../../../src/domain/requirement-priority';
 import { CopyButton } from '../../../src/ui/copy-button';
 import { ArtifactDocument } from './artifact-document';
 import { TaskAutoRefresh } from '../task-auto-refresh';
 import { TaskContextChat } from './task-context-chat';
 import { TaskPriorityControl } from './task-priority-control';
+import { EditTaskInputDialog } from './edit-task-input-dialog';
 import {
   acknowledgeClosureAction,
   addStoryAction,
@@ -198,6 +201,9 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const detail = await getTask(taskId);
   if (!detail) notFound();
   const { task, metadata, dependencies, dependencyGateOpen, lanes, stories, deliverySpecs, questions, runtimeInputs, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
+  const contextChat = await getTaskContextChat(taskId);
+  const canEditOriginalInput = executionAttempts.length === 0 && !contextChat.session && !['done', 'cancelled'].includes(task.agile_status);
+  const dependencyCandidates = canEditOriginalInput ? await listRequirementDependencyCandidates() : [];
   const pendingDependencies = dependencyGateOpen
     ? []
     : dependencies.filter((dependency) => dependency.agile_status !== 'done');
@@ -221,7 +227,6 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
     .filter((decision) => decision.state === 'waiting' || decision.state === 'active')
     .map((decision) => `${decision.lane === 'analysis' ? '交付分析' : decision.lane === 'delivery' ? '开发验证' : '控制'}：${dispatchReasonLabel(decision.reason)}`)
     .join('；');
-  const contextChat = await getTaskContextChat(taskId);
   const unansweredQuestions = questions.filter((question) => question.status === 'pending');
   const alignedDecisions = decisionAlignmentQuestions(questions, deliverySpecs);
   const pendingDecisions = alignedDecisions.filter((question) => question.decision_authority === 'human' && question.status === 'pending');
@@ -331,7 +336,19 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           <p className="eyebrow">创建时输入</p>
           <h2 id="task-original-input-title"><FileText size={17}/>原始需求</h2>
         </div>
-        <small>后续工作流不会改写此内容</small>
+        <div className="task-original-input-actions">
+          <small>{canEditOriginalInput ? '尚无 Agent 执行记录，可以修改首次派发输入' : 'Agent 开始处理后，原始输入保持不变'}</small>
+          {canEditOriginalInput && <EditTaskInputDialog
+            taskId={task.task_id}
+            title={task.title}
+            description={task.description || ''}
+            pipeline={(REQUIREMENT_PIPELINES.some((pipeline) => pipeline.id === task.item_type) ? task.item_type : 'feature') as RequirementPipelineId}
+            priority={task.priority || DEFAULT_REQUIREMENT_PRIORITY}
+            metadata={metadata.map((item) => ({ key: item.metadata_key, value: item.metadata_value }))}
+            dependencyIds={dependencies.map((dependency) => dependency.depends_on_task_id)}
+            dependencyCandidates={dependencyCandidates}
+          />}
+        </div>
       </div>
       {originalDescription
         ? shouldCollapseOriginalDescription
@@ -626,7 +643,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
               comments={documentComments.filter((comment) => comment.document_id === reviewDocument.document_id)}
               feedbackGroups={feedbackGroups}
               allowReopen={!isBusinessAnalysis && task.agile_status !== 'done'}
-              allowComment={!isBusinessAnalysis && task.agile_status !== 'done'}
+              allowComment={task.agile_status !== 'done'}
             /></div> : <div className="empty">结卡报告不可用，请重新运行 Review Agent。</div>}
           </div>
           {task.agile_status === 'ready_to_close' && reviewDocument && blockingFeedback.length > 0 && <div className="release-block">

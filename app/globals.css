@@ -540,6 +540,9 @@ main{padding:28px 20px}
 .task-original-input-head .eyebrow{margin:0 0 4px}
 .task-original-input-head h2{display:flex;align-items:center;gap:7px;margin:0;font-size:17px}
 .task-original-input-head small{margin:3px 0 0;text-align:right}
+.task-original-input-actions{display:flex;align-items:center;justify-content:flex-end;gap:12px}
+.task-input-edit-button{flex:none;padding:7px 11px;font-size:12px}
+.task-input-edit-note{margin:0;color:var(--muted);font-size:12px;line-height:1.5}
 .task-original-input-content{margin:14px 0 0;color:#354056;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere}
 .task-original-input-empty{margin:14px 0 0;color:var(--muted);font-size:13px}
 .task-original-input-details>summary{margin-top:14px;list-style:none;cursor:pointer;border-radius:7px}
@@ -673,6 +676,7 @@ main{padding:28px 20px}
 .workspace-switch{grid-template-columns:1fr}
 .task-original-input-head{display:block}
 .task-original-input-head small{display:block;margin-top:7px;text-align:left}
+.task-original-input-actions{align-items:flex-start;justify-content:space-between;margin-top:8px}
 .task-steps{padding:14px}
 .task-steps-head{margin-bottom:14px}
 .step-copy strong{font-size:11px;white-space:normal}

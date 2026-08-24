@@ -222,6 +222,21 @@ function controlLine(task: Task, codeSlotAvailable: boolean, lanes: TaskLane[]) 
   return null;
 }
 
+function attachBusinessAnalysisRevisionFeedback(db: Db, task: Task, delegation: Delegation) {
+  if (task.item_type !== 'business-analysis'
+    || !['requirement-spec-agent', 'spec-review-agent'].includes(delegation.agent)) return delegation;
+  const comments = db.prepare(`
+    SELECT comment_id FROM document_comments
+    WHERE task_id = ? AND status = 'open'
+      AND feedback_status = 'in_progress'
+      AND target_agent = 'requirement-spec-agent'
+    ORDER BY created_at, comment_id
+  `).all(task.task_id) as { comment_id: string }[];
+  if (!comments.length) return delegation;
+  const feedbackIds = comments.map((comment) => comment.comment_id);
+  return { ...delegation, feedbackId: feedbackIds[0], feedbackIds };
+}
+
 function compareAnalysisCandidates(a: { task: Task; lane: TaskLane }, b: { task: Task; lane: TaskLane }) {
   const leftReadyAt = a.lane.ready_at || a.lane.updated_at || a.task.updated_at;
   const rightReadyAt = b.lane.ready_at || b.lane.updated_at || b.task.updated_at;
@@ -293,7 +308,8 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
       continue;
     }
     if (task.agile_status === 'blocked') continue;
-    const control = controlLine(task, taskCodeAvailable, lanes);
+    const rawControl = controlLine(task, taskCodeAvailable, lanes);
+    const control = rawControl ? attachBusinessAnalysisRevisionFeedback(db, task, rawControl) : null;
     if (control) {
       if (!taskHasActive
         && agentSlots > 0
@@ -345,7 +361,8 @@ export function projectRequirementWorkInDb(db: Db, taskId: string): Delegation[]
   if (task.agile_status === 'blocked') return [];
   const codeClaim = resourceClaims.get(CODE_WORKSPACE_RESOURCE);
   const codeSlotAvailable = !codeClaim || codeClaim.owner_task_id === taskId;
-  const control = controlLine(task, codeSlotAvailable, lanes);
+  const rawControl = controlLine(task, codeSlotAvailable, lanes);
+  const control = rawControl ? attachBusinessAnalysisRevisionFeedback(db, task, rawControl) : null;
   if (control) return active.length || !resourcesAvailable(control, resourceClaims, new Set()) ? [] : [control];
   return lanes
     .filter((lane) => !active.some((item) => item.lane === lane.lane))

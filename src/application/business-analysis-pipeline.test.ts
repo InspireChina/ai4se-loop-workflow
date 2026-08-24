@@ -42,8 +42,8 @@ async function executeBusinessAnalysisAgent(
   return result;
 }
 
-test('runs Business Analysis from a raw idea to an independently approved requirement specification', async () => {
-  const { acknowledgeClosure, createTask, getTask } = await import('./tasks');
+test('runs Business Analysis from a raw idea to an independently approved and revisable requirement specification', async () => {
+  const { acknowledgeClosure, addDocumentComment, createTask, getTask } = await import('./tasks');
   const taskId = await createTask({
     title: '让团队更早发现项目健康风险',
     description: '希望有一个项目体检能力，但目标用户、检查内容和结果形态尚未确定。',
@@ -96,7 +96,46 @@ test('runs Business Analysis from a raw idea to an independently approved requir
   assert.equal((await inspectTaskDispatch(taskId)).length, 0);
   assert.match(ready?.documents.find((document) => document.document_id === ready.task.review_document_id)?.content || '', /# ACCEPTANCE/);
 
-  await acknowledgeClosure({ taskId, reviewRevision: ready!.task.review_revision });
+  const firstReviewRevision = ready!.task.review_revision;
+  const commentId = await addDocumentComment({
+    taskId,
+    documentId: ready!.task.review_document_id!,
+    anchorType: 'file',
+    intent: 'change_request',
+    content: '请明确结果同时展示风险等级。',
+  });
+  const revising = await getTask(taskId);
+  assert.equal(revising?.task.agile_status, 'backlog');
+  assert.equal(revising?.task.current_subagent, 'requirement-spec-agent');
+  assert.equal(revising?.task.review_document_id, null);
+  assert.equal(revising?.documentComments.find((comment) => comment.comment_id === commentId)?.feedback_status, 'in_progress');
+
+  const revisedSpecification = specification.replace('分项状态、风险依据和建议行动', '分项状态、风险等级、风险依据和建议行动');
+  delegation = (await inspectTaskDispatch(taskId))[0];
+  assert.equal(delegation.agent, 'requirement-spec-agent');
+  assert.deepEqual(delegation.feedbackIds, [commentId]);
+  await executeBusinessAnalysisAgent(delegation, [
+    ['requirement-spec', 'composition', 'complete', '--artifact', revisedSpecification],
+    ['requirement-spec', 'verification', 'complete', '--artifact', revisedSpecification],
+    ['requirement-spec', 'complete'],
+  ], `${taskId}-spec-revision`);
+
+  delegation = (await inspectTaskDispatch(taskId))[0];
+  assert.equal(delegation.agent, 'spec-review-agent');
+  assert.deepEqual(delegation.feedbackIds, [commentId]);
+  await executeBusinessAnalysisAgent(delegation, [
+    ['spec-review', 'inspection', 'complete', '--artifact', '# 独立审查\n\n修订后的规格明确包含风险等级。'],
+    ['spec-review', 'classification', 'complete', '--artifact', JSON.stringify({ summary: '评论已落实且没有阻断缺口', gaps: [] })],
+    ['spec-review', 'approve', '--artifact', revisedSpecification],
+  ], `${taskId}-review-revision`);
+
+  const revised = await getTask(taskId);
+  assert.equal(revised?.task.agile_status, 'ready_to_close');
+  assert.equal(revised?.task.review_revision, firstReviewRevision + 1);
+  assert.equal(revised?.documentComments.find((comment) => comment.comment_id === commentId)?.feedback_status, 'resolved');
+  assert.match(revised?.documents.find((document) => document.document_id === revised.task.review_document_id)?.content || '', /风险等级/);
+
+  await acknowledgeClosure({ taskId, reviewRevision: revised!.task.review_revision });
   assert.equal((await getTask(taskId))?.task.agile_status, 'done');
 });
 

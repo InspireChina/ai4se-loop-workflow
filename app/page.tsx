@@ -38,10 +38,15 @@ export default async function Home() {
       const runtimeLane = task.lanes.find((lane) => lane.status === 'waiting_for_runtime_input');
       const answerLane = task.lanes.find((lane) => lane.status === 'waiting_for_answers');
       const blockedLane = task.lanes.find((lane) => lane.status === 'system_blocked');
+      const pendingDependencies = task.dependency_gate_open
+        ? []
+        : task.dependencies.filter((dependency) => dependency.agile_status !== 'done');
+      const waitingForDependencies = pendingDependencies.length > 0;
       const requirementAnswers = task.run_state === 'waiting_for_answers'
         && ['idea-context-agent', 'business-design-agent', 'backlog-agent'].includes(task.current_subagent || '');
       const needsAttention = !task.is_paused && (requirementAnswers || runtimeLane || answerLane || blockedLane);
       const label = task.is_paused ? '已暂停'
+        : waitingForDependencies ? '等待前置需求'
         : requirementAnswers
         ? task.current_subagent === 'idea-context-agent' ? '等待需求意图确认'
           : task.current_subagent === 'business-design-agent' ? '等待业务方案决策'
@@ -50,6 +55,16 @@ export default async function Home() {
           : inBusinessAnalysis(task)
             ? task.agile_status === 'ready_to_close' ? '等待阅读需求规格' : task.current_subagent ? agentLabel(task.current_subagent).replace(' Agent', '') : statusLabel(task.agile_status)
             : statusLabel(task.agile_status);
-      return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}><span><strong>{task.title}</strong><small>{task.task_id} · 优先级 {requirementPriorityLabel(task.priority)}</small></span><span className={`badge ${task.is_paused || task.agile_status === 'blocked' || needsAttention ? 'amber' : 'blue'}`}><CircleDot size={13}/>{label}</span><span>{task.is_paused ? `暂停推进 · ${task.paused_reason || '暂缓推进'}` : phase(task)}</span><span>{task.is_paused ? '恢复后从原步骤继续' : terminologyText(task.next_step)}</span></Link>;
+      const progress = task.is_paused
+        ? `暂停推进 · ${task.paused_reason || '暂缓推进'}`
+        : waitingForDependencies
+          ? `等待 ${pendingDependencies.length} 个前置需求完成`
+          : phase(task);
+      const nextStep = task.is_paused
+        ? '恢复后从原步骤继续'
+        : waitingForDependencies
+          ? `前置需求完成后自动调度 · ${pendingDependencies.map((dependency) => dependency.title).join('、')}`
+          : terminologyText(task.next_step);
+      return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}><span><strong>{task.title}</strong><small>{task.task_id} · 优先级 {requirementPriorityLabel(task.priority)}</small></span><span className={`badge ${task.is_paused || waitingForDependencies || task.agile_status === 'blocked' || needsAttention ? 'amber' : 'blue'}`}><CircleDot size={13}/>{label}</span><span>{progress}</span><span>{nextStep}</span></Link>;
     })}</div></section></>;
 }

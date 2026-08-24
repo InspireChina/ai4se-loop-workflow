@@ -602,6 +602,10 @@ export async function addDocumentComment(input: unknown) {
   const db = await databaseConnection();
   const document = db.prepare('SELECT * FROM documents WHERE document_id = ? AND task_id = ?').get(value.documentId, value.taskId) as Document | undefined;
   if (!document) throw new Error('文档不存在');
+  const task = fetchTask(db, value.taskId);
+  const revisesBusinessAnalysisSpecification = task?.item_type === 'business-analysis'
+    && task.agile_status === 'ready_to_close'
+    && task.review_document_id === document.document_id;
   const hasSelection = value.anchorType === 'selection' && Boolean(value.quotedText);
   if (value.anchorType === 'selection' && !hasSelection) throw new Error('选区评论必须包含引用内容');
   if (value.startOffset != null && value.endOffset != null && value.endOffset < value.startOffset) throw new Error('评论选区无效');
@@ -626,10 +630,51 @@ export async function addDocumentComment(input: unknown) {
       value.content,
       value.intent,
     );
-    addEvent(db, value.taskId, 'human', 'DocumentCommented', `提交${value.intent === 'change_request' ? '修改请求' : value.intent === 'question' ? '问题' : '建议'}：${document.title}`);
+    if (revisesBusinessAnalysisSpecification) {
+      db.prepare(`
+        UPDATE document_comments
+        SET feedback_status = 'in_progress', disposition = 'revise',
+            target_agent = 'requirement-spec-agent',
+            triage_reason = '用户要求修订已审查的需求规格',
+            triaged_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE comment_id = ?
+      `).run(commentId);
+      db.prepare(`
+        UPDATE tasks
+        SET agile_status = 'backlog', current_subagent = 'requirement-spec-agent',
+            run_state = 'runnable', closure_status = 'none', review_document_id = NULL,
+            next_step = ?, last_actor = 'human', updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ?
+      `).run(`用户对已审查需求规格提出反馈，请修订规格并重新独立审查：${value.content}`, value.taskId);
+      addEvent(db, value.taskId, 'human', 'BusinessAnalysisSpecificationRevisionRequested', `提交需求规格修订意见：${document.title}`);
+    } else {
+      addEvent(db, value.taskId, 'human', 'DocumentCommented', `提交${value.intent === 'change_request' ? '修改请求' : value.intent === 'question' ? '问题' : '建议'}：${document.title}`);
+    }
   })();
   refreshPages(`/tasks/${value.taskId}`);
   return commentId;
+}
+
+export async function resolveBusinessAnalysisSpecificationComments(input: { taskId: string; revision: number }) {
+  const db = await databaseConnection();
+  const evidence = JSON.stringify({
+    verdict: 'resolved',
+    reason: '需求规格已经修订并重新通过独立审查',
+    evidence: [`需求规格说明书 revision ${input.revision}`],
+  });
+  const result = db.prepare(`
+    UPDATE document_comments
+    SET status = 'resolved', feedback_status = 'resolved',
+        verification_json = ?, evolution_status = 'pending',
+        resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+    WHERE task_id = ? AND status = 'open'
+      AND feedback_status = 'in_progress'
+      AND target_agent = 'requirement-spec-agent'
+  `).run(evidence, input.taskId);
+  if (result.changes) {
+    addEvent(db, input.taskId, 'spec-review-agent', 'BusinessAnalysisSpecificationCommentsResolved', `修订后的需求规格已通过独立审查，闭环 ${result.changes} 条评论`);
+  }
+  refreshPages(`/tasks/${input.taskId}`);
 }
 
 const documentCommentIdSchema = z.object({
@@ -774,6 +819,90 @@ export async function createTask(input: unknown) {
     db.exec('ROLLBACK');
     throw error;
   }
+}
+
+const updateUnstartedTaskInputSchema = z.object({
+  taskId: z.string().min(1),
+  title: z.string().trim().min(1).max(300),
+  description: z.string().optional().nullable(),
+  itemType: z.enum(['direct', 'business-analysis', 'end-to-end', 'feature', 'bug']),
+  priority: z.string().trim().optional().nullable(),
+  metadata: z.array(z.object({
+    key: z.string(),
+    value: z.string(),
+  })).optional().default([]),
+  dependsOnTaskIds: z.array(z.string().trim().min(1)).max(50).optional().default([]),
+});
+
+export async function updateUnstartedTaskInput(input: unknown) {
+  const value = updateUnstartedTaskInputSchema.parse(input);
+  const metadata = parseRequirementMetadata(value.metadata);
+  const priority = requirementPriority(value.priority || DEFAULT_REQUIREMENT_PRIORITY);
+  const description = value.description?.trim() || null;
+  const currentSubagent = value.itemType === 'direct'
+    ? 'direct-agent'
+    : ['business-analysis', 'end-to-end'].includes(value.itemType) ? 'idea-context-agent' : null;
+  const nextStep = value.itemType === 'direct' ? '新建需求，等待直接执行' : '新建需求，等待 Loop 梳理';
+  const db = await databaseConnection();
+  let dispatchRevision: number;
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const before = fetchTask(db, value.taskId);
+    if (!before) throw new Error('需求不存在');
+    if (['done', 'cancelled'].includes(before.agile_status)) throw new Error('已结束的需求不能编辑输入');
+    const execution = db.prepare('SELECT 1 FROM execution_attempts WHERE task_id = ? LIMIT 1').get(value.taskId);
+    const contextChat = db.prepare('SELECT 1 FROM task_context_chat_sessions WHERE task_id = ? LIMIT 1').get(value.taskId);
+    if (execution || contextChat) throw new Error('该需求已经由 Agent 开始处理，原始输入不能再修改');
+
+    const previousMetadata = db.prepare(`
+      SELECT metadata_key AS key, metadata_value AS value
+      FROM requirement_metadata WHERE task_id = ? ORDER BY metadata_key
+    `).all(value.taskId) as { key: string; value: string }[];
+    const previousDependencies = requirementDependenciesInDb(db, value.taskId).map((item) => item.depends_on_task_id);
+    const changedFields = [
+      before.title !== value.title ? '标题' : '',
+      before.description !== description ? '描述' : '',
+      before.item_type !== value.itemType ? 'Pipeline' : '',
+      before.priority !== priority ? '优先级' : '',
+      JSON.stringify(previousMetadata) !== JSON.stringify([...metadata].sort((left, right) => left.key.localeCompare(right.key))) ? 'Metadata' : '',
+      JSON.stringify(previousDependencies) !== JSON.stringify([...new Set(value.dependsOnTaskIds)]) ? '前置需求' : '',
+    ].filter(Boolean);
+
+    db.prepare(`
+      UPDATE tasks
+      SET title = ?, description = ?, item_type = ?, priority = ?, current_subagent = ?,
+          next_step = ?, last_actor = 'human', updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ?
+    `).run(value.title, description, value.itemType, priority, currentSubagent, nextStep, value.taskId);
+    db.prepare('DELETE FROM requirement_metadata WHERE task_id = ?').run(value.taskId);
+    const insertMetadata = db.prepare(`
+      INSERT INTO requirement_metadata(task_id, metadata_key, metadata_value) VALUES(?, ?, ?)
+    `);
+    for (const item of metadata) insertMetadata.run(value.taskId, item.key, item.value);
+    db.prepare('DELETE FROM task_dependencies WHERE task_id = ?').run(value.taskId);
+    configureRequirementDependenciesInDb(db, value.taskId, value.dependsOnTaskIds);
+    db.prepare('DELETE FROM task_lanes WHERE task_id = ?').run(value.taskId);
+    const after = fetchTask(db, value.taskId);
+    if (!after) throw new Error('需求输入更新失败');
+    ensureTaskLanesInDb(db, after);
+    addEvent(
+      db,
+      value.taskId,
+      'human',
+      'TaskInputUpdated',
+      changedFields.length ? `Agent 开始前更新需求输入：${changedFields.join('、')}` : 'Agent 开始前确认需求输入，无字段变化',
+    );
+    dispatchRevision = advanceRuntimeEventRevisionInDb(db, 'dispatch.invalidated');
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
+
+  await syncTaskFiles(db, value.taskId);
+  await publishRuntimeInvalidation('dispatch.invalidated', dispatchRevision, value.taskId);
+  refreshPages('/', '/tasks', `/tasks/${value.taskId}`);
 }
 
 const contextSchema = z.object({

@@ -24,6 +24,7 @@ import {
   CodeSlotBusyError,
   getTask,
   rewindTask,
+  resolveBusinessAnalysisSpecificationComments,
   resolveRuntimeInputs,
   saveDeliverySpec,
   setTaskLaneState,
@@ -565,6 +566,10 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         review_revision: detail.task.review_revision + 1,
         review_document_id: artifactDocumentId,
         next_step: '需求规格已通过独立审查，等待用户阅读确认',
+      });
+      await resolveBusinessAnalysisSpecificationComments({
+        taskId: delegation.taskId,
+        revision: detail.task.review_revision + 1,
       });
       return 'advanced';
     }

@@ -101,7 +101,8 @@ export function ArtifactDocument({
           const feedbackStatus = comment.feedback_status === 'resolved' ? '已解决'
             : comment.feedback_status === 'verifying' ? '等待独立验证'
               : comment.feedback_status === 'in_progress'
-                ? group?.delivery_unit_indexes?.length
+                ? comment.target_agent === 'requirement-spec-agent' ? '等待需求规格修订与复审'
+                  : group?.delivery_unit_indexes?.length
                   ? `由新增交付单元 ${group.delivery_unit_indexes.join('、')} 处理中`
                   : group?.status === 'waiting_for_repro' ? '等待问题复现'
                     : group?.status === 'waiting_for_plan' ? '等待追加拆分'

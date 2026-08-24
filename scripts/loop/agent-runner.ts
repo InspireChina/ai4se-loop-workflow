@@ -138,7 +138,8 @@ async function recordRunnerFailure(failure: unknown) {
 async function buildPrompt(delegation: DelegationEnvelope, repositoryBaseCommit: string | null) {
   const runtime = await loadAgentRuntime(delegation.agent, delegation.pipeline);
   const full = await getTaskContext(delegation.taskId);
-  const activeFeedback: typeof full.documentComments = [];
+  const delegatedFeedbackIds = new Set([delegation.feedbackId, ...(delegation.feedbackIds || [])].filter(Boolean));
+  const activeFeedback = full.documentComments.filter((comment) => delegatedFeedbackIds.has(comment.comment_id));
   const recoveryStage = recoveryStageForAgent(delegation.agent);
   const activeRecovery = recoveryStage
     ? await listRecoveryItemsForStage({ taskId: delegation.taskId, storyIndex: delegation.storyIndex, stage: recoveryStage })

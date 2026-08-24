@@ -22,6 +22,7 @@ import {
   submitRuntimeInputs,
   rewindTask,
   transitionTask,
+  updateUnstartedTaskInput,
 } from '../src/application/tasks';
 import { paths } from '../src/infrastructure/database';
 import { requirementPipeline } from '../src/domain/pipeline-catalog';
@@ -53,6 +54,28 @@ export async function createTaskAction(formData: FormData) {
     dependsOnTaskIds: formData.getAll('dependsOnTaskId'),
   });
   return taskId;
+}
+
+export async function updateUnstartedTaskInputAction(formData: FormData) {
+  const taskId = String(formData.get('taskId') || '');
+  const pipeline = requirementPipeline(formData.get('pipeline') || 'feature');
+  const priority = requirementPriority(formData.get('priority') || DEFAULT_REQUIREMENT_PRIORITY);
+  const metadataKeys = formData.getAll('metadataKey');
+  const metadataValues = formData.getAll('metadataValue');
+  const metadata = parseRequirementMetadata(metadataKeys.map((key, index) => ({
+    key,
+    value: metadataValues[index],
+  })));
+  await updateUnstartedTaskInput({
+    taskId,
+    title: formData.get('title'),
+    description: formData.get('description') || undefined,
+    itemType: pipeline,
+    priority,
+    metadata,
+    dependsOnTaskIds: formData.getAll('dependsOnTaskId'),
+  });
+  redirect(`/tasks/${encodeURIComponent(taskId)}`);
 }
 
 function scheduledRequirementInput(formData: FormData) {

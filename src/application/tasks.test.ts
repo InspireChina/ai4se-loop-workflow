@@ -224,6 +224,72 @@ test('changes priority without clearing a pending resume or moving workflow stat
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id = ?").run(taskId);
 });
 
+test('edits the complete requirement input only before the first Agent execution', async () => {
+  const { createTask, getTask, updateUnstartedTaskInput } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const firstDependencyId = await createTask({ title: 'Original dependency' });
+  const secondDependencyId = await createTask({ title: 'Replacement dependency' });
+  const taskId = await createTask({
+    title: 'Original input',
+    description: 'Original description',
+    itemType: 'feature',
+    priority: '3',
+    metadata: [{ key: 'tracking.requirement_card_id', value: 'CARD-OLD' }],
+    dependsOnTaskIds: [firstDependencyId],
+  });
+
+  await updateUnstartedTaskInput({
+    taskId,
+    title: 'Edited input',
+    description: 'Edited description',
+    itemType: 'business-analysis',
+    priority: '8',
+    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'autonomous' }],
+    dependsOnTaskIds: [secondDependencyId],
+  });
+
+  let detail = await getTask(taskId);
+  assert.equal(detail?.task.title, 'Edited input');
+  assert.equal(detail?.task.description, 'Edited description');
+  assert.equal(detail?.task.item_type, 'business-analysis');
+  assert.equal(detail?.task.current_subagent, 'idea-context-agent');
+  assert.equal(detail?.task.priority, '8');
+  assert.deepEqual(detail?.metadata.map((item) => [item.metadata_key, item.metadata_value]), [[
+    'workflow.analysis_decision_mode',
+    'autonomous',
+  ]]);
+  assert.deepEqual(detail?.dependencies.map((item) => item.depends_on_task_id), [secondDependencyId]);
+  assert.match(detail?.events[0].summary || '', /标题、描述、Pipeline、优先级、Metadata、前置需求/);
+
+  db.prepare(`
+    INSERT INTO execution_attempts(
+      execution_id, run_id, task_id, agent, pipeline, delegation_key,
+      attempt, status, input_hash, input_json
+    ) VALUES('execution-input-edit-lock', 'run-input-edit-lock', ?, 'idea-context-agent',
+             'idea-context', 'input-edit-lock', 1, 'applied', 'input-edit-hash', '{}')
+  `).run(taskId);
+  await assert.rejects(() => updateUnstartedTaskInput({
+    taskId,
+    title: 'Must not be saved',
+    itemType: 'direct',
+    priority: '9',
+  }), /已经由 Agent 开始处理/);
+  detail = await getTask(taskId);
+  assert.equal(detail?.task.title, 'Edited input');
+  assert.equal(detail?.task.item_type, 'business-analysis');
+
+  const contextTaskId = await createTask({ title: 'Context Agent started' });
+  const { beginTaskContextChatTurn } = await import('./task-context-chat');
+  await beginTaskContextChatTurn(contextTaskId, 'Read the current context', 'codex');
+  await assert.rejects(() => updateUnstartedTaskInput({
+    taskId: contextTaskId,
+    title: 'Must not replace context input',
+    itemType: 'feature',
+    priority: '5',
+  }), /已经由 Agent 开始处理/);
+});
+
 test('persists predefined metadata independently from legacy task columns', async () => {
   const { createTask, getTask } = await import('./tasks');
   const taskId = await createTask({
