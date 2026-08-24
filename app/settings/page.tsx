@@ -1,15 +1,16 @@
 import Link from 'next/link';
 import { paths } from '../../src/infrastructure/database';
-import { Activity, ArrowRight, Bot, Check } from 'lucide-react';
-import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, OMP_THINKING_LEVELS, getAgentExecutorSettings, getFlowAgentDefaultRuntimeSettings, getLangfuseSettings } from '../../src/application/project-settings';
-import { changeWorkspaceRootAction, saveAgentExecutorAction, saveFlowAgentDefaultRuntimeAction, saveLangfuseSettingsAction } from '../actions';
+import { Activity, ArrowRight, Bot, Check, Gauge } from 'lucide-react';
+import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, MAX_AGENT_CONCURRENCY, OMP_THINKING_LEVELS, getAgentConcurrency, getAgentExecutorSettings, getFlowAgentDefaultRuntimeSettings, getLangfuseSettings } from '../../src/application/project-settings';
+import { changeWorkspaceRootAction, saveAgentConcurrencyAction, saveAgentExecutorAction, saveFlowAgentDefaultRuntimeAction, saveLangfuseSettingsAction } from '../actions';
 
 export const dynamic = 'force-dynamic';
 
 export default async function SettingsPage() {
-  const [settings, flowDefaults, langfuse] = await Promise.all([
+  const [settings, flowDefaults, agentConcurrency, langfuse] = await Promise.all([
     getAgentExecutorSettings(),
     getFlowAgentDefaultRuntimeSettings(),
+    getAgentConcurrency(),
     getLangfuseSettings(),
   ]);
   return <>
@@ -18,6 +19,20 @@ export default async function SettingsPage() {
     <form action={changeWorkspaceRootAction} className="card settings">
       <div><strong>当前项目</strong><p className="muted settings-description">切换后，需求、运行记录和项目设置会自动使用该代码库对应的独立数据库。</p></div>
       <div className="workspace-switch"><label>工作区根目录<input name="workspaceRoot" required defaultValue={paths.root} spellCheck={false}/></label><button className="button" type="submit">切换项目</button></div>
+    </form>
+    <form action={saveAgentConcurrencyAction} className="card settings">
+      <div className="settings-section-head">
+        <span className="executor-icon"><Gauge size={18}/></span>
+        <div><strong>流程 Agent 并发</strong><p className="muted settings-description">统一限制所有流程 Agent 的运行总数；代码槽和浏览器锁继续作为额外资源约束。</p></div>
+      </div>
+      <div className="fields">
+        <label>Agent 最大并发数
+          <input name="agentConcurrency" type="number" min="1" max={MAX_AGENT_CONCURRENCY} step="1" required defaultValue={agentConcurrency}/>
+          <small className="muted">可设置 1–{MAX_AGENT_CONCURRENCY}。无锁 Agent 与占用代码槽、浏览器锁的 Agent 全部计入。</small>
+        </label>
+      </div>
+      <small className="muted">保存后立即影响新的派发；已经运行的 Agent 不会被终止。若当前占用超过新上限，系统会等待其自然结束后再派发。</small>
+      <button className="button" type="submit">保存并发设置</button>
     </form>
     <form action={saveFlowAgentDefaultRuntimeAction} className="card settings">
       <div className="settings-section-head"><span className="executor-icon"><Bot size={18}/></span><div><strong>流程 Agent Runtime · 项目默认</strong><p className="muted settings-description">所有选择“跟随项目默认”的流程 Agent 会立即继承这里的执行器及对应参数。</p></div><Link className="button secondary" href="/agents">Agent 独立配置 <ArrowRight size={14}/></Link></div>

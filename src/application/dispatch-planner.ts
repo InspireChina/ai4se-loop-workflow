@@ -20,6 +20,7 @@ import {
 import { taskContextChatTurnIsRunning } from './task-context-chat';
 import { nextFeedbackDispatchInDb, type FeedbackDispatch } from './feedback';
 import type { DelegationEnvelope, Task } from './tasks';
+import { agentConcurrencyInDb } from './project-settings';
 
 type Db = Database.Database;
 
@@ -148,6 +149,15 @@ function activeLaneExecutions(db: Db) {
   `).all() as ActiveLaneExecution[];
 }
 
+function activeAgentExecutionCount(db: Db) {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM execution_attempts
+    WHERE status IN ('planned', 'running')
+  `).get() as { count: number };
+  return row.count;
+}
+
 function laneLine(task: Task, lane: TaskLane, codeSlotAvailable: boolean): Delegation | null {
   const line = (pipeline: string, agent: string, storyIndex: number | null, description: string): Delegation => ({
     taskId: task.task_id,
@@ -253,7 +263,7 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
   tasks.sort(compareDispatchTasks);
   const active = activeLaneExecutions(db);
   const activeKeys = new Set(active.map((item) => `${item.task_id}:${item.lane}`));
-  let analysisSlots = Math.max(0, 4 - [...activeKeys].filter((key) => key.endsWith(':analysis')).length);
+  let agentSlots = Math.max(0, agentConcurrencyInDb(db) - activeAgentExecutionCount(db));
   const resourceClaims = schedulingResourceClaims(db);
   const codeClaim = resourceClaims.get(CODE_WORKSPACE_RESOURCE);
   const reservedResources = new Set<ResourceKey>();
@@ -271,18 +281,24 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
     const taskHasActive = active.some((item) => item.task_id === task.task_id);
     if (feedback && feedbackCanDispatch(task, lanes)) {
       const delegation = feedbackDelegation(task, feedback);
-      if (!taskHasActive && resourcesAvailable(delegation, resourceClaims, reservedResources)) {
+      if (!taskHasActive
+        && agentSlots > 0
+        && resourcesAvailable(delegation, resourceClaims, reservedResources)) {
         reserveResources(delegation, reservedResources);
         lines.push(delegation);
+        agentSlots -= 1;
       }
       continue;
     }
     if (task.agile_status === 'blocked') continue;
     const control = controlLine(task, taskCodeAvailable, lanes);
     if (control) {
-      if (!taskHasActive && resourcesAvailable(control, resourceClaims, reservedResources)) {
+      if (!taskHasActive
+        && agentSlots > 0
+        && resourcesAvailable(control, resourceClaims, reservedResources)) {
         reserveResources(control, reservedResources);
         lines.push(toEnvelope(task, control));
+        agentSlots -= 1;
       }
       continue;
     }
@@ -293,18 +309,19 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
     const delivery = lanes.find((lane) => lane.lane === 'delivery');
     if (!delivery || activeKeys.has(`${task.task_id}:delivery`)) continue;
     const deliveryWork = laneLine(task, delivery, taskCodeAvailable);
-    if (!deliveryWork || !resourcesAvailable(deliveryWork, resourceClaims, reservedResources)) continue;
+    if (!deliveryWork || !agentSlots || !resourcesAvailable(deliveryWork, resourceClaims, reservedResources)) continue;
     reserveResources(deliveryWork, reservedResources);
     lines.push(toEnvelope(task, deliveryWork, delivery.retry_cycle));
+    agentSlots -= 1;
   }
 
   for (const candidate of analysisCandidates.sort(compareAnalysisCandidates)) {
-    if (!analysisSlots) break;
+    if (!agentSlots) break;
     const work = laneLine(candidate.task, candidate.lane, true);
     if (!work || !resourcesAvailable(work, resourceClaims, reservedResources)) continue;
     reserveResources(work, reservedResources);
     lines.push(toEnvelope(candidate.task, work, candidate.lane.retry_cycle));
-    analysisSlots -= 1;
+    agentSlots -= 1;
   }
   return lines;
 }

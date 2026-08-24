@@ -1683,47 +1683,98 @@ test('dispatches the highest numeric priority first when requirements compete fo
   assert.equal(contenders[0].priority, '9');
 });
 
-test('caps Analysis concurrency at four and preserves existing task cursors when lanes are materialized', async () => {
+test('applies the configured global Agent concurrency to Analysis and preserves existing task cursors', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { getTask } = await import('./tasks');
+  const { getAgentConcurrency, setAgentConcurrency } = await import('./project-settings');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
   db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
 
-  const preservedTaskId = 'TASK-preserved-lane-cursors';
-  db.prepare(`
-    INSERT INTO tasks(
-      task_id, title, item_type, agile_status, current_subagent,
-      analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
-    ) VALUES(?, 'Preserved cursors', 'feature', 'ready for dev', 'analyst-agent', 3, 2, 1, 4, 3, '')
-  `).run(preservedTaskId);
-  const preserved = await getTask(preservedTaskId);
-  assert.deepEqual(
-    [preserved?.task.analysis_index, preserved?.task.dev_index, preserved?.task.test_index],
-    [3, 2, 1],
-  );
-  assert.deepEqual(preserved?.lanes.map((lane) => [lane.lane, lane.status]), [
-    ['analysis', 'runnable'],
-    ['delivery', 'runnable'],
-  ]);
-  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id = ?").run(preservedTaskId);
-
-  const taskIds: string[] = [];
-  for (let index = 0; index < 5; index += 1) {
-    const taskId = `TASK-analysis-cap-${index}`;
-    taskIds.push(taskId);
+  const previousConcurrency = await getAgentConcurrency();
+  try {
+    await setAgentConcurrency(3);
+    const preservedTaskId = 'TASK-preserved-lane-cursors';
     db.prepare(`
       INSERT INTO tasks(
-        task_id, title, item_type, priority, agile_status, current_subagent,
+        task_id, title, item_type, agile_status, current_subagent,
         analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
-      ) VALUES(?, ?, 'feature', ?, 'ready for dev', 'analyst-agent', 0, 0, 0, 1, 0, '')
-    `).run(taskId, `Analysis cap ${index}`, index === 4 ? 'P0' : 'P3');
-    db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, ?, ?)').run(taskId, `Unit ${index}`, `unit-${index}`);
+      ) VALUES(?, 'Preserved cursors', 'feature', 'ready for dev', 'analyst-agent', 3, 2, 1, 4, 3, '')
+    `).run(preservedTaskId);
+    const preserved = await getTask(preservedTaskId);
+    assert.deepEqual(
+      [preserved?.task.analysis_index, preserved?.task.dev_index, preserved?.task.test_index],
+      [3, 2, 1],
+    );
+    assert.deepEqual(preserved?.lanes.map((lane) => [lane.lane, lane.status]), [
+      ['analysis', 'runnable'],
+      ['delivery', 'runnable'],
+    ]);
+    db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id = ?").run(preservedTaskId);
+
+    const taskIds: string[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      const taskId = `TASK-analysis-cap-${index}`;
+      taskIds.push(taskId);
+      db.prepare(`
+        INSERT INTO tasks(
+          task_id, title, item_type, priority, agile_status, current_subagent,
+          analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+        ) VALUES(?, ?, 'feature', ?, 'ready for dev', 'analyst-agent', 0, 0, 0, 1, 0, '')
+      `).run(taskId, `Analysis cap ${index}`, index === 4 ? 'P0' : 'P3');
+      db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, ?, ?)').run(taskId, `Unit ${index}`, `unit-${index}`);
+    }
+    const analysis = (await inspectAllDispatch()).filter((item) => taskIds.includes(item.taskId) && item.lane === 'analysis');
+    assert.equal(analysis.length, 3);
+    assert.equal(analysis.some((item) => item.taskId === 'TASK-analysis-cap-4'), true);
+  } finally {
+    await setAgentConcurrency(previousConcurrency);
   }
-  const analysis = (await inspectAllDispatch()).filter((item) => taskIds.includes(item.taskId) && item.lane === 'analysis');
-  assert.equal(analysis.length, 4);
-  assert.equal(analysis.some((item) => item.taskId === 'TASK-analysis-cap-4'), true);
+});
+
+test('shares the global Agent concurrency limit between locked and unlocked Agents', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { createTask } = await import('./tasks');
+  const { getAgentConcurrency, setAgentConcurrency } = await import('./project-settings');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+  db.prepare('DELETE FROM resource_claims').run();
+
+  const previousConcurrency = await getAgentConcurrency();
+  try {
+    await setAgentConcurrency(2);
+    const lockedTaskId = await createTask({ title: 'Locked active Agent' });
+    const lockedDelegation = (await inspectTaskDispatch(lockedTaskId))[0];
+    assert.deepEqual(lockedDelegation.resources, ['browser:exclusive']);
+    await beginTestExecutionAttempt({
+      runId: 'run-global-agent-concurrency-locked',
+      delegation: lockedDelegation,
+      prompt: 'Keep one locked Agent active.',
+    });
+
+    const unlockedTaskIds: string[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const taskId = `TASK-global-agent-concurrency-analysis-${index}`;
+      unlockedTaskIds.push(taskId);
+      db.prepare(`
+        INSERT INTO tasks(
+          task_id, title, item_type, agile_status, current_subagent,
+          analysis_index, dev_index, test_index, total_stories, spec_resolved_index, work_dir
+        ) VALUES(?, ?, 'feature', 'ready for dev', 'analyst-agent', 0, 0, 0, 1, 0, '')
+      `).run(taskId, `Unlocked Analysis ${index}`);
+      db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, ?, ?)')
+        .run(taskId, `Unit ${index}`, `unit-global-concurrency-${index}`);
+    }
+
+    const planned = (await inspectAllDispatch()).filter((item) => unlockedTaskIds.includes(item.taskId));
+    assert.equal(planned.length, 1);
+    assert.equal(planned[0].agent, 'analyst-agent');
+  } finally {
+    await setAgentConcurrency(previousConcurrency);
+  }
 });
 
 test('releases only the requested blocked lane and resumes its persisted delivery unit', async () => {
@@ -1828,7 +1879,7 @@ test('treats legacy task-level blocked state as an exclusive control gate', asyn
   assert.equal((await inspectAllDispatch()).some((item) => item.taskId === taskId), false);
 });
 
-test('counts one active Analysis lane once when both its execution and queued result are visible', async () => {
+test('does not consume an Agent slot after Analysis has exited and its result is being applied', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
@@ -1864,7 +1915,7 @@ test('counts one active Analysis lane once when both its execution and queued re
     `).run(taskId, `Analysis candidate ${index}`);
   }
   const dispatched = (await inspectAllDispatch()).filter((item) => candidates.includes(item.taskId) && item.lane === 'analysis');
-  assert.equal(dispatched.length, 3);
+  assert.equal(dispatched.length, 4);
 });
 
 test('initializes one project-owned Prompt from the system template without overwriting project edits', async () => {

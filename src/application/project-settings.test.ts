@@ -1,6 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+test('persists and validates the global Agent concurrency limit', async () => {
+  const {
+    getAgentConcurrency,
+    setAgentConcurrency,
+  } = await import('./project-settings');
+  const previous = await getAgentConcurrency();
+  try {
+    assert.equal(await setAgentConcurrency('7'), 7);
+    assert.equal(await getAgentConcurrency(), 7);
+    await assert.rejects(() => setAgentConcurrency('0'), /不能小于 1/);
+    await assert.rejects(() => setAgentConcurrency('33'), /不能大于 32/);
+    await assert.rejects(() => setAgentConcurrency('1.5'), /必须是整数/);
+    assert.equal(await getAgentConcurrency(), 7);
+  } finally {
+    await setAgentConcurrency(previous);
+  }
+});
+
 test('inherits the project flow runtime by default and preserves explicit agent overrides', async () => {
   const { FLOW_AGENT_IDS } = await import('../domain/agent-profile');
   const {

@@ -6,6 +6,7 @@ import { AGENT_EXECUTORS, type AgentExecutorId } from '../domain/agent-executor'
 import { FLOW_AGENT_IDS, isFlowAgentId, type FlowAgentId } from '../domain/agent-profile';
 import type { AgentExecutionOptions } from '../infrastructure/agent-executor';
 import { databaseConnection, setConfiguredWorkspaceRoot } from '../infrastructure/database';
+import { advanceRuntimeEventRevisionInDb, publishRuntimeInvalidation } from './runtime-events';
 
 export const AGENT_EXECUTOR_OPTIONS: ReadonlyArray<{
   id: AgentExecutorId;
@@ -39,6 +40,11 @@ const claudeModelSchema = z.string().trim().max(200, 'Claude 模型名称不能�
 const ompModelSchema = z.string().trim().max(200, 'OMP 模型名称不能超过 200 个字符').regex(/^[^\u0000-\u001f\u007f]*$/, 'OMP 模型名称包含无效控制字符');
 const ompThinkingSchema = z.enum(OMP_THINKING_LEVELS);
 const langfuseSampleRateSchema = z.coerce.number().min(0, '采样率不能小于 0').max(1, '采样率不能大于 1');
+export const DEFAULT_AGENT_CONCURRENCY = 4;
+export const MAX_AGENT_CONCURRENCY = 32;
+const agentConcurrencySchema = z.coerce.number().int('Agent 并发数必须是整数')
+  .min(1, 'Agent 并发数不能小于 1')
+  .max(MAX_AGENT_CONCURRENCY, `Agent 并发数不能大于 ${MAX_AGENT_CONCURRENCY}`);
 
 const LANGFUSE_SETTING_KEYS = [
   'langfuse_enabled',
@@ -117,6 +123,37 @@ async function readProjectSettings(keys: readonly string[]) {
   const placeholders = keys.map(() => '?').join(', ');
   const rows = db.prepare(`SELECT setting_key, setting_value FROM project_settings WHERE setting_key IN (${placeholders})`).all(...keys) as { setting_key: string; setting_value: string }[];
   return Object.fromEntries(rows.map((row) => [row.setting_key, row.setting_value]));
+}
+
+export function agentConcurrencyInDb(db: Awaited<ReturnType<typeof databaseConnection>>) {
+  const row = db.prepare(`
+    SELECT setting_value FROM project_settings WHERE setting_key = 'agent_concurrency'
+  `).get() as { setting_value: string } | undefined;
+  const parsed = agentConcurrencySchema.safeParse(row?.setting_value);
+  return parsed.success ? parsed.data : DEFAULT_AGENT_CONCURRENCY;
+}
+
+export async function getAgentConcurrency() {
+  const db = await databaseConnection();
+  return agentConcurrencyInDb(db);
+}
+
+export async function setAgentConcurrency(input: unknown) {
+  const concurrency = agentConcurrencySchema.parse(input);
+  const db = await databaseConnection();
+  const revision = db.transaction(() => {
+    db.prepare(`
+      INSERT INTO project_settings(setting_key, setting_value)
+      VALUES('agent_concurrency', ?)
+      ON CONFLICT(setting_key) DO UPDATE SET
+        setting_value = excluded.setting_value,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(String(concurrency));
+    return advanceRuntimeEventRevisionInDb(db, 'dispatch.invalidated');
+  })();
+  await publishRuntimeInvalidation('dispatch.invalidated', revision, 'agent-concurrency');
+  try { revalidatePath('/settings'); } catch { /* CLI usage has no request context. */ }
+  return concurrency;
 }
 
 export function normalizeWorkspaceRoot(input: unknown) {

@@ -1,7 +1,7 @@
 'use server';
 
 import { redirect } from 'next/navigation';
-import { normalizeWorkspaceRoot, setAgentExecutorSettings, setAgentRuntimeSettings, setFlowAgentDefaultRuntimeSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
+import { normalizeWorkspaceRoot, setAgentConcurrency, setAgentExecutorSettings, setAgentRuntimeSettings, setFlowAgentDefaultRuntimeSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
 import { resetAgentPromptToSystemTemplate, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
 import {
   addDocumentComment,
@@ -189,6 +189,11 @@ export async function saveFlowAgentDefaultRuntimeAction(formData: FormData) {
     ompModel: formData.get('ompModel'),
     ompThinking: formData.get('ompThinking'),
   });
+  redirect('/settings');
+}
+
+export async function saveAgentConcurrencyAction(formData: FormData) {
+  await setAgentConcurrency(formData.get('agentConcurrency'));
   redirect('/settings');
 }
 
