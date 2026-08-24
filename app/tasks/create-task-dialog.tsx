@@ -7,15 +7,22 @@ import { REQUIREMENT_PIPELINES } from '../../src/domain/pipeline-catalog';
 import { DEFAULT_REQUIREMENT_PRIORITY, REQUIREMENT_PRIORITY_OPTIONS } from '../../src/domain/requirement-priority';
 import { REQUIREMENT_METADATA_DEFINITIONS, type RequirementMetadataKey } from '../../src/domain/requirement-metadata';
 import { createTaskAction } from '../actions';
+import type { RequirementDependencyCandidate } from '../../src/application/task-dependencies';
 
 function CreateTaskButton() {
   const { pending } = useFormStatus();
   return <button className="button" type="submit" disabled={pending}>{pending ? '创建中…' : '创建需求'}</button>;
 }
 
-export default function CreateTaskDialog() {
+export default function CreateTaskDialog({ dependencyCandidates }: { dependencyCandidates: RequirementDependencyCandidate[] }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const [metadataKeys, setMetadataKeys] = useState<RequirementMetadataKey[]>([]);
+  const [dependencyQuery, setDependencyQuery] = useState('');
+  const [selectedDependencyIds, setSelectedDependencyIds] = useState<string[]>([]);
+  const visibleDependencyCandidates = dependencyCandidates.filter((candidate) => {
+    const query = dependencyQuery.trim().toLocaleLowerCase();
+    return !query || candidate.title.toLocaleLowerCase().includes(query) || candidate.task_id.toLocaleLowerCase().includes(query);
+  });
 
   function addMetadata() {
     const available = REQUIREMENT_METADATA_DEFINITIONS.find((definition) => !metadataKeys.includes(definition.key));
@@ -28,6 +35,12 @@ export default function CreateTaskDialog() {
 
   function removeMetadata(index: number) {
     setMetadataKeys((current) => current.filter((_, itemIndex) => itemIndex !== index));
+  }
+
+  function toggleDependency(taskId: string, selected: boolean) {
+    setSelectedDependencyIds((current) => selected
+      ? current.includes(taskId) ? current : [...current, taskId]
+      : current.filter((item) => item !== taskId));
   }
 
   async function createAndOpenTask(formData: FormData) {
@@ -79,6 +92,37 @@ export default function CreateTaskDialog() {
           })}
           <button className="metadata-add" type="button" onClick={addMetadata} disabled={metadataKeys.length >= REQUIREMENT_METADATA_DEFINITIONS.length}><Plus size={14}/>添加 metadata</button>
         </div>
+        <fieldset className="dependency-picker">
+          <legend>前置需求（可选）</legend>
+          <small>只有所选需求全部完成后，这个需求才会首次进入调度。</small>
+          {selectedDependencyIds.map((taskId) => <input type="hidden" name="dependsOnTaskId" value={taskId} key={taskId}/>)}
+          {dependencyCandidates.length > 0 && <input
+            className="dependency-search"
+            type="search"
+            value={dependencyQuery}
+            onChange={(event) => setDependencyQuery(event.target.value)}
+            placeholder="搜索需求标题或 ID"
+            aria-label="搜索前置需求"
+          />}
+          <div className="dependency-options">
+            {visibleDependencyCandidates.map((candidate) => <label className="dependency-option" key={candidate.task_id}>
+              <input
+                type="checkbox"
+                checked={selectedDependencyIds.includes(candidate.task_id)}
+                onChange={(event) => toggleDependency(candidate.task_id, event.target.checked)}
+              />
+              <span>
+                <strong>{candidate.title}</strong>
+                <small>{candidate.task_id} · {candidate.agile_status === 'done' ? '已完成' : '进行中'}</small>
+              </span>
+            </label>)}
+            {dependencyCandidates.length === 0
+              ? <span className="dependency-empty">当前没有可选的前置需求。</span>
+              : visibleDependencyCandidates.length === 0
+                ? <span className="dependency-empty">没有匹配的需求。</span>
+                : null}
+          </div>
+        </fieldset>
         <div className="dialog-actions">
           <button className="button secondary" type="button" onClick={() => dialogRef.current?.close()}>取消</button>
           <CreateTaskButton/>

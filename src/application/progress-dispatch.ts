@@ -12,6 +12,7 @@ import {
   type ExecutionAttempt,
 } from './executions';
 import { retryNotBeforeForFailure } from './execution-retry-policy';
+import { requirementDependencyGateOpenInDb } from './task-dependencies';
 
 export type DispatchWaitReason =
   | 'active-execution'
@@ -20,6 +21,7 @@ export type DispatchWaitReason =
   | 'paused-only'
   | 'waiting-for-input'
   | 'system-blocked'
+  | 'dependencies-pending'
   | 'lower-priority'
   | 'no-runnable-work';
 
@@ -289,6 +291,9 @@ async function inspect(input: { requirementId: string }): Promise<DispatchExplan
   }
   if (task.agile_status === 'blocked' || task.run_state === 'system_blocked') {
     return { requirementId: input.requirementId, decisions: [{ lane: 'control', state: 'waiting', reason: 'system-blocked' }] };
+  }
+  if (!requirementDependencyGateOpenInDb(db, input.requirementId)) {
+    return { requirementId: input.requirementId, decisions: [{ lane: 'control', state: 'waiting', reason: 'dependencies-pending' }] };
   }
   let selected: DelegationEnvelope[] = [];
   db.exec('SAVEPOINT dispatch_inspect');

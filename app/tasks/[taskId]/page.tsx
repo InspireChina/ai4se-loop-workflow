@@ -151,6 +151,7 @@ function dispatchReasonLabel(reason: DispatchWaitReason | undefined) {
     'paused-only': '需求已暂停',
     'waiting-for-input': '等待人工输入',
     'system-blocked': '系统阻塞，等待处理',
+    'dependencies-pending': '等待前置需求完成',
     'lower-priority': '当前由更高优先级工作先推进',
     'no-runnable-work': '当前没有可派发步骤',
   } as Record<DispatchWaitReason, string>)[reason || 'no-runnable-work'];
@@ -160,7 +161,11 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const { taskId } = await params;
   const detail = await getTask(taskId);
   if (!detail) notFound();
-  const { task, metadata, lanes, stories, deliverySpecs, questions, runtimeInputs, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
+  const { task, metadata, dependencies, dependencyGateOpen, lanes, stories, deliverySpecs, questions, runtimeInputs, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
+  const pendingDependencies = dependencyGateOpen
+    ? []
+    : dependencies.filter((dependency) => dependency.agile_status !== 'done');
+  const waitingForDependencies = pendingDependencies.length > 0;
   const {
     isBusinessAnalysis,
     isEndToEnd,
@@ -191,11 +196,15 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
   const waitingForAnswers = waitingForControlAnswers || analysisLane.status === 'waiting_for_answers';
   const nextStepText = task.is_paused
     ? `暂停期间不会派发 Agent；恢复后继续：${terminologyText(task.next_step) || '等待重新调度'}`
+    : waitingForDependencies
+    ? `等待前置需求完成：${pendingDependencies.map((dependency) => dependency.title).join('、')}`
     : waitingForAnswers && unansweredQuestions.length === 0
     ? `回答已保存，提交后交回 ${agentLabel(waitingForControlAnswers ? task.current_subagent : 'analyst-agent')}`
     : terminologyText(task.next_step) || '—';
   const currentStepDetail = task.is_paused
     ? `已暂停推进 · ${task.paused_reason || '暂缓推进'}`
+    : waitingForDependencies
+    ? `尚未进入首次调度 · 等待 ${pendingDependencies.length} 个前置需求完成`
     : waitingForAnswers && unansweredQuestions.length === 0
     ? `回答已保存，等待提交 · ${agentLabel(waitingForControlAnswers ? task.current_subagent : 'analyst-agent')}`
     : inBusinessAnalysisStage
@@ -249,7 +258,7 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           <p className="eyebrow">{task.task_id}</p>
           <h1>{task.title}</h1>
         </div>
-        <span className={`badge ${task.is_paused || task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{task.is_paused ? '已暂停' : waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : isDirect && task.agile_status !== 'done' ? '直接执行' : inBusinessAnalysisStage ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status)}</span>
+        <span className={`badge ${task.is_paused || waitingForDependencies || task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{task.is_paused ? '已暂停' : waitingForDependencies ? '等待前置需求' : waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : isDirect && task.agile_status !== 'done' ? '直接执行' : inBusinessAnalysisStage ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status)}</span>
       </div>
       <div className="chips" aria-label="需求运行上下文">
         <TaskAutoRefresh taskId={task.task_id}/>
@@ -303,6 +312,25 @@ export default async function TaskDetail({ params }: { params: Promise<{ taskId:
           : <p className="task-original-input-content">{originalDescription}</p>
         : <p className="task-original-input-empty">创建时未填写补充描述，原始需求仅包含标题。</p>}
     </section>
+
+    {dependencies.length > 0 && <section className="task-section" aria-labelledby="task-dependencies-title">
+      <div className="section-head">
+        <h2 id="task-dependencies-title">前置需求</h2>
+        <small>{waitingForDependencies ? `等待 ${pendingDependencies.length} 个需求完成后自动调度` : dependencyGateOpen ? '调度门禁已解除' : '全部已完成'}</small>
+      </div>
+      <div className="card story-list">
+        {dependencies.map((dependency) => <Link className="story task-dependency-link" href={`/tasks/${encodeURIComponent(dependency.depends_on_task_id)}`} key={dependency.depends_on_task_id}>
+          <span className={dependency.agile_status === 'done' ? 'done' : 'active'}>
+            {dependency.agile_status === 'done' ? <CheckCircle2 size={16}/> : <Clock3 size={16}/>}
+          </span>
+          <div>
+            <strong>{dependency.title}</strong>
+            <small>{dependency.depends_on_task_id}</small>
+          </div>
+          <em>{dependency.agile_status === 'done' ? '已完成' : statusLabel(dependency.agile_status)}</em>
+        </Link>)}
+      </div>
+    </section>}
 
     <section className={`card task-steps ${task.is_paused || task.agile_status === 'blocked' ? 'blocked' : task.agile_status === 'done' ? 'done' : ''}`} aria-label="需求当前进度">
       <div className="task-steps-head">

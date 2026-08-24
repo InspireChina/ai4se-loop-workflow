@@ -21,6 +21,7 @@ import { taskContextChatTurnIsRunning } from './task-context-chat';
 import { nextFeedbackDispatchInDb, type FeedbackDispatch } from './feedback';
 import type { DelegationEnvelope, Task } from './tasks';
 import { agentConcurrencyInDb } from './project-settings';
+import { requirementDependencyGateOpenInDb } from './task-dependencies';
 
 type Db = Database.Database;
 
@@ -271,6 +272,7 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
   const analysisCandidates: { task: Task; lane: TaskLane }[] = [];
 
   for (const task of tasks) {
+    if (!requirementDependencyGateOpenInDb(db, task.task_id)) continue;
     refreshTaskLaneStatesInDb(db, task);
     const lanes = taskLanesInDb(db, task);
     const taskCodeAvailable = codeClaim?.owner_task_id === task.task_id
@@ -330,6 +332,7 @@ export function projectRequirementWorkInDb(db: Db, taskId: string): Delegation[]
   const task = db.prepare(`${dispatchTaskSelect} WHERE task_id = ?`).get(taskId) as Task | undefined;
   if (!task) throw new Error('需求不存在');
   if (task.is_paused) return [];
+  if (!requirementDependencyGateOpenInDb(db, taskId)) return [];
   refreshTaskLaneStatesInDb(db, task);
   const active = activeLaneExecutions(db).filter((item) => item.task_id === taskId);
   const lanes = taskLanesInDb(db, task);

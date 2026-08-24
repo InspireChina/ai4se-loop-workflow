@@ -50,6 +50,7 @@ export async function createTaskAction(formData: FormData) {
     itemType: pipeline,
     priority,
     metadata,
+    dependsOnTaskIds: formData.getAll('dependsOnTaskId'),
   });
   return taskId;
 }

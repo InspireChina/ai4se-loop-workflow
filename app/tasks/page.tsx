@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { formatEventTime } from '../../src/application/event-time';
-import { listCompletedTasks, listTasks, type TaskWithLanes } from '../../src/application/tasks';
+import { listCompletedTasks, listRequirementDependencyCandidates, listTasks, type TaskWithLanes } from '../../src/application/tasks';
 import { agentLabel, itemTypeLabel, statusLabel } from '../../src/domain/terminology';
 import { requirementPriorityLabel } from '../../src/domain/requirement-priority';
 import CreateTaskDialog from './create-task-dialog';
@@ -32,10 +32,13 @@ function inBusinessAnalysis(task: { item_type: string; current_subagent: string 
 export default async function TasksPage({ searchParams }: TasksPageProps) {
   const { view } = await searchParams;
   const completedView = view === 'completed';
-  const tasks = completedView ? await listCompletedTasks() : await listTasks();
+  const [tasks, dependencyCandidates] = await Promise.all([
+    completedView ? listCompletedTasks() : listTasks(),
+    listRequirementDependencyCandidates(),
+  ]);
 
   return <>
-    <header className="page-header"><div><p className="eyebrow">REQUIREMENTS</p><h1>需求</h1><p className="muted">{completedView ? '已经完成交付的需求。' : '当前项目中正在推进的全部需求。'}</p></div><CreateTaskDialog/></header>
+    <header className="page-header"><div><p className="eyebrow">REQUIREMENTS</p><h1>需求</h1><p className="muted">{completedView ? '已经完成交付的需求。' : '当前项目中正在推进的全部需求。'}</p></div><CreateTaskDialog dependencyCandidates={dependencyCandidates}/></header>
     <section>
       <nav className="task-views" aria-label="需求视图">
         <Link href="/tasks" aria-current={!completedView ? 'page' : undefined}>进行中</Link>
@@ -51,8 +54,14 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
           const timeValue = task.completed_at ?? task.updated_at;
           const waitingForRequirementAnswers = !completedView && task.run_state === 'waiting_for_answers'
             && ['idea-context-agent', 'business-design-agent', 'backlog-agent'].includes(task.current_subagent || '');
+          const pendingDependencies = completedView ? [] : (task as TaskWithLanes).dependency_gate_open
+            ? []
+            : (task as TaskWithLanes).dependencies.filter((dependency) => dependency.agile_status !== 'done');
+          const waitingForDependencies = pendingDependencies.length > 0;
           const laneSummary = completedView ? '' : task.is_paused
             ? `暂停推进${task.paused_reason ? ` · ${task.paused_reason}` : ''}`
+            : waitingForDependencies
+            ? `等待前置需求 · ${pendingDependencies.map((dependency) => dependency.title).join('、')}`
             : waitingForRequirementAnswers
             ? `${agentLabel(task.current_subagent)}（等待用户回答）`
             : businessAnalysisActive
@@ -68,12 +77,12 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
           const directStatus = task.item_type === 'direct'
             ? task.agile_status === 'done' ? '已完成' : '直接执行'
             : null;
-          const displayStatus = task.is_paused ? '已暂停' : waitingForRequirementAnswers ? '等待需求确认' : directStatus || businessAnalysisStatus || statusLabel(task.agile_status);
+          const displayStatus = task.is_paused ? '已暂停' : waitingForDependencies ? '等待前置需求' : waitingForRequirementAnswers ? '等待需求确认' : directStatus || businessAnalysisStatus || statusLabel(task.agile_status);
 
           return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}>
             <span><strong>{task.title}</strong><small>{task.task_id} · 优先级 {requirementPriorityLabel(task.priority)}</small></span>
             <span>{itemTypeLabel(task.item_type)}</span>
-            <span className={`badge ${task.agile_status === 'done' ? 'green' : task.is_paused || waitingForRequirementAnswers ? 'amber' : 'blue'}`}>{displayStatus}</span>
+            <span className={`badge ${task.agile_status === 'done' ? 'green' : task.is_paused || waitingForDependencies || waitingForRequirementAnswers ? 'amber' : 'blue'}`}>{displayStatus}</span>
             <span>{completedView ? <><small>{timeLabel}</small><br />{formatEventTime(timeValue)}</> : laneSummary}</span>
           </Link>;
         })}

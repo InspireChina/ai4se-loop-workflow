@@ -41,6 +41,13 @@ import {
 import type { RecoveryItem } from './recovery-items';
 import { cancelFeedbackForTask } from './feedback';
 import { advanceAndPublishRuntimeInvalidation, advanceRuntimeEventRevisionInDb, publishRuntimeInvalidation } from './runtime-events';
+import {
+  configureRequirementDependenciesInDb,
+  requirementDependenciesInDb,
+  requirementDependencyCandidatesInDb,
+  requirementDependencyGateOpenInDb,
+  type RequirementDependency,
+} from './task-dependencies';
 
 export type Task = TaskState & {
   title: string;
@@ -63,7 +70,11 @@ export type Task = TaskState & {
   completed_at: string | null;
   retry_cycle: number;
 };
-export type TaskWithLanes = Task & { lanes: TaskLane[] };
+export type TaskWithLanes = Task & {
+  lanes: TaskLane[];
+  dependencies: RequirementDependency[];
+  dependency_gate_open: boolean;
+};
 
 export type RequirementMetadata = {
   task_id: string;
@@ -367,8 +378,18 @@ export async function listTasks(options: { includeTerminal?: boolean } = {}): Pr
     || right.updated_at.localeCompare(left.updated_at));
   return tasks.map((task) => {
     refreshTaskLaneStatesInDb(db, task);
-    return { ...task, lanes: taskLanesInDb(db, task) };
+    return {
+      ...task,
+      lanes: taskLanesInDb(db, task),
+      dependencies: requirementDependenciesInDb(db, task.task_id),
+      dependency_gate_open: requirementDependencyGateOpenInDb(db, task.task_id),
+    };
   });
+}
+
+export async function listRequirementDependencyCandidates() {
+  const db = await databaseConnection();
+  return requirementDependencyCandidatesInDb(db);
 }
 
 /**
@@ -405,6 +426,7 @@ export async function getTask(taskId: string) {
     WHERE task_id = ?
     ORDER BY created_at, metadata_key
   `).all(taskId) as RequirementMetadata[];
+  const taskDependencies = requirementDependenciesInDb(db, taskId);
   const storyRows = db.prepare('SELECT * FROM stories WHERE task_id = ? ORDER BY story_index')
     .all(taskId) as Omit<Story, 'context_links' | 'depends_on_story_indexes'>[];
   const contextLinks = db.prepare(`
@@ -480,6 +502,8 @@ export async function getTask(taskId: string) {
   return {
     task,
     metadata,
+    dependencies: taskDependencies,
+    dependencyGateOpen: requirementDependencyGateOpenInDb(db, taskId),
     lanes,
     stories,
     deliverySpecs,
@@ -658,6 +682,7 @@ export const createTaskSchema = z.object({
     key: z.string(),
     value: z.string(),
   })).optional().default([]),
+  dependsOnTaskIds: z.array(z.string().trim().min(1)).max(50).optional().default([]),
   itemType: z.enum(['direct', 'business-analysis', 'end-to-end', 'feature', 'bug', 'tech', 'intake', 'other']).default('feature'),
   priority: z.string().trim().optional().nullable(),
   actor: z.enum(['human', 'system']).default('human'),
@@ -715,10 +740,21 @@ export function createTaskInDb(
     VALUES (?, ?, ?)
   `);
   for (const item of metadata) insertMetadata.run(taskId, item.key, item.value);
+  const dependencies = configureRequirementDependenciesInDb(db, taskId, value.dependsOnTaskIds);
   const task = fetchTask(db, taskId);
   if (!task) throw new Error('需求创建失败');
   ensureTaskLanesInDb(db, task);
   addEvent(db, task.task_id, value.actor, 'TaskCreated', `创建需求：${task.title}`);
+  if (dependencies.length) {
+    const waiting = dependencies.filter((dependency) => dependency.agile_status !== 'done');
+    addEvent(
+      db,
+      task.task_id,
+      value.actor,
+      'TaskDependenciesConfigured',
+      `配置 ${dependencies.length} 个前置需求${waiting.length ? `，等待完成：${waiting.map((dependency) => dependency.title).join('、')}` : '，创建时均已完成'}`,
+    );
+  }
   return task;
 }
 
