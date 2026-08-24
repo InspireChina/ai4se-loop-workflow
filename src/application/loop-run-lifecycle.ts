@@ -92,6 +92,23 @@ export function lifecycleRestartDelayMs(restartCount: number) {
   return 5 * 60_000;
 }
 
+function releaseVersion(input: string) {
+  const match = input.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/);
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] as const : null;
+}
+
+export function installedVersionReachedTarget(installedVersion: string, targetVersion: string | null) {
+  if (!targetVersion) return false;
+  if (installedVersion === targetVersion || `v${installedVersion}` === targetVersion) return true;
+  const installed = releaseVersion(installedVersion);
+  const target = releaseVersion(targetVersion);
+  if (!installed || !target) return false;
+  for (let index = 0; index < installed.length; index += 1) {
+    if (installed[index] !== target[index]) return installed[index] > target[index];
+  }
+  return true;
+}
+
 type ObservedRun = NonNullable<Awaited<ReturnType<typeof getRunStatus>>>;
 
 export function runnerHealthReason(run: ObservedRun | null) {
@@ -559,17 +576,21 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     return receipt;
   }
 
-  async function confirmInstalledUpdate() {
+  async function recoverUpdateSilenceAfterRestart() {
     if (!options.installedVersion) return;
     const db = await databaseConnection();
     const state = stateRow(db);
-    if (state.mode !== 'update-silence' || state.update_target_version !== options.installedVersion) return;
+    if (state.mode !== 'update-silence') return;
+    const reachedTarget = installedVersionReachedTarget(options.installedVersion, state.update_target_version);
+    const recoveryError = reachedTarget
+      ? null
+      : `应用已重新启动，但更新未完成：当前版本 ${options.installedVersion}，目标版本 ${state.update_target_version || '未知'}；已自动恢复运行控制`;
     db.prepare(`
       UPDATE loop_lifecycle_state
       SET mode = 'normal', update_attempt_id = NULL, update_target_version = NULL,
-          update_readiness = NULL, last_error = NULL, updated_at = CURRENT_TIMESTAMP
+          update_readiness = NULL, last_error = ?, updated_at = CURRENT_TIMESTAMP
       WHERE singleton = 1
-    `).run();
+    `).run(recoveryError);
   }
 
   return {
@@ -583,7 +604,10 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     markHostProcessExited: (processId: string) => serialize(() => markHostProcessExited(processId)),
     verifyUpdateReadiness: () => serialize(() => verifyUpdateReadiness()),
     async start() {
-      await confirmInstalledUpdate();
+      // update-silence is only valid while the old desktop host is shutting
+      // down. Reaching a new host process means installation either completed
+      // or failed; both outcomes must restore lifecycle controls.
+      await recoverUpdateSilenceAfterRestart();
       if (options.setLoginStartup) {
         const db = await databaseConnection();
         try { await options.setLoginStartup(stateRow(db).desired_intent === 'running'); } catch { /* surfaced on the next user command */ }

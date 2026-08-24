@@ -5,11 +5,20 @@ import { databaseConnection } from '../infrastructure/database';
 import {
   canReclaimSupervisorLease,
   createLoopRunLifecycle,
+  installedVersionReachedTarget,
   lifecycleRestartDelayMs,
   RUNNER_STALE_GRACE_MS,
   runnerHealthDisposition,
   runnerHealthReason,
 } from './loop-run-lifecycle';
+
+test('recognizes exact and skipped desktop update targets', () => {
+  assert.equal(installedVersionReachedTarget('0.1.17', '0.1.17'), true);
+  assert.equal(installedVersionReachedTarget('0.1.17', 'v0.1.16'), true);
+  assert.equal(installedVersionReachedTarget('0.1.15', '0.1.16'), false);
+  assert.equal(installedVersionReachedTarget('invalid', '0.1.16'), false);
+  assert.equal(installedVersionReachedTarget('0.1.17', null), false);
+});
 
 test('uses the agreed bounded Runner restart backoff', () => {
   assert.equal(lifecycleRestartDelayMs(1), 5_000);
@@ -123,4 +132,64 @@ test('deduplicates commands and freezes ordinary intent changes during update si
   assert.equal(resumed.outcome, 'resumed');
   assert.equal(resumed.snapshot.mode.kind, 'normal');
   await lifecycle.shutdown(true);
+});
+
+test('desktop restart always releases update silence and records an incomplete installation', async () => {
+  const db = await databaseConnection();
+  db.prepare(`
+    UPDATE loop_lifecycle_state
+    SET desired_intent = 'stopped', mode = 'update-silence',
+        update_attempt_id = 'stale-update', update_target_version = '0.1.17',
+        update_readiness = 'ready', actual_phase = 'stopped', active_run_id = NULL,
+        retry_at = NULL, last_error = NULL
+    WHERE singleton = 1
+  `).run();
+  const lifecycle = createLoopRunLifecycle({
+    ownerId: `electron-${process.pid}-${randomUUID()}`,
+    adapter: 'electron',
+    installedVersion: '0.1.15',
+  });
+  await lifecycle.start();
+  const recovered = db.prepare(`
+    SELECT mode, update_attempt_id, update_target_version, update_readiness, last_error
+    FROM loop_lifecycle_state WHERE singleton = 1
+  `).get() as {
+    mode: string;
+    update_attempt_id: string | null;
+    update_target_version: string | null;
+    update_readiness: string | null;
+    last_error: string | null;
+  };
+  assert.equal(recovered.mode, 'normal');
+  assert.equal(recovered.update_attempt_id, null);
+  assert.equal(recovered.update_target_version, null);
+  assert.equal(recovered.update_readiness, null);
+  assert.match(recovered.last_error || '', /当前版本 0\.1\.15，目标版本 0\.1\.17.*已自动恢复运行控制/);
+  await lifecycle.shutdown(false);
+});
+
+test('desktop restart clears update silence after skipping past the recorded target', async () => {
+  const db = await databaseConnection();
+  db.prepare(`
+    UPDATE loop_lifecycle_state
+    SET desired_intent = 'stopped', mode = 'update-silence',
+        update_attempt_id = 'skipped-update', update_target_version = '0.1.16',
+        update_readiness = 'ready', actual_phase = 'stopped', active_run_id = NULL,
+        retry_at = NULL, last_error = 'old update state'
+    WHERE singleton = 1
+  `).run();
+  const lifecycle = createLoopRunLifecycle({
+    ownerId: `electron-${process.pid}-${randomUUID()}`,
+    adapter: 'electron',
+    installedVersion: '0.1.17',
+  });
+  await lifecycle.start();
+  const recovered = db.prepare(`
+    SELECT mode, update_target_version, last_error
+    FROM loop_lifecycle_state WHERE singleton = 1
+  `).get() as { mode: string; update_target_version: string | null; last_error: string | null };
+  assert.equal(recovered.mode, 'normal');
+  assert.equal(recovered.update_target_version, null);
+  assert.equal(recovered.last_error, null);
+  await lifecycle.shutdown(false);
 });
