@@ -80,6 +80,14 @@ test('renders only the hot Backlog context in the launch Prompt while retaining 
   assert.equal(snapshot.authoritativeFacts.lifecycle.progress.total, 0);
   assert.deepEqual(snapshot.authoritativeFacts.deliveryUnits, []);
   assert.deepEqual(snapshot.recentExecutionEvidence, []);
+
+  const compactRecovery = renderAgentWorkingContextPack(snapshot, 'compact');
+  const minimalRecovery = renderAgentWorkingContextPack(snapshot, 'minimal');
+  assert.match(compactRecovery, /这是压缩恢复包/);
+  assert.match(minimalRecovery, /这是最小恢复包/);
+  assert.match(minimalRecovery, /必须先执行当前角色的 status/);
+  assert.doesNotMatch(compactRecovery, /Remind readers before a loan expires/);
+  assert.doesNotMatch(minimalRecovery, /Remind readers before a loan expires/);
 });
 
 test('builds a compact execution snapshot while preserving full context for just-in-time reads', async () => {

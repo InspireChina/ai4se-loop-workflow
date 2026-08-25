@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { agentExecutionOptions, getAgentExecutorSettings } from '../../../../../src/application/project-settings';
 import { beginTaskContextChatTurn, completeTaskContextChatTurn, getTaskContextChat, recordTaskContextChatFailureAttempt } from '../../../../../src/application/task-context-chat';
 import { EXECUTION_FAILURE_MAX_RETRIES } from '../../../../../src/application/executions';
-import { waitForExecutionRetryBackoff } from '../../../../../src/application/execution-retry-policy';
+import { waitForExecutionRetryBackoff, type ExecutionRecoveryMode } from '../../../../../src/application/execution-retry-policy';
 import { sanitizeDiagnosticText } from '../../../../../src/infrastructure/diagnostic-text';
 import { runTaskContextChatTurn } from '../../../../../src/infrastructure/task-context-chat-executor';
 
@@ -36,7 +36,12 @@ export async function POST(request: Request, context: { params: Promise<{ taskId
           const body = await request.json() as { message?: unknown };
           const settings = await getAgentExecutorSettings();
           claimed = await beginTaskContextChatTurn(taskId, body.message, settings.executorId);
+          const claimedMessageId = claimed.messageId;
           send({ type: 'accepted', executor: claimed.session.executor });
+          let providerSessionId = claimed.session.providerSessionId;
+          let recoveryMode: ExecutionRecoveryMode = 'initial';
+          let retryNumber = 0;
+          let recoveryMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
           for (let failureAttempt = 1; failureAttempt <= EXECUTION_FAILURE_MAX_RETRIES + 1; failureAttempt += 1) {
             try {
               const result = await runTaskContextChatTurn({
@@ -44,10 +49,14 @@ export async function POST(request: Request, context: { params: Promise<{ taskId
                 sessionId: claimed.session.sessionId,
                 messageId: claimed.messageId,
                 executor: claimed.session.executor,
-                providerSessionId: claimed.session.providerSessionId,
+                providerSessionId,
                 message: claimed.message,
                 commandToken: claimed.commandToken,
                 executionOptions: agentExecutionOptions({ ...settings, executorId: claimed.session.executor }),
+                recoveryMode,
+                retryNumber,
+                maxRetries: EXECUTION_FAILURE_MAX_RETRIES,
+                recoveryMessages,
                 onProgress: (event) => send({ type: 'progress', event }),
               });
               const completed = await completeTaskContextChatTurn({
@@ -75,12 +84,19 @@ export async function POST(request: Request, context: { params: Promise<{ taskId
                 maxRetries: EXECUTION_FAILURE_MAX_RETRIES,
               });
               if (!retry.willRetry) throw error;
+              providerSessionId = null;
+              recoveryMode = retry.recovery?.mode || 'minimal';
+              retryNumber = retry.failureAttempt;
+              const transcript = await getTaskContextChat(taskId);
+              recoveryMessages = transcript.messages
+                .filter((message) => message.messageId !== claimedMessageId)
+                .map((message) => ({ role: message.role, content: message.content }));
               send({
                 type: 'progress',
                 event: {
                   kind: 'status',
-                  label: `自动重试 ${failureAttempt}/${retry.maxRetries}`,
-                  detail: sanitizeDiagnosticText(retry.reason, 900),
+                  label: `自动重试 ${failureAttempt}/${retry.maxRetries} · ${retry.recovery?.label || '恢复包'}`,
+                  detail: `${sanitizeDiagnosticText(retry.reason, 760)} · 将使用全新 Provider 会话`,
                   status: 'error',
                 },
               });

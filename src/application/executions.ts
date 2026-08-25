@@ -11,6 +11,7 @@ import type { Task } from './tasks';
 import type { ResourceKey } from '../domain/resource';
 import {
   EXECUTION_FAILURE_MAX_RETRIES,
+  retryRecoveryPlanForFailure,
   retryNotBeforeForFailure,
 } from './execution-retry-policy';
 
@@ -84,8 +85,9 @@ export function recordExecutionFailureActivityInDb(
 ) {
   const scope = input.lane ? `${input.lane} Lane` : 'control';
   const unit = input.storyIndex === null ? '' : ` · 交付单元 ${input.storyIndex}`;
+  const recovery = input.willRetry ? retryRecoveryPlanForFailure(input.failureAttempt) : null;
   const outcome = input.willRetry
-    ? `第 ${input.failureAttempt} 次失败，自动重试 ${input.failureAttempt}/${input.maxRetries}${input.retryNotBefore ? `，不早于 ${input.retryNotBefore}` : ''}`
+    ? `第 ${input.failureAttempt} 次失败，自动重试 ${input.failureAttempt}/${input.maxRetries}${recovery ? `，恢复策略 ${recovery.label}` : ''}${input.retryNotBefore ? `，不早于 ${input.retryNotBefore}` : ''}`
     : `第 ${input.failureAttempt} 次失败，${input.maxRetries} 次自动重试已耗尽`;
   const summary = `${scope} · ${input.agent}${unit} · ${outcome} · ${input.failureKind} · execution=${input.executionId}：${input.error}`;
   db.prepare(`

@@ -141,13 +141,16 @@ test('keeps the Runner behind its start gate until process registration complete
   assert.ok(heartbeat < dispatch);
 });
 
-test('retries every Agent execution failure three times before blocking its lane', () => {
+test('retries every Agent execution failure four times with progressively reduced recovery packs', () => {
   const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
 
   assert.match(source, /EXECUTION_FAILURE_MAX_RETRIES/);
   assert.match(source, /failExecutionWithRetryPolicy\(attempt\.execution_id, reason/);
   assert.match(source, /execution\.terminationReason \? 'agent-timeout' : 'agent-cli-exit'/);
   assert.match(source, /shouldRetryReportedFailure\(result, attempt\.attempt\)/);
+  assert.match(source, /executionRecoveryModeForAttempt\(attemptNumber\)/);
+  assert.match(source, /retryRecoveryPlanForFailure\(retry\.failureAttempt\)/);
+  assert.match(source, /Error Recovery · retry/);
   assert.match(source, /execution\.failureDetail/);
   assert.doesNotMatch(source, /maxRetries:\s*[12]\b/);
   assert.doesNotMatch(source, /if \(!retryPolicy\).*failExecution/s);

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { paths } from './database';
-import { buildTaskContextChatPrompt, taskContextChatPermissionArgs, taskContextChatProgressEvents } from './task-context-chat-executor';
+import { buildTaskContextChatPrompt, renderTaskContextChatRecoveryTranscript, taskContextChatPermissionArgs, taskContextChatProgressEvents } from './task-context-chat-executor';
 
 test('configures non-interactive bypass permissions for every context chat executor', () => {
   assert.deepEqual(taskContextChatPermissionArgs('cursor'), ['--force', '--trust']);
@@ -41,6 +41,32 @@ test('refreshes task facts on every resumed context chat turn', () => {
   assert.match(prompt, /必须重新运行只读命令获取最新事实/);
   assert.match(prompt, /task-context --task-id TASK-chat-resume/);
   assert.match(prompt, /如果用户只是询问、解释、比较或探索方案，直接回答/);
+});
+
+test('rebuilds failed context Chat turns in bounded fresh-session recovery packets', () => {
+  const messages = [
+    { role: 'user' as const, content: 'Earlier question' },
+    { role: 'assistant' as const, content: 'Earlier answer with durable conclusions' },
+  ];
+  const prompt = buildTaskContextChatPrompt('TASK-chat-recovery', 'Continue safely', false, {
+    mode: 'minimal',
+    retryNumber: 4,
+    maxRetries: 4,
+    messages,
+  });
+  assert.match(prompt, /Error Recovery · retry 4\/4 · 最小恢复包/);
+  assert.match(prompt, /全新 Provider 会话/);
+  assert.match(prompt, /用户：Earlier question/);
+  assert.match(prompt, /Agent：Earlier answer with durable conclusions/);
+  assert.match(prompt, /用户问题：\nContinue safely/);
+
+  const bounded = renderTaskContextChatRecoveryTranscript([
+    { role: 'user', content: 'old message that should be omitted' },
+    { role: 'assistant', content: 'x'.repeat(200) },
+  ], 40);
+  assert.ok(bounded.length <= 45);
+  assert.doesNotMatch(bounded, /old message/);
+  assert.match(bounded, /^Agent：/);
 });
 
 test('projects provider reasoning summaries and redacted tool lifecycle events for live Chat progress', () => {

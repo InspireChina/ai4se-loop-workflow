@@ -1106,7 +1106,7 @@ test('keeps retry attempts in one logical generation even when the rebuilt promp
   await completeExecution(rework.attempt.execution_id);
 });
 
-test('shares one three-retry budget across every failure kind in a generation', async () => {
+test('shares one four-retry budget across every failure kind in a generation', async () => {
   const { createTask } = await import('./tasks');
   const { completeExecution, failExecutionWithRetryPolicy } = await import('./executions');
   const { databaseConnection } = await import('../infrastructure/database');
@@ -1118,15 +1118,15 @@ test('shares one three-retry budget across every failure kind in a generation', 
 
   const first = await beginTestExecutionAttempt({ runId: 'run-kind-1', delegation, prompt: 'first failure kind' });
   const firstRetry = await failExecutionWithRetryPolicy(first.attempt.execution_id, 'evidence failed', {
-    kind: 'evidence-persistence', maxRetries: 3,
+    kind: 'evidence-persistence', maxRetries: 4,
   });
   const second = await beginTestExecutionAttempt({ runId: 'run-kind-2', delegation, prompt: 'second failure kind' });
   const secondRetry = await failExecutionWithRetryPolicy(second.attempt.execution_id, 'missing terminal command', {
-    kind: 'agent-missing-terminal-command', maxRetries: 3,
+    kind: 'agent-missing-terminal-command', maxRetries: 4,
   });
   const third = await beginTestExecutionAttempt({ runId: 'run-kind-3', delegation, prompt: 'third failure kind' });
   const thirdRetry = await failExecutionWithRetryPolicy(third.attempt.execution_id, 'CLI exit 1', {
-    kind: 'agent-cli-exit', maxRetries: 3,
+    kind: 'agent-cli-exit', maxRetries: 4,
   });
   assert.deepEqual(
     [firstRetry, secondRetry, thirdRetry].map((retry) => ({ willRetry: retry.willRetry, failureAttempt: retry.failureAttempt })),
@@ -1137,23 +1137,33 @@ test('shares one three-retry budget across every failure kind in a generation', 
     ],
   );
 
-  const fourth = await beginTestExecutionAttempt({ runId: 'run-kind-4', delegation, prompt: 'fourth failure blocks' });
-  const blocked = await failExecutionWithRetryPolicy(fourth.attempt.execution_id, 'application failed', {
-    kind: 'agent-result-application', maxRetries: 3,
+  const fourth = await beginTestExecutionAttempt({ runId: 'run-kind-4', delegation, prompt: 'fourth failure uses the second minimal recovery' });
+  const fourthRetry = await failExecutionWithRetryPolicy(fourth.attempt.execution_id, 'application failed', {
+    kind: 'agent-result-application', maxRetries: 4,
   });
   assert.deepEqual(
-    { willRetry: blocked.willRetry, failureAttempt: blocked.failureAttempt, globalAttempt: fourth.attempt.attempt },
-    { willRetry: false, failureAttempt: 4, globalAttempt: 4 },
+    { willRetry: fourthRetry.willRetry, failureAttempt: fourthRetry.failureAttempt },
+    { willRetry: true, failureAttempt: 4 },
+  );
+
+  const fifth = await beginTestExecutionAttempt({ runId: 'run-kind-5', delegation, prompt: 'fifth failure blocks' });
+  const blocked = await failExecutionWithRetryPolicy(fifth.attempt.execution_id, 'unknown runtime failed', {
+    kind: 'agent-execution', maxRetries: 4,
+  });
+  assert.deepEqual(
+    { willRetry: blocked.willRetry, failureAttempt: blocked.failureAttempt, globalAttempt: fifth.attempt.attempt },
+    { willRetry: false, failureAttempt: 5, globalAttempt: 5 },
   );
   const rows = db.prepare(`
     SELECT failure_kind, status FROM execution_attempts
-    WHERE execution_id IN (?, ?, ?, ?) ORDER BY attempt
-  `).all(first.attempt.execution_id, second.attempt.execution_id, third.attempt.execution_id, fourth.attempt.execution_id);
+    WHERE execution_id IN (?, ?, ?, ?, ?) ORDER BY attempt
+  `).all(first.attempt.execution_id, second.attempt.execution_id, third.attempt.execution_id, fourth.attempt.execution_id, fifth.attempt.execution_id);
   assert.deepEqual(rows, [
     { failure_kind: 'evidence-persistence', status: 'retryable_failed' },
     { failure_kind: 'agent-missing-terminal-command', status: 'retryable_failed' },
     { failure_kind: 'agent-cli-exit', status: 'retryable_failed' },
-    { failure_kind: 'agent-result-application', status: 'system_blocked' },
+    { failure_kind: 'agent-result-application', status: 'retryable_failed' },
+    { failure_kind: 'agent-execution', status: 'system_blocked' },
   ]);
   const failureEvents = db.prepare(`
     SELECT event_type, summary FROM task_events
@@ -1164,16 +1174,18 @@ test('shares one three-retry budget across every failure kind in a generation', 
     'AgentExecutionRetryScheduled',
     'AgentExecutionRetryScheduled',
     'AgentExecutionRetryScheduled',
+    'AgentExecutionRetryScheduled',
     'AgentExecutionRetriesExhausted',
   ]);
   assert.match(failureEvents[0].summary, /evidence-persistence.*execution=.*evidence failed/);
   assert.match(failureEvents[1].summary, /agent-missing-terminal-command.*missing terminal command/);
   assert.match(failureEvents[2].summary, /agent-cli-exit.*CLI exit 1/);
-  assert.match(failureEvents[3].summary, /第 4 次失败，3 次自动重试已耗尽.*agent-result-application.*application failed/);
-  await completeExecution(fourth.attempt.execution_id);
+  assert.match(failureEvents[3].summary, /恢复策略 最小恢复包.*agent-result-application.*application failed/);
+  assert.match(failureEvents[4].summary, /第 5 次失败，4 次自动重试已耗尽.*agent-execution.*unknown runtime failed/);
+  await completeExecution(fifth.attempt.execution_id);
 });
 
-test('records background Evolution evaluator failures with three retries and the exact error', async () => {
+test('records background Evolution evaluator failures with four retries and the exact error', async () => {
   const { createTask } = await import('./tasks');
   const { beginEvolutionRun, recordEvolutionFailureAttempt } = await import('./agent-evolution');
   const { databaseConnection } = await import('../infrastructure/database');
@@ -1200,20 +1212,20 @@ test('records background Evolution evaluator failures with three retries and the
   const evolution = await beginEvolutionRun(evidence);
   assert.ok(evolution?.evolutionId);
 
-  for (let failureAttempt = 1; failureAttempt <= 4; failureAttempt += 1) {
+  for (let failureAttempt = 1; failureAttempt <= 5; failureAttempt += 1) {
     const retry = await recordEvolutionFailureAttempt({
       evolutionId: evolution!.evolutionId,
       evidence,
       error: `evaluator failure ${failureAttempt}: exact diagnostic`,
       failureAttempt,
-      maxRetries: 3,
+      maxRetries: 4,
     });
-    assert.equal(retry.willRetry, failureAttempt <= 3);
+    assert.equal(retry.willRetry, failureAttempt <= 4);
   }
 
   assert.deepEqual(
     db.prepare('SELECT status, error FROM agent_evolution_runs WHERE evolution_id = ?').get(evolution!.evolutionId),
-    { status: 'failed', error: 'evaluator failure 4: exact diagnostic' },
+    { status: 'failed', error: 'evaluator failure 5: exact diagnostic' },
   );
   const events = db.prepare(`
     SELECT event_type, summary FROM task_events
@@ -1224,10 +1236,11 @@ test('records background Evolution evaluator failures with three retries and the
     'AgentExecutionRetryScheduled',
     'AgentExecutionRetryScheduled',
     'AgentExecutionRetryScheduled',
+    'AgentExecutionRetryScheduled',
     'AgentExecutionRetriesExhausted',
   ]);
   assert.match(events[0].summary, /evolution-evaluator.*evaluator failure 1: exact diagnostic/);
-  assert.match(events[3].summary, /第 4 次失败，3 次自动重试已耗尽.*evaluator failure 4: exact diagnostic/);
+  assert.match(events[4].summary, /第 5 次失败，4 次自动重试已耗尽.*evaluator failure 5: exact diagnostic/);
 });
 
 test('does not let a late execution failure overwrite cancellation', async () => {

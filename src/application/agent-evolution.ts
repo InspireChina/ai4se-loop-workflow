@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { retryNotBeforeForFailure } from './execution-retry-policy';
+import { retryRecoveryPlanForFailure, retryNotBeforeForFailure } from './execution-retry-policy';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { loopAgentCommand } from '../infrastructure/runtime-entry';
@@ -341,6 +341,7 @@ export async function recordEvolutionFailureAttempt(input: {
   const db = await databaseConnection();
   const willRetry = input.failureAttempt <= input.maxRetries;
   const retryNotBefore = willRetry ? retryNotBeforeForFailure(input.failureAttempt) : null;
+  const recovery = willRetry ? retryRecoveryPlanForFailure(input.failureAttempt) : null;
   db.transaction(() => {
     db.prepare(`
       UPDATE agent_evolution_runs
@@ -349,7 +350,7 @@ export async function recordEvolutionFailureAttempt(input: {
       WHERE evolution_id = ?
     `).run(willRetry ? 'running' : 'failed', input.error, willRetry ? 1 : 0, input.evolutionId);
     const outcome = willRetry
-      ? `第 ${input.failureAttempt} 次失败，自动重试 ${input.failureAttempt}/${input.maxRetries}${retryNotBefore ? `，不早于 ${retryNotBefore}` : ''}`
+      ? `第 ${input.failureAttempt} 次失败，自动重试 ${input.failureAttempt}/${input.maxRetries}${recovery ? `，恢复策略 ${recovery.label}` : ''}${retryNotBefore ? `，不早于 ${retryNotBefore}` : ''}`
       : `第 ${input.failureAttempt} 次失败，${input.maxRetries} 次自动重试已耗尽`;
     db.prepare(`
       INSERT INTO task_events(event_id, task_id, actor, event_type, summary)
@@ -361,7 +362,7 @@ export async function recordEvolutionFailureAttempt(input: {
       `background · prompt-evolution-agent · ${outcome} · evolution-evaluator · evolution=${input.evolutionId} · source-execution=${input.evidence.executionId}：${input.error}`,
     );
   }).immediate();
-  return { willRetry, failureAttempt: input.failureAttempt, maxRetries: input.maxRetries, retryNotBefore };
+  return { willRetry, failureAttempt: input.failureAttempt, maxRetries: input.maxRetries, retryNotBefore, recovery };
 }
 
 export async function cancelEvolutionRun(evolutionId: string, reason: string) {

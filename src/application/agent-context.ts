@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { databaseConnection } from '../infrastructure/database';
 import { documentKindLabel } from '../domain/terminology';
 import { recoveryItemForPrompt, type RecoveryItem } from './recovery-items';
+import type { ExecutionRecoveryMode } from './execution-retry-policy';
 import type { DelegationEnvelope, DocumentComment, ExecutionAttemptView, FeedbackGroup, RuntimeInputRequest } from './tasks';
 
 export const agentContextProtocol = 'loop-agent-context/v2';
@@ -681,7 +682,62 @@ function nonEmptyObligations(snapshot: AgentContextSnapshot) {
  * Render only the hot, role-relevant projection that belongs in the launch Prompt.
  * The complete immutable snapshot remains available through agent-context commands.
  */
-export function renderAgentWorkingContextPack(snapshot: AgentContextSnapshot) {
+function renderReducedRecoveryContextPack(
+  snapshot: AgentContextSnapshot,
+  mode: 'compact' | 'minimal',
+) {
+  const { work, authoritativeFacts } = snapshot;
+  const obligations = Object.fromEntries(Object.entries(snapshot.activeObligations)
+    .map(([key, value]) => [key, Array.isArray(value) ? value.length : 0])
+    .filter(([, count]) => Number(count) > 0));
+  const referenceLimit = mode === 'compact' ? 24 : 12;
+  const lines = [
+    mode === 'compact'
+      ? '这是压缩恢复包。完整冻结快照仍可通过 agent-context 命令读取；不要依赖上一次 Provider 会话。'
+      : '这是最小恢复包。只从持久化检查点继续，先读取角色 status，并按需使用 agent-context 获取事实；不要展开全部上下文。',
+    '',
+    '## Current Work',
+    '',
+    `- Task: \`${work.taskId}\``,
+    `- Agent: ${work.agent}`,
+    `- Lane / Flow: ${work.lane} / ${work.flow}`,
+    `- Objective: ${compact(work.objective, mode === 'compact' ? 1_200 : 600)}`,
+  ];
+  if (work.deliveryUnit != null) lines.push(`- Delivery Unit: ${work.deliveryUnit}`);
+  if (work.repositoryBaseCommit) lines.push(`- Repository Base Commit: \`${work.repositoryBaseCommit}\``);
+  lines.push(
+    '',
+    '## Durable Checkpoint',
+    '',
+    `- Requirement: ${compact(authoritativeFacts.requirement.title, 300)}`,
+    `- Lifecycle: ${authoritativeFacts.lifecycle.agileStatus}`,
+    `- Progress: analysis=${authoritativeFacts.lifecycle.progress.analysis}, development=${authoritativeFacts.lifecycle.progress.development}, verification=${authoritativeFacts.lifecycle.progress.verification}, total=${authoritativeFacts.lifecycle.progress.total}`,
+    `- Active obligation counts: ${JSON.stringify(obligations)}`,
+  );
+  if (snapshot.recentExecutionEvidence.length) {
+    lines.push(
+      `- Latest execution evidence: ${compact(snapshot.recentExecutionEvidence[0], mode === 'compact' ? 1_200 : 600)}`,
+    );
+  }
+  lines.push(
+    '',
+    '## On-demand Context',
+    '',
+    `- Snapshot: ${snapshot.snapshotId}`,
+    `- Required refs: ${snapshot.requiredContextRefs.slice(0, referenceLimit).join(', ') || 'none'}`,
+    '- 必须先执行当前角色的 status 命令恢复草稿和下一步；只读取完成下一步所需的 Context refs。',
+    '- 执行任何可能有副作用的操作前，先核对数据库、Git 和 execution receipts，避免重复已经生效的写入。',
+  );
+  return lines.join('\n');
+}
+
+export function renderAgentWorkingContextPack(
+  snapshot: AgentContextSnapshot,
+  mode: ExecutionRecoveryMode = 'initial',
+) {
+  if (mode === 'compact' || mode === 'minimal') {
+    return renderReducedRecoveryContextPack(snapshot, mode);
+  }
   const { work, authoritativeFacts } = snapshot;
   const lines = [
     '下面是从完整冻结快照中按当前角色与阶段投影的即时上下文。未内联的资料仍保留在 Context Snapshot 中，可通过 agent-context 命令按需读取。',

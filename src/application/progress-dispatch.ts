@@ -34,6 +34,7 @@ export type ReservedExecution = {
   reservationId: string;
   executionId: string;
   runId: string;
+  attempt: number;
   work: DelegationEnvelope;
   claimedResources: readonly ResourceKey[];
 };
@@ -65,6 +66,7 @@ export type DispatchExplanation = {
 export type PreparedExecution = {
   prompt: string;
   contextSnapshot: unknown;
+  recovery: { mode: string; label: string; retryNumber: number };
   baseCommit?: string | null;
   promptMetadata: { version: number; templateVersion: number; hash: string };
   memory: { revision: number; hash: string };
@@ -186,6 +188,7 @@ async function reserveNext(input: { runId: string }): Promise<ReserveNextResult>
         reservationId,
         executionId,
         runId: input.runId,
+        attempt,
         work,
         claimedResources: work.resources,
         generationKey,
@@ -229,7 +232,7 @@ async function reserveNext(input: { runId: string }): Promise<ReserveNextResult>
           storyIndex: work.storyIndex,
         });
       }
-      reservations.push({ reservationId, executionId, runId: input.runId, work, claimedResources: work.resources });
+      reservations.push({ reservationId, executionId, runId: input.runId, attempt, work, claimedResources: work.resources });
     }
     db.exec('COMMIT');
     if (!reservations.length && earliestRetryNotBefore) {
@@ -450,6 +453,7 @@ async function activate(input: { reservationId: string; prepared: PreparedExecut
       delegation: reservation.work,
       prompt: input.prepared.prompt,
       contextSnapshot: input.prepared.contextSnapshot,
+      recovery: input.prepared.recovery,
       runtime: input.prepared.runtime,
     });
     const inputHash = hash(inputJson);

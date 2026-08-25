@@ -69,7 +69,7 @@ test('recovers interrupted executions by durable checkpoint instead of a lease',
   db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE result_id = 'result-queued-output'").run();
 });
 
-test('blocks an interrupted execution after three retries and records the exact error', async () => {
+test('blocks an interrupted execution after four retries and records the exact error', async () => {
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Interrupted execution retry limit' });
   db.prepare(`
@@ -77,7 +77,7 @@ test('blocks an interrupted execution after three retries and records the exact 
       execution_id, run_id, task_id, agent, pipeline, lane, delegation_key,
       attempt, status, input_hash, input_json
     ) VALUES('execution-interrupted-limit', 'run-interrupted-limit', ?, 'dev-agent', 'dev', 'delivery',
-      'key-interrupted-limit', 4, 'running', 'hash-interrupted-limit', '{}')
+      'key-interrupted-limit', 5, 'running', 'hash-interrupted-limit', '{}')
   `).run(taskId);
 
   const recovered = await reconcileInterruptedExecutions('run-interrupted-limit', 'runner crashed after retries');
@@ -103,7 +103,7 @@ test('blocks an interrupted execution after three retries and records the exact 
     WHERE task_id = ? AND event_type = 'AgentExecutionRetriesExhausted'
     ORDER BY rowid DESC LIMIT 1
   `).get(taskId) as { event_type: string; summary: string };
-  assert.match(failureEvent.summary, /第 4 次失败，3 次自动重试已耗尽.*runner-interrupted.*runner crashed after retries/);
+  assert.match(failureEvent.summary, /第 5 次失败，4 次自动重试已耗尽.*runner-interrupted.*runner crashed after retries/);
 });
 
 test('releases a cancelled requirement execution when its runner has already exited', async () => {
@@ -169,10 +169,10 @@ test('routes queued result application failures through the same retry policy an
   `).get(retryable.taskId) as { summary: string };
   assert.match(retryEvent.summary, /应用排队中的 Agent 结果失败.*JSON/);
 
-  const exhausted = await insertFailure('exhausted', 4);
-  const fourth = await applyNextQueuedAgentResult();
-  assert.equal(fourth.status, 'failed');
-  if (fourth.status === 'failed') assert.equal(fourth.willRetry, false);
+  const exhausted = await insertFailure('exhausted', 5);
+  const fifth = await applyNextQueuedAgentResult();
+  assert.equal(fifth.status, 'failed');
+  if (fifth.status === 'failed') assert.equal(fifth.willRetry, false);
   assert.deepEqual(
     db.prepare('SELECT status, failure_kind FROM execution_attempts WHERE execution_id = ?').get(exhausted.executionId),
     { status: 'system_blocked', failure_kind: 'agent-result-application' },
@@ -186,7 +186,7 @@ test('routes queued result application failures through the same retry policy an
     WHERE task_id = ? AND event_type = 'AgentExecutionRetriesExhausted'
     ORDER BY rowid DESC LIMIT 1
   `).get(exhausted.taskId) as { summary: string };
-  assert.match(exhaustedEvent.summary, /第 4 次失败，3 次自动重试已耗尽.*应用排队中的 Agent 结果失败.*JSON/);
+  assert.match(exhaustedEvent.summary, /第 5 次失败，4 次自动重试已耗尽.*应用排队中的 Agent 结果失败.*JSON/);
 });
 
 test('records clean-exit continuation phases in the requirement activity feed', async () => {

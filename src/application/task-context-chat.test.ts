@@ -161,7 +161,7 @@ test('rejects empty or oversized context chat input', async () => {
   await assert.rejects(() => beginTaskContextChatTurn(taskId, 'x'.repeat(20_001), 'codex'));
 });
 
-test('records every context Chat failure and only releases the session after three retries', async () => {
+test('records four context Chat retries, rotates the provider session, and releases after exhaustion', async () => {
   const { createTask } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
   const {
@@ -172,16 +172,20 @@ test('records every context Chat failure and only releases the session after thr
   const taskId = await createTask({ title: 'Context chat retry activity' });
   const claimed = await beginTaskContextChatTurn(taskId, 'Explain the failure', 'codex');
   const db = await databaseConnection();
+  db.prepare('UPDATE task_context_chat_sessions SET provider_session_id = ? WHERE session_id = ?')
+    .run('oversized-provider-session', claimed.session.sessionId);
 
-  for (let failureAttempt = 1; failureAttempt <= 4; failureAttempt += 1) {
+  for (let failureAttempt = 1; failureAttempt <= 5; failureAttempt += 1) {
     const result = await recordTaskContextChatFailureAttempt({
       sessionId: claimed.session.sessionId,
       error: new Error(`provider failure ${failureAttempt}: exact diagnostic`),
       failureAttempt,
-      maxRetries: 3,
+      maxRetries: 4,
     });
-    assert.equal(result.willRetry, failureAttempt <= 3);
-    assert.equal((await getTaskContextChat(taskId)).session?.state, failureAttempt <= 3 ? 'running' : 'idle');
+    assert.equal(result.willRetry, failureAttempt <= 4);
+    const chat = await getTaskContextChat(taskId);
+    assert.equal(chat.session?.state, failureAttempt <= 4 ? 'running' : 'idle');
+    assert.equal(chat.session?.providerSessionId, null);
   }
 
   const events = db.prepare(`
@@ -193,9 +197,11 @@ test('records every context Chat failure and only releases the session after thr
     'AgentExecutionRetryScheduled',
     'AgentExecutionRetryScheduled',
     'AgentExecutionRetryScheduled',
+    'AgentExecutionRetryScheduled',
     'AgentExecutionRetriesExhausted',
   ]);
-  assert.match(events[0].summary, /context-chat-execution.*provider failure 1: exact diagnostic/);
-  assert.match(events[3].summary, /第 4 次失败，3 次自动重试已耗尽.*provider failure 4: exact diagnostic/);
-  assert.equal((await getTaskContextChat(taskId)).session?.lastError, 'provider failure 4: exact diagnostic');
+  assert.match(events[0].summary, /恢复策略 标准恢复包.*context-chat-execution.*provider failure 1: exact diagnostic/);
+  assert.match(events[3].summary, /恢复策略 最小恢复包/);
+  assert.match(events[4].summary, /第 5 次失败，4 次自动重试已耗尽.*provider failure 5: exact diagnostic/);
+  assert.equal((await getTaskContextChat(taskId)).session?.lastError, 'provider failure 5: exact diagnostic');
 });

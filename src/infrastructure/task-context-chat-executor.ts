@@ -7,7 +7,13 @@ import { sanitizeDiagnosticText } from './diagnostic-text';
 import { terminateProcessTree } from './process-tree';
 import type { AgentExecutorId } from '../domain/agent-executor';
 import type { AgentExecutionOptions } from './agent-executor';
+import type { ExecutionRecoveryMode } from '../application/execution-retry-policy';
 import { paths } from './database';
+
+export type TaskContextChatRecoveryMessage = {
+  role: 'user' | 'assistant';
+  content: string;
+};
 
 type ContextChatRun = {
   taskId: string;
@@ -18,6 +24,10 @@ type ContextChatRun = {
   message: string;
   commandToken: string;
   executionOptions: AgentExecutionOptions;
+  recoveryMode?: ExecutionRecoveryMode;
+  retryNumber?: number;
+  maxRetries?: number;
+  recoveryMessages?: readonly TaskContextChatRecoveryMessage[];
   onProgress?: (event: TaskContextChatProgressEvent) => void;
 };
 
@@ -188,6 +198,12 @@ export function buildTaskContextChatPrompt(
   taskId: string,
   message: string,
   firstTurn: boolean,
+  recovery: {
+    mode?: ExecutionRecoveryMode;
+    retryNumber?: number;
+    maxRetries?: number;
+    messages?: readonly TaskContextChatRecoveryMessage[];
+  } = {},
 ) {
   const freshness = [
     '在回答涉及当前状态、文档、活动、规格、问题或验证证据的问题前，必须重新运行只读命令获取最新事实；不要依赖会话中较早的事实。',
@@ -225,7 +241,40 @@ export function buildTaskContextChatPrompt(
     ...(firstTurn ? [] : ['本轮双路径能力契约覆盖旧轮次中“Chat 只能只读或所有修改都必须进入 Feedback”的过时说明；以本轮安全边界为准。']),
     ...commonContract,
   ].join('\n');
-  return `${contract}\n\n${freshness}\n\n用户问题：\n${message}`;
+  const recoveryMode = recovery.mode || 'initial';
+  const recoveryLimit = recoveryMode === 'standard' ? 24_000 : recoveryMode === 'compact' ? 12_000 : recoveryMode === 'minimal' ? 4_000 : 0;
+  const recoveryMessages = recoveryLimit
+    ? renderTaskContextChatRecoveryTranscript(recovery.messages || [], recoveryLimit)
+    : '';
+  const recoveryPacket = recoveryMode === 'initial' ? '' : [
+    `# Error Recovery · retry ${recovery.retryNumber || 1}/${recovery.maxRetries || 4} · ${recoveryMode === 'standard' ? '标准恢复包' : recoveryMode === 'compact' ? '压缩恢复包' : '最小恢复包'}`,
+    '这是错误退出后的全新 Provider 会话。不要假设能够读取上一次会话的 thinking、工具输出或临时状态。',
+    '先从下方持久化对话、最新任务事实、Git 和领域命令结果恢复；执行写操作前必须核对是否已经生效，避免重复副作用。',
+    ...(recoveryMode === 'minimal' ? ['只读取回答当前问题所需的事实，不要展开完整需求历史。'] : []),
+    ...(recoveryMessages ? ['', '# Persisted Conversation Recovery', recoveryMessages] : []),
+  ].join('\n');
+  return `${contract}\n\n${freshness}${recoveryPacket ? `\n\n${recoveryPacket}` : ''}\n\n用户问题：\n${message}`;
+}
+
+export function renderTaskContextChatRecoveryTranscript(
+  messages: readonly TaskContextChatRecoveryMessage[],
+  maxChars: number,
+) {
+  const selected: string[] = [];
+  let used = 0;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const item = messages[index];
+    if (!item) continue;
+    const label = item.role === 'user' ? '用户' : 'Agent';
+    const available = Math.max(0, maxChars - used - label.length - 4);
+    if (!available) break;
+    const content = item.content.trim();
+    const bounded = content.length <= available ? content : `${content.slice(0, Math.max(0, available - 1))}…`;
+    selected.unshift(`${label}：${bounded}`);
+    used += label.length + bounded.length + 2;
+    if (bounded.length < content.length) break;
+  }
+  return selected.join('\n\n');
 }
 
 function finalText(executor: AgentExecutorId, stdout: string) {
@@ -274,8 +323,14 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
       ? (line) => taskContextChatProgressEvents(input.executor, line).forEach((event) => input.onProgress?.(event))
       : undefined,
   );
-  const firstTurn = !input.providerSessionId;
-  const prompt = buildTaskContextChatPrompt(input.taskId, input.message, firstTurn);
+  const newProviderSession = !input.providerSessionId;
+  const logicalFirstTurn = newProviderSession && !(input.recoveryMessages?.length);
+  const prompt = buildTaskContextChatPrompt(input.taskId, input.message, logicalFirstTurn, {
+    mode: input.recoveryMode,
+    retryNumber: input.retryNumber,
+    maxRetries: input.maxRetries,
+    messages: input.recoveryMessages,
+  });
   const chatCommandEnv = {
     LOOP_CONTEXT_CHAT_SESSION_ID: input.sessionId,
     LOOP_CONTEXT_CHAT_MESSAGE_ID: input.messageId,
@@ -308,16 +363,16 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
       '--print', '--input-format', 'text', '--output-format', 'stream-json', '--verbose',
       ...taskContextChatPermissionArgs('claude'), '--tools', 'Read,Glob,Grep,Bash',
       ...(input.executionOptions.model ? ['--model', input.executionOptions.model] : []),
-      ...(firstTurn ? ['--session-id', providerSessionId] : ['--resume', providerSessionId]),
+      ...(newProviderSession ? ['--session-id', providerSessionId] : ['--resume', providerSessionId]),
     ], prompt, chatCommandEnv, true);
   } else if (input.executor === 'omp') {
     result = await runChatProcess(process.env.OMP_CLI || 'omp', [
       '--mode', 'json', ...taskContextChatPermissionArgs('omp'),
       ...(input.executionOptions.model ? ['--model', input.executionOptions.model] : []),
       ...(input.executionOptions.reasoningEffort ? ['--thinking', input.executionOptions.reasoningEffort] : []),
-      ...(!firstTurn && providerSessionId ? ['--resume', providerSessionId] : []),
+      ...(!newProviderSession && providerSessionId ? ['--resume', providerSessionId] : []),
     ], prompt, chatCommandEnv, true);
-    if (firstTurn) providerSessionId = ompSessionId(result.stdout);
+    if (newProviderSession) providerSessionId = ompSessionId(result.stdout);
   } else {
     const common = [
       '--json', ...taskContextChatPermissionArgs('codex'),
@@ -325,10 +380,10 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
       ...(input.executionOptions.reasoningEffort ? ['--config', `model_reasoning_effort="${input.executionOptions.reasoningEffort}"`] : []),
     ];
     const search = input.executionOptions.webSearch ? ['--search'] : [];
-    result = firstTurn
+    result = newProviderSession
       ? await runChatProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', ...common, '-C', paths.root, '-'], prompt, chatCommandEnv, true)
       : await runChatProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', 'resume', ...common, providerSessionId, '-'], prompt, chatCommandEnv, true);
-    if (firstTurn) providerSessionId = codexSessionId(result.stdout);
+    if (newProviderSession) providerSessionId = codexSessionId(result.stdout);
   }
 
   if (result.exitCode !== 0) {

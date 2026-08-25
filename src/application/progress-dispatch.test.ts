@@ -39,6 +39,7 @@ test('reserves runnable work atomically and exposes the active reservation to in
       prepared: {
         prompt: 'Perform the reserved work',
         contextSnapshot: { snapshotId: 'snapshot-test' },
+        recovery: { mode: 'initial', label: '正常上下文', retryNumber: 0 },
         baseCommit: 'base-test',
         promptMetadata: { version: 1, templateVersion: 2, hash: 'prompt-test' },
         memory: { revision: 3, hash: 'memory-test' },
@@ -60,6 +61,7 @@ test('reserves runnable work atomically and exposes the active reservation to in
       prepared: {
         prompt: 'ignored duplicate',
         contextSnapshot: {},
+        recovery: { mode: 'initial', label: '正常上下文', retryNumber: 0 },
         promptMetadata: { version: 9, templateVersion: 9, hash: 'ignored' },
         memory: { revision: 9, hash: 'ignored' },
         runtime: { executorId: 'ignored', webSearchEnabled: false },
@@ -88,7 +90,7 @@ test('reserves runnable work atomically and exposes the active reservation to in
   }
 });
 
-test('retries preparation failures three times before blocking the requirement', async () => {
+test('retries preparation failures four times before blocking the requirement', async () => {
   const { createTask, beginRun, cancelTask, endRun, releaseBlock } = await import('./tasks');
   const { progressDispatcher } = await import('./progress-dispatch');
   const { databaseConnection } = await import('../infrastructure/database');
@@ -98,7 +100,7 @@ test('retries preparation failures three times before blocking the requirement',
 
   try {
     const outcomes: unknown[] = [];
-    for (let expectedAttempt = 1; expectedAttempt <= 4; expectedAttempt += 1) {
+    for (let expectedAttempt = 1; expectedAttempt <= 5; expectedAttempt += 1) {
       const dispatch = await progressDispatcher.reserveNext({ runId });
       assert.equal(dispatch.kind, 'reserved');
       const reservation = dispatch.reservations.find((item) => item.work.taskId === taskId);
@@ -112,7 +114,8 @@ test('retries preparation failures three times before blocking the requirement',
       { kind: 'retry', attempt: 1 },
       { kind: 'retry', attempt: 2 },
       { kind: 'retry', attempt: 3 },
-      { kind: 'blocked', attempt: 4 },
+      { kind: 'retry', attempt: 4 },
+      { kind: 'blocked', attempt: 5 },
     ]);
     const failureEvents = db.prepare(`
       SELECT event_type, summary FROM task_events
@@ -123,10 +126,13 @@ test('retries preparation failures three times before blocking the requirement',
       'AgentExecutionRetryScheduled',
       'AgentExecutionRetryScheduled',
       'AgentExecutionRetryScheduled',
+      'AgentExecutionRetryScheduled',
       'AgentExecutionRetriesExhausted',
     ]);
     assert.match(failureEvents[0].summary, /agent-preparation.*prompt preparation 1/);
-    assert.match(failureEvents[3].summary, /第 4 次失败，3 次自动重试已耗尽.*prompt preparation 4/);
+    assert.match(failureEvents[0].summary, /恢复策略 标准恢复包/);
+    assert.match(failureEvents[3].summary, /恢复策略 最小恢复包/);
+    assert.match(failureEvents[4].summary, /第 5 次失败，4 次自动重试已耗尽.*prompt preparation 5/);
 
     const afterLimit = await progressDispatcher.reserveNext({ runId });
     assert.equal(afterLimit.kind, 'wait');

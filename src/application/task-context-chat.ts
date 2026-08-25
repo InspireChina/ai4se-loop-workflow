@@ -3,7 +3,7 @@ import { z } from 'zod';
 import type { AgentExecutorId } from '../domain/agent-executor';
 import { databaseConnection, hash } from '../infrastructure/database';
 import { EXECUTION_FAILURE_MAX_RETRIES } from './executions';
-import { retryNotBeforeForFailure } from './execution-retry-policy';
+import { retryRecoveryPlanForFailure, retryNotBeforeForFailure } from './execution-retry-policy';
 
 const messageSchema = z.string().trim().min(1, '请输入问题').max(20_000, '单条消息不能超过 20000 个字符');
 
@@ -285,6 +285,7 @@ export async function recordTaskContextChatFailureAttempt(input: {
   const maxRetries = input.maxRetries ?? EXECUTION_FAILURE_MAX_RETRIES;
   const willRetry = input.failureAttempt <= maxRetries;
   const retryNotBefore = willRetry ? retryNotBeforeForFailure(input.failureAttempt) : null;
+  const recovery = willRetry ? retryRecoveryPlanForFailure(input.failureAttempt) : null;
   const reason = input.error instanceof Error ? input.error.message : String(input.error);
   const db = await databaseConnection();
   db.transaction(() => {
@@ -295,11 +296,11 @@ export async function recordTaskContextChatFailureAttempt(input: {
     db.prepare(`
       UPDATE task_context_chat_sessions
       SET state = ?, command_token_hash = CASE WHEN ? THEN command_token_hash ELSE NULL END,
-          last_error = ?, updated_at = CURRENT_TIMESTAMP
+          provider_session_id = NULL, last_error = ?, updated_at = CURRENT_TIMESTAMP
       WHERE session_id = ?
     `).run(willRetry ? 'running' : 'idle', willRetry ? 1 : 0, reason.slice(0, 4000), input.sessionId);
     const outcome = willRetry
-      ? `第 ${input.failureAttempt} 次失败，自动重试 ${input.failureAttempt}/${maxRetries}${retryNotBefore ? `，不早于 ${retryNotBefore}` : ''}`
+      ? `第 ${input.failureAttempt} 次失败，自动重试 ${input.failureAttempt}/${maxRetries}${recovery ? `，恢复策略 ${recovery.label}` : ''}${retryNotBefore ? `，不早于 ${retryNotBefore}` : ''}`
       : `第 ${input.failureAttempt} 次失败，${maxRetries} 次自动重试已耗尽`;
     db.prepare(`
       INSERT INTO task_events(event_id, task_id, actor, event_type, summary)
@@ -311,5 +312,5 @@ export async function recordTaskContextChatFailureAttempt(input: {
       `context-chat · context-chat-agent(${session.executor}) · ${outcome} · context-chat-execution · session=${input.sessionId}：${reason}`,
     );
   }).immediate();
-  return { willRetry, failureAttempt: input.failureAttempt, maxRetries, reason, retryNotBefore };
+  return { willRetry, failureAttempt: input.failureAttempt, maxRetries, reason, retryNotBefore, recovery };
 }

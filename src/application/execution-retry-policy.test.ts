@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   executionRetryBackoffMs,
+  executionRecoveryModeForAttempt,
   remainingExecutionRetries,
+  retryRecoveryPlanForFailure,
   retryNotBeforeForFailure,
   shouldRetryReportedFailure,
 } from './execution-retry-policy';
@@ -12,20 +14,32 @@ test('uses bounded universal retry backoff for every failure kind', () => {
   assert.equal(executionRetryBackoffMs(1, env), 10_000);
   assert.equal(executionRetryBackoffMs(2, env), 30_000);
   assert.equal(executionRetryBackoffMs(3, env), 120_000);
-  assert.equal(executionRetryBackoffMs(99, env), 120_000);
+  assert.equal(executionRetryBackoffMs(4, env), 300_000);
+  assert.equal(executionRetryBackoffMs(99, env), 300_000);
   assert.equal(retryNotBeforeForFailure(2, new Date('2026-08-22T00:00:00.000Z'), env), '2026-08-22T00:00:30.000Z');
 });
 
-test('retries structured failure results three times before applying the final negative result', () => {
+test('retries structured failure results four times before applying the final negative result', () => {
   assert.equal(shouldRetryReportedFailure({ outcome: 'failed' }, 1), true);
-  assert.equal(shouldRetryReportedFailure({ verdict: 'failed' }, 3), true);
-  assert.equal(shouldRetryReportedFailure({ outcome: 'failed' }, 4), false);
+  assert.equal(shouldRetryReportedFailure({ verdict: 'failed' }, 4), true);
+  assert.equal(shouldRetryReportedFailure({ outcome: 'failed' }, 5), false);
   assert.equal(shouldRetryReportedFailure({ outcome: 'completed', verdict: 'passed' }, 1), false);
 });
 
 test('reports remaining retries after the current execution attempt', () => {
-  assert.equal(remainingExecutionRetries(1), 3);
-  assert.equal(remainingExecutionRetries(2), 2);
-  assert.equal(remainingExecutionRetries(3), 1);
-  assert.equal(remainingExecutionRetries(4), 0);
+  assert.equal(remainingExecutionRetries(1), 4);
+  assert.equal(remainingExecutionRetries(2), 3);
+  assert.equal(remainingExecutionRetries(3), 2);
+  assert.equal(remainingExecutionRetries(4), 1);
+  assert.equal(remainingExecutionRetries(5), 0);
+});
+
+test('uses a runtime-neutral recovery ladder with two minimal attempts', () => {
+  assert.deepEqual([1, 2, 3, 4].map((attempt) => retryRecoveryPlanForFailure(attempt)?.mode), [
+    'standard', 'compact', 'minimal', 'minimal',
+  ]);
+  assert.deepEqual([1, 2, 3, 4, 5].map(executionRecoveryModeForAttempt), [
+    'initial', 'standard', 'compact', 'minimal', 'minimal',
+  ]);
+  assert.equal(retryRecoveryPlanForFailure(5), null);
 });
