@@ -2,11 +2,22 @@
 
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { Bot, LoaderCircle, Send, WandSparkles } from 'lucide-react';
+import { Bot, BrainCircuit, CheckCircle2, CircleAlert, LoaderCircle, Send, Terminal, WandSparkles } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import type { TaskContextChatMessage, TaskContextChatSession } from '../../../src/application/task-context-chat';
 import type { AgentExecutorId } from '../../../src/domain/agent-executor';
+import type { TaskContextChatProgressEvent } from '../../../src/infrastructure/task-context-chat-executor';
+
+type ContextChatStreamEvent = {
+  type: 'accepted' | 'progress' | 'result' | 'error';
+  executor?: AgentExecutorId;
+  event?: TaskContextChatProgressEvent;
+  message?: TaskContextChatMessage;
+  changeRequestSubmitted?: boolean;
+  changeRequestCount?: number;
+  error?: string;
+};
 
 export function TaskContextChat({
   taskId,
@@ -23,6 +34,7 @@ export function TaskContextChat({
   const [sending, setSending] = useState(false);
   const [sessionState, setSessionState] = useState(initialSession?.state || 'idle');
   const [error, setError] = useState(initialSession?.lastError || '');
+  const [progress, setProgress] = useState<Array<TaskContextChatProgressEvent & { id: string }>>([]);
   const [draft, setDraft] = useState('');
   const endRef = useRef<HTMLDivElement>(null);
   const busy = sending || sessionState === 'running';
@@ -50,6 +62,7 @@ export function TaskContextChat({
     setMessages((current) => [...current, optimistic]);
     setDraft('');
     setError('');
+    setProgress([]);
     setSending(true);
     setSessionState('running');
     try {
@@ -58,18 +71,44 @@ export function TaskContextChat({
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ message }),
       });
-      const body = await response.json() as {
-        message?: TaskContextChatMessage;
-        executor?: AgentExecutorId;
-        changeRequestSubmitted?: boolean;
-        changeRequestCount?: number;
-        error?: string;
+      if (!response.ok || !response.body) throw new Error('上下文 Agent 无法建立实时连接');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let pending = '';
+      let completed = false;
+      const receive = (event: ContextChatStreamEvent) => {
+        if (event.type === 'accepted') {
+          setExecutor(event.executor || executor);
+          return;
+        }
+        if (event.type === 'progress' && event.event) {
+          setProgress((current) => [...current, {
+            ...event.event!,
+            id: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+          }].slice(-80));
+          return;
+        }
+        if (event.type === 'error') throw new Error(event.error || '上下文 Agent 执行失败');
+        if (event.type === 'result' && event.message) {
+          completed = true;
+          setMessages((current) => [...current, event.message!]);
+          setExecutor(event.executor || executor);
+          setSessionState('idle');
+          if (event.changeRequestSubmitted) router.refresh();
+        }
       };
-      if (!response.ok || !body.message) throw new Error(body.error || '上下文 Agent 未返回回答');
-      setMessages((current) => [...current, body.message!]);
-      setExecutor(body.executor || executor);
-      setSessionState('idle');
-      if (body.changeRequestSubmitted) router.refresh();
+      while (true) {
+        const chunk = await reader.read();
+        pending += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
+        const lines = pending.split(/\r?\n/);
+        pending = chunk.done ? '' : lines.pop() || '';
+        for (const line of lines.filter(Boolean)) receive(JSON.parse(line) as ContextChatStreamEvent);
+        if (chunk.done) {
+          if (pending.trim()) receive(JSON.parse(pending) as ContextChatStreamEvent);
+          break;
+        }
+      }
+      if (!completed) throw new Error('上下文 Agent 实时连接结束，但没有返回最终回答');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : String(caught));
       setSessionState('idle');
@@ -98,7 +137,21 @@ export function TaskContextChat({
           ? <div className="markdown-content"><ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown></div>
           : <p>{message.content}</p>}
       </article>)}
-      {busy && <div className="context-chat-thinking"><LoaderCircle size={14}/>Agent 正在读取最新上下文并判断处理路径…</div>}
+      {busy && <div className="context-chat-live-progress">
+        <div className="context-chat-live-head"><LoaderCircle size={14}/><strong>Agent 正在处理</strong><small>实时进展</small></div>
+        {progress.length === 0
+          ? <div className="context-chat-progress-placeholder"><BrainCircuit size={14}/>正在读取最新上下文并判断处理路径…</div>
+          : <div className="context-chat-progress-list">{progress.map((item) => <div className={`context-chat-progress-item ${item.kind} ${item.status}`} key={item.id}>
+            <span>{item.kind === 'thinking'
+              ? <BrainCircuit size={13}/>
+              : item.status === 'completed'
+                ? <CheckCircle2 size={13}/>
+                : item.status === 'error'
+                  ? <CircleAlert size={13}/>
+                  : <Terminal size={13}/>}</span>
+            <div><strong>{item.label}</strong>{item.detail && <small>{item.detail}</small>}</div>
+          </div>)}</div>}
+      </div>}
       <div ref={endRef}/>
     </div>
     {error && <p className="context-chat-error">{error}</p>}

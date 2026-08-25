@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { paths } from './database';
-import { buildTaskContextChatPrompt, taskContextChatPermissionArgs } from './task-context-chat-executor';
+import { buildTaskContextChatPrompt, taskContextChatPermissionArgs, taskContextChatProgressEvents } from './task-context-chat-executor';
 
 test('configures non-interactive bypass permissions for every context chat executor', () => {
   assert.deepEqual(taskContextChatPermissionArgs('cursor'), ['--force', '--trust']);
@@ -41,4 +41,51 @@ test('refreshes task facts on every resumed context chat turn', () => {
   assert.match(prompt, /必须重新运行只读命令获取最新事实/);
   assert.match(prompt, /task-context --task-id TASK-chat-resume/);
   assert.match(prompt, /如果用户只是询问、解释、比较或探索方案，直接回答/);
+});
+
+test('projects provider reasoning summaries and redacted tool lifecycle events for live Chat progress', () => {
+  assert.deepEqual(taskContextChatProgressEvents('codex', JSON.stringify({
+    type: 'item.completed',
+    item: { type: 'reasoning', text: 'Inspecting the current delivery facts.' },
+  })), [{
+    kind: 'thinking',
+    label: '思考进展',
+    detail: 'Inspecting the current delivery facts.',
+    status: 'running',
+  }]);
+
+  const started = taskContextChatProgressEvents('codex', JSON.stringify({
+    type: 'item.started',
+    item: { id: 'tool-1', type: 'command_execution', command: 'npm test token=private-value' },
+  }));
+  assert.equal(started[0]?.kind, 'tool');
+  assert.equal(started[0]?.label, '终端命令');
+  assert.match(started[0]?.detail || '', /token=\[REDACTED\]/);
+  assert.doesNotMatch(started[0]?.detail || '', /private-value/);
+
+  assert.deepEqual(taskContextChatProgressEvents('codex', JSON.stringify({
+    type: 'item.completed',
+    item: { id: 'tool-1', type: 'command_execution', command: 'npm test', exit_code: 0, aggregated_output: 'passed' },
+  })), [{
+    kind: 'tool',
+    label: '终端命令完成',
+    detail: '执行完成',
+    status: 'completed',
+  }]);
+});
+
+test('projects Claude emitted thinking without treating final answer text as hidden reasoning', () => {
+  assert.deepEqual(taskContextChatProgressEvents('claude', JSON.stringify({
+    type: 'assistant',
+    message: { content: [{ type: 'thinking', thinking: 'Checking the relevant files.' }] },
+  })), [{
+    kind: 'thinking',
+    label: '思考进展',
+    detail: 'Checking the relevant files.',
+    status: 'running',
+  }]);
+  assert.deepEqual(taskContextChatProgressEvents('claude', JSON.stringify({
+    type: 'assistant',
+    message: { content: [{ type: 'text', text: 'Final answer' }] },
+  })), []);
 });

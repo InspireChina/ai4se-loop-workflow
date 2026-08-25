@@ -1,8 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { createAgentFinalTextAccumulator, resolveCursorAgentLaunch } from './agent-executor';
+import { createAgentFinalTextAccumulator, parseAgentTelemetryStdoutEvents, resolveCursorAgentLaunch } from './agent-executor';
 import { resolveAgentExecutionLimits } from './agent-execution-limits';
 import { createTemporaryPrompt, removeTemporaryPrompt } from './delegation-execution';
+import { sanitizeDiagnosticText } from './diagnostic-text';
 import { terminateProcessTree } from './process-tree';
 import type { AgentExecutorId } from '../domain/agent-executor';
 import type { AgentExecutionOptions } from './agent-executor';
@@ -17,6 +18,14 @@ type ContextChatRun = {
   message: string;
   commandToken: string;
   executionOptions: AgentExecutionOptions;
+  onProgress?: (event: TaskContextChatProgressEvent) => void;
+};
+
+export type TaskContextChatProgressEvent = {
+  kind: 'thinking' | 'tool' | 'status';
+  label: string;
+  detail?: string;
+  status: 'running' | 'completed' | 'error';
 };
 
 type ProcessResult = { exitCode: number; stdout: string; stderr: string; terminationReason?: string };
@@ -36,6 +45,7 @@ function runProcess(
   envOverrides: Record<string, string | undefined> = {},
   startupTimeoutMs = 20 * 60 * 1000,
   idleTimeoutMs = 30 * 60 * 1000,
+  onStdoutLine?: (line: string) => void,
 ) {
   return new Promise<ProcessResult>((resolve, reject) => {
     const child = spawn(command, args, {
@@ -45,6 +55,7 @@ function runProcess(
       windowsHide: true,
     });
     let stdout = '';
+    let stdoutPending = '';
     let stderr = '';
     let terminationReason = '';
     let startupTimer: NodeJS.Timeout | undefined;
@@ -67,7 +78,25 @@ function runProcess(
       }, idleTimeoutMs);
       idleTimer.unref();
     };
-    child.stdout?.on('data', (chunk: Buffer) => { noteOutput(); stdout += chunk.toString('utf8'); });
+    const publishStdoutLines = (text: string, flush = false) => {
+      stdoutPending += text;
+      const lines = stdoutPending.split(/\r?\n/);
+      stdoutPending = flush ? '' : lines.pop() || '';
+      const complete = flush && lines.at(-1) === '' ? lines.slice(0, -1) : lines;
+      for (const line of complete.filter(Boolean)) {
+        try { onStdoutLine?.(line); } catch { /* UI progress must not affect execution */ }
+      }
+      if (flush && stdoutPending) {
+        try { onStdoutLine?.(stdoutPending); } catch { /* UI progress must not affect execution */ }
+        stdoutPending = '';
+      }
+    };
+    child.stdout?.on('data', (chunk: Buffer) => {
+      noteOutput();
+      const text = chunk.toString('utf8');
+      stdout += text;
+      publishStdoutLines(text);
+    });
     child.stderr?.on('data', (chunk: Buffer) => { noteOutput(); stderr += chunk.toString('utf8'); });
     child.once('error', reject);
     startupTimer = setTimeout(() => {
@@ -79,6 +108,7 @@ function runProcess(
     }, timeoutMs);
     timer.unref();
     child.once('close', (exitCode) => {
+      publishStdoutLines('', true);
       if (startupTimer) clearTimeout(startupTimer);
       if (idleTimer) clearTimeout(idleTimer);
       clearTimeout(timer);
@@ -86,6 +116,68 @@ function runProcess(
     });
     if (input !== undefined) child.stdin?.end(input);
   });
+}
+
+function progressText(value: unknown) {
+  const text = sanitizeDiagnosticText(value, 900).replace(/\s+/g, ' ').trim();
+  return text || '';
+}
+
+function providerThinking(executor: AgentExecutorId, line: string) {
+  try {
+    const event = JSON.parse(line) as Record<string, unknown>;
+    const item = event.item as Record<string, unknown> | undefined;
+    if (executor === 'codex' && event.type === 'item.completed' && item?.type === 'reasoning') {
+      return progressText(item.text || item.summary);
+    }
+    const message = event.message as Record<string, unknown> | undefined;
+    const blocks = Array.isArray(message?.content) ? message.content as Record<string, unknown>[] : [];
+    const emittedThinking = blocks
+      .filter((block) => block.type === 'thinking' || block.type === 'reasoning')
+      .map((block) => progressText(block.thinking || block.reasoning || block.text || block.summary))
+      .filter(Boolean)
+      .join(' ');
+    if (emittedThinking) return emittedThinking;
+    if (event.type === 'thinking' || event.type === 'reasoning') {
+      return progressText(event.thinking || event.reasoning || event.text || event.summary);
+    }
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+function toolLabel(tool: string | undefined) {
+  const normalized = (tool || '').toLowerCase();
+  if (normalized === 'shell' || normalized === 'bash') return '终端命令';
+  if (normalized === 'read') return '读取文件';
+  if (normalized === 'grep' || normalized === 'glob') return '搜索代码';
+  if (normalized === 'web_search') return '网页搜索';
+  if (normalized === 'file_change') return '修改文件';
+  if (normalized === 'mcp_tool_call') return '调用外部工具';
+  if (normalized === 'tool') return '工具调用';
+  return tool ? `调用 ${tool}` : '调用工具';
+}
+
+export function taskContextChatProgressEvents(executor: AgentExecutorId, line: string): TaskContextChatProgressEvent[] {
+  const progress: TaskContextChatProgressEvent[] = [];
+  const thinking = providerThinking(executor, line);
+  if (thinking) progress.push({ kind: 'thinking', label: '思考进展', detail: thinking, status: 'running' });
+  for (const event of parseAgentTelemetryStdoutEvents(executor, line)) {
+    if (event.name !== 'loop.agent.tool') continue;
+    const completed = event.phase === 'completed';
+    const failed = completed && event.success === false;
+    const label = toolLabel(event.tool);
+    progress.push({
+      kind: 'tool',
+      label: completed ? `${label}${failed ? '失败' : '完成'}` : label,
+      detail: completed
+        ? failed ? `执行失败${event.exitCode == null ? '' : ` · exit ${event.exitCode}`}` : '执行完成'
+        : progressText(event.summary || '正在执行'),
+      status: failed ? 'error' : completed ? 'completed' : 'running',
+    });
+  }
+  return progress;
 }
 
 function commandPath(value: string) {
@@ -169,7 +261,19 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
     args: string[],
     processInput?: string,
     environment: Record<string, string | undefined> = {},
-  ) => runProcess(command, args, processInput, maxRuntimeMs, environment, startupTimeoutMs, idleTimeoutMs);
+    publishProgress = false,
+  ) => runProcess(
+    command,
+    args,
+    processInput,
+    maxRuntimeMs,
+    environment,
+    startupTimeoutMs,
+    idleTimeoutMs,
+    publishProgress
+      ? (line) => taskContextChatProgressEvents(input.executor, line).forEach((event) => input.onProgress?.(event))
+      : undefined,
+  );
   const firstTurn = !input.providerSessionId;
   const prompt = buildTaskContextChatPrompt(input.taskId, input.message, firstTurn);
   const chatCommandEnv = {
@@ -194,7 +298,7 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
         ...launch.prefixArgs,
         '--print', '--output-format', 'stream-json', ...taskContextChatPermissionArgs('cursor'), '--resume', providerSessionId,
         temporary.reference,
-      ], undefined, { ...launch.env, ...chatCommandEnv });
+      ], undefined, { ...launch.env, ...chatCommandEnv }, true);
     } finally {
       removeTemporaryPrompt(temporary);
     }
@@ -205,14 +309,14 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
       ...taskContextChatPermissionArgs('claude'), '--tools', 'Read,Glob,Grep,Bash',
       ...(input.executionOptions.model ? ['--model', input.executionOptions.model] : []),
       ...(firstTurn ? ['--session-id', providerSessionId] : ['--resume', providerSessionId]),
-    ], prompt, chatCommandEnv);
+    ], prompt, chatCommandEnv, true);
   } else if (input.executor === 'omp') {
     result = await runChatProcess(process.env.OMP_CLI || 'omp', [
       '--mode', 'json', ...taskContextChatPermissionArgs('omp'),
       ...(input.executionOptions.model ? ['--model', input.executionOptions.model] : []),
       ...(input.executionOptions.reasoningEffort ? ['--thinking', input.executionOptions.reasoningEffort] : []),
       ...(!firstTurn && providerSessionId ? ['--resume', providerSessionId] : []),
-    ], prompt, chatCommandEnv);
+    ], prompt, chatCommandEnv, true);
     if (firstTurn) providerSessionId = ompSessionId(result.stdout);
   } else {
     const common = [
@@ -222,8 +326,8 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
     ];
     const search = input.executionOptions.webSearch ? ['--search'] : [];
     result = firstTurn
-      ? await runChatProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', ...common, '-C', paths.root, '-'], prompt, chatCommandEnv)
-      : await runChatProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', 'resume', ...common, providerSessionId, '-'], prompt, chatCommandEnv);
+      ? await runChatProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', ...common, '-C', paths.root, '-'], prompt, chatCommandEnv, true)
+      : await runChatProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', 'resume', ...common, providerSessionId, '-'], prompt, chatCommandEnv, true);
     if (firstTurn) providerSessionId = codexSessionId(result.stdout);
   }
 
