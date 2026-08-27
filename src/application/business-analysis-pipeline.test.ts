@@ -4,6 +4,37 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { DelegationEnvelope } from './tasks';
 
+function intentBriefModuleCommands(summary: string, sourceUrl?: string): string[][] {
+  return [
+    ['idea-context', 'brief', 'problem', 'set', '--text', summary],
+    ['idea-context', 'brief', 'actor', 'upsert', '--key', 'project-team', '--name', '项目团队', '--role', '使用正式产物理解目标并采取后续行动。'],
+    ['idea-context', 'brief', 'goal', 'upsert', '--key', 'primary-goal', '--text', summary],
+    ['idea-context', 'brief', 'success', 'upsert', '--key', 'observable-success', '--text', `用户能够确认：${summary}`],
+    ...(sourceUrl ? [[
+      'idea-context', 'brief', 'source', 'upsert', '--key', 'research-source',
+      '--title', 'OpenAI Codex documentation', '--reference', sourceUrl,
+      '--usage', '用于补充外部背景与评价维度，不替代用户目标；适用范围受官方资料内容限制。',
+    ]] : []),
+  ];
+}
+
+function businessSolutionModuleCommands(summary: string, sourceUrl?: string): string[][] {
+  return [
+    ['business-design', 'solution', 'summary', 'set', '--text', summary],
+    ['business-design', 'solution', 'actor', 'upsert', '--key', 'project-member', '--name', '项目成员', '--responsibility', '发起业务流程并使用结果采取行动。'],
+    ['business-design', 'solution', 'scenario', 'upsert', '--key', 'main-flow', '--type', 'main', '--title', '完成主要业务目标', '--actor', '项目成员', '--trigger', '用户需要获得目标结果', '--outcome', summary],
+    ['business-design', 'solution', 'flow', 'upsert', '--key', 'main-step', '--scenario', 'main-flow', '--position', '1', '--action', '用户发起并完成主要流程', '--result', summary],
+    ['business-design', 'solution', 'rule', 'upsert', '--key', 'traceable-result', '--text', '结果必须清楚展示其业务依据。'],
+    ['business-design', 'solution', 'scope', 'include', '--key', 'primary-scope', '--text', summary],
+    ['business-design', 'solution', 'success', 'upsert', '--key', 'observable-success', '--text', `项目成员能够确认：${summary}`],
+    ...(sourceUrl ? [[
+      'business-design', 'solution', 'source', 'upsert', '--key', 'research-source',
+      '--title', 'OpenAI Codex documentation', '--reference', sourceUrl,
+      '--usage', '用于补充方案评价维度，不替代产品决定；适用范围受官方资料内容限制。',
+    ]] : []),
+  ];
+}
+
 async function executeBusinessAnalysisAgent(
   delegation: DelegationEnvelope,
   commands: string[][],
@@ -53,12 +84,16 @@ test('runs Business Analysis from a raw idea to an independently approved and re
 
   let delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'idea-context-agent');
-  await executeBusinessAnalysisAgent(delegation, [
+  const intentResult = await executeBusinessAnalysisAgent(delegation, [
     ['idea-context', 'discovery', 'complete', '--artifact', '# 调查\n\n团队需要更早识别项目健康风险。'],
     ['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify({ summary: '目标可以从现有想法唯一归纳', questions: [] })],
-    ['idea-context', 'synthesis', 'complete', '--artifact', '# 需求意图简报\n\n帮助项目团队在风险扩大前识别健康异常，并获得可采取行动的解释。'],
+    ...intentBriefModuleCommands('帮助项目团队在风险扩大前识别健康异常，并获得可采取行动的解释。'),
+    ['idea-context', 'synthesis', 'complete'],
     ['idea-context', 'complete'],
   ], `${taskId}-intent`);
+  assert.match(intentResult.artifact?.content || '', /^# 需求意图简报\n/);
+  assert.match(intentResult.artifact?.content || '', /## 问题与背景[\s\S]*## 目标参与者[\s\S]*## 业务目标/);
+  assert.doesNotMatch(intentResult.artifact?.content || '', /^\s*\{/);
 
   delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'business-design-agent');
@@ -67,10 +102,14 @@ test('runs Business Analysis from a raw idea to an independently approved and re
     ['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify({ summary: '当前没有必须分叉的业务决定', questions: [] })],
     ['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify({ notes: '没有活动决策节点', agentDecisions: [], humanDecisionKeys: [] })],
     ['business-design', 'decision-resolution', 'audit-complete', '--artifact', '# 答案审查\n\n当前没有活动决策节点，也没有新增业务语义。'],
-    ['business-design', 'solution', 'complete', '--artifact', '# 业务方案\n\n项目成员可发起体检，查看分项状态、风险依据和建议行动。'],
+    ...businessSolutionModuleCommands('项目成员可发起体检，查看分项状态、风险依据和建议行动。'),
+    ['business-design', 'solution', 'complete'],
     ['business-design', 'complete'],
   ], `${taskId}-design`);
   assert.equal(designStatus.businessAnalysis?.stage, 'business_design');
+  assert.match(designStatus.artifact?.content || '', /^# 业务方案\n/);
+  assert.match(designStatus.artifact?.content || '', /## 主场景[\s\S]*## 业务流程[\s\S]*## 业务规则/);
+  assert.doesNotMatch(designStatus.artifact?.content || '', /^\s*\{/);
 
   const specification = '# AS IS\n\n项目成员缺少统一的健康风险视图。\n\n# TO BE\n\n项目成员可发起项目体检并查看分项状态、风险依据和建议行动。\n\n# ACTORS\n\n项目成员。\n\n# SCENARIOS\n\n发起体检并阅读结果。\n\n# BUSINESS RULES\n\n每个风险必须展示依据。\n\n# SCOPE\n\n项目级体检结果。\n\n# OUT OF SCOPE\n\n自动修复。\n\n# ACCEPTANCE\n\n用户可以看到分项状态、风险依据和建议行动。\n\n# DEPENDENCIES\n\n无。\n\n# ASSUMPTIONS\n\n用户可以访问目标项目。';
   delegation = (await inspectTaskDispatch(taskId))[0];
@@ -154,7 +193,8 @@ test('hands an approved End to End specification directly to Develop without hum
   await executeBusinessAnalysisAgent(delegation, [
     ['idea-context', 'discovery', 'complete', '--artifact', '# 调查\n\n团队需要更早识别项目健康风险。'],
     ['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify({ summary: '目标可以唯一归纳', questions: [] })],
-    ['idea-context', 'synthesis', 'complete', '--artifact', '# 需求意图简报\n\n帮助项目团队在风险扩大前识别健康异常。'],
+    ...intentBriefModuleCommands('帮助项目团队在风险扩大前识别健康异常。'),
+    ['idea-context', 'synthesis', 'complete'],
     ['idea-context', 'complete'],
   ], `${taskId}-intent`);
 
@@ -165,7 +205,8 @@ test('hands an approved End to End specification directly to Develop without hum
     ['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify({ summary: '没有必须分叉的决定', questions: [] })],
     ['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify({ notes: '没有活动决策节点', agentDecisions: [], humanDecisionKeys: [] })],
     ['business-design', 'decision-resolution', 'audit-complete', '--artifact', '# 答案审查\n\n没有新增业务语义。'],
-    ['business-design', 'solution', 'complete', '--artifact', '# 业务方案\n\n项目成员可发起体检并查看风险依据和建议行动。'],
+    ...businessSolutionModuleCommands('项目成员可发起体检并查看风险依据和建议行动。'),
+    ['business-design', 'solution', 'complete'],
     ['business-design', 'complete'],
   ], `${taskId}-design`);
 
@@ -269,11 +310,17 @@ test('dynamically inserts Research for intent and business design and requires c
   const intentProposal = await runIntent(['idea-context', 'research', 'complete', '--artifact', research]);
   assert.match(intentProposal, /Phase: CLARIFICATION PROPOSAL/);
   await runIntent(['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify({ summary: '没有目标歧义', questions: [] })]);
+  for (const command of intentBriefModuleCommands('定义项目对 Agent 的友好程度。')) await runIntent(command);
   await assert.rejects(
-    runIntent(['idea-context', 'synthesis', 'complete', '--artifact', '# 需求意图简报\n\n定义项目对 Agent 的友好程度。']),
-    /必须包含 RESEARCH BASIS/,
+    runIntent(['idea-context', 'synthesis', 'complete']),
+    /必须登记至少一个调研依据/,
   );
-  await runIntent(['idea-context', 'synthesis', 'complete', '--artifact', '# 需求意图简报\n\n定义项目对 Agent 的友好程度。\n\n# RESEARCH BASIS\n\n采用官方资料作为外部背景，同时保留用户目标决定权：https://developers.openai.com/codex/']);
+  await runIntent([
+    'idea-context', 'brief', 'source', 'upsert', '--key', 'codex-docs',
+    '--title', 'OpenAI Codex documentation', '--reference', 'https://developers.openai.com/codex/',
+    '--usage', '用于定义外部背景，不替代用户目标；官方文档不规定本产品的具体业务方案。',
+  ]);
+  await runIntent(['idea-context', 'synthesis', 'complete']);
   await runIntent(['idea-context', 'complete']);
   const intentResult = await readAgentCommandSubmission(intent.attempt.execution_id);
   await applyAgentResult(`RUN-ba-research-${taskId}-intent`, delegation, intentResult!, { executionId: intent.attempt.execution_id });
@@ -301,7 +348,11 @@ test('dynamically inserts Research for intent and business design and requires c
   await runDesign(['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify({ summary: '当前没有必须分叉的业务决定', questions: [] })]);
   await runDesign(['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify({ notes: '没有活动节点', agentDecisions: [], humanDecisionKeys: [] })]);
   await runDesign(['business-design', 'decision-resolution', 'audit-complete', '--artifact', '# 答案审查\n\n没有新增语义。']);
-  await runDesign(['business-design', 'solution', 'complete', '--artifact', '# 业务方案\n\n从项目上下文、验证能力和维护反馈三个方面形成体检结果。\n\n# RESEARCH BASIS\n\n外部资料用于补充评价维度，不替代产品决定：https://developers.openai.com/codex/']);
+  for (const command of businessSolutionModuleCommands(
+    '从项目上下文、验证能力和维护反馈三个方面形成体检结果。',
+    'https://developers.openai.com/codex/',
+  )) await runDesign(command);
+  await runDesign(['business-design', 'solution', 'complete']);
   await runDesign(['business-design', 'complete']);
   const designResult = await readAgentCommandSubmission(design.attempt.execution_id);
   await applyAgentResult(`RUN-ba-research-${taskId}-design`, delegation, designResult!, { executionId: design.attempt.execution_id });
@@ -361,7 +412,8 @@ test('injects decision strength only while Idea Context answers and audits fully
   assert.doesNotMatch(resolved, /Decision Mode|fully_autonomous/);
   const audited = await run(['idea-context', 'clarification-resolution', 'audit-complete', '--artifact', '# 答案审查\n\n参与者选择没有引入当前问题树外的新语义。']);
   assert.match(audited, /To: synthesis/);
-  await run(['idea-context', 'synthesis', 'complete', '--artifact', '# 需求意图简报\n\n帮助全体项目成员更早识别并共同处理项目健康风险。']);
+  for (const command of intentBriefModuleCommands('帮助全体项目成员更早识别并共同处理项目健康风险。')) await run(command);
+  await run(['idea-context', 'synthesis', 'complete']);
   await run(['idea-context', 'complete']);
   const result = await readAgentCommandSubmission(started.attempt.execution_id);
   assert.equal(result?.outcome, 'completed');
@@ -466,7 +518,8 @@ test('audits an Idea Context custom answer and returns to clarification proposal
     '# 答案审查\n\n阻断风险定义已经闭合，没有引入新的需求意图分支。',
   ]);
   assert.match(followUpAudited, /To: synthesis/);
-  await resumedRun(['idea-context', 'synthesis', 'complete', '--artifact', '# 需求意图简报\n\n帮助团队在 30 天内关闭至少 80% 已阻止关键交付的风险。']);
+  for (const command of intentBriefModuleCommands('帮助团队在 30 天内关闭至少 80% 已阻止关键交付的风险。')) await resumedRun(command);
+  await resumedRun(['idea-context', 'synthesis', 'complete']);
   await resumedRun(['idea-context', 'complete']);
   const completed = await readAgentCommandSubmission(resumed.attempt.execution_id);
   await applyAgentResult(`RUN-ba-intent-expand-${taskId}-2`, delegation, completed!, { executionId: resumed.attempt.execution_id });
@@ -602,7 +655,8 @@ test('audits a Business Design custom answer and expands only the newly introduc
     '# 答案审查\n\n严重风险边界已经闭合，没有引入新的业务方案分支。',
   ]);
   assert.match(followUpAudited, /To: solution/);
-  await resumedRun(['business-design', 'solution', 'complete', '--artifact', '# 业务方案\n\n普通风险对项目成员可见；存在阻断项时仅项目负责人可查看严重风险。']);
+  for (const command of businessSolutionModuleCommands('普通风险对项目成员可见；存在阻断项时仅项目负责人可查看严重风险。')) await resumedRun(command);
+  await resumedRun(['business-design', 'solution', 'complete']);
   await resumedRun(['business-design', 'complete']);
   const completed = await readAgentCommandSubmission(resumed.attempt.execution_id);
   assert.equal(completed?.businessAnalysis?.disposition, 'advance');
@@ -612,4 +666,41 @@ test('audits a Business Design custom answer and expands only the newly introduc
   assert.equal(detail?.task.current_subagent, 'requirement-spec-agent');
   assert.equal(detail?.questions.find((item) => item.decision_key === 'result-visibility')?.answer, '普通风险对项目成员可见，严重风险仅对项目负责人可见。');
   assert.equal(detail?.questions.find((item) => item.decision_key === 'severe-risk-boundary')?.decision_authority, 'agent');
+});
+
+test('keeps migrated protocol v1 Business Analysis drafts on the legacy artifact command path', async () => {
+  const { createTask } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { issueAgentCommandToken, readAgentCommandSubmission, runAgentCommand } = await import('./agent-command-drafts');
+  const taskId = await createTask({
+    title: '继续升级前已经启动的需求意图草稿',
+    itemType: 'business-analysis',
+    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
+  });
+  const delegation = (await inspectTaskDispatch(taskId))[0];
+  const started = await beginTestExecutionAttempt({
+    runId: `RUN-ba-legacy-${taskId}`,
+    delegation,
+    prompt: 'Legacy Business Analysis draft compatibility',
+  });
+  const token = await issueAgentCommandToken(started.attempt.execution_id);
+  assert.ok(token);
+  const run = (args: string[]) => runAgentCommand({ executionId: started.attempt.execution_id, token, args });
+  await run(['idea-context', 'status']);
+
+  const db = await databaseConnection();
+  db.prepare(`
+    UPDATE business_analysis_drafts SET protocol_version = 1
+    WHERE draft_id = (
+      SELECT draft_id FROM agent_work_drafts WHERE last_execution_id = ?
+    )
+  `).run(started.attempt.execution_id);
+
+  await run(['idea-context', 'discovery', 'complete', '--artifact', '# 调查\n\n升级前草稿继续使用原协议。']);
+  await run(['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify({ summary: '没有需要确认的分支', questions: [] })]);
+  const legacyArtifact = '# 需求意图简报\n\n这是升级前已经开始编辑的正式产物。';
+  await run(['idea-context', 'synthesis', 'complete', '--artifact', legacyArtifact]);
+  await run(['idea-context', 'complete']);
+  const result = await readAgentCommandSubmission(started.attempt.execution_id);
+  assert.equal(result?.artifact?.content, legacyArtifact);
 });

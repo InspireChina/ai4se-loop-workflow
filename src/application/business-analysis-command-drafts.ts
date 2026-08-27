@@ -38,6 +38,47 @@ type Input = {
   flags: Map<string, string>;
 };
 
+type ModuleItem = {
+  module: string;
+  item_key: string;
+  payload_json: string;
+  ordinal: number;
+};
+
+type StructuredModuleDefinition = {
+  id: string;
+  label: string;
+  required: boolean;
+  minimum: number;
+};
+
+const INTENT_BRIEF_MODULES: StructuredModuleDefinition[] = [
+  { id: 'problem', label: '问题与背景', required: true, minimum: 1 },
+  { id: 'actors', label: '目标参与者', required: true, minimum: 1 },
+  { id: 'goals', label: '业务目标', required: true, minimum: 1 },
+  { id: 'success', label: '成功结果', required: true, minimum: 1 },
+  { id: 'constraints', label: '硬约束', required: false, minimum: 0 },
+  { id: 'sources', label: '权威输入与调研依据', required: false, minimum: 0 },
+  { id: 'assumptions', label: '已确认假设', required: false, minimum: 0 },
+  { id: 'exclusions', label: '排除项', required: false, minimum: 0 },
+];
+
+const BUSINESS_SOLUTION_MODULES: StructuredModuleDefinition[] = [
+  { id: 'summary', label: '方案摘要', required: true, minimum: 1 },
+  { id: 'actors', label: '参与者及职责', required: true, minimum: 1 },
+  { id: 'main_scenarios', label: '主场景', required: true, minimum: 1 },
+  { id: 'exception_scenarios', label: '异常场景', required: false, minimum: 0 },
+  { id: 'recovery_scenarios', label: '恢复场景', required: false, minimum: 0 },
+  { id: 'flows', label: '业务流程', required: true, minimum: 1 },
+  { id: 'rules', label: '业务规则', required: true, minimum: 1 },
+  { id: 'state_transitions', label: '状态与转换', required: false, minimum: 0 },
+  { id: 'scope_in', label: 'In Scope', required: true, minimum: 1 },
+  { id: 'scope_out', label: 'Out of Scope', required: false, minimum: 0 },
+  { id: 'success', label: '成功结果', required: true, minimum: 1 },
+  { id: 'dependencies', label: '约束与依赖', required: false, minimum: 0 },
+  { id: 'sources', label: '调研依据', required: false, minimum: 0 },
+];
+
 const optionSchema = z.object({
   id: z.string().min(1).max(100),
   label: z.string().min(1).max(240),
@@ -146,16 +187,27 @@ function workflowFor(execution: Execution) {
 
 function state(db: Db, draftId: string) {
   const draft = db.prepare(`
-    SELECT workflow_phase, validated_change_seq, research_enabled
+    SELECT workflow_phase, validated_change_seq, research_enabled, protocol_version
     FROM business_analysis_drafts WHERE draft_id = ?
-  `).get(draftId) as { workflow_phase: string; validated_change_seq: number | null; research_enabled: number } | undefined;
+  `).get(draftId) as {
+    workflow_phase: string;
+    validated_change_seq: number | null;
+    research_enabled: number;
+    protocol_version: number;
+  } | undefined;
   if (!draft) throw new Error('Business Analysis 草稿不存在');
   const artifacts = db.prepare(`
     SELECT phase, content, updated_at
     FROM business_analysis_phase_artifacts
     WHERE draft_id = ? ORDER BY updated_at, phase
   `).all(draftId) as { phase: string; content: string; updated_at: string }[];
-  return { draft, artifacts };
+  const moduleItems = db.prepare(`
+    SELECT module, item_key, payload_json, ordinal
+    FROM business_analysis_module_items
+    WHERE draft_id = ?
+    ORDER BY module, ordinal, item_key
+  `).all(draftId) as ModuleItem[];
+  return { draft, artifacts, moduleItems };
 }
 
 function successfulWebSearchRecorded(db: Db, executionId: string) {
@@ -209,6 +261,242 @@ function saveArtifact(db: Db, draftId: string, phase: string, content: string) {
   `).run(draftId);
 }
 
+function touchDraft(db: Db, draftId: string) {
+  db.prepare(`
+    UPDATE agent_work_drafts
+    SET change_seq = change_seq + 1, updated_at = CURRENT_TIMESTAMP
+    WHERE draft_id = ?
+  `).run(draftId);
+}
+
+function upsertModuleItem(
+  db: Db,
+  draftId: string,
+  module: string,
+  itemKey: string,
+  payload: Record<string, unknown>,
+) {
+  const existing = db.prepare(`
+    SELECT ordinal FROM business_analysis_module_items
+    WHERE draft_id = ? AND module = ? AND item_key = ?
+  `).get(draftId, module, itemKey) as { ordinal: number } | undefined;
+  const ordinal = existing?.ordinal || ((db.prepare(`
+    SELECT COALESCE(MAX(ordinal), 0) + 1 AS ordinal
+    FROM business_analysis_module_items WHERE draft_id = ? AND module = ?
+  `).get(draftId, module) as { ordinal: number }).ordinal);
+  db.prepare(`
+    INSERT INTO business_analysis_module_items(draft_id, module, item_key, payload_json, ordinal)
+    VALUES(?, ?, ?, ?, ?)
+    ON CONFLICT(draft_id, module, item_key) DO UPDATE SET
+      payload_json = excluded.payload_json,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(draftId, module, itemKey, JSON.stringify(payload), ordinal);
+  touchDraft(db, draftId);
+}
+
+function removeModuleItem(db: Db, draftId: string, module: string, itemKey: string) {
+  const removed = db.prepare(`
+    DELETE FROM business_analysis_module_items
+    WHERE draft_id = ? AND module = ? AND item_key = ?
+  `).run(draftId, module, itemKey).changes;
+  if (!removed) throw new Error(`模块 ${module} 中不存在 ${itemKey}`);
+  touchDraft(db, draftId);
+}
+
+function modulePayload<T extends Record<string, unknown>>(item: ModuleItem) {
+  return JSON.parse(item.payload_json) as T;
+}
+
+function itemsIn(current: ReturnType<typeof state>, module: string) {
+  return current.moduleItems.filter((item) => item.module === module);
+}
+
+function moduleDefinitions(agent: string) {
+  return agent === 'idea-context-agent' ? INTENT_BRIEF_MODULES
+    : agent === 'business-design-agent' ? BUSINESS_SOLUTION_MODULES
+      : [];
+}
+
+function structuredDocumentPhase(agent: string, phase: string) {
+  return (agent === 'idea-context-agent' && phase === 'synthesis')
+    || (agent === 'business-design-agent' && phase === 'solution');
+}
+
+function structuredModuleErrors(
+  current: ReturnType<typeof state>,
+  execution: Execution,
+) {
+  const errors: string[] = [];
+  for (const definition of moduleDefinitions(execution.agent)) {
+    const count = itemsIn(current, definition.id).length;
+    if (definition.required && count < definition.minimum) {
+      errors.push(`${definition.label}至少需要 ${definition.minimum} 项`);
+    }
+  }
+  if (current.draft.research_enabled && !itemsIn(current, 'sources').length) {
+    errors.push('启用 Research 时必须登记至少一个调研依据');
+  }
+  if (execution.agent === 'business-design-agent') {
+    const scenarioKeys = new Set([
+      ...itemsIn(current, 'main_scenarios'),
+      ...itemsIn(current, 'exception_scenarios'),
+      ...itemsIn(current, 'recovery_scenarios'),
+    ].map((item) => item.item_key));
+    for (const flow of itemsIn(current, 'flows')) {
+      const payload = modulePayload<{ scenarioKey: string }>(flow);
+      if (!scenarioKeys.has(payload.scenarioKey)) {
+        errors.push(`业务流程 ${flow.item_key} 引用了不存在的场景 ${payload.scenarioKey}`);
+      }
+    }
+  }
+  return errors;
+}
+
+function markdownValue(value: string) {
+  return value.trim().replace(/\n/g, '\n  ');
+}
+
+function markdownTableValue(value: string) {
+  return value.trim().replace(/\|/g, '\\|').replace(/\r?\n/g, '<br>');
+}
+
+function renderedDecisionPath(db: Db, execution: Execution) {
+  const decisions = db.prepare(`
+    SELECT title, answer, decision_authority, recommendation_reason
+    FROM questions
+    WHERE task_id = ? AND story_index IS NULL AND source_agent = ?
+      AND status IN ('answered', 'resolved') AND answer IS NOT NULL
+    ORDER BY created_at, question_id
+  `).all(execution.task_id, execution.agent) as {
+    title: string;
+    answer: string;
+    decision_authority: string | null;
+    recommendation_reason: string | null;
+  }[];
+  return decisions.length
+    ? decisions.map((decision) => [
+      `### ${decision.title}`,
+      '',
+      `- 决定：${markdownValue(decision.answer)}`,
+      `- 决定者：${decision.decision_authority === 'human' ? '用户' : 'Agent'}`,
+      ...(decision.recommendation_reason ? [`- 依据：${markdownValue(decision.recommendation_reason)}`] : []),
+    ].join('\n')).join('\n\n')
+    : '本阶段没有形成需要单独登记的决策节点。';
+}
+
+function renderSources(current: ReturnType<typeof state>) {
+  const sources = itemsIn(current, 'sources').map((item) => modulePayload<{
+    title: string;
+    reference: string;
+    usage: string;
+  }>(item));
+  return sources.length
+    ? sources.map((source) => `- **${source.title}**：${source.reference}；用途：${markdownValue(source.usage)}`)
+    : ['- 无额外权威输入或外部调研依据'];
+}
+
+function renderIntentBrief(db: Db, execution: Execution, current: ReturnType<typeof state>) {
+  const problem = modulePayload<{ text: string }>(itemsIn(current, 'problem')[0]);
+  const actors = itemsIn(current, 'actors').map((item) => modulePayload<{ name: string; role: string }>(item));
+  const texts = (module: string) => itemsIn(current, module).map((item) => modulePayload<{ text: string }>(item).text);
+  return [
+    '# 需求意图简报',
+    '',
+    '## 问题与背景', '', problem.text,
+    '',
+    '## 目标参与者', '', ...actors.map((actor) => `- **${actor.name}**：${markdownValue(actor.role)}`),
+    '',
+    '## 业务目标', '', ...texts('goals').map((text) => `- ${markdownValue(text)}`),
+    '',
+    '## 成功结果', '', ...texts('success').map((text) => `- ${markdownValue(text)}`),
+    '',
+    '## 硬约束', '', ...(texts('constraints').length ? texts('constraints').map((text) => `- ${markdownValue(text)}`) : ['- 无已确认的额外硬约束']),
+    '',
+    '## RESEARCH BASIS（权威输入与调研依据）', '', ...renderSources(current),
+    '',
+    '## 已确认假设', '', ...(texts('assumptions').length ? texts('assumptions').map((text) => `- ${markdownValue(text)}`) : ['- 无需要单独保留的已确认假设']),
+    '',
+    '## 排除项', '', ...(texts('exclusions').length ? texts('exclusions').map((text) => `- ${markdownValue(text)}`) : ['- 无已确认的排除项']),
+    '',
+    '## Active Decision Path', '', renderedDecisionPath(db, execution),
+  ].join('\n').trimEnd();
+}
+
+function renderScenarioSection(current: ReturnType<typeof state>, module: string) {
+  const scenarios = itemsIn(current, module).map((item) => ({
+    key: item.item_key,
+    ...modulePayload<{ title: string; actor: string; trigger: string; outcome: string }>(item),
+  }));
+  return scenarios.length
+    ? scenarios.flatMap((scenario) => [
+      `### ${scenario.title}`,
+      '',
+      `- 参与者：${markdownValue(scenario.actor)}`,
+      `- 触发：${markdownValue(scenario.trigger)}`,
+      `- 结果：${markdownValue(scenario.outcome)}`,
+      '',
+    ])
+    : ['- 无独立场景'];
+}
+
+function renderBusinessSolution(db: Db, execution: Execution, current: ReturnType<typeof state>) {
+  const summary = modulePayload<{ text: string }>(itemsIn(current, 'summary')[0]);
+  const actors = itemsIn(current, 'actors').map((item) => modulePayload<{ name: string; responsibility: string }>(item));
+  const texts = (module: string) => itemsIn(current, module).map((item) => modulePayload<{ text: string }>(item).text);
+  const flows = itemsIn(current, 'flows').map((item) => ({
+    key: item.item_key,
+    ...modulePayload<{
+      scenarioKey: string;
+      position: number;
+      action: string;
+      result: string;
+    }>(item),
+  })).sort((left, right) => left.scenarioKey.localeCompare(right.scenarioKey)
+    || left.position - right.position
+    || left.key.localeCompare(right.key));
+  const transitions = itemsIn(current, 'state_transitions').map((item) => modulePayload<{
+    from: string;
+    event: string;
+    to: string;
+    rule: string;
+  }>(item));
+  return [
+    '# 业务方案',
+    '',
+    '## 方案摘要', '', summary.text,
+    '',
+    '## 参与者及职责', '', ...actors.map((actor) => `- **${actor.name}**：${markdownValue(actor.responsibility)}`),
+    '',
+    '## 主场景', '', ...renderScenarioSection(current, 'main_scenarios'),
+    '',
+    '## 异常场景', '', ...renderScenarioSection(current, 'exception_scenarios'),
+    '',
+    '## 恢复场景', '', ...renderScenarioSection(current, 'recovery_scenarios'),
+    '',
+    '## 业务流程', '', ...flows.map((flow) => `${flow.position}. [${flow.scenarioKey}] ${markdownValue(flow.action)} → ${markdownValue(flow.result)}`),
+    '',
+    '## 业务规则', '', ...texts('rules').map((text) => `- ${markdownValue(text)}`),
+    '',
+    '## 状态与转换', '',
+    ...(transitions.length
+      ? ['| 当前状态 | 事件 | 下一状态 | 规则 |', '| --- | --- | --- | --- |', ...transitions.map((item) => `| ${markdownTableValue(item.from)} | ${markdownTableValue(item.event)} | ${markdownTableValue(item.to)} | ${markdownTableValue(item.rule)} |`)]
+      : ['- 本方案没有需要单独维护的业务状态转换']),
+    '',
+    '## 范围', '',
+    '### In Scope', '', ...texts('scope_in').map((text) => `- ${markdownValue(text)}`),
+    '',
+    '### Out of Scope', '', ...(texts('scope_out').length ? texts('scope_out').map((text) => `- ${markdownValue(text)}`) : ['- 无额外排除项']),
+    '',
+    '## 成功结果', '', ...texts('success').map((text) => `- ${markdownValue(text)}`),
+    '',
+    '## 约束与依赖', '', ...(texts('dependencies').length ? texts('dependencies').map((text) => `- ${markdownValue(text)}`) : ['- 无额外约束或依赖']),
+    '',
+    '## Active Decision Path', '', renderedDecisionPath(db, execution),
+    '',
+    '## RESEARCH BASIS（调研依据）', '', ...renderSources(current),
+  ].join('\n').trimEnd();
+}
+
 function commandResult(command: string, outcome: string, details: string[] = []) {
   return [
     '# COMMAND RESULT', '',
@@ -243,11 +531,73 @@ function answerPhaseDecisionPolicy(agent: string, mode: ReturnType<typeof decisi
   }[mode];
 }
 
+function structuredDocumentCommands(agent: string) {
+  if (agent === 'idea-context-agent') return [
+    'idea-context brief problem set --text-file <问题与背景>',
+    'idea-context brief actor upsert --key <key> --name <参与者> --role-file <角色与需求>',
+    'idea-context brief goal upsert --key <key> --text-file <业务目标>',
+    'idea-context brief success upsert --key <key> --text-file <成功结果>',
+    'idea-context brief constraint upsert --key <key> --text-file <硬约束>',
+    'idea-context brief source upsert --key <key> --title <来源> --reference <URL或引用> --usage-file <采用方式与局限>',
+    'idea-context brief assumption upsert --key <key> --text-file <已确认假设>',
+    'idea-context brief exclusion upsert --key <key> --text-file <排除项>',
+    'idea-context brief remove --module <actors|goals|success|constraints|sources|assumptions|exclusions> --key <key>',
+    'idea-context synthesis complete',
+  ];
+  return [
+    'business-design solution summary set --text-file <方案摘要>',
+    'business-design solution actor upsert --key <key> --name <参与者> --responsibility-file <职责>',
+    'business-design solution scenario upsert --key <key> --type <main|exception|recovery> --title <标题> --actor <参与者> --trigger-file <触发> --outcome-file <结果>',
+    'business-design solution flow upsert --key <key> --scenario <场景key> --position <序号> --action-file <动作> --result-file <结果>',
+    'business-design solution rule upsert --key <key> --text-file <业务规则>',
+    'business-design solution state upsert --key <key> --from <当前状态> --event <事件> --to <下一状态> --rule-file <转换规则>',
+    'business-design solution scope include --key <key> --text-file <纳入范围>',
+    'business-design solution scope exclude --key <key> --text-file <排除范围>',
+    'business-design solution success upsert --key <key> --text-file <成功结果>',
+    'business-design solution dependency upsert --key <key> --text-file <约束或依赖>',
+    'business-design solution source upsert --key <key> --title <来源> --reference <URL或引用> --usage-file <采用方式与局限>',
+    'business-design solution remove --module <模块> --key <key>',
+    'business-design solution complete',
+  ];
+}
+
+function structuredDocumentWorkPacket(
+  execution: Execution,
+  current: ReturnType<typeof state>,
+) {
+  const definitions = moduleDefinitions(execution.agent);
+  const errors = structuredModuleErrors(current, execution);
+  const counts = new Map(definitions.map((definition) => [definition.id, itemsIn(current, definition.id).length]));
+  const title = execution.agent === 'idea-context-agent' ? '需求意图简报' : '业务方案';
+  return [
+    '# NEXT WORK PACKET', '',
+    `- Phase: ${current.draft.workflow_phase}`,
+    `- Structured Document: ${title}`,
+    '- Storage: Harness-owned modules; Agent 不提交整篇 Markdown。',
+    '', '# MODULE STATUS', '',
+    ...definitions.map((definition) => {
+      const count = counts.get(definition.id) || 0;
+      const ready = !definition.required || count >= definition.minimum;
+      return `- ${ready ? '✓' : '○'} ${definition.label} (${definition.id})：${count} 项${definition.required ? ' · 必填' : ' · 可选'}`;
+    }),
+    ...(errors.length ? ['', '# REMAINING REQUIREMENTS', '', ...errors.map((error, index) => `${index + 1}. ${error}`)] : []),
+    '', '# COMMANDS', '',
+    ...structuredDocumentCommands(execution.agent).map((command) => `- \`${command}\``),
+    '', '# COMPLETION', '',
+    errors.length
+      ? '继续补齐模块；`complete` 会拒绝不完整草稿。'
+      : `模块结构已经满足要求；执行 \`${execution.agent === 'idea-context-agent' ? 'idea-context synthesis complete' : 'business-design solution complete'}\` 后由 Harness 生成 Markdown。`,
+  ].join('\n');
+}
+
 function workPacket(db: Db, execution: Execution, draft: Draft) {
   const workflow = workflowFor(execution);
   const current = state(db, draft.draft_id);
   const definition = workflow.definitions[current.draft.workflow_phase];
   if (!definition) throw new Error(`草稿阶段 ${current.draft.workflow_phase} 不受 ${execution.agent} 支持`);
+  if (current.draft.protocol_version >= 2 && structuredDocumentPhase(execution.agent, current.draft.workflow_phase)) {
+    return structuredDocumentWorkPacket(execution, current);
+  }
   const isAnswerPhase = (execution.agent === 'idea-context-agent' && current.draft.workflow_phase === 'clarification_resolution')
     || (execution.agent === 'business-design-agent' && current.draft.workflow_phase === 'decision_resolution');
   const mode = isAnswerPhase
@@ -534,17 +884,28 @@ export function businessAnalysisHelp(agent: string, topic?: string | null) {
   }
   const supportsResearch = agent === 'idea-context-agent' || agent === 'business-design-agent';
   const phases = businessAnalysisPhases(agent as BusinessAnalysisAgentId, supportsResearch);
-  const commands = phases
-    .map((phase) => workflow.definitions[phase].submit)
-    .filter((command): command is string => Boolean(command));
+  const usesStructuredDocument = agent === 'idea-context-agent' || agent === 'business-design-agent';
+  const structuredComplete = agent === 'idea-context-agent'
+    ? 'idea-context synthesis complete'
+    : agent === 'business-design-agent'
+      ? 'business-design solution complete'
+      : null;
+  const commands = phases.flatMap((phase) => {
+    const command = workflow.definitions[phase].submit;
+    if (!command) return [];
+    if (command === structuredComplete) return structuredDocumentCommands(agent);
+    return [`${command}${command.endsWith(' complete') && !command.endsWith(`${workflow.namespace} complete`) ? ' --artifact-file <工作包文件>' : ''}`];
+  });
   return [
-    `${agent} 使用聚合工作包命令链；一个 --artifact-file 承载当前阶段的完整产物，不逐字段提交。`,
+    usesStructuredDocument
+      ? `${agent} 的分析阶段使用聚合工作包；正式文档阶段使用结构化模块命令，由 Harness 校验并生成 Markdown。`
+      : `${agent} 使用聚合工作包命令链；一个 --artifact-file 承载当前阶段的完整产物，不逐字段提交。`,
     '',
     `阶段：${phases.map((phase) => phase === 'research' ? '[RESEARCH · 仅实时搜索开启时]' : workflow.definitions[phase].label).join(' → ')}`,
     '',
     '命令：',
     `  ${workflow.namespace} status`,
-    ...commands.map((command) => `  ${command}${command.endsWith(' complete') && !command.endsWith(`${workflow.namespace} complete`) ? ' --artifact-file <工作包文件>' : ''}`),
+    ...commands.map((command) => `  ${command}`),
     ...(agent === 'idea-context-agent' || agent === 'business-design-agent' ? [`  ${workflow.namespace} request-clarification`] : []),
     ...(agent === 'idea-context-agent' ? [
       '  idea-context clarification-resolution audit-complete --artifact-file <答案审查>',
@@ -579,20 +940,193 @@ export function cloneBusinessAnalysisDraft(db: Db, source: Draft, target: Draft,
   const phase = resumeClarification
     ? sourceState.draft.workflow_phase
     : businessAnalysisPhases(agent as BusinessAnalysisAgentId, researchEnabled)[0];
-  db.prepare(`INSERT INTO business_analysis_drafts(draft_id, workflow_phase, research_enabled) VALUES(?, ?, ?)`)
-    .run(target.draft_id, phase, researchEnabled ? 1 : 0);
+  db.prepare(`
+    INSERT INTO business_analysis_drafts(draft_id, workflow_phase, research_enabled, protocol_version)
+    VALUES(?, ?, ?, ?)
+  `).run(target.draft_id, phase, researchEnabled ? 1 : 0, sourceState.draft.protocol_version);
   db.prepare(`
     INSERT INTO business_analysis_phase_artifacts(draft_id, phase, content, updated_at)
     SELECT ?, phase, content, updated_at
     FROM business_analysis_phase_artifacts WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
+  db.prepare(`
+    INSERT INTO business_analysis_module_items(
+      draft_id, module, item_key, payload_json, ordinal, created_at, updated_at
+    )
+    SELECT ?, module, item_key, payload_json, ordinal, created_at, updated_at
+    FROM business_analysis_module_items WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
 }
 
 export function initializeBusinessAnalysisDraft(db: Db, draft: Draft, agent: string, researchEnabled: boolean) {
   const workflow = businessAnalysisWorkflow(agent);
   if (!workflow) throw new Error(`未知 Business Analysis Agent：${agent}`);
-  db.prepare(`INSERT INTO business_analysis_drafts(draft_id, workflow_phase, research_enabled) VALUES(?, ?, ?)`)
-    .run(draft.draft_id, businessAnalysisPhases(agent as BusinessAnalysisAgentId, researchEnabled)[0], researchEnabled ? 1 : 0);
+  db.prepare(`
+    INSERT INTO business_analysis_drafts(draft_id, workflow_phase, research_enabled, protocol_version)
+    VALUES(?, ?, ?, 2)
+  `).run(draft.draft_id, businessAnalysisPhases(agent as BusinessAnalysisAgentId, researchEnabled)[0], researchEnabled ? 1 : 0);
+}
+
+function structuredAccepted(input: Input, detail: string) {
+  return [
+    commandResult(input.command, 'accepted', [detail]),
+    '',
+    workPacket(input.db, input.execution, input.draft),
+  ].join('\n');
+}
+
+function sourcePayload(flags: Map<string, string>) {
+  return {
+    title: bounded(required(flags, 'title'), '来源标题', 500),
+    reference: bounded(required(flags, 'reference'), '来源 URL 或引用', 2000),
+    usage: bounded(required(flags, 'usage'), '采用方式与局限', 4000),
+  };
+}
+
+function runStructuredDocumentCommand(
+  input: Input,
+  current: ReturnType<typeof state>,
+) {
+  const { db, draft, execution, command, flags } = input;
+  const phase = current.draft.workflow_phase;
+  if (!structuredDocumentPhase(execution.agent, phase)) return null;
+  const key = () => bounded(required(flags, 'key'), '稳定 key', 120);
+  const textPayload = (label: string) => ({ text: bounded(required(flags, 'text'), label) });
+
+  if (execution.agent === 'idea-context-agent') {
+    if (command === 'idea-context brief problem set') {
+      upsertModuleItem(db, draft.draft_id, 'problem', 'main', textPayload('问题与背景'));
+      return structuredAccepted(input, '问题与背景已保存');
+    }
+    if (command === 'idea-context brief actor upsert') {
+      const itemKey = key();
+      upsertModuleItem(db, draft.draft_id, 'actors', itemKey, {
+        name: bounded(required(flags, 'name'), '参与者名称', 240),
+        role: bounded(required(flags, 'role'), '参与者角色与需求', 4000),
+      });
+      return structuredAccepted(input, `目标参与者 ${itemKey} 已保存`);
+    }
+    const intentTextModules: Record<string, { module: string; label: string }> = {
+      'idea-context brief goal upsert': { module: 'goals', label: '业务目标' },
+      'idea-context brief success upsert': { module: 'success', label: '成功结果' },
+      'idea-context brief constraint upsert': { module: 'constraints', label: '硬约束' },
+      'idea-context brief assumption upsert': { module: 'assumptions', label: '已确认假设' },
+      'idea-context brief exclusion upsert': { module: 'exclusions', label: '排除项' },
+    };
+    const intentTextModule = intentTextModules[command];
+    if (intentTextModule) {
+      const itemKey = key();
+      upsertModuleItem(db, draft.draft_id, intentTextModule.module, itemKey, textPayload(intentTextModule.label));
+      return structuredAccepted(input, `${intentTextModule.label} ${itemKey} 已保存`);
+    }
+    if (command === 'idea-context brief source upsert') {
+      const itemKey = key();
+      upsertModuleItem(db, draft.draft_id, 'sources', itemKey, sourcePayload(flags));
+      return structuredAccepted(input, `权威输入 ${itemKey} 已保存`);
+    }
+    if (command === 'idea-context brief remove') {
+      const module = bounded(required(flags, 'module'), '模块', 80);
+      if (!INTENT_BRIEF_MODULES.some((definition) => definition.id === module) || module === 'problem') {
+        throw new Error('--module 必须是 actors、goals、success、constraints、sources、assumptions 或 exclusions');
+      }
+      const itemKey = key();
+      removeModuleItem(db, draft.draft_id, module, itemKey);
+      return structuredAccepted(input, `${module}/${itemKey} 已移除`);
+    }
+  }
+
+  if (execution.agent === 'business-design-agent') {
+    if (command === 'business-design solution summary set') {
+      upsertModuleItem(db, draft.draft_id, 'summary', 'main', textPayload('方案摘要'));
+      return structuredAccepted(input, '方案摘要已保存');
+    }
+    if (command === 'business-design solution actor upsert') {
+      const itemKey = key();
+      upsertModuleItem(db, draft.draft_id, 'actors', itemKey, {
+        name: bounded(required(flags, 'name'), '参与者名称', 240),
+        responsibility: bounded(required(flags, 'responsibility'), '参与者职责', 4000),
+      });
+      return structuredAccepted(input, `参与者 ${itemKey} 已保存`);
+    }
+    if (command === 'business-design solution scenario upsert') {
+      const type = required(flags, 'type');
+      const module = ({ main: 'main_scenarios', exception: 'exception_scenarios', recovery: 'recovery_scenarios' } as Record<string, string>)[type];
+      if (!module) throw new Error('--type 必须是 main、exception 或 recovery');
+      const itemKey = key();
+      upsertModuleItem(db, draft.draft_id, module, itemKey, {
+        title: bounded(required(flags, 'title'), '场景标题', 500),
+        actor: bounded(required(flags, 'actor'), '场景参与者', 1000),
+        trigger: bounded(required(flags, 'trigger'), '场景触发条件', 4000),
+        outcome: bounded(required(flags, 'outcome'), '场景可观察结果', 4000),
+      });
+      return structuredAccepted(input, `${type} 场景 ${itemKey} 已保存`);
+    }
+    if (command === 'business-design solution flow upsert') {
+      const itemKey = key();
+      const position = Number(required(flags, 'position'));
+      if (!Number.isInteger(position) || position <= 0) throw new Error('--position 必须是正整数');
+      upsertModuleItem(db, draft.draft_id, 'flows', itemKey, {
+        scenarioKey: bounded(required(flags, 'scenario'), '场景 key', 120),
+        position,
+        action: bounded(required(flags, 'action'), '流程动作', 4000),
+        result: bounded(required(flags, 'result'), '流程结果', 4000),
+      });
+      return structuredAccepted(input, `业务流程 ${itemKey} 已保存`);
+    }
+    if (command === 'business-design solution state upsert') {
+      const itemKey = key();
+      upsertModuleItem(db, draft.draft_id, 'state_transitions', itemKey, {
+        from: bounded(required(flags, 'from'), '当前状态', 500),
+        event: bounded(required(flags, 'event'), '转换事件', 1000),
+        to: bounded(required(flags, 'to'), '下一状态', 500),
+        rule: bounded(required(flags, 'rule'), '转换规则', 4000),
+      });
+      return structuredAccepted(input, `状态转换 ${itemKey} 已保存`);
+    }
+    const designTextModules: Record<string, { module: string; label: string }> = {
+      'business-design solution rule upsert': { module: 'rules', label: '业务规则' },
+      'business-design solution success upsert': { module: 'success', label: '成功结果' },
+      'business-design solution dependency upsert': { module: 'dependencies', label: '约束或依赖' },
+      'business-design solution scope include': { module: 'scope_in', label: 'In Scope' },
+      'business-design solution scope exclude': { module: 'scope_out', label: 'Out of Scope' },
+    };
+    const designTextModule = designTextModules[command];
+    if (designTextModule) {
+      const itemKey = key();
+      upsertModuleItem(db, draft.draft_id, designTextModule.module, itemKey, textPayload(designTextModule.label));
+      return structuredAccepted(input, `${designTextModule.label} ${itemKey} 已保存`);
+    }
+    if (command === 'business-design solution source upsert') {
+      const itemKey = key();
+      upsertModuleItem(db, draft.draft_id, 'sources', itemKey, sourcePayload(flags));
+      return structuredAccepted(input, `调研依据 ${itemKey} 已保存`);
+    }
+    if (command === 'business-design solution remove') {
+      const module = bounded(required(flags, 'module'), '模块', 80);
+      if (!BUSINESS_SOLUTION_MODULES.some((definition) => definition.id === module) || module === 'summary') {
+        throw new Error(`未知或不可移除的业务方案模块：${module}`);
+      }
+      const itemKey = key();
+      removeModuleItem(db, draft.draft_id, module, itemKey);
+      return structuredAccepted(input, `${module}/${itemKey} 已移除`);
+    }
+  }
+
+  const completeCommand = execution.agent === 'idea-context-agent'
+    ? 'idea-context synthesis complete'
+    : 'business-design solution complete';
+  if (command === completeCommand) {
+    const errors = structuredModuleErrors(current, execution);
+    if (errors.length) {
+      throw new Error(`结构化${execution.agent === 'idea-context-agent' ? '需求意图简报' : '业务方案'}不完整：\n${errors.map((error, index) => `${index + 1}. ${error}`).join('\n')}`);
+    }
+    const content = execution.agent === 'idea-context-agent'
+      ? renderIntentBrief(db, execution, current)
+      : renderBusinessSolution(db, execution, current);
+    if (current.draft.research_enabled) assertResearchBasisIncluded(db, draft.draft_id, content);
+    return transition(input, phase, 'finalize', content, '结构化模块校验通过并由 Harness 生成正式 Markdown');
+  }
+  throw new Error(`命令 ${command} 不属于当前结构化 ${phase} 工作包`);
 }
 
 export function runBusinessAnalysisCommand(input: Input) {
@@ -613,6 +1147,10 @@ export function runBusinessAnalysisCommand(input: Input) {
 
   assertViewed(draft, execution.execution_id);
   const phase = current.draft.workflow_phase;
+
+  if (current.draft.protocol_version >= 2 && structuredDocumentPhase(execution.agent, phase)) {
+    return runStructuredDocumentCommand(input, current)!;
+  }
 
   if (command === `${namespace} request-clarification`) {
     if (!['clarification_resolution', 'decision_resolution'].includes(phase)) throw new Error('当前工作包不能请求澄清');

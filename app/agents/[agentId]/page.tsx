@@ -1,9 +1,10 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { Activity, Bot, BrainCircuit, Check, FolderCog, Gauge, MemoryStick, RotateCcw, Sparkles } from 'lucide-react';
+import { Activity, BookOpenText, Bot, BrainCircuit, CalendarDays, Check, FolderCog, Gauge, MemoryStick, PencilLine, RotateCcw, Sparkles } from 'lucide-react';
 import { getAgentProfile } from '../../../src/application/agent-profiles';
 import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, OMP_THINKING_LEVELS, getAgentRuntimeSettings, getFlowAgentDefaultRuntimeSettings } from '../../../src/application/project-settings';
 import { AGENT_PROMPT_SEED_REVISION, isFlowAgentId } from '../../../src/domain/agent-profile';
+import { MarkdownContent } from '../../../src/ui/markdown-content';
 import { resetAgentPromptAction, saveAgentMemoryAction, saveAgentPromptAction, saveAgentRuntimeAction, setAgentAutoEvolutionAction } from '../../actions';
 
 export const dynamic = 'force-dynamic';
@@ -29,7 +30,22 @@ function selectedSection(input: string | string[] | undefined): AgentSection {
   return agentSections.some((section) => section.id === value) ? value as AgentSection : 'runtime';
 }
 
-export default async function AgentDetailPage({ params, searchParams }: { params: Promise<{ agentId: string }>; searchParams: Promise<{ section?: string | string[]; runtimeMode?: string | string[] }> }) {
+function dailyMemoryLabel(name: string) {
+  return name.replace(/\.md$/i, '');
+}
+
+function dailyMemoryBody(content: string) {
+  return content
+    .replace(/^#\s+[^\n]+\n*/u, '')
+    .replace(/<!--[^]*?-->\s*/gu, '')
+    .trim();
+}
+
+function dailyObservationCount(content: string) {
+  return content.match(/^##\s+/gmu)?.length || 0;
+}
+
+export default async function AgentDetailPage({ params, searchParams }: { params: Promise<{ agentId: string }>; searchParams: Promise<{ section?: string | string[]; runtimeMode?: string | string[]; memoryMode?: string | string[] }> }) {
   const [{ agentId }, query] = await Promise.all([params, searchParams]);
   if (!isFlowAgentId(agentId)) notFound();
   const [detail, runtimeSettings, flowDefaults] = await Promise.all([
@@ -40,6 +56,8 @@ export default async function AgentDetailPage({ params, searchParams }: { params
   const section = selectedSection(query.section);
   const runtimeMode = Array.isArray(query.runtimeMode) ? query.runtimeMode[0] : query.runtimeMode;
   const editingIndependentRuntime = runtimeSettings.source === 'agent_override' || runtimeMode === 'override';
+  const memoryMode = Array.isArray(query.memoryMode) ? query.memoryMode[0] : query.memoryMode;
+  const editingMemory = memoryMode === 'edit';
   const flowRuntimeSummary = flowDefaults.executorId === 'codex'
     ? `${flowDefaults.executorId} · ${flowDefaults.codexModel} · ${flowDefaults.codexReasoningEffort}${flowDefaults.codexWebSearch ? ' · 实时网页搜索' : ''}`
     : flowDefaults.executorId === 'claude'
@@ -166,18 +184,38 @@ export default async function AgentDetailPage({ params, searchParams }: { params
         </aside>
       </div>}
 
-      {section === 'memory' && <div className="agent-section-layout">
-        <form action={saveAgentMemoryAction} className="card settings agent-editor agent-section-card">
-          <input type="hidden" name="agentId" value={agentId}/><input type="hidden" name="section" value="memory"/>
-          <div className="settings-section-head"><span className="executor-icon"><MemoryStick size={18}/></span><div><strong>Durable Memory</strong><p className="muted settings-description">只保存跨任务可复用、已经有证据支持的经验；运行观察保存在 daily memory。</p></div><span className="badge">r{detail.currentMemory.revision}</span></div>
-          <textarea className="code-editor memory-editor" name="content" defaultValue={detail.currentMemory.content}/>
-          <label>修改原因<input name="reason" placeholder="例如：补充项目测试工具的稳定用法"/></label>
-          <button className="button" type="submit">保存长期记忆</button>
-        </form>
-        <aside className="card settings agent-section-aside-card">
-          <div><strong>Daily Memory</strong><p className="muted settings-description">每轮观察先进入短期层；重复、跨需求且高置信的经验才会提升。</p></div>
-          <div className="daily-memory-list">{detail.dailyMemories.length ? detail.dailyMemories.map((memory) => <details key={memory.name}><summary>{memory.name}</summary><pre>{memory.content}</pre></details>) : <p className="muted">尚无 daily memory。</p>}</div>
-        </aside>
+      {section === 'memory' && <div className="memory-section-stack">
+        <section className="card settings agent-section-card memory-card">
+          <div className="settings-section-head memory-section-head">
+            <span className="executor-icon"><MemoryStick size={18}/></span>
+            <div><strong>Durable Memory</strong><p className="muted settings-description">跨任务复用的稳定经验。默认以文档方式阅读，需要修改时再进入编辑模式。</p></div>
+            <div className="memory-head-actions"><span className="badge">r{detail.currentMemory.revision}</span>{editingMemory
+              ? <Link className="button secondary memory-mode-button" href={`/agents/${agentId}?section=memory`}><BookOpenText size={15}/>返回阅读</Link>
+              : <Link className="button secondary memory-mode-button" href={`/agents/${agentId}?section=memory&memoryMode=edit`}><PencilLine size={15}/>编辑</Link>}
+            </div>
+          </div>
+          {editingMemory ? <form action={saveAgentMemoryAction} className="agent-editor memory-edit-form">
+            <input type="hidden" name="agentId" value={agentId}/><input type="hidden" name="section" value="memory"/>
+            <textarea className="code-editor memory-editor" name="content" defaultValue={detail.currentMemory.content}/>
+            <label>修改原因<input name="reason" placeholder="例如：补充项目测试工具的稳定用法"/></label>
+            <div className="form-actions"><button className="button" type="submit">保存长期记忆</button><Link className="button secondary" href={`/agents/${agentId}?section=memory`}>取消</Link></div>
+          </form> : <div className="memory-document"><MarkdownContent content={detail.currentMemory.content}/></div>}
+        </section>
+
+        <section className="card settings agent-section-card daily-memory-card">
+          <div className="settings-section-head">
+            <span className="executor-icon"><CalendarDays size={18}/></span>
+            <div><strong>Daily Memory</strong><p className="muted settings-description">按日期浏览短期观察；最新一天默认展开，内容以 Markdown 排版显示。</p></div>
+            <span className="badge">最近 {detail.dailyMemories.length} / {detail.dailyFiles.length} 天</span>
+          </div>
+          <div className="daily-memory-list">{detail.dailyMemories.length ? detail.dailyMemories.map((memory, index) => {
+            const observationCount = dailyObservationCount(memory.content);
+            return <details key={memory.name} open={index === 0}>
+              <summary><span className="daily-memory-icon"><CalendarDays size={16}/></span><span><strong>{dailyMemoryLabel(memory.name)}</strong><small>{observationCount} 条观察</small></span>{index === 0 && <span className="badge green">最新</span>}</summary>
+              <div className="daily-memory-document"><MarkdownContent content={dailyMemoryBody(memory.content)}/></div>
+            </details>;
+          }) : <div className="memory-empty"><CalendarDays size={20}/><p className="muted">尚无 daily memory；Agent 产生可复用观察后会按日期显示在这里。</p></div>}</div>
+        </section>
       </div>}
 
       {section === 'evolution' && <div className="agent-section-layout">
