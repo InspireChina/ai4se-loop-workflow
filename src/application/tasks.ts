@@ -49,6 +49,7 @@ import {
   requirementDependencySatisfied,
   type RequirementDependency,
 } from './task-dependencies';
+import { queueVerificationAssistanceInDb } from './verification-assistance';
 
 export type Task = TaskState & {
   title: string;
@@ -75,6 +76,11 @@ export type TaskWithLanes = Task & {
   lanes: TaskLane[];
   dependencies: RequirementDependency[];
   dependency_gate_open: boolean;
+  verification_assistance_pending_count: number;
+  verification_assistance_running_count: number;
+  verification_assistance_escalated_count: number;
+  verification_assistance_attempt: number;
+  verification_assistance_max_attempts: number;
 };
 
 export type RequirementMetadata = {
@@ -227,6 +233,11 @@ export type RuntimeInputRequest = {
   created_at: string;
   updated_at: string;
   resolved_at: string | null;
+  assistance_job_id: string | null;
+  assistance_status: 'pending' | 'running' | 'resolved' | 'escalated' | 'cancelled' | null;
+  assistance_attempt_count: number | null;
+  assistance_max_attempts: number | null;
+  assistance_last_reason: string | null;
 };
 export type ClosureAcknowledgement = { acknowledgement_id: string; task_id: string; review_document_id: string; review_revision: number; acknowledged_by: string; acknowledged_at: string };
 export type ExecutionAttemptView = { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; lane: string | null; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_template_version: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; executor_id: string | null; configured_model: string | null; reasoning_effort: string | null; result_outcome: string | null; result_verdict: string | null; result_summary: string | null; last_error: string | null; retry_not_before: string | null; dispatch_generation_key: string | null; dispatch_execution_exited_at: string | null; dispatch_settled_at: string | null; claimed_resources: string | null; created_at: string; started_at: string | null; finished_at: string | null };
@@ -379,11 +390,32 @@ export async function listTasks(options: { includeTerminal?: boolean } = {}): Pr
     || right.updated_at.localeCompare(left.updated_at));
   return tasks.map((task) => {
     refreshTaskLaneStatesInDb(db, task);
+    const assistance = db.prepare(`
+      SELECT
+        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+        SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count,
+        SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END) AS escalated_count,
+        COALESCE(MAX(attempt_count), 0) AS attempt,
+        COALESCE(MAX(max_attempts), 0) AS max_attempts
+      FROM verification_assistance_jobs
+      WHERE task_id = ? AND status IN ('pending', 'running', 'escalated')
+    `).get(task.task_id) as {
+      pending_count: number | null;
+      running_count: number | null;
+      escalated_count: number | null;
+      attempt: number;
+      max_attempts: number;
+    };
     return {
       ...task,
       lanes: taskLanesInDb(db, task),
       dependencies: requirementDependenciesInDb(db, task.task_id),
       dependency_gate_open: requirementDependencyGateOpenInDb(db, task.task_id),
+      verification_assistance_pending_count: assistance.pending_count || 0,
+      verification_assistance_running_count: assistance.running_count || 0,
+      verification_assistance_escalated_count: assistance.escalated_count || 0,
+      verification_assistance_attempt: assistance.attempt,
+      verification_assistance_max_attempts: assistance.max_attempts,
     };
   });
 }
@@ -453,7 +485,18 @@ export async function getTask(taskId: string) {
   }));
   const deliverySpecs = db.prepare('SELECT * FROM story_specs WHERE task_id = ? ORDER BY story_index, revision').all(taskId) as DeliverySpecRecord[];
   const questions = db.prepare('SELECT * FROM questions WHERE task_id = ? ORDER BY created_at').all(taskId) as Question[];
-  const runtimeInputs = db.prepare('SELECT * FROM runtime_input_requests WHERE task_id = ? ORDER BY created_at').all(taskId) as RuntimeInputRequest[];
+  const runtimeInputs = db.prepare(`
+    SELECT request.*,
+           job.job_id AS assistance_job_id,
+           job.status AS assistance_status,
+           job.attempt_count AS assistance_attempt_count,
+           job.max_attempts AS assistance_max_attempts,
+           job.last_reason AS assistance_last_reason
+    FROM runtime_input_requests request
+    LEFT JOIN verification_assistance_jobs job ON job.request_id = request.request_id
+    WHERE request.task_id = ?
+    ORDER BY request.created_at
+  `).all(taskId) as RuntimeInputRequest[];
   const documents = db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[];
   const documentComments = db.prepare('SELECT * FROM document_comments WHERE task_id = ? ORDER BY created_at').all(taskId) as DocumentComment[];
   const feedbackBatches = db.prepare(`
@@ -1322,6 +1365,14 @@ export async function addRuntimeInputRequest(input: unknown) {
         blockedReason: value.title,
       });
     }
+    if (value.sourceAgent === 'test-agent') {
+      queueVerificationAssistanceInDb(db, {
+        requestId,
+        taskId: value.taskId,
+        storyIndex: value.storyIndex || null,
+        title: value.title,
+      });
+    }
     addEvent(db, value.taskId, value.sourceAgent, 'RuntimeInputRequested', `请求运行信息：${value.title}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId);
@@ -1347,6 +1398,12 @@ export async function answerRuntimeInput(input: unknown) {
   `).get(value.requestId, value.taskId) as RuntimeInputRequest | undefined;
   if (!request) throw new Error('运行信息请求不存在');
   if (request.status !== 'pending') throw new Error('运行信息请求已经处理');
+  const assistance = db.prepare(`
+    SELECT status FROM verification_assistance_jobs WHERE request_id = ?
+  `).get(value.requestId) as { status: string } | undefined;
+  if (assistance && ['pending', 'running'].includes(assistance.status)) {
+    throw new Error('系统辅助 Agent 正在处理该验证协助；连续尝试后仍无法解决时才会转交人工');
+  }
   db.exec('BEGIN');
   try {
     db.prepare(`
@@ -1354,6 +1411,11 @@ export async function answerRuntimeInput(input: unknown) {
       SET answer = ?, status = 'answered', updated_at = CURRENT_TIMESTAMP
       WHERE request_id = ?
     `).run(value.answer, value.requestId);
+    db.prepare(`
+      UPDATE verification_assistance_jobs
+      SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+      WHERE request_id = ? AND status = 'escalated'
+    `).run(value.requestId);
     addEvent(db, value.taskId, 'human', 'RuntimeInputAnswered', `回答了运行信息「${request.title}」。`);
     db.exec('COMMIT');
   } catch (error) {

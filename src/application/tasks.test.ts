@@ -8,6 +8,29 @@ import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 import { resourcesForAgent } from '../domain/resource';
 import type { DelegationEnvelope } from './tasks';
 
+async function resolveTestVerificationAssistance(answer: string) {
+  const { claimNextVerificationAssistance, completeVerificationAssistanceExecution, runVerificationAssistanceCommand } = await import('./verification-assistance');
+  const claimed = await claimNextVerificationAssistance({
+    runId: `run-test-system-assistance-${Date.now()}-${Math.random()}`,
+    executorId: 'codex',
+    executionOptions: {},
+  });
+  assert.ok(claimed);
+  await runVerificationAssistanceCommand({
+    jobId: claimed.jobId,
+    sessionId: claimed.sessionId,
+    token: claimed.token,
+    args: ['verification-assistance', 'status'],
+  });
+  await runVerificationAssistanceCommand({
+    jobId: claimed.jobId,
+    sessionId: claimed.sessionId,
+    token: claimed.token,
+    args: ['verification-assistance', 'resolve', '--answer', answer],
+  });
+  await completeVerificationAssistanceExecution(claimed.executionId);
+}
+
 test('updates an existing task-level document instead of inserting a duplicate NULL-story row', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { listDocuments, upsertDocument } = await import('./tasks');
@@ -1017,8 +1040,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
   const testInput = detail!.runtimeInputs.find((input) => input.source_agent === 'test-agent')!;
   assert.equal(detail?.task.run_state, 'waiting_for_runtime_input');
   assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE), undefined);
-  await answerRuntimeInput({ taskId, requestId: testInput.request_id, answer: '使用本地预览环境。' });
-  await submitRuntimeInputs(taskId);
+  await resolveTestVerificationAssistance('使用本地预览环境。');
   assert.equal((await getTask(taskId))?.task.resume_pending, 0);
   assert.equal((await inspectTaskDispatch(taskId))[0]?.agent, 'test-agent');
   assert.equal((await inspectTaskDispatch(taskId))[0]?.pipeline, 'resume');

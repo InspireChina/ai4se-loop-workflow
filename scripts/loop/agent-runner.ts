@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 import '../load-env.js';
 import { createHash } from 'node:crypto';
-import { agentExecutionOptions, getAgentRuntimeSettings, getLangfuseRuntimeEnv } from '../../src/application/project-settings';
+import { agentExecutionOptions, getAgentExecutorSettings, getAgentRuntimeSettings, getLangfuseRuntimeEnv, type AgentExecutorSettings } from '../../src/application/project-settings';
 import { buildAgentContextSnapshot, renderAgentWorkingContextPack } from '../../src/application/agent-context';
 import {
   advanceAndPublishRuntimeInvalidation,
@@ -58,6 +58,15 @@ import {
 import { appendLoopRunLog, CodeSlotBusyError, endRun, getRunStatus, getTask, getTaskContext, recordRuntimeEventWithFallback, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
 import { progressDispatcher, type ReservedExecution } from '../../src/application/progress-dispatch';
 import {
+  buildVerificationAssistancePrompt,
+  claimNextVerificationAssistance,
+  completeVerificationAssistanceExecution,
+  finishVerificationAssistanceAttempt,
+  reconcileVerificationAssistanceJobs,
+  verificationAssistanceJobStatus,
+  type ClaimedVerificationAssistance,
+} from '../../src/application/verification-assistance';
+import {
   listRecoveryItemsForStage,
   recoveryStageForAgent,
 } from '../../src/application/recovery-items';
@@ -106,6 +115,103 @@ function scheduleEvolution(evaluation: Promise<void>) {
     runnerWake.wake('background-completed');
   });
   backgroundEvaluations.add(tracked);
+}
+
+async function runVerificationAssistanceAttempt(job: ClaimedVerificationAssistance, settings: AgentExecutorSettings) {
+  const executor = getAgentExecutor(settings.executorId);
+  const executionOptions = agentExecutionOptions(settings);
+  const limits = resolveAgentExecutionLimits(process.env);
+  const temporary = createAgentExecutionTempDirectory(paths.root, job.executionId);
+  activeExecutionTemporaries.set(job.executionId, temporary);
+  try {
+    const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
+    const execution = await executeDelegation({
+      runId,
+      prompt: buildVerificationAssistancePrompt(job),
+      workspaceRoot: paths.root,
+      executor,
+      executionOptions,
+      context: {
+        agent: 'system-assistance-agent',
+        taskId: job.taskId,
+        storyIndex: job.storyIndex,
+        pipeline: 'verification-assistance',
+        lane: 'control',
+      },
+      description: `处理验证协助：${job.title}（第 ${job.attempt}/${job.maxAttempts} 次）`,
+      telemetry,
+      appendLog: (message) => appendLoopRunLog(runId, message),
+      recordTelemetryEvent: async (event) => {
+        await recordExecutionReceipt(
+          job.executionId,
+          'tool_event',
+          String(event.sequence).padStart(8, '0'),
+          event,
+        );
+        const input = event.input as Record<string, unknown> | undefined;
+        if (typeof input?.command === 'string' && /loop-agent\.(?:mjs|cjs)/i.test(input.command)) {
+          await advanceAndPublishRuntimeInvalidation('task.progressed', job.taskId);
+        }
+      },
+      maxRuntimeMs: limits.maxRuntimeMs,
+      startupTimeoutMs: limits.startupTimeoutMs,
+      idleTimeoutMs: limits.idleTimeoutMs,
+      environment: {
+        LOOP_VERIFICATION_ASSISTANCE_JOB_ID: job.jobId,
+        LOOP_VERIFICATION_ASSISTANCE_SESSION_ID: job.sessionId,
+        LOOP_VERIFICATION_ASSISTANCE_COMMAND_TOKEN: job.token,
+        LOOP_AGENT_TMP_DIR: temporary.directory,
+      },
+      cancellationRequested: async () => {
+        const db = await databaseConnection();
+        const row = db.prepare(`
+          SELECT job.status, task.is_paused
+          FROM verification_assistance_jobs job
+          JOIN tasks task ON task.task_id = job.task_id
+          WHERE job.job_id = ?
+        `).get(job.jobId) as { status: string; is_paused: number } | undefined;
+        return !row || row.status !== 'running' || Boolean(row.is_paused);
+      },
+      cancellationSignal: runnerAbort.signal,
+    });
+    const current = await verificationAssistanceJobStatus(job.jobId);
+    if (current?.status !== 'running') {
+      await completeVerificationAssistanceExecution(job.executionId);
+      await appendLoopRunLog(
+        runId,
+        current?.status === 'resolved'
+          ? `[系统辅助] 已解决验证协助 requirement=${job.taskId} attempt=${job.attempt}/${job.maxAttempts}`
+          : `[系统辅助] 已提交本次未解决结论 requirement=${job.taskId} attempt=${job.attempt}/${job.maxAttempts} status=${current?.status || 'missing'}`,
+      );
+      return;
+    }
+    const reason = execution.cancelled
+      ? '系统辅助 Agent 因需求暂停或 Runner 停止而中断'
+      : execution.exitCode !== 0
+        ? execution.terminationReason
+          ? `系统辅助 Agent ${execution.terminationReason}${execution.failureDetail ? `；${execution.failureDetail}` : ''}`
+          : `系统辅助 Agent CLI 退出码 ${execution.exitCode}${execution.failureDetail ? `；${execution.failureDetail}` : ''}`
+        : '系统辅助 Agent 已退出，但未执行 resolve 或 defer 终止命令';
+    const result = await finishVerificationAssistanceAttempt({ jobId: job.jobId, reason, outcome: 'failed' });
+    await appendLoopRunLog(
+      runId,
+      result.escalated
+        ? `[系统辅助] ${job.maxAttempts} 次验证协助均未解决，已转交人工 requirement=${job.taskId}：${reason}`
+        : `[系统辅助] 验证协助第 ${job.attempt}/${job.maxAttempts} 次失败，将继续自动尝试 requirement=${job.taskId}：${reason}`,
+    );
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    const result = await finishVerificationAssistanceAttempt({ jobId: job.jobId, reason, outcome: 'failed' });
+    await appendLoopRunLog(
+      runId,
+      result.escalated
+        ? `[系统辅助] 验证协助重试已耗尽，已转交人工 requirement=${job.taskId}：${reason}`
+        : `[系统辅助] 验证协助执行异常，将继续自动尝试 requirement=${job.taskId} attempt=${job.attempt}/${job.maxAttempts}：${reason}`,
+    );
+  } finally {
+    activeExecutionTemporaries.delete(job.executionId);
+    removeAgentExecutionTempDirectory(temporary);
+  }
 }
 
 async function recordExecutionCycleStarted(attempt: ExecutionAttempt, delegation: DelegationEnvelope) {
@@ -872,6 +978,8 @@ async function cancelInvalidExecutions() {
 async function main() {
   const staleLanes = await progressDispatcher.reconcileStaleLanes();
   if (staleLanes) await appendLoopRunLog(runId, `[恢复] 已恢复 ${staleLanes} 条失去活跃 execution 的 Lane`);
+  const staleAssistance = await reconcileVerificationAssistanceJobs();
+  if (staleAssistance) await appendLoopRunLog(runId, `[恢复] 已恢复 ${staleAssistance} 条未正常收尾的系统验证协助`);
   let recovery = await progressDispatcher.nextRecovery();
   while (recovery) {
     const { attempt: recoverable, work: delegation } = recovery;
@@ -925,6 +1033,19 @@ async function main() {
     }
     const completionRevision = inFlightExecutions.revision();
     await drainQueuedAgentResults();
+    const systemSettings = await getAgentExecutorSettings();
+    const assistance = await claimNextVerificationAssistance({
+      runId,
+      executorId: systemSettings.executorId,
+      executionOptions: agentExecutionOptions(systemSettings),
+    });
+    if (assistance) {
+      scheduleEvolution(runVerificationAssistanceAttempt(assistance, systemSettings));
+      await appendLoopRunLog(
+        runId,
+        `[调度] 启动系统验证协助 Agent：requirement=${assistance.taskId} unit=${assistance.storyIndex ?? '-'} attempt=${assistance.attempt}/${assistance.maxAttempts}`,
+      );
+    }
     const dispatch = await progressDispatcher.reserveNext({ runId });
     let launched = 0;
     for (const reservation of dispatch.kind === 'reserved' ? dispatch.reservations : []) {

@@ -268,11 +268,17 @@ export default async function TaskDetail({
       : isDirect
         ? task.agile_status === 'done' ? 'Direct Agent 已提交最终结果' : 'Direct Agent 正在执行当前需求'
         : stepDetail(task, lanes);
-  const unansweredRuntimeInputs = runtimeInputs.filter((input) => input.status === 'pending');
+  const unansweredRuntimeInputs = runtimeInputs.filter((input) =>
+    input.status === 'pending'
+      && (!input.assistance_status || input.assistance_status === 'escalated' || input.assistance_status === 'cancelled'));
   const waitingRuntimeLanes = lanes.filter((lane) => lane.status === 'waiting_for_runtime_input');
   const waitingForRuntimeInput = waitingRuntimeLanes.length > 0;
+  const systemVerificationAssistance = runtimeInputs.some((input) =>
+    input.source_agent === 'test-agent'
+      && input.status === 'pending'
+      && (input.assistance_status === 'pending' || input.assistance_status === 'running'));
   const waitingForVerificationAssistance = waitingRuntimeLanes.some((lane) =>
-    lane.current_agent === 'test-agent');
+    lane.current_agent === 'test-agent') && !systemVerificationAssistance;
   const blockedLanes = lanes.filter((lane) => lane.status === 'system_blocked');
   const reviewDocument = task.review_document_id ? documents.find((document) => document.document_id === task.review_document_id) : null;
   const blockingFeedback = documentComments.filter((comment) => comment.feedback_status !== 'resolved');
@@ -328,7 +334,7 @@ export default async function TaskDetail({
           <p className="eyebrow">{task.task_id}</p>
           <h1>{task.title}</h1>
         </div>
-        <span className={`badge ${task.is_paused || waitingForDependencies || task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{task.is_paused ? '已暂停' : waitingForDependencies ? '等待前置需求' : waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : isDirect && task.agile_status !== 'done' ? '直接执行' : inBusinessAnalysisStage ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status)}</span>
+        <span className={`badge ${task.is_paused || waitingForDependencies || task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{task.is_paused ? '已暂停' : waitingForDependencies ? '等待前置需求' : systemVerificationAssistance ? '系统辅助验证中' : waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : isDirect && task.agile_status !== 'done' ? '直接执行' : inBusinessAnalysisStage ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status)}</span>
       </div>
       <div className="chips" aria-label="需求运行上下文">
         <TaskAutoRefresh taskId={task.task_id}/>
@@ -625,6 +631,15 @@ export default async function TaskDetail({
           <div className="question-list">
             {runtimeInputs.length === 0 ? <div className="card empty">当前没有 Agent 等待补充信息或验证协助。</div> : runtimeInputs.map((input) => {
               const verificationAssistance = input.source_agent === 'test-agent';
+              const assistanceActive = verificationAssistance && input.status === 'pending'
+                && (input.assistance_status === 'pending' || input.assistance_status === 'running');
+              const assistanceLabel = input.assistance_status === 'running'
+                ? `系统处理中 · ${input.assistance_attempt_count}/${input.assistance_max_attempts}`
+                : input.assistance_status === 'pending'
+                  ? `等待系统处理 · ${input.assistance_attempt_count}/${input.assistance_max_attempts}`
+                  : input.assistance_status === 'escalated'
+                    ? `系统尝试 ${input.assistance_attempt_count} 次后转人工`
+                    : null;
               return <article className="question card" key={input.request_id}>
               <div className="question-title">
                 <AlertTriangle size={18}/>
@@ -633,12 +648,14 @@ export default async function TaskDetail({
                   <h3>{terminologyText(input.title)}</h3>
                   <small>来源：{agentLabel(input.source_agent)}</small>
                 </div>
-                <span className={`badge ${input.status === 'answered' || input.status === 'resolved' ? 'green' : 'amber'}`}>{input.status === 'resolved' ? '已用于恢复' : input.status === 'answered' ? '已回答' : input.status === 'superseded' ? '已失效' : '待回答'}</span>
+                <span className={`badge ${input.status === 'answered' || input.status === 'resolved' ? 'green' : assistanceActive ? 'blue' : 'amber'}`}>{input.status === 'resolved' ? '已用于恢复' : input.status === 'answered' ? input.assistance_status === 'resolved' ? '系统已解决' : '已回答' : input.status === 'superseded' ? '已失效' : assistanceLabel || '待回答'}</span>
               </div>
               <p>{terminologyText(input.question)}</p>
               {input.why && <p className="muted">为什么需要：{terminologyText(input.why)}</p>}
               {input.recommendation && <div className="recommendation">建议：{terminologyText(input.recommendation)}</div>}
-              {input.answer ? <p className="answer"><b>你的答复：</b>{input.answer}</p> : input.status === 'pending' && <form action={answerRuntimeInputAction}>
+              {assistanceActive && <div className="recommendation">系统辅助 Agent 正在优先调查。只有连续尝试仍无法解决后，才会转为人工验证协助。{input.assistance_last_reason ? ` 上次尝试：${terminologyText(input.assistance_last_reason)}` : ''}</div>}
+              {input.assistance_status === 'escalated' && input.assistance_last_reason && <div className="recommendation">系统辅助结论：{terminologyText(input.assistance_last_reason)}</div>}
+              {input.answer ? <p className="answer"><b>{input.assistance_status === 'resolved' ? '系统辅助答复：' : '你的答复：'}</b>{input.answer}</p> : input.status === 'pending' && !assistanceActive && <form action={answerRuntimeInputAction}>
                 <input type="hidden" name="taskId" value={task.task_id}/>
                 <input type="hidden" name="requestId" value={input.request_id}/>
                 <textarea name="answer" required placeholder={verificationAssistance ? '补充依赖或环境；也可以填写你的手测结果、实际观察和证据…' : '填写继续当前执行所需的非敏感运行信息…'}/>

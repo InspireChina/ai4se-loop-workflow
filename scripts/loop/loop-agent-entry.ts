@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { relative, resolve } from 'node:path';
 import { runAgentCommand } from '../../src/application/agent-command-drafts';
 import { runInternalAgentCommand } from '../../src/application/internal-agent-command-drafts';
+import { runVerificationAssistanceCommand } from '../../src/application/verification-assistance';
 
 function fail(message: string): never {
   process.stderr.write(`loop-agent: ${message}\n`);
@@ -14,9 +15,13 @@ const internalWorkType = process.env.LOOP_INTERNAL_WORK_TYPE;
 const internalWorkId = process.env.LOOP_INTERNAL_WORK_ID;
 const internalSessionId = process.env.LOOP_INTERNAL_SESSION_ID;
 const internalToken = process.env.LOOP_INTERNAL_COMMAND_TOKEN;
+const assistanceJobId = process.env.LOOP_VERIFICATION_ASSISTANCE_JOB_ID;
+const assistanceSessionId = process.env.LOOP_VERIFICATION_ASSISTANCE_SESSION_ID;
+const assistanceToken = process.env.LOOP_VERIFICATION_ASSISTANCE_COMMAND_TOKEN;
 const hasFlowContext = Boolean(executionId && token);
 const hasInternalContext = Boolean(internalWorkType && internalWorkId && internalSessionId && internalToken);
-if (!hasFlowContext && !hasInternalContext) fail('命令只能在活动 Agent execution 内使用');
+const hasAssistanceContext = Boolean(assistanceJobId && assistanceSessionId && assistanceToken);
+if (!hasFlowContext && !hasInternalContext && !hasAssistanceContext) fail('命令只能在活动 Agent execution 内使用');
 
 const rawArgs = process.argv.slice(2);
 
@@ -48,7 +53,11 @@ try {
     args.push(argument.slice(0, -5), content);
     index += 1;
   }
-  const output = hasInternalContext
+  const output = hasAssistanceContext
+    ? await runVerificationAssistanceCommand({
+        jobId: assistanceJobId!, sessionId: assistanceSessionId!, token: assistanceToken!, args,
+      })
+    : hasInternalContext
     ? await runInternalAgentCommand({
         workType: internalWorkType as 'evolution', workId: internalWorkId!, sessionId: internalSessionId!, token: internalToken!, args,
       })
@@ -59,7 +68,7 @@ try {
   if ([
     'requirement-context', 'delivery-plan', 'delivery-analysis', 'implementation',
     'verification', 'review', 'idea-context', 'business-design',
-    'requirement-spec', 'spec-review', 'direct',
+    'requirement-spec', 'spec-review', 'direct', 'verification-assistance',
   ].includes(rawArgs[0])) {
     const namespace = rawArgs[0];
     const firstFlag = rawArgs.findIndex((argument) => argument.startsWith('--'));

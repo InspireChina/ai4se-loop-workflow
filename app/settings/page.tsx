@@ -30,7 +30,7 @@ export default async function SettingsPage() {
     { id: 'workspace', group: '项目与调度', label: '当前项目', description: '工作区与独立数据', value: basename(paths.root) },
     { id: 'concurrency', group: '项目与调度', label: 'Agent 并发', description: '全局运行容量', value: `上限 ${agentConcurrency}` },
     { id: 'flow-runtime', group: 'Agent Runtime', label: '流程 Agent 默认', description: '流程 Profile 继承', value: flowRuntimeSummary },
-    { id: 'system-runtime', group: 'Agent Runtime', label: '系统辅助 Agent', description: '上下文对话等能力', value: systemRuntimeSummary },
+    { id: 'system-runtime', group: 'Agent Runtime', label: '系统辅助 Agent', description: '上下文对话、验证协助等能力', value: systemRuntimeSummary },
     { id: 'langfuse', group: '集成', label: 'Langfuse', description: 'Trace 与诊断', value: langfuseStatus },
   ];
 
@@ -73,7 +73,7 @@ export default async function SettingsPage() {
       <section className="card settings-editor" aria-labelledby="system-runtime-settings-title">
         <div className="settings-editor-head"><span className="executor-icon"><Bot size={18}/></span><div><p className="eyebrow">SYSTEM RUNTIME</p><h2 id="system-runtime-settings-title">系统辅助 Agent Runtime</h2><p>用于上下文对话等没有独立 Agent Profile 的能力，不会覆盖流程 Agent 的独立 Runtime。</p></div><span className="settings-current">{systemRuntimeSummary}</span></div>
         <form action={saveAgentExecutorAction} className="settings settings-editor-form">
-          <fieldset className="executor-settings"><legend>系统辅助执行器</legend><p className="muted">所选 CLI 需要已在本机登录。</p><div className="executor-options">
+          <fieldset className="executor-settings"><legend>系统辅助执行器</legend><p className="muted">用于上下文对话及验证协助自动排障；所选 CLI 需要已在本机登录。</p><div className="executor-options">
             {AGENT_EXECUTOR_OPTIONS.map((option) => <label className="executor-option" key={option.id}><input type="radio" name="agentExecutor" value={option.id} defaultChecked={settings.executorId === option.id}/><span className="executor-icon"><Bot size={18}/></span><span><strong>{option.label}</strong><small>{option.description}</small></span><Check className="executor-check" size={17}/></label>)}
           </div></fieldset>
           <fieldset className="codex-settings"><legend>Codex 执行参数</legend><p className="muted">仅在选择 Codex 执行器时生效。</p><div className="fields"><label>模型<select name="codexModel" defaultValue={settings.codexModel}>{CODEX_MODEL_OPTIONS.map((model) => <option value={model.id} key={model.id}>{model.label}</option>)}</select><small className="muted">Sol 优先最高智能，Terra 平衡效果与成本，Luna 优先低成本。</small></label><label>思考强度<select name="codexReasoningEffort" defaultValue={settings.codexReasoningEffort}>{CODEX_REASONING_EFFORTS.map((effort) => <option value={effort} key={effort}>{effort === 'default' ? '跟随 Codex 默认值' : effort}</option>)}</select></label></div><label className="checkbox"><input type="checkbox" name="codexWebSearch" defaultChecked={settings.codexWebSearch}/>启用 Codex 实时网页搜索（启动参数 <code>--search</code>）</label></fieldset>

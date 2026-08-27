@@ -10,6 +10,29 @@ async function command(executionId: string, token: string, args: string[]) {
   return runAgentCommand({ executionId, token, args });
 }
 
+async function resolveVerificationAssistance(answer: string) {
+  const { claimNextVerificationAssistance, completeVerificationAssistanceExecution, runVerificationAssistanceCommand } = await import('./verification-assistance');
+  const claimed = await claimNextVerificationAssistance({
+    runId: `RUN-system-assistance-${Date.now()}-${Math.random()}`,
+    executorId: 'codex',
+    executionOptions: {},
+  });
+  assert.ok(claimed);
+  await runVerificationAssistanceCommand({
+    jobId: claimed.jobId,
+    sessionId: claimed.sessionId,
+    token: claimed.token,
+    args: ['verification-assistance', 'status'],
+  });
+  await runVerificationAssistanceCommand({
+    jobId: claimed.jobId,
+    sessionId: claimed.sessionId,
+    token: claimed.token,
+    args: ['verification-assistance', 'resolve', '--answer', answer],
+  });
+  await completeVerificationAssistanceExecution(claimed.executionId);
+}
+
 async function begin(delegation: DelegationEnvelope, suffix: string) {
   const { issueAgentCommandToken } = await import('./agent-command-drafts');
   const started = await beginTestExecutionAttempt({
@@ -297,15 +320,11 @@ test('verification permits an API supplement but derives implementation failure 
   assert.equal((await inspectTaskDispatch(taskId))[0]?.agent, 'dev-agent');
 });
 
-test('blocked verification becomes human assistance and resumes the same plan', async () => {
+test('blocked verification is handled by system assistance and resumes the same plan', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
-  const {
-    answerRuntimeInput,
-    getTask,
-    submitRuntimeInputs,
-  } = await import('./tasks');
+  const { getTask } = await import('./tasks');
   const { taskId, delegation } = await verificationDelegation('验证环境资源阻塞');
   const started = await begin(delegation, `${taskId}-block`);
   await command(started.executionId, started.token!, ['verification', 'status']);
@@ -342,12 +361,9 @@ test('blocked verification becomes human assistance and resumes the same plan', 
     input.request_key?.startsWith('verification-assistance:'));
   assert.ok(assistance);
 
-  await answerRuntimeInput({
-    taskId,
-    requestId: assistance!.request_id,
-    answer: '人工验证：通过；实际观察：完成结果展示完成状态，未完成结果仍可识别；证据：云桌面截图 TEST-42。',
-  });
-  await submitRuntimeInputs(taskId, 'delivery');
+  await resolveVerificationAssistance(
+    '系统辅助验证：通过；实际观察：完成结果展示完成状态，未完成结果仍可识别；证据：云桌面截图 TEST-42。',
+  );
   const resumedDelegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'test-agent' && item.pipeline === 'resume')! as DelegationEnvelope;
   assert.ok(resumedDelegation);
@@ -356,7 +372,7 @@ test('blocked verification becomes human assistance and resumes the same plan', 
   const restored = await command(resumed.executionId, resumed.token!, ['verification', 'status']);
   assert.match(restored, /阶段：EXECUTE/);
   assert.match(restored, /执行结果：1\/1/);
-  assert.match(restored, /人工验证：通过/);
+  assert.match(restored, /系统辅助验证：通过/);
   await recordResult(resumed.executionId, resumed.token!, {
     status: 'passed',
     evidence: '用户在云桌面代为执行；实际观察与冻结 Oracle 一致；证据为截图 TEST-42',
@@ -380,11 +396,7 @@ test('verification runtime input resumes the same frozen plan and partial result
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
-  const {
-    answerRuntimeInput,
-    getTask,
-    submitRuntimeInputs,
-  } = await import('./tasks');
+  const { getTask } = await import('./tasks');
   const { taskId, delegation } = await verificationDelegation('验证运行资源恢复');
   const first = await begin(delegation, `${taskId}-input`);
   await command(first.executionId, first.token!, ['verification', 'status']);
@@ -423,12 +435,7 @@ test('verification runtime input resumes the same frozen plan and partial result
   let detail = await getTask(taskId);
   const request = detail?.runtimeInputs.find((item) => item.request_key === 'preview-url');
   assert.ok(request);
-  await answerRuntimeInput({
-    taskId,
-    requestId: request!.request_id,
-    answer: '使用 http://localhost:3001。',
-  });
-  await submitRuntimeInputs(taskId);
+  await resolveVerificationAssistance('使用 http://localhost:3001。');
   const resumedDelegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'test-agent' && item.pipeline === 'resume')! as DelegationEnvelope;
   const resumed = await begin(resumedDelegation, `${taskId}-resume`);
@@ -498,12 +505,7 @@ test('a changed delivery contract reopens a waiting frozen plan without losing t
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
-  const {
-    answerRuntimeInput,
-    getTask,
-    saveDeliverySpec,
-    submitRuntimeInputs,
-  } = await import('./tasks');
+  const { getTask, saveDeliverySpec } = await import('./tasks');
   const { taskId, delegation } = await verificationDelegation('规格变化后重新规划验证');
   const first = await begin(delegation, `${taskId}-spec-change-input`);
   await command(first.executionId, first.token!, ['verification', 'status']);
@@ -524,12 +526,7 @@ test('a changed delivery contract reopens a waiting frozen plan without losing t
   const request = (await getTask(taskId))?.runtimeInputs.find((item) =>
     item.request_key === 'preview-url');
   assert.ok(request);
-  await answerRuntimeInput({
-    taskId,
-    requestId: request!.request_id,
-    answer: '使用 http://localhost:3002。',
-  });
-  await submitRuntimeInputs(taskId);
+  await resolveVerificationAssistance('使用 http://localhost:3002。');
   await saveDeliverySpec({
     taskId,
     storyIndex: 1,

@@ -14,11 +14,17 @@ const internalWorkType = process.env.LOOP_INTERNAL_WORK_TYPE;
 const internalWorkId = process.env.LOOP_INTERNAL_WORK_ID;
 const internalSessionId = process.env.LOOP_INTERNAL_SESSION_ID;
 const internalToken = process.env.LOOP_INTERNAL_COMMAND_TOKEN;
+const assistanceJobId = process.env.LOOP_VERIFICATION_ASSISTANCE_JOB_ID;
+const assistanceSessionId = process.env.LOOP_VERIFICATION_ASSISTANCE_SESSION_ID;
+const assistanceToken = process.env.LOOP_VERIFICATION_ASSISTANCE_COMMAND_TOKEN;
 const hasFlowContext = Boolean(executionId && token);
 const hasInternalContext = Boolean(
   internalWorkType && internalWorkId && internalSessionId && internalToken,
 );
-if (!hasFlowContext && !hasInternalContext) {
+const hasAssistanceContext = Boolean(
+  assistanceJobId && assistanceSessionId && assistanceToken,
+);
+if (!hasFlowContext && !hasInternalContext && !hasAssistanceContext) {
   fail('命令只能在活动 Agent execution 内使用');
 }
 
@@ -56,7 +62,18 @@ try {
     index += 1;
   }
   let output;
-  if (hasInternalContext) {
+  if (hasAssistanceContext) {
+    const { runVerificationAssistanceCommand } = await tsImport(
+      '../../src/application/verification-assistance.ts',
+      import.meta.url,
+    );
+    output = await runVerificationAssistanceCommand({
+      jobId: assistanceJobId,
+      sessionId: assistanceSessionId,
+      token: assistanceToken,
+      args,
+    });
+  } else if (hasInternalContext) {
     const { runInternalAgentCommand } = await tsImport(
       '../../src/application/internal-agent-command-drafts.ts',
       import.meta.url,
@@ -85,7 +102,7 @@ try {
   if ([
     'requirement-context', 'delivery-plan', 'delivery-analysis', 'implementation',
     'verification', 'review', 'idea-context', 'business-design',
-    'requirement-spec', 'spec-review', 'direct',
+    'requirement-spec', 'spec-review', 'direct', 'verification-assistance',
   ].includes(rawArgs[0])) {
     const namespace = rawArgs[0];
     const firstFlag = rawArgs.findIndex((argument) => argument.startsWith('--'));

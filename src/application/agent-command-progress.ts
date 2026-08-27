@@ -176,6 +176,34 @@ function directProgress(row: ActiveExecutionRow): AgentCommandProgress {
   };
 }
 
+function verificationAssistanceProgress(db: Database.Database, row: ActiveExecutionRow): AgentCommandProgress {
+  const job = db.prepare(`
+    SELECT attempt_count, max_attempts, status_viewed_session_id
+    FROM verification_assistance_jobs WHERE current_execution_id = ?
+  `).get(row.execution_id) as {
+    attempt_count: number;
+    max_attempts: number;
+    status_viewed_session_id: string | null;
+  } | undefined;
+  const inspected = Boolean(job?.status_viewed_session_id);
+  return {
+    executionId: row.execution_id,
+    agent: row.agent,
+    pipeline: row.pipeline,
+    storyIndex: row.story_index,
+    state: 'running',
+    stateLabel: `系统辅助尝试 ${job?.attempt_count || 1}/${job?.max_attempts || 3}`,
+    currentPhase: inspected ? 'investigate' : 'restore',
+    stages: [
+      { id: 'restore', label: '读取协助请求', status: inspected ? 'completed' : 'current' },
+      { id: 'investigate', label: '自主调查与验证', status: inspected ? 'current' : 'pending' },
+      { id: 'submit', label: '提交解决或转交', status: 'pending' },
+    ],
+    latestCommand: latestDomainCommand(db, row.execution_id),
+    updatedAt: row.updated_at,
+  };
+}
+
 function latestDomainCommand(db: Database.Database, executionId: string | null) {
   if (!executionId) return null;
   const rows = db.prepare(`
@@ -282,6 +310,10 @@ export function agentCommandProgressInDb(db: Database.Database, taskId: string) 
   const progress = drafts.map((draft) => buildDraftProgress(db, draft));
   for (const execution of activeExecutions) {
     if (draftExecutionIds.has(execution.execution_id)) continue;
+    if (execution.pipeline === 'verification-assistance') {
+      progress.push(verificationAssistanceProgress(db, execution));
+      continue;
+    }
     const profile = agentCommandProfile(execution.agent, execution.pipeline);
     if (!profile || profile.draftType === 'direct') {
       const direct = directProgress(execution);

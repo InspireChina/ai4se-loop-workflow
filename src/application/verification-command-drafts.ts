@@ -648,17 +648,17 @@ function terminalSubmit(
   })();
   if (action === 'request-input') {
     return [
-      renderCommandResult({ command: 'verification request-input', outcome: 'waiting_for_human' }),
-      '', '# NEXT', '', '- Owner: Harness', '- Agent Action: wait_for_human',
+      renderCommandResult({ command: 'verification request-input', outcome: 'waiting_for_assistance' }),
+      '', '# NEXT', '', '- Owner: Harness', '- Agent Action: wait_for_system_assistance',
     ].join('\n');
   }
   const conclusion = deriveConclusion(current).action;
   return [
     renderCommandResult({
       command: 'verification complete',
-      outcome: conclusion === 'pass' ? 'completed' : conclusion === 'fail' ? 'failed' : 'waiting_for_human',
+      outcome: conclusion === 'pass' ? 'completed' : conclusion === 'fail' ? 'failed' : 'waiting_for_assistance',
     }),
-    '', '# NEXT', '', '- Owner: Harness', `- Agent Action: ${conclusion === 'block' ? 'wait_for_human' : 'end_execution'}`,
+    '', '# NEXT', '', '- Owner: Harness', `- Agent Action: ${conclusion === 'block' ? 'wait_for_system_assistance' : 'end_execution'}`,
   ].join('\n');
 }
 

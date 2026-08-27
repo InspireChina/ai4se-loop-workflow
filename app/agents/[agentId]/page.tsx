@@ -41,11 +41,7 @@ function dailyMemoryBody(content: string) {
     .trim();
 }
 
-function dailyObservationCount(content: string) {
-  return content.match(/^##\s+/gmu)?.length || 0;
-}
-
-export default async function AgentDetailPage({ params, searchParams }: { params: Promise<{ agentId: string }>; searchParams: Promise<{ section?: string | string[]; runtimeMode?: string | string[]; memoryMode?: string | string[] }> }) {
+export default async function AgentDetailPage({ params, searchParams }: { params: Promise<{ agentId: string }>; searchParams: Promise<{ section?: string | string[]; runtimeMode?: string | string[]; memoryMode?: string | string[]; memoryError?: string | string[]; memoryPromoted?: string | string[] }> }) {
   const [{ agentId }, query] = await Promise.all([params, searchParams]);
   if (!isFlowAgentId(agentId)) notFound();
   const [detail, runtimeSettings, flowDefaults] = await Promise.all([
@@ -58,6 +54,8 @@ export default async function AgentDetailPage({ params, searchParams }: { params
   const editingIndependentRuntime = runtimeSettings.source === 'agent_override' || runtimeMode === 'override';
   const memoryMode = Array.isArray(query.memoryMode) ? query.memoryMode[0] : query.memoryMode;
   const editingMemory = memoryMode === 'edit';
+  const memoryError = Array.isArray(query.memoryError) ? query.memoryError[0] : query.memoryError;
+  const memoryPromoted = Array.isArray(query.memoryPromoted) ? query.memoryPromoted[0] : query.memoryPromoted;
   const flowRuntimeSummary = flowDefaults.executorId === 'codex'
     ? `${flowDefaults.executorId} · ${flowDefaults.codexModel} · ${flowDefaults.codexReasoningEffort}${flowDefaults.codexWebSearch ? ' · 实时网页搜索' : ''}`
     : flowDefaults.executorId === 'claude'
@@ -185,6 +183,8 @@ export default async function AgentDetailPage({ params, searchParams }: { params
       </div>}
 
       {section === 'memory' && <div className="memory-section-stack">
+        {memoryError && <p className="memory-operation-message error">加入 Durable Memory 失败：{memoryError}</p>}
+        {memoryPromoted === '1' && <p className="memory-operation-message success"><Check size={15}/>观察已加入 Durable Memory。</p>}
         <section className="card settings agent-section-card memory-card">
           <div className="settings-section-head memory-section-head">
             <span className="executor-icon"><MemoryStick size={18}/></span>
@@ -209,10 +209,18 @@ export default async function AgentDetailPage({ params, searchParams }: { params
             <span className="badge">最近 {detail.dailyMemories.length} / {detail.dailyFiles.length} 天</span>
           </div>
           <div className="daily-memory-list">{detail.dailyMemories.length ? detail.dailyMemories.map((memory, index) => {
-            const observationCount = dailyObservationCount(memory.content);
             return <details key={memory.name} open={index === 0}>
-              <summary><span className="daily-memory-icon"><CalendarDays size={16}/></span><span><strong>{dailyMemoryLabel(memory.name)}</strong><small>{observationCount} 条观察</small></span>{index === 0 && <span className="badge green">最新</span>}</summary>
-              <div className="daily-memory-document"><MarkdownContent content={dailyMemoryBody(memory.content)}/></div>
+              <summary><span className="daily-memory-icon"><CalendarDays size={16}/></span><span><strong>{dailyMemoryLabel(memory.name)}</strong><small>{memory.observations.length} 条观察</small></span>{index === 0 && <span className="badge green">最新</span>}</summary>
+              <div className="daily-memory-observations">{memory.observations.length ? memory.observations.map((observation) => <article className="daily-observation" key={`${observation.executionId}:${observation.fingerprint}`}>
+                <div className="daily-observation-actions">{observation.promoted
+                  ? <span className="badge green"><Check size={13}/>已加入 Durable Memory</span>
+                  : <form action={`/agents/${agentId}/memory/promote`} method="post">
+                    <input type="hidden" name="memoryName" value={memory.name}/><input type="hidden" name="executionId" value={observation.executionId}/><input type="hidden" name="fingerprint" value={observation.fingerprint}/>
+                    <button className="button secondary daily-promote-button" type="submit"><MemoryStick size={14}/>加入 Durable Memory</button>
+                  </form>}
+                </div>
+                <div className="daily-memory-document"><MarkdownContent content={observation.content}/></div>
+              </article>) : <div className="daily-memory-document"><MarkdownContent content={dailyMemoryBody(memory.content)}/></div>}</div>
             </details>;
           }) : <div className="memory-empty"><CalendarDays size={20}/><p className="muted">尚无 daily memory；Agent 产生可复用观察后会按日期显示在这里。</p></div>}</div>
         </section>

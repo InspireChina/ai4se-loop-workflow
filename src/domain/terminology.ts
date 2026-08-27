@@ -29,6 +29,7 @@ const agentLabels: Record<string, string> = {
   'requirement-spec-agent': '需求规格 Agent',
   'spec-review-agent': '规格审查 Agent',
   'context-chat-agent': '上下文 Chat Agent',
+  'system-assistance-agent': '系统辅助 Agent',
 };
 
 const itemTypeLabels: Record<string, string> = {
@@ -61,6 +62,7 @@ const flowLabels: Record<string, string> = {
   'ba-design': '业务方案设计',
   'ba-spec': '需求规格编写',
   'ba-review': '规格独立审查',
+  'verification-assistance': '系统验证协助',
 };
 
 const documentKindLabels: Record<string, string> = {

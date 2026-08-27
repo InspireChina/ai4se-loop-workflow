@@ -25,7 +25,12 @@ export default async function Home() {
       && ['idea-context-agent', 'business-design-agent', 'backlog-agent'].includes(task.current_subagent || ''))
     .map((task) => ({ task, lane: null }));
   const waitingForAnswers = [...requirementWaitingForAnswers, ...laneWaitingForAnswers];
-  const waitingForRuntimeInput = activeTasks.flatMap((task) => task.lanes.filter((lane) => lane.status === 'waiting_for_runtime_input').map((lane) => ({ task, lane })));
+  const waitingForRuntimeInput = activeTasks.flatMap((task) => task.lanes.filter((lane) =>
+    lane.status === 'waiting_for_runtime_input'
+      && (lane.current_agent !== 'test-agent'
+        || task.verification_assistance_escalated_count > 0
+        || (task.verification_assistance_pending_count === 0 && task.verification_assistance_running_count === 0)),
+  ).map((lane) => ({ task, lane })));
   const readyToClose = activeTasks.filter((task) => task.agile_status === 'ready_to_close');
   const needsHuman = [
     ...waitingForAnswers.map((item) => ({ ...item, kind: 'answers' as const })),
@@ -37,6 +42,9 @@ export default async function Home() {
     <section><h2>需要我处理</h2>{needsHuman.length === 0 ? <div className="empty">当前没有需要你处理的信息或最终产物。</div> : needsHuman.map(({ task, lane, kind }) => <article className="attention" key={`${task.task_id}-${lane?.lane || kind}`}><AlertTriangle size={20}/><div><p className="eyebrow">{kind === 'closure' ? task.item_type === 'business-analysis' ? '待阅读需求规格说明书' : '待阅读结卡报告' : kind === 'runtime' ? `${lane!.current_agent === 'test-agent' ? '待验证协助' : '待补充运行信息'} · ${lane!.lane === 'analysis' ? '交付分析' : '开发验证'} · ${agentLabel(lane!.current_agent)}` : lane ? `待回答关键决策 · 交付分析 · ${agentLabel(lane.current_agent)}` : `待回答需求澄清 · 需求级 · ${agentLabel(task.current_subagent)}`}</p><h3>{task.title}</h3><p>{terminologyText(lane?.blocked_reason || task.blocked_reason)}</p><small>{terminologyText(task.next_step)}</small></div><Link href={`/tasks/${task.task_id}`} className="button secondary">去处理 <ArrowRight size={14}/></Link></article>)}</section>
     <section><h2>正在推进</h2><div className="card table"><div className="row heading"><span>需求</span><span>状态</span><span>交付进度</span><span>下一步</span></div>{tasks.map((task) => {
       const runtimeLane = task.lanes.find((lane) => lane.status === 'waiting_for_runtime_input');
+      const systemAssisting = runtimeLane?.current_agent === 'test-agent'
+        && task.verification_assistance_escalated_count === 0
+        && task.verification_assistance_pending_count + task.verification_assistance_running_count > 0;
       const answerLane = task.lanes.find((lane) => lane.status === 'waiting_for_answers');
       const blockedLane = task.lanes.find((lane) => lane.status === 'system_blocked');
       const pendingDependencies = task.dependency_gate_open
@@ -45,13 +53,14 @@ export default async function Home() {
       const waitingForDependencies = pendingDependencies.length > 0;
       const requirementAnswers = task.run_state === 'waiting_for_answers'
         && ['idea-context-agent', 'business-design-agent', 'backlog-agent'].includes(task.current_subagent || '');
-      const needsAttention = !task.is_paused && (requirementAnswers || runtimeLane || answerLane || blockedLane);
+      const needsAttention = !task.is_paused && (requirementAnswers || (runtimeLane && !systemAssisting) || answerLane || blockedLane);
       const label = task.is_paused ? '已暂停'
         : waitingForDependencies ? '等待前置需求'
         : requirementAnswers
         ? task.current_subagent === 'idea-context-agent' ? '等待需求意图确认'
           : task.current_subagent === 'business-design-agent' ? '等待业务方案决策'
             : '等待需求澄清'
+        : systemAssisting ? `系统辅助验证中 ${task.verification_assistance_attempt}/${task.verification_assistance_max_attempts}`
         : runtimeLane ? runtimeLane.current_agent === 'test-agent' ? '等待验证协助' : '等待运行信息' : answerLane ? '等待关键决策' : blockedLane ? `${blockedLane.lane === 'analysis' ? '交付分析' : '开发验证'}阻塞`
           : inBusinessAnalysis(task)
             ? task.agile_status === 'ready_to_close' ? '等待阅读需求规格' : task.current_subagent ? agentLabel(task.current_subagent).replace(' Agent', '') : statusLabel(task.agile_status)

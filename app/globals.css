@@ -429,6 +429,9 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .code-editor{min-height:320px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.55;tab-size:2}
 .memory-editor{min-height:240px}
 .memory-section-stack{display:grid;gap:16px}
+.memory-operation-message{display:flex;align-items:center;gap:7px;margin:0;border:1px solid;border-radius:8px;padding:10px 12px;font-size:12px}
+.memory-operation-message.error{border-color:#efc6bf;background:#fff3f0;color:#9c352b}
+.memory-operation-message.success{border-color:#cce4d5;background:#f0faf4;color:var(--green)}
 .memory-section-head{align-items:flex-start}
 .memory-head-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;margin-left:auto}
 .memory-mode-button{min-height:30px;padding:5px 9px;font-size:12px}
@@ -458,7 +461,13 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .daily-memory-list summary strong{display:block;color:var(--ink);font-size:13px}
 .daily-memory-list summary small{margin-top:2px;font-size:11px}
 .daily-memory-icon{display:grid;place-items:center;width:30px;height:30px;border-radius:7px;background:#eef3ff;color:var(--blue)}
-.daily-memory-document .markdown-content{padding:16px 20px;font-size:13px;line-height:1.65}
+.daily-memory-observations{display:grid;gap:0}
+.daily-observation{position:relative;border-bottom:1px solid var(--line);background:#fff}
+.daily-observation:last-child{border-bottom:0}
+.daily-observation-actions{display:flex;justify-content:flex-end;padding:12px 14px 0}
+.daily-observation-actions form{margin:0}
+.daily-promote-button{min-height:30px;padding:5px 9px;font-size:11px}
+.daily-memory-document .markdown-content{padding:10px 20px 18px;font-size:13px;line-height:1.65}
 .daily-memory-document .markdown-content h2{margin:18px 0 8px;font-size:14px}
 .daily-memory-document .markdown-content h2:first-child{margin-top:0}
 .daily-memory-document .markdown-content ul{margin:8px 0}

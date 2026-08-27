@@ -88,6 +88,14 @@ export type AgentObservation = {
   last_seen_at: string;
 };
 
+export type DailyMemoryObservation = {
+  executionId: string;
+  fingerprint: string;
+  summary: string;
+  content: string;
+  promoted: boolean;
+};
+
 const promptSchema = z.string().trim().min(1).max(100_000);
 const memorySchema = z.string().trim().max(40_000);
 
@@ -127,6 +135,25 @@ function currentPromptInDb(db: AgentDatabase, agentId: FlowAgentId): CurrentProm
 function promptCandidateInDb(db: AgentDatabase, agentId: FlowAgentId): PromptCandidate | null {
   const row = db.prepare('SELECT * FROM agent_prompt_candidates WHERE agent_id = ?').get(agentId) as PromptCandidateRow | undefined;
   return row ? { ...row, status: 'candidate' } : null;
+}
+
+function parseDailyMemoryObservations(content: string, durableMemory = ''): DailyMemoryObservation[] {
+  const markers = [...content.matchAll(/<!-- execution:([^\s]+) fingerprint:([^\s]+) -->/gu)];
+  return markers.flatMap((marker, index) => {
+    const start = (marker.index || 0) + marker[0].length;
+    const end = index + 1 < markers.length ? markers[index + 1].index : content.length;
+    const section = content.slice(start, end).trim();
+    const summary = section.match(/^##\s+(.+)$/mu)?.[1]?.trim();
+    if (!summary) return [];
+    const fingerprint = marker[2];
+    return [{
+      executionId: marker[1],
+      fingerprint,
+      summary,
+      content: section,
+      promoted: durableMemory.includes(`<!-- EVOLUTION:${fingerprint} -->`),
+    }];
+  });
 }
 
 type CanaryAttemptRow = {
@@ -414,10 +441,14 @@ export async function getAgentProfile(agentIdInput: string, ensure = true) {
     ORDER BY last_seen_at DESC, observation_id DESC LIMIT 100
   `).all(agentId) as AgentObservation[];
   const dailyFiles = readdirSync(join(agentDirectory(agentId), 'memory')).filter((name) => name.endsWith('.md')).sort().reverse();
-  const dailyMemories = dailyFiles.slice(0, 14).map((name) => ({
-    name,
-    content: readFileSync(join(agentDirectory(agentId), 'memory', name), 'utf8'),
-  }));
+  const dailyMemories = dailyFiles.slice(0, 14).map((name) => {
+    const content = readFileSync(join(agentDirectory(agentId), 'memory', name), 'utf8');
+    return {
+      name,
+      content,
+      observations: parseDailyMemoryObservations(content, currentMemory.content),
+    };
+  });
   return {
     definition: AGENT_PROFILE_DEFINITIONS[agentId],
     profile,
@@ -543,6 +574,60 @@ export async function saveAgentMemory(input: { agentId: string; content: unknown
   return revision;
 }
 
+export async function promoteDailyMemoryObservation(input: {
+  agentId: string;
+  memoryName: unknown;
+  executionId: unknown;
+  fingerprint: unknown;
+}) {
+  if (!isFlowAgentId(input.agentId)) throw new Error('未知 Agent');
+  const memoryName = z.string().regex(/^\d{4}-\d{2}-\d{2}\.md$/u, 'Daily Memory 文件名无效').parse(input.memoryName);
+  const executionId = z.string().trim().min(1).max(200).parse(input.executionId);
+  const fingerprint = z.string().trim().regex(/^[a-z0-9][a-z0-9-]{2,119}$/u, '观察 fingerprint 无效').parse(input.fingerprint);
+  await ensureAgentRuntimeWorkspace();
+  const detail = await getAgentProfile(input.agentId, false);
+  const marker = `<!-- EVOLUTION:${fingerprint} -->`;
+  if (detail.currentMemory.content.includes(marker)) return detail.currentMemory.revision;
+
+  const path = join(agentDirectory(input.agentId), 'memory', memoryName);
+  let dailyContent = '';
+  try { dailyContent = readFileSync(path, 'utf8'); }
+  catch { throw new Error(`Daily Memory 不存在：${memoryName}`); }
+  const observation = parseDailyMemoryObservations(dailyContent).find((item) => (
+    item.executionId === executionId && item.fingerprint === fingerprint
+  ));
+  if (!observation) throw new Error('Daily Memory 中不存在该观察');
+  const guidance = observation.content.match(/^- Guidance:\s*(.+)$/mu)?.[1]?.trim();
+  const category = observation.content.match(/^- Category:\s*(.+)$/mu)?.[1]?.trim();
+  if (!guidance || !category) throw new Error('Daily Memory 观察缺少 Guidance 或 Category');
+
+  const content = [
+    detail.currentMemory.content.trimEnd(),
+    '',
+    marker,
+    `## ${observation.summary}`,
+    '',
+    guidance,
+    '',
+    `适用范围：${category}。由用户从 Daily Memory 提升；证据：execution ${executionId}。`,
+    '',
+  ].join('\n');
+  const revision = await createMemoryVersion(
+    input.agentId,
+    content,
+    'human',
+    `用户从 ${memoryName} 提升经验 ${fingerprint}`,
+    { memoryName, executionId, fingerprint },
+  );
+  const db = await databaseConnection();
+  db.prepare(`
+    UPDATE agent_observations SET status = 'promoted_memory', last_seen_at = CURRENT_TIMESTAMP
+    WHERE agent_id = ? AND fingerprint = ?
+  `).run(input.agentId, fingerprint);
+  try { revalidatePath('/agents', 'layout'); } catch { /* Non-request usage. */ }
+  return revision;
+}
+
 export async function setAgentAutoEvolution(input: { agentId: string; enabled: unknown }) {
   if (!isFlowAgentId(input.agentId)) throw new Error('未知 Agent');
   const db = await databaseConnection();
@@ -594,6 +679,7 @@ export async function loadAgentRuntime(agentIdInput: string, pipeline?: string):
 
 export const agentProfileInternals = {
   createMemoryVersion,
+  parseDailyMemoryObservations,
   agentDirectory,
   atomicWrite,
   promptCandidateInDb,
