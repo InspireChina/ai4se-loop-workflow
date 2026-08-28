@@ -485,12 +485,12 @@ test('passes the configured Claude model as an explicit CLI override', () => {
 test('runs Oh My Pi as an ephemeral auto-approved JSON stream using stdin', () => {
   const executor = getAgentExecutor('omp');
   assert.equal(executor.command, process.env.OMP_CLI || 'omp');
-  assert.deepEqual(executor.buildArgs('prompt', '/workspace'), ['--mode', 'json', '--no-session', '--approval-mode', 'yolo']);
+  assert.deepEqual(executor.buildArgs('prompt', '/workspace'), ['--print', '--mode', 'json', '--no-session', '--approval-mode', 'yolo']);
   assert.deepEqual(executor.buildArgs('prompt', '/workspace', { model: 'ollama/qwen3.6:35b', reasoningEffort: 'high' }), [
-    '--mode', 'json', '--no-session', '--approval-mode', 'yolo',
+    '--print', '--mode', 'json', '--no-session', '--approval-mode', 'yolo',
     '--model', 'ollama/qwen3.6:35b', '--thinking', 'high',
   ]);
-  assert.match(executor.formatCommand('/workspace'), /^omp --mode json --no-session --approval-mode yolo/);
+  assert.match(executor.formatCommand('/workspace'), /^omp --print --mode json --no-session --approval-mode yolo/);
   assert.match(executor.formatCommand('/workspace', { model: 'opus', reasoningEffort: 'xhigh' }), /--model opus --thinking xhigh/);
   assert.equal(executor.promptMode, 'stdin');
 });
@@ -512,6 +512,15 @@ test('normalizes Oh My Pi tool lifecycle events', () => {
   assert.match(getAgentExecutor('omp').parseStdout(JSON.stringify({
     type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] },
   }), context) || '', /executor=omp.*done/);
+});
+
+test('captures Oh My Pi provider errors from stdout', () => {
+  const error = extractAgentFailureDetail('omp', JSON.stringify({
+    type: 'agent_end',
+    error: { message: 'provider unavailable', code: 'AUTH_FAILED' },
+  }));
+  assert.match(error || '', /provider unavailable/);
+  assert.match(error || '', /AUTH_FAILED/);
 });
 
 test('uses the native Cursor Agent wrapper outside Windows with the workspace supplied as cwd', { skip: process.platform === 'win32' }, () => {

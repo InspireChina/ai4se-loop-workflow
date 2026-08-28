@@ -280,8 +280,8 @@ export function extractAgentFailureDetail(executor: AgentExecutorId, line: strin
     if (executor === 'codex' && (type === 'error' || type === 'turn.failed')) {
       return stringifyValue(event.message || event.error || line);
     }
-    if (executor === 'omp' && type === 'error') {
-      return stringifyValue(event.error || event.message || line);
+    if (executor === 'omp' && (type === 'error' || event.is_error === true || event.isError === true || type === 'agent_end' && (event.error || event.message))) {
+      return stringifyValue(event.error || event.message || event.result || line);
     }
     if (executor === 'cursor' && (type === 'error' || event.is_error === true)) {
       return stringifyValue(event.error || event.message || event.result || line);
@@ -601,7 +601,7 @@ function parseOmpStdout(line: string, context: AgentExecutionContext) {
       const text = ompAssistantText(event);
       return text ? standardOutputLog('omp', context, text) : null;
     }
-    if (type === 'error') return `[执行器错误] ${meta('omp', context)} - ${compact(stringifyValue(event.error || event.message || line))}`;
+    if (type === 'error' || event.is_error === true || event.isError === true || type === 'agent_end' && (event.error || event.message)) return `[执行器错误] ${meta('omp', context)} - ${compact(stringifyValue(event.error || event.message || event.result || line))}`;
     return null;
   } catch {
     return standardOutputLog('omp', context, line);
@@ -848,12 +848,12 @@ const executors: Omit<Record<AgentExecutorId, AgentExecutor>, 'cursor'> = {
   omp: {
     id: 'omp', label: 'Oh My Pi', command: process.env.OMP_CLI || 'omp', promptMode: 'stdin',
     buildArgs: (_prompt, _workspace, options) => [
-      '--mode', 'json', '--no-session', '--approval-mode', 'yolo',
+      '--print', '--mode', 'json', '--no-session', '--approval-mode', 'yolo',
       ...(options?.model ? ['--model', options.model] : []),
       ...(options?.reasoningEffort ? ['--thinking', options.reasoningEffort] : []),
     ],
     formatCommand: (workspace, options) => [
-      'omp --mode json --no-session --approval-mode yolo',
+      'omp --print --mode json --no-session --approval-mode yolo',
       options?.model ? `--model ${options.model}` : '',
       options?.reasoningEffort ? `--thinking ${options.reasoningEffort}` : '',
       `(stdin cwd=${workspace})`,
