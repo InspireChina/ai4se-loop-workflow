@@ -180,6 +180,84 @@ test('cancels an unactivated reservation from a dead runner without consuming a 
   }
 });
 
+test('manual Loop stop defers active work without consuming a retry', async () => {
+  const { createTask, beginRun, cancelTask, endRun } = await import('./tasks');
+  const { progressDispatcher } = await import('./progress-dispatch');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Manual Loop stop preserves retry budget' });
+  const firstRunId = await beginRun('manual-loop-stop-first-run');
+  let cleanupRunId: string | null = firstRunId;
+
+  try {
+    const first = await progressDispatcher.reserveNext({ runId: firstRunId });
+    assert.equal(first.kind, 'reserved');
+    const firstReservation = first.reservations.find((item) => item.work.taskId === taskId);
+    assert.ok(firstReservation);
+    const activated = await progressDispatcher.activate({
+      reservationId: firstReservation.reservationId,
+      prepared: {
+        prompt: 'Run until the requirement is complete',
+        contextSnapshot: { snapshotId: 'manual-stop-snapshot' },
+        recovery: { mode: 'initial', label: '正常上下文', retryNumber: 0 },
+        baseCommit: null,
+        promptMetadata: { version: 1, templateVersion: 1, hash: 'manual-stop-prompt' },
+        memory: { revision: 1, hash: 'manual-stop-memory' },
+        evolutionCandidateId: null,
+        runtime: { executorId: 'test-executor', webSearchEnabled: false },
+      },
+    });
+    assert.equal(activated.kind, 'running');
+
+    await endRun(firstRunId, false, { stopRunner: false });
+    cleanupRunId = null;
+
+    const stoppedAttempt = db.prepare(`
+      SELECT status, failure_kind, retry_not_before, dispatch_retry_consumed
+      FROM execution_attempts
+      WHERE execution_id = ?
+    `).get(firstReservation.executionId) as {
+      status: string;
+      failure_kind: string | null;
+      retry_not_before: string | null;
+      dispatch_retry_consumed: number;
+    };
+    assert.deepEqual(stoppedAttempt, {
+      status: 'cancelled',
+      failure_kind: null,
+      retry_not_before: null,
+      dispatch_retry_consumed: 0,
+    });
+    const stopEvents = db.prepare(`
+      SELECT event_type
+      FROM task_events
+      WHERE task_id = ?
+        AND event_type IN ('AgentExecutionDeferredByLoopStop', 'AgentExecutionRetryScheduled')
+      ORDER BY rowid
+    `).all(taskId) as Array<{ event_type: string }>;
+    assert.deepEqual(stopEvents.map((event) => event.event_type), [
+      'AgentExecutionDeferredByLoopStop',
+    ]);
+
+    const secondRunId = await beginRun('manual-loop-stop-second-run');
+    cleanupRunId = secondRunId;
+    const replacement = await progressDispatcher.reserveNext({ runId: secondRunId });
+    assert.equal(replacement.kind, 'reserved');
+    const replacementReservation = replacement.reservations.find((item) => item.work.taskId === taskId);
+    assert.ok(replacementReservation);
+    const replacementAttempt = db.prepare(`
+      SELECT attempt
+      FROM execution_attempts
+      WHERE execution_id = ?
+    `).get(replacementReservation.executionId) as { attempt: number };
+    assert.equal(replacementAttempt.attempt, 1);
+    await progressDispatcher.settle({ reservationId: replacementReservation.reservationId });
+  } finally {
+    await cancelTask({ taskId, reason: 'test cleanup' });
+    if (cleanupRunId) await endRun(cleanupRunId, true, { stopRunner: false });
+  }
+});
+
 test('waits for the universal retry backoff deadline before redispatching', async () => {
   const { createTask, beginRun, cancelTask, endRun } = await import('./tasks');
   const { progressDispatcher } = await import('./progress-dispatch');

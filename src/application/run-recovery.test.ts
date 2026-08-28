@@ -44,6 +44,7 @@ test('recovers interrupted executions by durable checkpoint instead of a lease',
     failedCount: 1,
     retryableCount: 1,
     blockedCount: 0,
+    deferredCount: 0,
     cancelledReservationCount: 0,
     recoverableCount: 1,
     pendingResultCount: 1,
@@ -86,6 +87,7 @@ test('blocks an interrupted execution after four retries and records the exact e
     failedCount: 1,
     retryableCount: 0,
     blockedCount: 1,
+    deferredCount: 0,
     cancelledReservationCount: 0,
     recoverableCount: 0,
     pendingResultCount: 0,
@@ -124,6 +126,7 @@ test('releases a cancelled requirement execution when its runner has already exi
     failedCount: 0,
     retryableCount: 0,
     blockedCount: 0,
+    deferredCount: 0,
     cancelledReservationCount: 0,
     recoverableCount: 0,
     pendingResultCount: 0,
@@ -132,6 +135,59 @@ test('releases a cancelled requirement execution when its runner has already exi
     (db.prepare("SELECT status FROM execution_attempts WHERE execution_id = 'execution-cancelled-run'").get() as { status: string }).status,
     'cancelled',
   );
+});
+
+test('manual Loop stop defers a running execution without consuming a failure retry', async () => {
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Manual Loop stop is not an execution failure' });
+  db.prepare(`
+    INSERT INTO execution_attempts(
+      execution_id, run_id, task_id, agent, pipeline, lane, delegation_key,
+      dispatch_generation_key, dispatch_retry_consumed,
+      attempt, status, input_hash, input_json
+    ) VALUES('execution-manual-loop-stop', 'run-manual-loop-stop', ?, 'dev-agent', 'dev', 'delivery',
+      'key-manual-loop-stop', 'generation-manual-loop-stop', 1,
+      1, 'running', 'hash-manual-loop-stop', '{}')
+  `).run(taskId);
+
+  const recovered = await reconcileInterruptedExecutions(
+    'run-manual-loop-stop',
+    'Loop 已停止（用户停止），执行尚未返回结构化结果',
+    { countAsFailure: false },
+  );
+
+  assert.deepEqual(recovered, {
+    failedCount: 0,
+    retryableCount: 0,
+    blockedCount: 0,
+    deferredCount: 1,
+    cancelledReservationCount: 0,
+    recoverableCount: 0,
+    pendingResultCount: 0,
+  });
+  assert.deepEqual(
+    db.prepare(`
+      SELECT status, failure_kind, retry_not_before, dispatch_retry_consumed
+      FROM execution_attempts WHERE execution_id = 'execution-manual-loop-stop'
+    `).get(),
+    { status: 'cancelled', failure_kind: null, retry_not_before: null, dispatch_retry_consumed: 0 },
+  );
+  assert.equal(
+    (db.prepare(`
+      SELECT COALESCE(MAX(attempt), 0) AS attempt
+      FROM execution_attempts
+      WHERE dispatch_generation_key = 'generation-manual-loop-stop'
+        AND dispatch_retry_consumed = 1
+    `).get() as { attempt: number }).attempt,
+    0,
+  );
+  const events = db.prepare(`
+    SELECT event_type, summary FROM task_events
+    WHERE task_id = ? AND event_type IN ('AgentExecutionDeferredByLoopStop', 'AgentExecutionRetryScheduled')
+    ORDER BY rowid
+  `).all(taskId) as Array<{ event_type: string; summary: string }>;
+  assert.deepEqual(events.map((event) => event.event_type), ['AgentExecutionDeferredByLoopStop']);
+  assert.match(events[0].summary, /不消耗失败重试额度.*下次运行将重新派发/);
 });
 
 test('routes queued result application failures through the same retry policy and activity log', async () => {

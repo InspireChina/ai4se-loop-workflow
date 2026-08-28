@@ -2268,7 +2268,8 @@ async function reconcileDispatchLanes() {
 }
 
 function interruptedExecutionRecoveryLog(recovered: Awaited<ReturnType<typeof import('./executions')['reconcileInterruptedExecutions']>>) {
-  return `${recovered.retryableCount} 个无结果执行转为可重试，`
+  return `${recovered.deferredCount} 个执行因正常停止而延期且不计失败，`
+    + `${recovered.retryableCount} 个无结果执行转为可重试，`
     + `${recovered.blockedCount} 个无结果执行因重试耗尽而阻塞，`
     + `${recovered.cancelledReservationCount} 个未启动派发已取消，`
     + `${recovered.recoverableCount + recovered.pendingResultCount} 个已有结果执行等待恢复`;
@@ -2343,7 +2344,11 @@ export async function endRun(runId: string, force = false, options: { stopRunner
   if (current?.runId) {
     const reason = options.reason || (force ? '异常终止' : '用户停止');
     const { reconcileInterruptedExecutions } = await import('./executions');
-    const recovered = await reconcileInterruptedExecutions(current.runId, `Loop 已停止（${reason}），执行尚未返回结构化结果`);
+    const recovered = await reconcileInterruptedExecutions(
+      current.runId,
+      `Loop 已停止（${reason}），执行尚未返回结构化结果`,
+      { countAsFailure: force },
+    );
     await reconcileDispatchLanes();
     await appendLoopRunLog(current.runId, `[运行] Loop 已停止：${reason}`);
     await appendLoopRunLog(current.runId, `[恢复] ${interruptedExecutionRecoveryLog(recovered)}，将在下次运行继续`);

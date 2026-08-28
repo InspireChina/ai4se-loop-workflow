@@ -111,9 +111,14 @@ export function shouldRecordDevCodeCommit(
     && result.changedFiles.length > 0;
 }
 
-export async function reconcileInterruptedExecutions(runId: string | null, reason: string) {
+export async function reconcileInterruptedExecutions(
+  runId: string | null,
+  reason: string,
+  options: { countAsFailure?: boolean } = {},
+) {
   const db = await databaseConnection();
   const scope = runId ? 'AND execution_attempts.run_id = ?' : '';
+  const countAsFailure = options.countAsFailure !== false;
   return db.transaction(() => {
   const orphanReservations = db.prepare(`
     SELECT execution_attempts.execution_id, execution_attempts.task_id,
@@ -211,6 +216,28 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
     attempt: number;
   }>;
   for (const interrupted of interruptedExecutions) {
+    if (!countAsFailure) {
+      db.prepare(`
+        UPDATE execution_attempts
+        SET status = 'cancelled', last_error = ?, failure_kind = NULL, retry_not_before = NULL,
+            dispatch_retry_consumed = 0, finished_at = CURRENT_TIMESTAMP,
+            heartbeat_at = CURRENT_TIMESTAMP,
+            dispatch_execution_exited_at = COALESCE(dispatch_execution_exited_at, CURRENT_TIMESTAMP),
+            dispatch_settled_at = COALESCE(dispatch_settled_at, CURRENT_TIMESTAMP)
+        WHERE execution_id = ? AND status = 'running'
+      `).run(reason, interrupted.execution_id);
+      const scopeLabel = interrupted.lane ? `${interrupted.lane} Lane` : 'control';
+      const unit = interrupted.story_index === null ? '' : ` · 交付单元 ${interrupted.story_index}`;
+      db.prepare(`
+        INSERT INTO task_events(event_id, task_id, actor, event_type, summary)
+        VALUES(?, ?, 'system', 'AgentExecutionDeferredByLoopStop', ?)
+      `).run(
+        randomUUID(),
+        interrupted.task_id,
+        `${scopeLabel} · ${interrupted.agent}${unit} · execution=${interrupted.execution_id} · Loop 手动停止，执行已中止且不消耗失败重试额度；下次运行将重新派发`,
+      );
+      continue;
+    }
     const willRetry = interrupted.attempt <= EXECUTION_FAILURE_MAX_RETRIES;
     const retryNotBefore = willRetry ? retryNotBeforeForFailure(interrupted.attempt) : null;
     db.prepare(`
@@ -250,9 +277,12 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
       `).run(interrupted.agent, reason, `系统阻塞：${reason}`, interrupted.task_id);
     }
   }
-  const retryableCount = interruptedExecutions.filter((execution) => execution.attempt <= EXECUTION_FAILURE_MAX_RETRIES).length;
-  const blockedCount = interruptedExecutions.length - retryableCount;
-  const failedCount = interruptedExecutions.length;
+  const retryableCount = countAsFailure
+    ? interruptedExecutions.filter((execution) => execution.attempt <= EXECUTION_FAILURE_MAX_RETRIES).length
+    : 0;
+  const blockedCount = countAsFailure ? interruptedExecutions.length - retryableCount : 0;
+  const failedCount = countAsFailure ? interruptedExecutions.length : 0;
+  const deferredCount = countAsFailure ? 0 : interruptedExecutions.length;
   const cancelledReservationCount = orphanReservations.length;
   const recoverableCount = (db.prepare(`
     SELECT COUNT(*) AS count
@@ -266,6 +296,7 @@ export async function reconcileInterruptedExecutions(runId: string | null, reaso
       failedCount,
       retryableCount,
       blockedCount,
+      deferredCount,
       cancelledReservationCount,
       recoverableCount,
       pendingResultCount,
