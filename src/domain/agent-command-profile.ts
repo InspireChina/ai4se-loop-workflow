@@ -1,9 +1,22 @@
+import { businessAnalysisPhases, businessAnalysisWorkflow } from './business-analysis-workflow';
+import { deliveryAnalysisNormalCommandPath } from './delivery-analysis-workflow';
+import { deliveryPlanNormalCommandPath } from './delivery-plan-workflow';
+import { developmentNormalCommandPath } from './development-workflow';
+import { requirementContextNormalCommandPath } from './requirement-context-workflow';
+import { verificationNormalCommandPath } from './verification-workflow';
+
 export type AgentCommandProfile = {
   id: string;
   agent: string;
   pipelines: string[];
   namespace: string;
   draftType: 'direct' | 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification' | 'feedback' | 'review' | 'business_analysis';
+  terminalActions: string[];
+};
+
+export type AgentCommandChain = {
+  pipeline: string;
+  commands: string[];
   terminalActions: string[];
 };
 
@@ -159,6 +172,54 @@ export function agentCommandProfiles() {
     pipelines: [...profile.pipelines],
     terminalActions: [...profile.terminalActions],
   }));
+}
+
+const PIPELINE_LABELS: Record<string, string> = {
+  direct: 'Direct',
+  'ba-intent': '需求意图确认',
+  'ba-design': '业务方案设计',
+  'ba-spec': '需求规格编写',
+  'ba-review': '规格独立审查',
+  backlog: '需求梳理',
+  repro: '问题复现',
+  analysis: '交付分析',
+  dev: '开发实现',
+  test: '独立验证',
+  review: '结卡报告',
+  split: '交付规划',
+  resume: '恢复执行',
+};
+
+function primaryCommandPath(profile: AgentCommandProfile, pipeline: string) {
+  if (pipeline === 'direct') return ['direct run', 'direct submit --summary-file <简短结论> [--result-file <完整结果>]'];
+  if (pipeline === 'backlog' || pipeline === 'resume' && profile.draftType === 'requirement_context') return requirementContextNormalCommandPath();
+  if (pipeline === 'analysis') return deliveryAnalysisNormalCommandPath();
+  if (pipeline === 'dev') return developmentNormalCommandPath();
+  if (pipeline === 'test') return verificationNormalCommandPath();
+  if (pipeline === 'split') return deliveryPlanNormalCommandPath();
+  if (profile.draftType === 'business_analysis') {
+    const workflow = businessAnalysisWorkflow(profile.agent);
+    if (workflow) return businessAnalysisPhases(profile.agent as Parameters<typeof businessAnalysisPhases>[0], false)
+      .map((phase) => workflow.definitions[phase]?.submit)
+      .filter((command): command is string => Boolean(command));
+  }
+  return profile.terminalActions;
+}
+
+export function agentCommandChains(agent: string): AgentCommandChain[] {
+  const profiles = PROFILES.filter((profile) => profile.agent === agent);
+  return profiles.map((profile) => {
+    const pipeline = profile.pipelines[0];
+    return {
+      pipeline,
+      commands: primaryCommandPath(profile, pipeline),
+      terminalActions: [...profile.terminalActions],
+    };
+  });
+}
+
+export function agentPipelineLabel(pipeline: string) {
+  return PIPELINE_LABELS[pipeline] || pipeline;
 }
 
 export function agentCommandWorkKey(

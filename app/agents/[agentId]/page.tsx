@@ -1,16 +1,18 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { Activity, BookOpenText, Bot, BrainCircuit, CalendarDays, Check, FolderCog, Gauge, MemoryStick, PencilLine, RotateCcw, Sparkles } from 'lucide-react';
+import { Activity, ArrowRight, BookOpenText, Bot, BrainCircuit, CalendarDays, Check, CircleDot, FolderCog, Gauge, MemoryStick, PencilLine, RotateCcw, Sparkles } from 'lucide-react';
 import { getAgentProfile } from '../../../src/application/agent-profiles';
 import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, OMP_THINKING_LEVELS, getAgentRuntimeSettings, getFlowAgentDefaultRuntimeSettings } from '../../../src/application/project-settings';
 import { AGENT_PROMPT_SEED_REVISION, isFlowAgentId } from '../../../src/domain/agent-profile';
 import { MarkdownContent } from '../../../src/ui/markdown-content';
+import { agentCommandChains, agentCommandProfile, agentContextHelpLines, agentPipelineLabel, loopAgentCommandPrefix } from '../../../src/domain/agent-command-profile';
 import { resetAgentPromptAction, saveAgentMemoryAction, saveAgentPromptAction, saveAgentRuntimeAction, setAgentAutoEvolutionAction } from '../../actions';
 
 export const dynamic = 'force-dynamic';
 
 const agentSections = [
   { id: 'runtime', label: '运行参数', description: 'CLI、模型与思考强度', icon: Gauge },
+  { id: 'commands', label: '命令链', description: '阶段顺序与终止动作', icon: CircleDot },
   { id: 'prompt', label: 'Prompt', description: '项目角色指令与系统模板', icon: BrainCircuit },
   { id: 'memory', label: 'Memory', description: '长期经验与每日观察', icon: MemoryStick },
   { id: 'evolution', label: '演化', description: '策略、候选与观察', icon: Sparkles },
@@ -77,6 +79,10 @@ export default async function AgentDetailPage({ params, searchParams }: { params
     `# Durable Memory · r${detail.currentMemory.revision}`,
     detail.currentMemory.content,
   ].join('\n');
+  const commandChains = agentCommandChains(agentId);
+  const commandProfile = commandChains.length ? agentCommandProfile(agentId, commandChains[0].pipeline) : null;
+  const commandPrefix = loopAgentCommandPrefix(process.cwd());
+  const contextPrefix = agentContextHelpLines(process.cwd())[0]?.replace(/^- `|`.*$/g, '') || `${commandPrefix} agent-context`;
 
   return <>
     <header className="page-header agent-page-header"><div><Link className="crumb" href="/agents">Agent 配置</Link><p className="eyebrow">{agentId}</p><h1>{detail.definition.label}</h1><p className="muted">{detail.definition.description}</p></div><span className={`badge ${detail.candidatePrompt ? 'amber' : detail.profile.auto_evolve ? 'green' : 'blue'}`}>{detail.candidatePrompt ? `Prompt Canary r${detail.candidatePrompt.revision}` : detail.profile.auto_evolve ? '自动演化已开启' : '自动演化已关闭'}</span></header>
@@ -109,6 +115,23 @@ export default async function AgentDetailPage({ params, searchParams }: { params
         <div><strong>当前生效配置</strong><p className="path-line">{flowRuntimeSummary}</p></div>
         <div className="form-actions"><Link className="button" href={`/agents/${agentId}?section=runtime&runtimeMode=override`}>改为独立配置</Link><Link className="button secondary" href="/settings">修改项目默认</Link></div>
       </section>}
+
+      {section === 'commands' && <div className="agent-command-layout">
+        <section className="card settings agent-section-card">
+          <div className="settings-section-head"><span className="executor-icon"><CircleDot size={18}/></span><div><strong>Agent 命令链</strong><p className="muted settings-description">只读展示 Harness 为当前 Agent 提供的正常推进路径，便于检查阶段是否过多、职责是否重复或终止条件是否清晰。</p></div><span className="badge">只读</span></div>
+          <div className="command-chain-list">{commandChains.map((chain) => <article className="command-chain" key={chain.pipeline}>
+            <div className="command-chain-head"><div><span className="badge">{agentPipelineLabel(chain.pipeline)}</span><code>{chain.pipeline}</code></div><small>{chain.commands.length} 个阶段</small></div>
+            <div className="command-chain-steps" aria-label={`${agentPipelineLabel(chain.pipeline)} 命令顺序`}>
+              {chain.commands.map((command, index) => <span className="command-chain-step" key={`${chain.pipeline}:${command}`}><code>{command}</code>{index < chain.commands.length - 1 && <ArrowRight size={14}/>}</span>)}
+            </div>
+            <div className="command-chain-terminal"><span>可用终止动作</span>{chain.terminalActions.map((action) => <code key={action}>{action}</code>)}</div>
+          </article>)}</div>
+        </section>
+        <aside className="agent-section-aside">
+          <section className="card settings"><strong>调用入口</strong><p className="muted settings-description">执行时由 Runner 注入一次性权限，Agent 通过以下入口推进当前工作。</p><code className="command-block">{commandPrefix} {commandProfile?.namespace || agentId} status</code></section>
+          <section className="card settings"><strong>按需读取上下文</strong><p className="muted settings-description">完整冻结快照不塞进启动 Prompt，按需使用 agent-context 查询。</p><code className="command-block">{contextPrefix} overview</code><code className="command-block">{contextPrefix} get &lt;context-ref&gt;</code><code className="command-block">{contextPrefix} search --query &lt;keyword&gt;</code></section>
+        </aside>
+      </div>}
 
       {section === 'runtime' && editingIndependentRuntime && <form action={saveAgentRuntimeAction} className="card settings agent-section-card">
         <input type="hidden" name="agentId" value={agentId}/><input type="hidden" name="section" value="runtime"/>
