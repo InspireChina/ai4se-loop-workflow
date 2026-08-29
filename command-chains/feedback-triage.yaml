@@ -1,0 +1,80 @@
+version: 1
+id: feedback-triage
+agent: feedback-agent
+
+artifacts:
+  feedback:
+    blocks:
+      inputs:
+        title: FROZEN FEEDBACK COMMENTS
+        cardinality: many
+        format: yaml
+        writable: false
+        required: true
+        fields:
+          commentId: { type: string, required: true }
+      meta:
+        title: FROZEN FEEDBACK BATCH
+        cardinality: one
+        format: yaml
+        writable: false
+        required: true
+        fields:
+          batchId: { type: string, required: true }
+          totalStories: { type: string, required: true }
+      summary:
+        title: FEEDBACK TRIAGE SUMMARY
+        cardinality: one
+        format: markdown
+        required: true
+      groups:
+        title: FEEDBACK WORK GROUPS
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          workType: { type: enum, required: true, values: [reply, historical_correction, report_correction, bug, behavior_change, scope_addition, technical_change, learning_only] }
+          title: { type: string }
+          reason: { type: string, required: true }
+          response: { type: string }
+          commentIds: { type: array, required: true, minItems: 1 }
+          affectedDeliveryUnits: { type: array, required: true }
+          acceptance: { type: array, required: true }
+      answer-review:
+        title: CLARIFICATION ANSWER REVIEW
+        cardinality: one
+        format: markdown
+        required: true
+
+phases:
+  # 内置输入门禁：冻结当前反馈批次的全部评论和既有交付单元数量。
+  inputs:
+    type: builtin
+    builtin: feedback-triage-inputs
+
+  # 内置决策阶段：只为会改变工作组边界或验收语义、且无法从冻结事实判断的歧义建立完整问题。
+  clarification_proposal:
+    type: builtin
+    builtin: decision-proposal
+
+  # 内置决策阶段：关闭可自主确定的问题，或一次提交完整 HUMAN 批次等待用户回答。
+  clarification_resolution:
+    type: builtin
+    builtin: decision-resolution
+
+  # 内置答案复核：消费原 decision key 上的用户答案，确认现有分组已经反映答案。
+  answer_review:
+    type: builtin
+    builtin: decision-answer-review
+    artifacts: [feedback.answer-review]
+
+  # Artifact Phase：把全部冻结评论恰好分入一个工作组，并声明路由所需的原因、范围、回复或验收语义。
+  grouping:
+    type: artifact
+    artifacts: [feedback.summary, feedback.groups]
+    instructions: 对当前批次做完整分流，并消费全部已关闭澄清。每条冻结评论必须且只能属于一个稳定 group key；直接回复和历史更正写 response，任何会产生后续工作的类型必须提供标题和可验证 acceptance。
+
+  # 内置最终门禁：校验评论覆盖、工作组结构和已关闭澄清，并编译反馈分流结果。
+  finalize:
+    type: builtin
+    builtin: feedback-triage-finalize

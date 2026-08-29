@@ -1,0 +1,82 @@
+version: 1
+id: reproduction
+agent: repro-agent
+
+artifacts:
+  reproduction:
+    blocks:
+      verdict:
+        title: REPRODUCTION VERDICT
+        cardinality: one
+        format: yaml
+        required: true
+        fields:
+          status: { type: enum, required: true, values: [reproduced, not_reproduced] }
+          expectedBehavior: { type: string, required: true }
+          actualBehavior: { type: string, required: true }
+          environment: { type: string, required: true }
+          stability: { type: string, required: true }
+          impactScope: { type: string, required: true }
+      steps:
+        title: REPRODUCTION STEPS
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          action: { type: string, required: true }
+          expected: { type: string, required: true }
+          actual: { type: string, required: true }
+      evidence:
+        title: REPRODUCTION EVIDENCE
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          kind: { type: enum, required: true, values: [log, screenshot, command, observation] }
+          content: { type: string, required: true }
+          source: { type: string, required: true }
+      hypotheses:
+        title: INVESTIGATION DIRECTIONS
+        cardinality: many
+        format: yaml
+        fields:
+          status: { type: enum, required: true, values: [suspected, excluded] }
+          statement: { type: string, required: true }
+          evidence: { type: string, required: true }
+      answer-review:
+        title: ALIGNMENT ANSWER REVIEW
+        cardinality: one
+        format: markdown
+        required: true
+
+phases:
+  # Artifact Phase：在不修改目标仓库持久文件的前提下复现候选异常，登记条件、步骤、观察证据和调查方向。
+  investigation:
+    type: artifact
+    artifacts:
+      - reproduction.verdict
+      - reproduction.steps
+      - reproduction.evidence
+      - reproduction.hypotheses
+    instructions: 建立最小充分的复现记录。Expected 只陈述报告或既有规范中的候选预期，Actual 只陈述当前条件下观察到的事实；明确环境、稳定性、最小影响范围、可重复步骤和可定位证据。无法确认不等于问题不存在，根因假设只用于指导调查，不得变成实现方案。
+
+  # 对齐提出：仅当缺失的用户事实会改变复现条件时，登记完整且互斥的确认问题；成功复现时无需创建 Decision。
+  alignment_proposal:
+    type: builtin
+    builtin: decision-proposal
+
+  # 对齐解决：已有用户答案必须按原 key 关闭；仍缺少必要事实时一次提交完整 HUMAN 批次并暂停。
+  alignment_resolution:
+    type: builtin
+    builtin: decision-resolution
+
+  # 答案复查：检查用户补充事实对环境、步骤和结论的组合影响；需要重新取证时回退 investigation。
+  answer_review:
+    type: builtin
+    builtin: decision-answer-review
+    artifacts: [reproduction.answer-review]
+
+  # 内置最终门禁：只允许有完整条件、步骤和观察证据的 reproduced 结论进入交付规划；调查方向不是完成门槛。
+  finalize:
+    type: builtin
+    builtin: reproduction-finalize

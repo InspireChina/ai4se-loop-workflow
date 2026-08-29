@@ -1,0 +1,71 @@
+version: 1
+id: development
+agent: dev-agent
+
+artifacts:
+  development:
+    blocks:
+      criteria:
+        title: IMPLEMENTATION EVIDENCE
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          evidence: { type: string, required: true }
+      recovery-resolutions:
+        title: RECOVERY RESOLUTIONS
+        cardinality: many
+        format: yaml
+        fields:
+          summary: { type: string, required: true }
+          evidence: { type: string, required: true }
+      code-review:
+        title: CODE REVIEW
+        cardinality: one
+        format: yaml
+        required: true
+        fields:
+          summary: { type: string, required: true }
+          evidence: { type: string, required: true }
+      risks:
+        title: RESIDUAL RISKS
+        cardinality: many
+        format: yaml
+        fields:
+          content: { type: string, required: true }
+
+phases:
+  # 只读范围门禁：读取冻结 Delivery Spec，确认实现目标、验收语义、保护约束与验证关注点。
+  delivery_spec:
+    type: builtin
+    builtin: delivery-spec
+
+  # 内置实现门禁：实现真实代码，并逐项登记验收证据和活动恢复事项；缺少运行信息时可登记请求并由 phase complete 暂停。
+  implement:
+    type: builtin
+    builtin: implementation-evidence
+    artifacts:
+      - development.criteria
+      - development.recovery-resolutions
+
+  # Artifact Phase：独立走查当前实现的规范、职责边界、可读性和可维护性；发现阻塞问题时回退 implement。
+  review:
+    type: artifact
+    artifacts: [development.code-review]
+    instructions: 对当前实现做独立代码审查，确认它遵守仓库规范、模块职责和 Clean Code 原则。登记审查摘要与可定位依据；发现阻塞问题时不要完成本阶段，使用 phase rewind 回到 implement 修正后重新审查。不要用测试通过代替代码质量审查。
+
+  # 内置命令事实门禁：从 Harness 捕获的真实 shell receipt 中选择关键成功检查，并如实登记残余风险。
+  developer_verify:
+    type: builtin
+    builtin: command-verification
+    artifacts: [development.risks]
+
+  # 提交确认：有当前交付相关改动时形成边界清晰的 Git 提交；没有改动时不要制造空提交。
+  commit:
+    type: confirmation
+    instructions: 检查当前交付是否已经形成范围正确的 Git 提交。只提交当前交付相关文件，不混入已有无关改动；没有代码变化时确认无需制造空提交。发现实现或验证问题时使用 phase rewind 回到对应阶段。
+
+  # 最终确认：Agent 复查实现证据、代码审查、真实命令事实、风险、恢复处理和提交状态的一致性。
+  finalize:
+    type: confirmation
+    instructions: 最终检查实现证据、代码审查、真实命令事实、残余风险、恢复事项和提交状态是否一致且完整。发现问题时不要提交，使用 phase rewind 回到对应阶段修正。

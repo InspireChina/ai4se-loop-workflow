@@ -133,7 +133,7 @@ test('labels command-driven draft updates as Agent domain commands', () => {
     type: 'item.started',
     item: {
       type: 'command_execution',
-      command: 'node "/app/scripts/loop/loop-agent.mjs" requirement-context status',
+      command: 'node "/app/scripts/loop/loop-agent.mjs" status',
     },
   });
   const parsed = getAgentExecutor('codex').parseStdout(line, {
@@ -143,7 +143,7 @@ test('labels command-driven draft updates as Agent domain commands', () => {
     pipeline: 'resume',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /恢复需求上下文草稿/);
+  assert.match(parsed || '', /恢复命令链草稿/);
 });
 
 test('labels Business Analysis packets as Agent domain commands', () => {
@@ -164,12 +164,12 @@ test('labels Business Analysis packets as Agent domain commands', () => {
   assert.match(parsed || '', /提交业务方案工作包/);
 });
 
-test('labels quoted delivery-plan arguments with the specific progressive action', () => {
+test('labels quoted delivery-plan Artifact writes as generic domain actions', () => {
   const line = JSON.stringify({
     type: 'item.started',
     item: {
       type: 'command_execution',
-      command: "/bin/zsh -lc 'node \"/app/scripts/loop/loop-agent.mjs\" '\"'\"'delivery-plan'\"'\"' '\"'\"'unit'\"'\"' '\"'\"'upsert'\"'\"' --key csv-export'",
+      command: "/bin/zsh -lc 'node \"/app/scripts/loop/loop-agent.mjs\" '\"'\"'artifact'\"'\"' '\"'\"'put'\"'\"' --artifact delivery-plan --block units --key csv-export'",
     },
   });
   const parsed = getAgentExecutor('codex').parseStdout(line, {
@@ -179,15 +179,15 @@ test('labels quoted delivery-plan arguments with the specific progressive action
     pipeline: 'split',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /保存交付单元/);
+  assert.match(parsed || '', /登记交付物/);
 });
 
-test('labels progressive reproduction evidence as an Agent domain action', () => {
+test('labels reproduction Artifact evidence as a generic domain action', () => {
   const line = JSON.stringify({
     type: 'item.started',
     item: {
       type: 'command_execution',
-      command: 'node "/app/scripts/loop/loop-agent.mjs" reproduction evidence upsert --key browser',
+      command: 'node "/app/scripts/loop/loop-agent.mjs" artifact put --artifact reproduction --block evidence --key browser',
     },
   });
   const parsed = getAgentExecutor('codex').parseStdout(line, {
@@ -197,15 +197,15 @@ test('labels progressive reproduction evidence as an Agent domain action', () =>
     pipeline: 'repro',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /更新复现证据/);
+  assert.match(parsed || '', /登记交付物/);
 });
 
-test('labels escaped and chained progressive commands as Agent domain actions', () => {
+test('labels escaped and chained reproduction command-chain actions', () => {
   const line = JSON.stringify({
     type: 'item.started',
     item: {
       type: 'command_execution',
-      command: '/bin/zsh -lc "node \\"/app/scripts/loop/loop-agent.mjs\\" reproduction actual set --text result && node \\"/app/scripts/loop/loop-agent.mjs\\" reproduction validate"',
+      command: '/bin/zsh -lc "node \\"/app/scripts/loop/loop-agent.mjs\\" artifact put --artifact reproduction --block verdict --content result && node \\"/app/scripts/loop/loop-agent.mjs\\" phase complete"',
     },
   });
   const parsed = getAgentExecutor('codex').parseStdout(line, {
@@ -215,17 +215,17 @@ test('labels escaped and chained progressive commands as Agent domain actions', 
     pipeline: 'resume',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /保存实际行为/);
+  assert.match(parsed || '', /登记交付物/);
 });
 
-test('labels Cursor shell wrappers around progressive commands as Agent domain actions', () => {
+test('labels Cursor shell wrappers around reproduction status', () => {
   const line = JSON.stringify({
     type: 'tool_call',
     subtype: 'started',
     tool_call: {
       shellToolCall: {
         args: {
-          command: '/bin/zsh -lc "node \\"/app/scripts/loop/loop-agent.mjs\\" reproduction status"',
+          command: '/bin/zsh -lc "node \\"/app/scripts/loop/loop-agent.mjs\\" status"',
         },
       },
     },
@@ -237,15 +237,15 @@ test('labels Cursor shell wrappers around progressive commands as Agent domain a
     pipeline: 'resume',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /恢复问题复现草稿/);
+  assert.match(parsed || '', /恢复命令链草稿/);
 });
 
-test('labels progressive delivery-analysis decisions as Agent domain actions', () => {
+test('labels generic command-chain decisions as Agent domain actions', () => {
   const line = JSON.stringify({
     type: 'item.started',
     item: {
       type: 'command_execution',
-      command: 'node "/app/scripts/loop/loop-agent.mjs" delivery-analysis decision resolve --key output-mode',
+      command: 'node "/app/scripts/loop/loop-agent.mjs" decision resolve --tree decisions --key output-mode',
     },
   });
   const parsed = getAgentExecutor('codex').parseStdout(line, {
@@ -258,14 +258,14 @@ test('labels progressive delivery-analysis decisions as Agent domain actions', (
   assert.match(parsed || '', /关闭关键决策/);
 });
 
-test('labels the Analyst frozen delivery contract without Dev-to-Test handoff terminology', () => {
+test('labels generic Artifact writes without Dev-to-Test handoff terminology', () => {
   const line = JSON.stringify({
     type: 'tool_call',
     subtype: 'started',
     tool_call: {
       shellToolCall: {
         args: {
-          command: 'node "/app/scripts/loop/loop-agent.mjs" delivery-analysis contract set --text frozen',
+          command: 'node "/app/scripts/loop/loop-agent.mjs" artifact put --artifact delivery-analysis --block contract --content-file frozen.md',
         },
       },
     },
@@ -276,18 +276,18 @@ test('labels the Analyst frozen delivery contract without Dev-to-Test handoff te
     storyIndex: 1,
     pipeline: 'analysis',
   });
-  assert.match(parsed || '', /保存冻结交付契约/);
+  assert.match(parsed || '', /登记交付物/);
   assert.doesNotMatch(parsed || '', /开发.*交接/);
 });
 
-test('labels progressive development evidence selection as an Agent domain action', () => {
+test('labels generic trusted check selection as an Agent domain action', () => {
   const line = JSON.stringify({
     type: 'tool_call',
     subtype: 'started',
     tool_call: {
       shellToolCall: {
         args: {
-          command: 'node "/app/scripts/loop/loop-agent.mjs" implementation check record --key unit --receipt 00000042 --summary passed',
+          command: 'node "/app/scripts/loop/loop-agent.mjs" check record --key unit --receipt 00000042 --summary passed',
         },
       },
     },
@@ -299,17 +299,17 @@ test('labels progressive development evidence selection as an Agent domain actio
     pipeline: 'dev',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /选择关键检查/);
+  assert.match(parsed || '', /登记真实命令检查/);
 });
 
-test('labels the trusted development commit confirmation as an Agent domain action', () => {
+test('labels generic phase confirmation as an Agent domain action', () => {
   const line = JSON.stringify({
     type: 'tool_call',
     subtype: 'started',
     tool_call: {
       shellToolCall: {
         args: {
-          command: 'node "/app/scripts/loop/loop-agent.mjs" implementation commit complete',
+          command: 'node "/app/scripts/loop/loop-agent.mjs" phase complete',
         },
       },
     },
@@ -321,17 +321,17 @@ test('labels the trusted development commit confirmation as an Agent domain acti
     pipeline: 'dev',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /确认代码提交步骤/);
+  assert.match(parsed || '', /完成命令链阶段/);
 });
 
-test('labels progressive independent verification results as an Agent domain action', () => {
+test('labels independent verification results as generic Artifact actions', () => {
   const line = JSON.stringify({
     type: 'tool_call',
     subtype: 'started',
     tool_call: {
       shellToolCall: {
         args: {
-          command: 'node "/app/scripts/loop/loop-agent.mjs" verification result record --key checkout-happy-path --status passed',
+          command: 'node "/app/scripts/loop/loop-agent.mjs" artifact put --artifact verification --block results --key checkout-happy-path',
         },
       },
     },
@@ -343,7 +343,7 @@ test('labels progressive independent verification results as an Agent domain act
     pipeline: 'test',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /记录场景验证结果/);
+  assert.match(parsed || '', /登记交付物/);
 });
 
 test('labels progressive feedback grouping as an Agent domain action', () => {

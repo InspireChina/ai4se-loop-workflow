@@ -108,17 +108,16 @@ async function applyNextFeedbackPlan(
   db.prepare(`
     INSERT INTO agent_work_drafts(
       draft_id, work_key, draft_version, draft_type, task_id, agent,
-      status, terminal_action, submitted_at
+      status, terminal_action, submitted_at, command_chain_id
     ) VALUES(?, ?, 1, 'delivery_plan', ?, 'story-splitter-agent',
-      'submitted', 'complete', CURRENT_TIMESTAMP)
+      'submitted', 'complete', CURRENT_TIMESTAMP, 'delivery-plan')
   `).run(draftId, `delivery-plan:${taskId}:feedback-split:${split.feedbackGroupId}`, taskId);
-  db.prepare('INSERT INTO delivery_plan_drafts(draft_id) VALUES(?)').run(draftId);
   await applyFeedbackSplitResult({
     taskId,
     batchId: split.feedbackBatchId,
     groupId: split.feedbackGroupId,
     deliveryUnits: units,
-    sourceDeliveryPlanDraftId: draftId,
+    sourceCommandChainDraftId: draftId,
   });
   return split;
 }
@@ -347,16 +346,15 @@ test('新版本会重新应用被旧版范围守卫误拒绝的反馈交付规�
   db.prepare(`
     INSERT INTO agent_work_drafts(
       draft_id, work_key, draft_version, draft_type, task_id, agent,
-      status, terminal_execution_id, terminal_action, submitted_at
+      status, terminal_execution_id, terminal_action, submitted_at, command_chain_id
     ) VALUES(?, ?, 1, 'delivery_plan', ?, 'story-splitter-agent',
-      'submitted', ?, 'complete', CURRENT_TIMESTAMP)
+      'submitted', ?, 'complete', CURRENT_TIMESTAMP, 'delivery-plan')
   `).run(
     draftId,
     `delivery-plan:${taskId}:feedback-split:${split.feedbackGroupId}`,
     taskId,
     attempt.execution_id,
   );
-  db.prepare('INSERT INTO delivery_plan_drafts(draft_id) VALUES(?)').run(draftId);
   db.prepare(`
     INSERT INTO agent_results(
       result_id, run_id, task_id, story_index, agent, pipeline, outcome,

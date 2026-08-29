@@ -3,6 +3,7 @@ import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspec
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
+import { stringify } from 'yaml';
 import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 import type { DelegationEnvelope } from './tasks';
 
@@ -92,31 +93,27 @@ async function recordBehaviorChange(
   token: string,
   commentId: string,
 ) {
-  await command(executionId, token, [
-    'feedback', 'summary', 'set', '--text',
-    '评论要求新增可观察的空状态提示，需要形成一个向前追加的行为修订工作组',
-  ]);
-  await command(executionId, token, [
-    'feedback', 'group', 'upsert',
-    '--key', 'empty-state',
-    '--type', 'behavior_change',
-    '--title', '补充空状态提示',
-    '--reason', '该评论改变用户可观察行为，不能改写既有交付历史',
-  ]);
-  await command(executionId, token, [
-    'feedback', 'group', 'comment', 'add',
-    '--key', 'empty-state', '--id', commentId,
-  ]);
-  await command(executionId, token, [
-    'feedback', 'group', 'unit', 'add',
-    '--key', 'empty-state', '--index', '1',
-  ]);
-  await command(executionId, token, [
-    'feedback', 'group', 'acceptance', 'upsert',
-    '--key', 'empty-state',
-    '--acceptance-key', 'visible-empty-state',
-    '--text', '空数据时页面展示清晰且可识别的提示',
-  ]);
+  await command(executionId, token, ['artifact', 'put', '--artifact', 'feedback', '--block', 'summary', '--content',
+    '评论要求新增可观察的空状态提示，需要形成一个向前追加的行为修订工作组']);
+  await command(executionId, token, ['artifact', 'put', '--artifact', 'feedback', '--block', 'groups', '--key', 'empty-state', '--content', stringify({
+    workType: 'behavior_change', title: '补充空状态提示',
+    reason: '该评论改变用户可观察行为，不能改写既有交付历史',
+    commentIds: [commentId], affectedDeliveryUnits: [1],
+    acceptance: ['空数据时页面展示清晰且可识别的提示'],
+  }).trim()]);
+}
+
+async function advanceFeedbackTriageToGrouping(executionId: string, token: string) {
+  await command(executionId, token, ['phase', 'complete']);
+  await command(executionId, token, ['phase', 'complete']);
+  await command(executionId, token, ['phase', 'complete']);
+  await command(executionId, token, ['artifact', 'put', '--artifact', 'feedback', '--block', 'answer-review', '--content', '本批次没有需要用户澄清的歧义。']);
+  await command(executionId, token, ['phase', 'complete']);
+}
+
+async function finishFeedbackTriage(executionId: string, token: string) {
+  await command(executionId, token, ['phase', 'complete']);
+  await command(executionId, token, ['phase', 'complete']);
 }
 
 async function planBehaviorChange(taskId: string) {
@@ -131,16 +128,15 @@ async function planBehaviorChange(taskId: string) {
   db.prepare(`
     INSERT INTO agent_work_drafts(
       draft_id, work_key, draft_version, draft_type, task_id, agent,
-      status, terminal_action, submitted_at
+      status, terminal_action, submitted_at, command_chain_id
     ) VALUES(?, ?, 1, 'delivery_plan', ?, 'story-splitter-agent',
-      'submitted', 'complete', CURRENT_TIMESTAMP)
+      'submitted', 'complete', CURRENT_TIMESTAMP, 'delivery-plan')
   `).run(draftId, `delivery-plan:${taskId}:feedback-split:${split.feedbackGroupId}`, taskId);
-  db.prepare('INSERT INTO delivery_plan_drafts(draft_id) VALUES(?)').run(draftId);
   await applyFeedbackSplitResult({
     taskId,
     batchId: split.feedbackBatchId!,
     groupId: split.feedbackGroupId!,
-    sourceDeliveryPlanDraftId: draftId,
+    sourceCommandChainDraftId: draftId,
     deliveryUnits: [{
       key: 'feedback-empty-state',
       title: '补充空状态提示',
@@ -173,16 +169,15 @@ test('feedback triage progressively covers the frozen batch and appends forward 
   const started = await begin(delegation, `${taskId}-triage`);
 
   await assert.rejects(
-    command(started.executionId, started.token!, [
-      'feedback', 'summary', 'set', '--text', '不能跳过 status',
-    ]),
-    /feedback status/,
+    command(started.executionId, started.token!, ['artifact', 'put', '--artifact', 'feedback', '--block', 'summary', '--content', '不能跳过 status']),
+    /先执行 status/,
   );
-  const initial = await command(started.executionId, started.token!, ['feedback', 'status']);
-  assert.match(initial, /批次分流/);
+  const initial = await command(started.executionId, started.token!, ['status']);
+  assert.match(initial, /FROZEN FEEDBACK BATCH/);
   assert.match(initial, new RegExp(commentId));
+  await advanceFeedbackTriageToGrouping(started.executionId, started.token!);
   await recordBehaviorChange(started.executionId, started.token!, commentId);
-  await command(started.executionId, started.token!, ['feedback', 'triage-complete']);
+  await finishFeedbackTriage(started.executionId, started.token!);
 
   const result = await readAgentCommandSubmission(started.executionId);
   assert.equal(result?.outcome, 'completed');
@@ -218,34 +213,21 @@ test('feedback clarification preserves the original decision key and partial dra
   } = await import('./tasks');
   const { taskId, commentId, delegation } = await completedRequirement('反馈澄清恢复');
   const first = await begin(delegation, `${taskId}-question`);
-  await command(first.executionId, first.token!, ['feedback', 'status']);
-  await command(first.executionId, first.token!, [
-    'feedback', 'summary', 'set', '--text',
-    '评论中的适用用户范围不足以安全判断工作组边界',
-  ]);
-  await command(first.executionId, first.token!, [
-    'feedback', 'question', 'upsert',
-    '--key', 'empty-state-audience',
-    '--title', '确认空状态适用范围',
-    '--question', '空状态提示面向全部用户还是仅管理员？',
-    '--impact', '该选择决定新增行为的用户范围',
-  ]);
-  await command(first.executionId, first.token!, [
-    'feedback', 'question', 'option-upsert',
-    '--key', 'empty-state-audience', '--id', 'all',
-    '--label', '全部用户', '--consequence', '所有空数据页面统一显示提示',
-  ]);
-  await command(first.executionId, first.token!, [
-    'feedback', 'question', 'option-upsert',
-    '--key', 'empty-state-audience', '--id', 'admin',
-    '--label', '仅管理员', '--consequence', '普通用户界面保持不变',
-  ]);
-  await command(first.executionId, first.token!, [
-    'feedback', 'question', 'recommend',
-    '--key', 'empty-state-audience', '--option', 'all',
-    '--reason', '评论没有限定角色，统一行为更符合字面范围',
-  ]);
-  await command(first.executionId, first.token!, ['feedback', 'request-clarification']);
+  await command(first.executionId, first.token!, ['status']);
+  await command(first.executionId, first.token!, ['phase', 'complete']);
+  await command(first.executionId, first.token!, ['decision', 'put', '--tree', 'decisions', '--key', 'empty-state-audience', '--content', stringify({
+    type: 'business', title: '确认空状态适用范围', question: '空状态提示面向全部用户还是仅管理员？',
+    impact: '该选择决定新增行为的用户范围',
+    options: [
+      { id: 'all', label: '全部用户', consequence: '所有空数据页面统一显示提示' },
+      { id: 'admin', label: '仅管理员', consequence: '普通用户界面保持不变' },
+    ],
+    recommendation: { option: 'all', reason: '评论没有限定角色，统一行为更符合字面范围', authority: 'user' },
+    dependencies: [],
+  }).trim()]);
+  await command(first.executionId, first.token!, ['phase', 'complete']);
+  await command(first.executionId, first.token!, ['decision', 'ask', '--tree', 'decisions', '--key', 'empty-state-audience']);
+  await command(first.executionId, first.token!, ['phase', 'complete']);
   const pending = await readAgentCommandSubmission(first.executionId);
   assert.equal(pending?.questions[0]?.decisionKey, 'empty-state-audience');
   await applyAgentResult(`RUN-feedback-question-${taskId}`, delegation, pending!, {
@@ -266,17 +248,20 @@ test('feedback clarification preserves the original decision key and partial dra
   const resumedDelegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.pipeline === 'feedback-triage')! as DelegationEnvelope;
   const resumed = await begin(resumedDelegation, `${taskId}-resume`);
-  const restored = await command(resumed.executionId, resumed.token!, ['feedback', 'status']);
-  assert.match(restored, /反馈草稿 v2/);
-  assert.match(restored, /empty-state-audience.*已回答=面向全部用户/);
+  const restored = await command(resumed.executionId, resumed.token!, ['status']);
+  assert.match(restored, /Draft: v2/);
+  assert.match(restored, /empty-state-audience.*answered=面向全部用户/);
+  await command(resumed.executionId, resumed.token!, ['decision', 'resolve', '--tree', 'decisions', '--key', 'empty-state-audience',
+    '--option', 'all', '--authority', 'user', '--decision', '面向全部用户', '--rationale', '用户明确回答', '--evidence', '用户答案']);
   await assert.rejects(
-    command(resumed.executionId, resumed.token!, [
-      'feedback', 'question', 'remove', '--key', 'empty-state-audience',
-    ]),
-    /必须保留原 decision key/,
+    command(resumed.executionId, resumed.token!, ['decision', 'remove', '--tree', 'decisions', '--key', 'empty-state-audience']),
+    /不属于当前 clarification_resolution 工作包/,
   );
+  await command(resumed.executionId, resumed.token!, ['phase', 'complete']);
+  await command(resumed.executionId, resumed.token!, ['artifact', 'put', '--artifact', 'feedback', '--block', 'answer-review', '--content', '用户确认空状态面向全部用户，分组按该范围登记。']);
+  await command(resumed.executionId, resumed.token!, ['phase', 'complete']);
   await recordBehaviorChange(resumed.executionId, resumed.token!, commentId);
-  await command(resumed.executionId, resumed.token!, ['feedback', 'triage-complete']);
+  await finishFeedbackTriage(resumed.executionId, resumed.token!);
   const completed = await readAgentCommandSubmission(resumed.executionId);
   await applyAgentResult(`RUN-feedback-resume-${taskId}`, resumedDelegation, completed!, {
     executionId: resumed.executionId,
@@ -297,9 +282,10 @@ test('feedback verify progressively records independent evidence and resolves on
   const { recordFeedbackUnitTestPassed } = await import('./feedback');
   const { taskId, commentId, delegation } = await completedRequirement('渐进式反馈验证');
   const triage = await begin(delegation, `${taskId}-triage`);
-  await command(triage.executionId, triage.token!, ['feedback', 'status']);
+  await command(triage.executionId, triage.token!, ['status']);
+  await advanceFeedbackTriageToGrouping(triage.executionId, triage.token!);
   await recordBehaviorChange(triage.executionId, triage.token!, commentId);
-  await command(triage.executionId, triage.token!, ['feedback', 'triage-complete']);
+  await finishFeedbackTriage(triage.executionId, triage.token!);
   const triageResult = await readAgentCommandSubmission(triage.executionId);
   await applyAgentResult(`RUN-feedback-verify-triage-${taskId}`, delegation, triageResult!, {
     executionId: triage.executionId,
@@ -319,23 +305,19 @@ test('feedback verify progressively records independent evidence and resolves on
     item.pipeline === 'feedback-verify')! as DelegationEnvelope;
   assert.ok(verifyDelegation);
   const verify = await begin(verifyDelegation, `${taskId}-verify`);
-  const status = await command(verify.executionId, verify.token!, ['feedback', 'status']);
-  assert.match(status, /独立验证/);
+  const status = await command(verify.executionId, verify.token!, ['status']);
+  assert.match(status, /FROZEN FEEDBACK TARGET/);
   assert.match(status, new RegExp(commentId));
-  await command(verify.executionId, verify.token!, [
-    'feedback', 'summary', 'set', '--text',
-    '新增空状态提示已经实现，并由交付单元独立测试证明',
-  ]);
-  await command(verify.executionId, verify.token!, [
-    'feedback', 'verification', 'reason', 'set', '--text',
-    '评论要求的用户可观察结果已经存在，且没有改写既有交付历史',
-  ]);
-  await command(verify.executionId, verify.token!, [
-    'feedback', 'evidence', 'upsert',
-    '--key', 'unit-2-test',
-    '--text', '交付单元 2 的 Test 结果通过，页面空数据场景展示明确提示',
-  ]);
-  await command(verify.executionId, verify.token!, ['feedback', 'resolve']);
+  await command(verify.executionId, verify.token!, ['phase', 'complete']);
+  await command(verify.executionId, verify.token!, ['artifact', 'put', '--artifact', 'feedback', '--block', 'summary', '--content',
+    '新增空状态提示已经实现，并由交付单元独立测试证明']);
+  await command(verify.executionId, verify.token!, ['artifact', 'put', '--artifact', 'feedback', '--block', 'evidence', '--key', 'unit-2-test', '--content',
+    '交付单元 2 的 Test 结果通过，页面空数据场景展示明确提示']);
+  await command(verify.executionId, verify.token!, ['artifact', 'put', '--artifact', 'feedback', '--block', 'conclusion', '--content', stringify({
+    verdict: 'resolved', reason: '评论要求的用户可观察结果已经存在，且没有改写既有交付历史',
+  }).trim()]);
+  await command(verify.executionId, verify.token!, ['phase', 'complete']);
+  await command(verify.executionId, verify.token!, ['phase', 'complete']);
   const verifyResult = await readAgentCommandSubmission(verify.executionId);
   assert.equal(verifyResult?.feedback?.mode, 'verify');
   if (verifyResult?.feedback?.mode === 'verify') {

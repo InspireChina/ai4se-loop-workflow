@@ -102,14 +102,14 @@ async function saveArtifact(delegation: DelegationEnvelope, result: AgentResult)
   });
 }
 
-async function deliveryPlanDraftId(sourceExecutionId?: string) {
+async function deliveryPlanCommandChainDraftId(sourceExecutionId?: string) {
   if (!sourceExecutionId) throw new Error('交付规划结果缺少来源 execution');
   const db = await databaseConnection();
   const row = db.prepare(`
     SELECT draft_id
     FROM agent_work_drafts
     WHERE terminal_execution_id = ?
-      AND draft_type = 'delivery_plan'
+      AND command_chain_id = 'delivery-plan'
       AND status = 'submitted'
       AND terminal_action = 'complete'
   `).get(sourceExecutionId) as { draft_id: string } | undefined;
@@ -591,7 +591,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     }
     case 'story-splitter-agent': {
       if (!result.deliveryUnits?.length) throw new Error('交付规划 Agent 结果缺少 deliveryUnits');
-      const sourceDeliveryPlanDraftId = await deliveryPlanDraftId(sourceExecutionId);
+      const sourceCommandChainDraftId = await deliveryPlanCommandChainDraftId(sourceExecutionId);
       if (delegation.pipeline === 'feedback-split') {
         if (!delegation.feedbackBatchId || !delegation.feedbackGroupId) throw new Error('反馈追加拆分缺少批次或分组');
         await applyFeedbackSplitResult({
@@ -600,7 +600,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
           groupId: delegation.feedbackGroupId,
           deliveryUnits: result.deliveryUnits,
           executionId: sourceExecutionId,
-          sourceDeliveryPlanDraftId,
+          sourceCommandChainDraftId,
         });
         return 'advanced';
       }
@@ -610,7 +610,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         taskId: delegation.taskId,
         actor,
         units: result.deliveryUnits,
-        sourceDeliveryPlanDraftId,
+        sourceCommandChainDraftId,
       });
       await updateTask(delegation.taskId, actor, {
         agile_status: detail.task.agile_status === 'in dev' ? 'in dev' : 'ready for dev',

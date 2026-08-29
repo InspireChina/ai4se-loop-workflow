@@ -16,7 +16,7 @@ export function insertDeliveryUnitContractsInDb(
     originType: DeliveryUnitOrigin;
     originFeedbackBatchId?: string | null;
     correctsStoryIndexes?: number[];
-    sourceDeliveryPlanDraftId?: string | null;
+    sourceCommandChainDraftId?: string | null;
   },
 ) {
   const firstIndex = ((db.prepare(`
@@ -35,7 +35,7 @@ export function insertDeliveryUnitContractsInDb(
         task_id, story_index, title, directory,
         origin_type, origin_feedback_batch_id, corrects_story_indexes_json,
         unit_key, actor, trigger_condition, observable_outcome, acceptance,
-        source_delivery_plan_draft_id
+        source_command_chain_draft_id
       ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.taskId,
@@ -50,7 +50,7 @@ export function insertDeliveryUnitContractsInDb(
       unit.trigger,
       unit.observableOutcome,
       unit.acceptance,
-      input.sourceDeliveryPlanDraftId || null,
+      input.sourceCommandChainDraftId || null,
     );
     for (const source of unit.sourceRefs) {
       db.prepare(`

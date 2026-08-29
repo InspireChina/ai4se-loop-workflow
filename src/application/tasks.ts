@@ -104,7 +104,7 @@ export type Story = {
   trigger_condition: string | null;
   observable_outcome: string | null;
   acceptance: string | null;
-  source_delivery_plan_draft_id: string | null;
+  source_command_chain_draft_id: string | null;
   context_links: {
     source_key: string;
     source_kind: 'change' | 'preserve' | 'technical' | 'acceptance';
@@ -1035,7 +1035,7 @@ export async function addPlannedDeliveryUnits(input: unknown) {
     taskId: z.string().min(1),
     actor: z.literal('story-splitter-agent'),
     units: z.array(deliveryUnitContractSchema).min(1).max(50),
-    sourceDeliveryPlanDraftId: z.string().min(1),
+    sourceCommandChainDraftId: z.string().min(1),
   }).parse(input);
   const db = await databaseConnection();
   const task = fetchTask(db, value.taskId);
@@ -1052,7 +1052,7 @@ export async function addPlannedDeliveryUnits(input: unknown) {
       taskId: value.taskId,
       units: value.units,
       originType: 'original',
-      sourceDeliveryPlanDraftId: value.sourceDeliveryPlanDraftId,
+      sourceCommandChainDraftId: value.sourceCommandChainDraftId,
     });
     db.prepare(`
       UPDATE tasks

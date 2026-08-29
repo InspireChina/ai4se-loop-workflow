@@ -765,7 +765,7 @@ export function renderAgentWorkingContextPack(
         '',
         '## Requirement-Context State',
         '',
-        '当前没有需要直接内联的恢复决策包。已有草稿、当前阶段和下一工作包以 requirement-context status 的返回为准。',
+        '当前没有需要直接内联的恢复决策包。已有草稿、当前阶段和下一工作包以 status 的返回为准。',
       );
     }
   } else {

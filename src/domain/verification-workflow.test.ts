@@ -1,22 +1,27 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  VERIFICATION_COMMAND_CHAIN,
   VERIFICATION_PHASE_ORDER,
   VERIFICATION_PHASE_SEQUENCE,
   VERIFICATION_WORKFLOW,
   verificationNormalCommandPath,
 } from './verification-workflow';
 
-test('verification workflow exposes the four hard-gated work packets', () => {
-  assert.deepEqual(VERIFICATION_PHASE_ORDER, ['plan', 'execute', 'evidence_review', 'finalize']);
-  assert.equal(VERIFICATION_PHASE_SEQUENCE, 'PLAN → EXECUTE → EVIDENCE REVIEW → FINALIZE');
+test('defines Verification entirely from the YAML command chain', () => {
+  assert.equal(VERIFICATION_COMMAND_CHAIN.agent, 'test-agent');
+  assert.deepEqual(VERIFICATION_PHASE_ORDER, ['inputs', 'plan', 'execute', 'evidence_review', 'finalize']);
+  assert.equal(
+    VERIFICATION_PHASE_SEQUENCE,
+    'FROZEN VERIFICATION INPUTS → PLAN → EXECUTE → EVIDENCE REVIEW → FINALIZE',
+  );
+  assert.equal(VERIFICATION_WORKFLOW.inputs.builtin, 'verification-inputs');
+  assert.equal(VERIFICATION_WORKFLOW.plan.builtin, 'verification-plan');
+  assert.equal(VERIFICATION_WORKFLOW.execute.builtin, 'verification-execution');
+  assert.equal(VERIFICATION_WORKFLOW.evidence_review.type, 'artifact');
+  assert.equal(VERIFICATION_WORKFLOW.finalize.builtin, 'verification-finalize');
+  assert.equal(VERIFICATION_COMMAND_CHAIN.artifacts.verification.blocks.sources.writable, false);
   assert.deepEqual(verificationNormalCommandPath(), [
-    'verification plan complete',
-    'verification execute complete',
-    'verification evidence-review complete',
-    'verification validate',
-    'verification complete',
+    'status', 'phase complete', 'phase complete', 'phase complete', 'phase complete', 'phase complete',
   ]);
-  assert.match(VERIFICATION_WORKFLOW.evidence_review.prohibited, /不要在本阶段修改场景或执行结果/);
-  assert.match(VERIFICATION_WORKFLOW.finalize.reviewBeforeSubmit.join('\n'), /不泄露内部稳定 key/);
 });

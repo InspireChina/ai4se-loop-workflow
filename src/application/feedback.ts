@@ -519,7 +519,7 @@ export async function applyFeedbackSplitResult(input: {
   groupId: string;
   deliveryUnits: DeliveryUnitContract[];
   executionId?: string;
-  sourceDeliveryPlanDraftId: string;
+  sourceCommandChainDraftId: string;
 }) {
   const db = await databaseConnection();
   const group = db.prepare(`
@@ -538,7 +538,7 @@ export async function applyFeedbackSplitResult(input: {
       originType: originType(group.work_type),
       originFeedbackBatchId: input.batchId,
       correctsStoryIndexes: affectedDeliveryUnits,
-      sourceDeliveryPlanDraftId: input.sourceDeliveryPlanDraftId,
+      sourceCommandChainDraftId: input.sourceCommandChainDraftId,
     });
     for (const unit of inserted) {
       db.prepare(`

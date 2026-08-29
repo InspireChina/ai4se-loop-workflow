@@ -1,0 +1,117 @@
+version: 1
+id: review
+agent: review-agent
+
+artifacts:
+  review:
+    blocks:
+      subjects:
+        title: FROZEN CLOSURE SUBJECTS
+        cardinality: many
+        format: yaml
+        writable: false
+        required: true
+        fields:
+          kind: { type: enum, required: true, values: [intent, target, impact, acceptance, delivery_unit, feedback_acceptance] }
+          content: { type: string, required: true }
+          sourceRef: { type: string }
+          contractRef: { type: string }
+          storyIndex: { type: string }
+      evidence-sources:
+        title: FROZEN EVIDENCE SOURCES
+        cardinality: many
+        format: yaml
+        writable: false
+        required: true
+        fields:
+          ref: { type: string, required: true }
+          kind: { type: string, required: true }
+          status: { type: string, required: true }
+          revision: { type: string, required: true }
+          fingerprint: { type: string, required: true }
+          independentTest: { type: enum, required: true, values: [yes, no] }
+      meta:
+        title: FROZEN REVIEW META
+        cardinality: one
+        format: yaml
+        writable: false
+        required: true
+        fields:
+          mode: { type: enum, required: true, values: [closure, report_correction] }
+          totalStories: { type: string, required: true }
+          reviewRevision: { type: string, required: true }
+          reviewDocumentId: { type: string }
+      reconciliations:
+        title: FINAL FACT RECONCILIATIONS
+        cardinality: many
+        format: yaml
+        fields:
+          subjectRef: { type: string, required: true }
+          result: { type: string, required: true }
+          evidenceRefs: { type: array, required: true, minItems: 1 }
+      gaps:
+        title: CLOSURE GAPS
+        cardinality: many
+        format: yaml
+        fields:
+          subjectRef: { type: string, required: true }
+          kind: { type: enum, required: true, values: [missing_evidence, fact_conflict, unresolved_obligation] }
+          reason: { type: string, required: true }
+          boundary: { type: string, required: true }
+      assessment:
+        title: CLOSURE ASSESSMENT
+        cardinality: one
+        format: yaml
+        required: true
+        fields:
+          summary: { type: string, required: true }
+          evidenceBoundary: { type: string, required: true }
+          residualRisk: { type: string }
+      report-sections:
+        title: CLOSURE REPORT SECTIONS
+        cardinality: many
+        format: yaml
+        fields:
+          kind: { type: enum, required: true, values: [outcome, scope, decisions, implementation, verification, deviations, risks, feedback] }
+          content: { type: string, required: true }
+      forward-units:
+        title: FORWARD DELIVERY UNITS
+        cardinality: many
+        format: yaml
+        fields:
+          title: { type: string, required: true }
+          actor: { type: string, required: true }
+          trigger: { type: string, required: true }
+          observableOutcome: { type: string, required: true }
+          acceptance: { type: string, required: true }
+          gapKeys: { type: array, required: true, minItems: 1 }
+          dependsOn: { type: array, required: true }
+
+phases:
+  # 内置输入门禁：冻结需求级承诺、全部交付单元、报告更正要求、当前证据快照和 Review 版本边界。
+  inputs:
+    type: builtin
+    builtin: review-inputs
+
+  # 内置事实门禁：每个冻结对象必须恰好登记一项最终对账，或登记一个可前向补齐的结卡缺口；普通结卡的对账必须绑定独立 Test 通过证据。
+  fact_reconciliation:
+    type: builtin
+    builtin: review-reconciliation
+    artifacts: [review.reconciliations, review.gaps]
+
+  # Artifact Phase：在逐项对账之上形成需求级结卡判断，并明确结论覆盖的证据边界与残余风险。
+  closure_assessment:
+    type: artifact
+    artifacts: [review.assessment]
+    instructions: 综合全部最终事实，判断原始需求是否已闭环。说明结论覆盖的冻结证据边界；仍会否定结卡的事项必须回退 fact_reconciliation 登记 gap，不能只写成残余风险。
+
+  # 内置输出门禁：无 gap 时维护核心报告章节；有 gap 时维护完整前向交付单元，每个 gap 必须恰好覆盖一次且依赖无环。
+  closure_output:
+    type: builtin
+    builtin: review-output
+    artifacts: [review.report-sections, review.forward-units]
+
+  # 内置最终门禁：重新校验任务版本、冻结证据、逐项对账和输出分支，并确定性编译 report_ready 或 closure_gap。
+  finalize:
+    type: builtin
+    builtin: review-finalize

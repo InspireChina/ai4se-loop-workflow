@@ -10,23 +10,20 @@ test('injects the complete read-only context and submission contract before Agen
   const prompt = agentCommandPrompt('/opt/Loop Work', 'analyst-agent', 'analysis');
   assert.ok(prompt);
   assert.match(prompt, /# Agent Tool Contract/);
-  assert.match(prompt, /delivery-analysis status/);
+  assert.match(prompt, /loop-agent\.mjs" status/);
   assert.match(prompt, /agent-context overview/);
   assert.match(prompt, /agent-context list/);
   assert.match(prompt, /agent-context get/);
   assert.match(prompt, /agent-context search/);
   assert.match(prompt, /agent-context evidence/);
   assert.match(prompt, /agent-context history/);
-  assert.match(prompt, /Required Context Refs/);
-  assert.match(prompt, /实时项目事实（只读调查）/);
-  assert.match(prompt, /只有完成冻结上下文读取和实时调查后仍无法从证据唯一确定/);
-  assert.match(prompt, /help <context\|impact\|decision-proposal\|decision-resolution\|answer-review\|contract\|finish>/);
-  assert.match(prompt, /delivery-analysis complete/);
-  assert.match(prompt, /\*\*首次必须执行：\*\*\n\n```bash/);
+  assert.match(prompt, /通用命令链/);
+  assert.match(prompt, /Artifact、Decision 和 Phase/);
+  assert.match(prompt, /loop-agent\.mjs" help/);
+  assert.match(prompt, /phase complete/);
+  assert.match(prompt, /\*\*首次必须执行：\*\*\n```bash/);
   assert.match(prompt, /- `npm --prefix/);
-  assert.match(prompt, /\*\*编辑与提交规则：\*\*/);
   assert.match(prompt, /\$LOOP_AGENT_TMP_DIR/);
-  assert.match(prompt, /当前 execution 结束后 Harness 会清理该目录/);
   assert.doesNotMatch(prompt, /## 工具选择顺序|## 命令行为/);
   assert.doesNotMatch(prompt, /implementation complete/);
 });
@@ -41,7 +38,7 @@ test('every configured role chain renders all terminal actions and forbids inter
         assert.match(prompt, new RegExp(action.split(' --')[0].replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
       }
       assert.match(prompt, /CLI exit 0/);
-      assert.match(prompt, /只有.*(?:submit|终止命令).*才能结束 execution|不能在角色终止命令成功前主动结束 execution/);
+      assert.match(prompt, /只有.*(?:submit|phase complete|终止命令).*才能结束 execution|不能在角色终止命令成功前主动结束 execution/);
     }
   }
 });
@@ -71,18 +68,24 @@ test('advertises a role-specific command guide for every progressive flow Agent'
   assert.match(direct || '', /direct run/);
   assert.match(direct || '', /direct submit/);
   assert.doesNotMatch(direct || '', /direct status|needs_input|request-input/);
-  assert.match(backlog || '', /COMMAND RESULT.*NEXT WORK PACKET/);
-  assert.match(backlog || '', /help <context\|assertion\|impact\|decision-proposal\|decision-resolution\|answer-review\|scope\|finish>/);
-  assert.match(splitter || '', /help <context\|unit\|source\|dependency\|revision\|finish>/);
-  assert.match(analyst || '', /help <context\|impact\|decision-proposal\|decision-resolution\|answer-review\|contract\|finish>/);
-  assert.match(development || '', /help <context\|evidence\|review\|commit\|input\|finish>/);
-  assert.match(development || '', /implementation 命令统一返回 `COMMAND RESULT`/);
-  assert.match(verification || '', /help <context\|plan\|execute\|evidence\|input\|finish>/);
-  assert.match(verification || '', /verification 命令统一返回 `COMMAND RESULT`/);
-  assert.match(review || '', /help <context\|reconciliation\|gap\|assessment\|report\|forward\|finish>/);
-  assert.match(review || '', /review 命令统一返回 `COMMAND RESULT`/);
-  assert.match(review || '', /Review 不创建问题或运行信息请求/);
-  assert.match(review || '', /review complete/);
+  assert.match(backlog || '', /通用命令链/);
+  assert.match(backlog || '', /phase complete/);
+  assert.match(backlog || '', /phase rewind --to <earlier-phase>/);
+  assert.match(splitter || '', /通用命令链/);
+  assert.match(splitter || '', /phase complete/);
+  assert.match(splitter || '', /phase rewind --to <earlier-phase>/);
+  assert.match(analyst || '', /通用命令链/);
+  assert.match(analyst || '', /phase complete/);
+  assert.match(analyst || '', /phase rewind --to <earlier-phase>/);
+  assert.match(development || '', /通用命令链/);
+  assert.match(development || '', /phase complete/);
+  assert.match(development || '', /phase rewind --to <earlier-phase>/);
+  assert.match(verification || '', /通用命令链/);
+  assert.match(verification || '', /phase complete/);
+  assert.match(verification || '', /phase rewind --to <earlier-phase>/);
+  assert.match(review || '', /通用命令链/);
+  assert.match(review || '', /phase complete/);
+  assert.match(review || '', /phase rewind --to <earlier-phase>/);
   for (const prompt of [ideaContext, businessDesign, requirementSpec, specReview]) {
     assert.match(prompt || '', /help <context\|workflow\|artifact\|decision\|finish>/);
     assert.match(prompt || '', /命令统一返回 `COMMAND RESULT`/);
@@ -92,13 +95,17 @@ test('advertises a role-specific command guide for every progressive flow Agent'
   assert.match(requirementSpec || '', /requirement-spec return-gap/);
   assert.match(specReview || '', /spec-review approve/);
   assert.doesNotMatch(review || '', /review request-input/);
-  assert.match(verification || '', /verification complete/);
-  assert.match(verification || '', /verification request-input/);
-  assert.doesNotMatch(verification || '', /verification (?:pass|fail|block)/);
+  assert.doesNotMatch(verification || '', /verification (?:complete|request-input|pass|fail|block)/);
   assert.doesNotMatch(development || '', /help <[^>]*handoff/);
-  assert.match(development || '', /implementation fail --reason <原因与证据>/);
+  assert.doesNotMatch(development || '', /implementation fail --reason <原因与证据>/);
   assert.doesNotMatch(analyst || '', /--reason <原因与证据>/);
-  for (const prompt of [direct, backlog, splitter, analyst, development, verification, review, ideaContext, businessDesign, requirementSpec, specReview]) {
+  for (const prompt of [direct, ideaContext, businessDesign, requirementSpec, specReview]) {
     assert.doesNotMatch(prompt || '', /loop-agent\.mjs" help\n/);
   }
+  assert.match(analyst || '', /loop-agent\.mjs" help\n/);
+  assert.match(backlog || '', /loop-agent\.mjs" help\n/);
+  assert.match(splitter || '', /loop-agent\.mjs" help\n/);
+  assert.match(development || '', /loop-agent\.mjs" help\n/);
+  assert.match(verification || '', /loop-agent\.mjs" help\n/);
+  assert.match(review || '', /loop-agent\.mjs" help\n/);
 });

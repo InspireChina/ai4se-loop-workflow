@@ -1,47 +1,18 @@
-import { beginTestExecutionAttempt } from '../test/execution-fixtures';
-import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import test from 'node:test';
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
+import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import type { DelegationEnvelope } from './tasks';
 
-function backlogDelegation(taskId: string, pipeline = 'backlog'): DelegationEnvelope {
+function backlogDelegation(taskId: string): DelegationEnvelope {
   return {
-    taskId,
-    lane: 'control',
-    pipeline,
-    agent: 'backlog-agent',
-    storyIndex: null,
-    resources: ['browser:exclusive'],
-    description: pipeline === 'resume' ? '根据用户回答继续需求梳理' : '收集需求上下文',
-    title: '渐进式需求上下文',
-    taskDescription: '支持将筛选结果导出。',
-    itemType: 'feature',
-    priority: '',
-    link: '',
-    externalId: '',
-    externalStatus: '',
-    agileStatus: 'backlog',
-    currentSubagent: 'backlog-agent',
-    resumePending: pipeline === 'resume' ? 1 : 0,
-    specResolvedIndex: 0,
-    runState: 'runnable',
-    closureStatus: 'none',
-    reviewRevision: 0,
-    reviewDocumentId: '',
-    lastActor: 'human',
-    analysisIndex: 0,
-    devIndex: 0,
-    testIndex: 0,
-    totalStories: 0,
-    nextStep: '收集上下文',
-    blockedReason: '',
-    owner: '',
-    evidence: '',
-    risk: '',
+    taskId, lane: 'control', pipeline: 'backlog', agent: 'backlog-agent', storyIndex: null,
+    resources: ['browser:exclusive'], description: '收集需求上下文', title: '需求上下文',
+    taskDescription: '管理员可以导出当前筛选结果。', itemType: 'feature', priority: '', link: '',
+    externalId: '', externalStatus: '', agileStatus: 'backlog', currentSubagent: 'backlog-agent',
+    resumePending: 0, specResolvedIndex: 0, runState: 'runnable', closureStatus: 'none',
+    reviewRevision: 0, reviewDocumentId: '', lastActor: 'human', analysisIndex: 0, devIndex: 0,
+    testIndex: 0, totalStories: 0, nextStep: '收集上下文', blockedReason: '', owner: '', evidence: '', risk: '',
   };
 }
 
@@ -50,1533 +21,152 @@ async function command(executionId: string, token: string, args: string[]) {
   return runAgentCommand({ executionId, token, args });
 }
 
-async function completeBacklogAnswerReview(executionId: string, token: string) {
-  return command(executionId, token, [
-    'requirement-context', 'answer-review', 'complete',
-    '--artifact', '已复查全部决策答案、条件分支与组合后果，没有发现新的需求级问题。',
-  ]);
-}
-
-async function begin(taskId: string, pipeline = 'backlog') {
+async function begin(delegation: DelegationEnvelope, suffix: string) {
   const { issueAgentCommandToken } = await import('./agent-command-drafts');
-  const delegation = backlogDelegation(taskId, pipeline);
   const started = await beginTestExecutionAttempt({
-    runId: `RUN-command-${taskId}-${pipeline}`,
+    runId: `RUN-delivery-plan-chain-${suffix}`,
     delegation,
-    prompt: 'role-specific command prompt',
+    prompt: 'YAML delivery plan command chain',
   });
   const token = await issueAgentCommandToken(started.attempt.execution_id);
   assert.ok(token);
-  return { delegation, executionId: started.attempt.execution_id, token };
-}
-
-async function beginDelegation(delegation: DelegationEnvelope, runSuffix = 'delivery-plan') {
-  const { issueAgentCommandToken } = await import('./agent-command-drafts');
-  const started = await beginTestExecutionAttempt({
-    runId: `RUN-command-${runSuffix}-${delegation.taskId}`,
-    delegation,
-    prompt: 'role-specific progressive command prompt',
-  });
-  const token = await issueAgentCommandToken(started.attempt.execution_id);
-  assert.ok(token);
-  return { delegation, executionId: started.attempt.execution_id, token };
+  return { executionId: started.attempt.execution_id, token };
 }
 
 async function taskReadyForSplit(title: string) {
   const { createTask } = await import('./tasks');
   const { applyAgentResult } = await import('./agent-results');
   const { databaseConnection } = await import('../infrastructure/database');
-  const taskId = await createTask({
-    title,
-    description: '管理员可以将当前筛选结果导出为 CSV，并且导出文件只包含当前筛选命中的字段。',
-  });
+  const taskId = await createTask({ title, description: '管理员可以导出当前筛选结果。' });
   const db = await databaseConnection();
   const draftId = `DRAFT-context-${taskId}`;
   db.prepare(`
     INSERT INTO agent_work_drafts(
       draft_id, work_key, draft_version, draft_type, task_id, agent,
-      status, terminal_action, submitted_at
-    ) VALUES(?, ?, 1, 'requirement_context', ?, 'backlog-agent', 'submitted', 'complete', CURRENT_TIMESTAMP)
+      status, terminal_action, submitted_at, command_chain_id
+    ) VALUES(?, ?, 1, 'requirement_context', ?, 'backlog-agent',
+      'submitted', 'complete', CURRENT_TIMESTAMP, 'requirement-context')
   `).run(draftId, `requirement-context:${taskId}`, taskId);
   db.prepare(`
-    INSERT INTO requirement_context_drafts(draft_id, intent, change_summary)
-    VALUES(?, '管理员取得筛选结果文件', '从只能在线查看变为可以下载当前筛选结果')
+    INSERT INTO command_chain_drafts(draft_id, command_chain_id, definition_version, workflow_phase)
+    VALUES(?, 'requirement-context', 1, 'finalize')
   `).run(draftId);
   db.prepare(`
-    INSERT INTO requirement_context_impacts(
-      draft_id, impact_key, statement, disposition, rationale, source, ordinal
-    ) VALUES(?, 'filtered-export', '管理员可以下载当前筛选命中的结果', 'change', '目标业务结果', '用户输入', 1)
-  `).run(draftId);
-  db.prepare(`
-    INSERT INTO requirement_context_acceptance_items(
-      draft_id, acceptance_key, content, source, ordinal
-    ) VALUES(?, 'download-matches-filter', '下载内容与当前筛选结果一致', '用户输入', 1)
-  `).run(draftId);
-  await applyAgentResult(
-    `RUN-command-backlog-${taskId}`,
-    backlogDelegation(taskId),
-    {
-      outcome: 'completed',
-      summary: '需求上下文完整，可以进入交付拆分。',
-      artifact: {
-        title: '需求分类与上下文',
-        content: '# 需求上下文\n\n管理员导出当前筛选结果。',
-      },
-      questions: [],
-      runtimeInputs: [],
-      feedbackResolutions: [],
-      recoveryResolutions: [],
-    },
-  );
-  const delegation = (await inspectTaskDispatch(taskId))[0] as DelegationEnvelope | undefined;
-  assert.equal(delegation?.agent, 'story-splitter-agent');
-  assert.equal(delegation?.pipeline, 'split');
-  return { taskId, delegation: delegation! };
+    INSERT INTO command_chain_artifact_blocks(
+      draft_id, artifact_id, block_id, item_key, content_format, content, ordinal
+    ) VALUES
+      (?, 'requirement-context', 'intent', '', 'markdown', '管理员取得筛选结果文件', 1),
+      (?, 'requirement-context', 'impacts', 'filtered-export', 'yaml',
+       'statement: 管理员可以下载当前筛选命中的结果\ndisposition: change\nrationale: 目标业务结果\nsource: 用户输入', 2),
+      (?, 'requirement-context', 'acceptance', 'download-matches-filter', 'yaml',
+       'content: 下载内容与当前筛选结果一致\nsource: 用户输入', 3)
+  `).run(draftId, draftId, draftId);
+  await applyAgentResult(`RUN-context-${taskId}`, backlogDelegation(taskId), {
+    outcome: 'completed',
+    summary: '需求上下文完整，可以进入交付拆分。',
+    artifact: { title: '需求上下文', content: '管理员导出当前筛选结果。' },
+    questions: [], runtimeInputs: [], feedbackResolutions: [], recoveryResolutions: [],
+  });
+  const delegation = (await inspectTaskDispatch(taskId)).find((item) => item.agent === 'story-splitter-agent');
+  assert.ok(delegation);
+  return { taskId, delegation: delegation! as DelegationEnvelope };
 }
 
-test('clean-exit continuation requires a progressive role to read status again', async () => {
-  const { createTask } = await import('./tasks');
-  const { resetAgentCommandStatusForContinuation } = await import('./agent-command-drafts');
-  const taskId = await createTask({
-    title: '自动续跑重新读取阶段',
-    description: 'CLI 正常退出但尚未提交时继续当前执行。',
-  });
-  const active = await begin(taskId);
-
-  await command(active.executionId, active.token!, ['requirement-context', 'status']);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'intent', 'set', '--text', '继续尚未完成的角色工作',
+async function put(executionId: string, token: string, block: string, content: string, key?: string) {
+  return command(executionId, token, [
+    'artifact', 'put', '--artifact', 'delivery-plan', '--block', block,
+    ...(key ? ['--key', key] : []), '--content', content,
   ]);
+}
 
-  assert.equal(await resetAgentCommandStatusForContinuation(active.executionId), true);
-  await assert.rejects(
-    command(active.executionId, active.token!, [
-      'requirement-context', 'intent', 'set', '--text', '不能沿用上一轮读取的状态',
-    ]),
-    /尚未查看草稿状态/,
-  );
-
-  const resumed = await command(active.executionId, active.token!, ['requirement-context', 'status']);
-  assert.match(resumed, /继续尚未完成的角色工作/);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'intent', 'set', '--text', '重新读取后继续工作',
-  ]);
-});
-
-test('requires status first, accepts progressive edits, and submits context without Agent routing', async () => {
-  const { createTask, getTask } = await import('./tasks');
+test('Story Splitter uses only the YAML command chain and compiles delivery units', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
-  const { readAgentCommandSubmission } = await import('./agent-command-drafts');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const taskId = await createTask({
-    title: '渐进式需求上下文',
-    description: '支持将筛选结果导出。',
-  });
-  const active = await begin(taskId);
-
-  await assert.rejects(
-    command(active.executionId, active.token!, [
-      'requirement-context', 'intent', 'set', '--text', '支持用户导出当前筛选结果',
-    ]),
-    /尚未查看草稿状态/,
-  );
-
-  const initial = await command(active.executionId, active.token!, ['requirement-context', 'status']);
-  assert.match(initial, /草稿 v1/);
-  assert.match(initial, /Outcome: state_restored/);
-  assert.match(initial, /## PHASE\s+as_is/);
-  assert.match(initial, /缺少 Reported Intent/);
-  assert.match(initial, /Status: not_ready/);
-  assert.doesNotMatch(initial, /## SUBMIT/);
-
-  const intentSet = await command(active.executionId, active.token!, [
-    'requirement-context', 'intent', 'set', '--text', '支持用户导出当前筛选结果',
-  ]);
-  assert.match(intentSet, /Readiness: not_ready/);
-  assert.match(intentSet, /AS-IS 至少需要一条可靠 Actual/);
-  assert.doesNotMatch(intentSet, /Submit:/);
-  const actualSet = await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'upsert',
-    '--key', 'current-export',
-    '--perspective', 'actual',
-    '--statement', '列表已经支持组合筛选，但当前导出不继承筛选结果',
-    '--evidence', 'observed',
-    '--source', '仓库列表导出入口与筛选查询实现',
-  ]);
-  assert.match(actualSet, /Readiness: structurally_ready/);
-  assert.match(actualSet, /Action: review_before_submit/);
-  assert.match(actualSet, /Submit: `requirement-context as-is complete`/);
-  await assert.rejects(
-    command(active.executionId, active.token!, ['requirement-context', 'validate']),
-    /当前 as_is 阶段不使用 validate/,
-  );
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'upsert',
-    '--key', 'filtered-export-target',
-    '--perspective', 'target',
-    '--statement', '下载文件与当前筛选列表一致',
-    '--evidence', 'decided',
-    '--source', '当前需求描述',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'change', 'set',
-    '--text', '将列表导出从全量结果改变为继承当前筛选条件',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'impact', 'upsert',
-    '--key', 'filtered-export-data',
-    '--statement', '导出文件的数据范围必须随当前筛选结果改变',
-    '--disposition', 'change',
-    '--rationale', '否则目标业务行为无法成立',
-    '--source', 'filtered-export-target',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'impact', 'upsert',
-    '--key', 'export-permission',
-    '--statement', '现有导出权限保持不变',
-    '--disposition', 'preserve',
-    '--rationale', '本次需求没有改变参与者权限',
-    '--source', '当前需求描述',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'acceptance', 'upsert',
-    '--key', 'filtered-file-matches-list',
-    '--text', '下载文件中的记录与当前筛选列表一致',
-    '--source', 'filtered-export-target',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'scope', 'include',
-    '--key', 'filtered-data',
-    '--text', '导出当前筛选条件命中的数据',
-  ]);
-
-  const populatedStatus = await command(active.executionId, active.token!, ['requirement-context', 'status']);
-  assert.match(populatedStatus, /current-export · actual · observed · active/);
-  assert.match(populatedStatus, /来源：仓库列表导出入口与筛选查询实现/);
-  assert.match(populatedStatus, /filtered-export-data · change · active/);
-  assert.match(populatedStatus, /依据：否则目标业务行为无法成立；来源：filtered-export-target/);
-
-  const transition = async (args: string[], from: string, to: string) => {
-    const output = await command(active.executionId, active.token!, args);
-    assert.match(output, /# COMMAND RESULT/);
-    assert.match(output, /Outcome: phase_completed/);
-    assert.match(output, new RegExp(`From: ${from}`));
-    assert.match(output, new RegExp(`To: ${to}`));
-    assert.match(output, /# NEXT WORK PACKET/);
-    assert.match(output, new RegExp(`## PHASE\\s+${to}`));
-    assert.match(output, /## OBJECTIVE/);
-    assert.match(output, /## REQUIRED/);
-    assert.match(output, /## DO NOT/);
-    assert.match(output, /## AVAILABLE COMMANDS/);
-    assert.match(output, /## READINESS/);
-    if (to === 'finalize') {
-      assert.match(output, /## VALIDATE\s+`requirement-context validate`/);
-      assert.doesNotMatch(output, /## SUBMIT/);
-    } else {
-      assert.match(output, /## SUBMIT/);
-    }
-  };
-
-  await transition(['requirement-context', 'as-is', 'complete'], 'as_is', 'decision_proposal');
-  await transition(['requirement-context', 'decision-proposal', 'complete'], 'decision_proposal', 'decision_resolution');
-  await transition(['requirement-context', 'decision-resolution', 'complete'], 'decision_resolution', 'answer_review');
-  await transition([
-    'requirement-context', 'answer-review', 'complete',
-    '--artifact', '全部答案与条件分支复查完成，没有新增问题。',
-  ], 'answer_review', 'to_be');
-  await transition(['requirement-context', 'to-be', 'complete'], 'to_be', 'impact_scan');
-  assert.match(
-    await command(active.executionId, active.token!, [
-      'requirement-context', 'impact-scan', 'reopen-decisions',
-      '--reason', '影响扫描要求重新确认已有决策覆盖',
-    ]),
-    /Outcome: phase_completed.*From: impact_scan.*To: decision_proposal.*# NEXT WORK PACKET.*## PHASE\s+decision_proposal/s,
-  );
-  await transition(['requirement-context', 'decision-proposal', 'complete'], 'decision_proposal', 'decision_resolution');
-  await transition(['requirement-context', 'decision-resolution', 'complete'], 'decision_resolution', 'answer_review');
-  await transition([
-    'requirement-context', 'answer-review', 'complete',
-    '--artifact', '重新打开后的答案与条件分支复查完成，没有新增问题。',
-  ], 'answer_review', 'to_be');
-  await transition(['requirement-context', 'to-be', 'complete'], 'to_be', 'impact_scan');
-  await transition(['requirement-context', 'impact-scan', 'complete'], 'impact_scan', 'scope');
-  await transition(['requirement-context', 'scope', 'complete'], 'scope', 'acceptance');
-  await transition(['requirement-context', 'acceptance', 'complete'], 'acceptance', 'finalize');
-  const db = await databaseConnection();
-  assert.deepEqual(
-    (db.prepare(`
-      SELECT from_phase, to_phase
-      FROM requirement_context_phase_transitions transition_item
-      JOIN agent_work_drafts draft ON draft.draft_id = transition_item.draft_id
-      WHERE draft.task_id = ?
-      ORDER BY transition_id
-    `).all(taskId) as { from_phase: string; to_phase: string }[]),
-    [
-      { from_phase: 'as_is', to_phase: 'decision_proposal' },
-      { from_phase: 'decision_proposal', to_phase: 'decision_resolution' },
-      { from_phase: 'decision_resolution', to_phase: 'answer_review' },
-      { from_phase: 'answer_review', to_phase: 'to_be' },
-      { from_phase: 'to_be', to_phase: 'impact_scan' },
-      { from_phase: 'impact_scan', to_phase: 'decision_proposal' },
-      { from_phase: 'decision_proposal', to_phase: 'decision_resolution' },
-      { from_phase: 'decision_resolution', to_phase: 'answer_review' },
-      { from_phase: 'answer_review', to_phase: 'to_be' },
-      { from_phase: 'to_be', to_phase: 'impact_scan' },
-      { from_phase: 'impact_scan', to_phase: 'scope' },
-      { from_phase: 'scope', to_phase: 'acceptance' },
-      { from_phase: 'acceptance', to_phase: 'finalize' },
-    ],
-  );
-
-  await assert.rejects(
-    command(active.executionId, active.token!, ['requirement-context', 'complete']),
-    /尚未通过当前草稿版本的 validate/,
-  );
-  assert.match(
-    await command(active.executionId, active.token!, ['requirement-context', 'validate']),
-    /Outcome: validation_passed.*Readiness: validated.*Action: `requirement-context complete`/s,
-  );
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'intent', 'set', '--text', '支持用户导出当前筛选结果',
-  ]);
-  await assert.rejects(
-    command(active.executionId, active.token!, ['requirement-context', 'complete']),
-    /尚未通过当前草稿版本的 validate/,
-  );
-  await command(active.executionId, active.token!, ['requirement-context', 'validate']);
-  assert.match(
-    await command(active.executionId, active.token!, ['requirement-context', 'complete']),
-    /Outcome: completed.*Agent Action: end_execution/s,
-  );
-  assert.match(
-    await command(active.executionId, active.token!, ['requirement-context', 'complete']),
-    /Outcome: already_submitted.*Agent Action: end_execution/s,
-  );
-
-  const result = await readAgentCommandSubmission(active.executionId);
-  assert.equal(result?.classification, undefined);
-  assert.equal(result?.route, undefined);
-  assert.match(result?.artifact?.content || '', /状态：Aligned/);
-  assert.match(result?.artifact?.content || '', /版本：v1/);
-  assert.match(result?.artifact?.content || '', /Pipeline：feature/);
-  assert.match(result?.artifact?.content || '', /## BUSINESS INTENT/);
-  assert.match(result?.artifact?.content || '', /## AS-IS\s+### Actual/);
-  assert.match(result?.artifact?.content || '', /当前导出不继承筛选结果/);
-  assert.match(result?.artifact?.content || '', /### Expected/);
-  assert.match(result?.artifact?.content || '', /未识别到独立于本次 TO-BE 的既有 Expected/);
-  assert.match(result?.artifact?.content || '', /## TO-BE/);
-  assert.match(result?.artifact?.content || '', /## CHANGE/);
-  assert.match(result?.artifact?.content || '', /## IMPACTS/);
-  assert.match(result?.artifact?.content || '', /### Preserve/);
-  assert.match(result?.artifact?.content || '', /## SCOPE/);
-  assert.match(result?.artifact?.content || '', /导出当前筛选条件命中的数据/);
-  assert.match(result?.artifact?.content || '', /## CONSTRAINTS/);
-  assert.match(result?.artifact?.content || '', /## ACCEPTANCE/);
-  assert.doesNotMatch(result?.artifact?.content || '', /## OPEN QUESTIONS/);
-  assert.doesNotMatch(result?.artifact?.content || '', /证据状态：|来源：|依据：|decision：/);
-  assert.doesNotMatch(result?.artifact?.content || '', /仓库列表导出入口与筛选查询实现|filtered-export-target/);
-
-  await applyAgentResult('RUN-command-progressive', active.delegation, result!, {
-    executionId: active.executionId,
-  });
-  await completeExecution(active.executionId);
-  const detail = await getTask(taskId);
-  assert.equal(detail?.task.item_type, 'feature');
-  assert.equal(detail?.task.agile_status, 'in plan');
-  assert.equal(detail?.task.current_subagent, 'story-splitter-agent');
-  const contextDocument = detail?.documents.find((document) => document.kind === 'context');
-  assert.ok(contextDocument);
-  assert.match(contextDocument.content, /列表已经支持组合筛选，但当前导出不继承筛选结果/);
-  assert.doesNotMatch(contextDocument.content, /证据状态：|来源：|依据：|decision：/);
-});
-
-test('routes unresolved impact branches back to the decision tree instead of exposing impact completion', async () => {
-  const { createTask } = await import('./tasks');
-  const taskId = await createTask({
-    title: '提醒方式需要在影响扫描时回流',
-    description: '借阅记录快到期时提醒，渠道尚未确认。',
-  });
-  const active = await begin(taskId);
-  await command(active.executionId, active.token!, ['requirement-context', 'status']);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'intent', 'set', '--text', '让读者及时获知借阅状态',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'upsert', '--key', 'actual-no-reminder',
-    '--perspective', 'actual', '--statement', '当前借阅到期前没有主动提醒',
-    '--evidence', 'observed', '--source', '借阅业务代码与任务调度配置',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'upsert', '--key', 'target-reminder',
-    '--perspective', 'target', '--statement', '读者会在借阅到期前收到提醒',
-    '--evidence', 'decided', '--source', '需求描述',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'change', 'set', '--text', '从无主动提醒变为到期前提醒读者',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'impact', 'upsert', '--key', 'reminder-state',
-    '--statement', '借阅记录需要参与提醒判定', '--disposition', 'change',
-    '--rationale', '目标提醒必须基于借阅到期状态', '--source', 'target-reminder',
-  ]);
-  await command(active.executionId, active.token!, ['requirement-context', 'as-is', 'complete']);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'question', 'add', '--key', 'reminder-channel',
-    '--title', '提醒渠道', '--question', '使用站内提醒还是邮件？',
-    '--impact', '渠道会改变用户触达结果',
-  ]);
-  for (const [id, label] of [['in-app', '站内提醒'], ['email', '邮件提醒']]) {
-    await command(active.executionId, active.token!, [
-      'requirement-context', 'question', 'option-add', '--key', 'reminder-channel',
-      '--id', id, '--label', label, '--consequence', `${label}形成不同触达方式`,
-    ]);
-  }
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'question', 'recommend', '--key', 'reminder-channel',
-    '--option', 'in-app', '--authority', 'agent_authority',
-    '--reason', '当前产品已有站内通知能力',
-  ]);
-  await command(active.executionId, active.token!, ['requirement-context', 'decision-proposal', 'complete']);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'question', 'decide', '--key', 'reminder-channel',
-    '--option', 'in-app', '--reason', '当前产品已有站内通知能力',
-  ]);
-  await command(active.executionId, active.token!, ['requirement-context', 'decision-resolution', 'complete']);
-  await completeBacklogAnswerReview(active.executionId, active.token!);
-  await command(active.executionId, active.token!, ['requirement-context', 'to-be', 'complete']);
-
-  const unresolvedImpact = await command(active.executionId, active.token!, [
-    'requirement-context', 'impact', 'upsert', '--key', 'channel-branch',
-    '--statement', '触达渠道仍会形成不同业务结果', '--disposition', 'needs_decision',
-    '--rationale', '影响扫描发现需求输入未授权固定渠道', '--source', '需求与现有通知能力对比',
-    '--decision', 'reminder-channel',
-  ]);
-  assert.match(unresolvedImpact, /Readiness: decisions_required/);
-  assert.match(unresolvedImpact, /Action: reopen_decision_tree/);
-  assert.match(unresolvedImpact, /impact-scan reopen-decisions/);
-  assert.doesNotMatch(unresolvedImpact, /impact-scan complete/);
-  await assert.rejects(
-    command(active.executionId, active.token!, ['requirement-context', 'impact-scan', 'complete']),
-    /尚未关闭的业务分叉/,
-  );
-});
-
-test('separates backlog decision proposals from resolution and injects metadata only in RESOLVE', async () => {
-  const { createTask } = await import('./tasks');
-  const taskId = await createTask({
-    title: '审慎确认提醒对象',
-    description: '借阅到期前发送提醒，但提醒对象还没有确认。',
-    metadata: [{
-      key: 'workflow.analysis_decision_mode',
-      value: 'conservative',
-    }],
-  });
-  const active = await begin(taskId);
-  const initial = await command(active.executionId, active.token!, ['requirement-context', 'status']);
-  assert.doesNotMatch(initial, /REQUIREMENT DECISION POLICY|Mode: `conservative`|审慎对齐/);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'intent', 'set', '--text', '在借阅到期前通知适当的参与者',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'upsert', '--key', 'actual-no-reminder',
-    '--perspective', 'actual', '--statement', '当前没有到期前主动提醒',
-    '--evidence', 'observed', '--source', '借阅流程调查',
-  ]);
-  const proposalPacket = await command(active.executionId, active.token!, [
-    'requirement-context', 'as-is', 'complete',
-  ]);
-  assert.doesNotMatch(proposalPacket, /REQUIREMENT DECISION POLICY|Mode: `conservative`|审慎对齐/);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'question', 'add', '--key', 'reminder-audience',
-    '--title', '提醒对象', '--question', '提醒借阅人还是同时提醒管理员？',
-    '--impact', '参与者不同会改变可观察业务结果',
-  ]);
-  for (const option of [
-    ['borrower', '仅借阅人', '只触达直接责任人'],
-    ['both', '借阅人与管理员', '同时形成管理侧触达'],
-  ]) {
-    await command(active.executionId, active.token!, [
-      'requirement-context', 'question', 'option-add', '--key', 'reminder-audience',
-      '--id', option[0], '--label', option[1], '--consequence', option[2],
-    ]);
-  }
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'question', 'recommend', '--key', 'reminder-audience',
-    '--option', 'borrower', '--authority', 'agent_authority',
-    '--reason', '先覆盖直接责任人',
-  ]);
-  await assert.rejects(
-    command(active.executionId, active.token!, [
-      'requirement-context', 'question', 'decide', '--key', 'reminder-audience',
-      '--option', 'borrower', '--reason', '不能在 PROPOSE 中回答',
-    ]),
-    /不属于当前 decision_proposal 工作包/,
-  );
-  const resolutionPacket = await command(active.executionId, active.token!, [
-    'requirement-context', 'decision-proposal', 'complete',
-  ]);
-  assert.match(resolutionPacket, /REQUIREMENT DECISION POLICY/);
-  assert.match(resolutionPacket, /Mode: `conservative` · 审慎对齐/);
-  assert.match(resolutionPacket, /其余业务分叉全部纳入 HUMAN 批次/);
-  await assert.rejects(
-    command(active.executionId, active.token!, [
-      'requirement-context', 'question', 'add', '--key', 'late-question',
-      '--title', '遗漏问题', '--question', '不应直接新增？', '--impact', '破坏问答分离',
-    ]),
-    /不属于当前 decision_resolution 工作包/,
-  );
-});
-
-test('fully autonomous backlog resolution closes every decision without a HUMAN batch', async () => {
-  const { createTask } = await import('./tasks');
-  const taskId = await createTask({
-    title: '完全自主确认提醒对象',
-    description: '借阅到期前发送提醒，具体提醒对象由 Agent 决定。',
-    metadata: [{
-      key: 'workflow.analysis_decision_mode',
-      value: 'fully_autonomous',
-    }],
-  });
-  const active = await begin(taskId);
-  const initial = await command(active.executionId, active.token!, ['requirement-context', 'status']);
-  assert.doesNotMatch(initial, /fully_autonomous|REQUIREMENT DECISION POLICY|完全自主/);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'intent', 'set', '--text', '在借阅到期前通知适当参与者',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'upsert', '--key', 'actual-no-reminder',
-    '--perspective', 'actual', '--statement', '当前没有到期前主动提醒',
-    '--evidence', 'observed', '--source', '借阅流程调查',
-  ]);
-  const proposalPacket = await command(active.executionId, active.token!, [
-    'requirement-context', 'as-is', 'complete',
-  ]);
-  assert.doesNotMatch(proposalPacket, /fully_autonomous|REQUIREMENT DECISION POLICY|完全自主/);
-  assert.match(proposalPacket, /规格和代码现状冲突、遗漏影响处置/);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'question', 'add', '--key', 'reminder-audience',
-    '--title', '提醒对象', '--question', '提醒借阅人还是同时提醒管理员？',
-    '--impact', '参与者不同会改变用户可观察结果',
-  ]);
-  for (const option of [
-    ['borrower', '仅借阅人', '只触达直接责任人'],
-    ['both', '借阅人与管理员', '同时形成管理侧触达'],
-  ]) {
-    await command(active.executionId, active.token!, [
-      'requirement-context', 'question', 'option-add', '--key', 'reminder-audience',
-      '--id', option[0], '--label', option[1], '--consequence', option[2],
-    ]);
-  }
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'question', 'recommend', '--key', 'reminder-audience',
-    '--option', 'borrower', '--authority', 'needs_user_input',
-    '--reason', '这是会改变参与者的产品决定',
-  ]);
-  const resolutionPacket = await command(active.executionId, active.token!, [
-    'requirement-context', 'decision-proposal', 'complete',
-  ]);
-  assert.match(resolutionPacket, /Mode: `fully_autonomous` · 完全自主/);
-  assert.match(resolutionPacket, /不得使用 question ask，也不得形成 HUMAN 决策批次/);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'question', 'decide', '--key', 'reminder-audience',
-    '--option', 'borrower', '--reason', '直接责任人最能及时采取归还行动；代价是管理员暂不获得同步触达，未选双方触达以避免不必要通知',
-  ]);
-  const resolved = await command(active.executionId, active.token!, ['requirement-context', 'status']);
-  assert.match(resolved, /活动决策 1 个，已关闭 1 个，待人工回答 0 个/);
-  assert.match(resolved, /## SUBMIT[\s\S]*`requirement-context decision-resolution complete`/);
-  const reviewPacket = await command(active.executionId, active.token!, [
-    'requirement-context', 'decision-resolution', 'complete',
-  ]);
-  assert.match(reviewPacket, /## PHASE\s+answer_review/);
-  assert.match(reviewPacket, /HUMAN 与 Agent/);
-  const reviewExpansionPacket = await command(active.executionId, active.token!, [
-    'requirement-context', 'answer-review', 'expand',
-    '--artifact', '组合答案显示通知对象还会影响代理借阅场景，需要增量提出一个新问题。',
-  ]);
-  assert.match(reviewExpansionPacket, /From: answer_review[\s\S]*To: decision_proposal/);
-  assert.match(reviewExpansionPacket, /LATEST ANSWER REVIEW[\s\S]*代理借阅场景/);
-  const reopened = await command(active.executionId, active.token!, ['requirement-context', 'status']);
-  assert.match(reopened, /活动决策 1 个，已关闭 1 个，待人工回答 0 个/);
-});
-
-test('requirement context migration exposes split decision phases and proposal audit fields', async () => {
-  const { databaseConnection } = await import('../infrastructure/database');
-  const db = await databaseConnection();
-  const draftTable = db.prepare(`
-    SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'requirement_context_drafts'
-  `).get() as { sql: string };
-  assert.match(draftTable.sql, /decision_proposal/);
-  assert.match(draftTable.sql, /decision_resolution/);
-  assert.match(draftTable.sql, /answer_review/);
-  assert.doesNotMatch(draftTable.sql, /'decision_tree'/);
-  const questionColumns = db.prepare('PRAGMA table_info(requirement_context_questions)').all() as { name: string }[];
-  assert.equal(questionColumns.some((column) => column.name === 'proposed_authority'), true);
-  assert.equal(questionColumns.some((column) => column.name === 'human_requested'), true);
-});
-
-test('routes an evidence-backed Actual versus Expected deviation to reproduction', async () => {
-  const { applyAgentResult } = await import('./agent-results');
-  const { completeExecution } = await import('./executions');
-  const { createTask, getTask } = await import('./tasks');
-  const { readAgentCommandSubmission } = await import('./agent-command-drafts');
-  const taskId = await createTask({
-    title: '筛选导出行为偏离现行业务规则',
-    description: '筛选后导出仍然包含全部记录。',
-    itemType: 'bug',
-  });
-  const active = await begin(taskId);
-  await command(active.executionId, active.token!, ['requirement-context', 'status']);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'intent', 'set', '--text', '恢复筛选列表的正确导出行为',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'upsert',
-    '--key', 'actual-export-all',
-    '--perspective', 'actual',
-    '--statement', '筛选列表后导出仍然包含全部记录',
-    '--evidence', 'reported',
-    '--source', '用户问题报告',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'upsert',
-    '--key', 'target-restore-rule',
-    '--perspective', 'target',
-    '--statement', '导出结果恢复为当前筛选命中的记录',
-    '--evidence', 'decided',
-    '--source', '用户问题报告',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'change', 'set',
-    '--text', 'Actual 偏离现行 Expected，本次恢复而非改变业务规则',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'impact', 'upsert',
-    '--key', 'restore-export-data',
-    '--statement', '导出数据范围恢复为筛选命中记录',
-    '--disposition', 'change',
-    '--rationale', '修复 Actual 与 Expected 的偏差',
-    '--source', 'actual-export-all 与 expected-filtered-export',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'acceptance', 'upsert',
-    '--key', 'export-matches-filter',
-    '--text', '导出文件只包含当前筛选命中的记录',
-    '--source', 'expected-filtered-export',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'scope', 'include',
-    '--key', 'restore-filtered-export',
-    '--text', '恢复筛选结果导出行为',
-  ]);
-  await command(active.executionId, active.token!, ['requirement-context', 'as-is', 'complete']);
-  await command(active.executionId, active.token!, ['requirement-context', 'decision-proposal', 'complete']);
-  await command(active.executionId, active.token!, ['requirement-context', 'decision-resolution', 'complete']);
-  await completeBacklogAnswerReview(active.executionId, active.token!);
-  await command(active.executionId, active.token!, ['requirement-context', 'to-be', 'complete']);
-  await command(active.executionId, active.token!, ['requirement-context', 'impact-scan', 'complete']);
-  await command(active.executionId, active.token!, ['requirement-context', 'scope', 'complete']);
-  await assert.rejects(
-    command(active.executionId, active.token!, ['requirement-context', 'acceptance', 'complete']),
-    /Bug Fix Pipeline 必须具备可靠 Existing Expected/,
-  );
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'upsert',
-    '--key', 'expected-filtered-export',
-    '--perspective', 'expected',
-    '--statement', '既有需求规格要求导出继承当前筛选条件',
-    '--evidence', 'decided',
-    '--source', '变更前已经确认的需求规格',
-  ]);
-  await command(active.executionId, active.token!, ['requirement-context', 'acceptance', 'complete']);
-  await command(active.executionId, active.token!, ['requirement-context', 'validate']);
-  await command(active.executionId, active.token!, ['requirement-context', 'complete']);
-  const result = await readAgentCommandSubmission(active.executionId);
-  assert.equal(result?.classification, undefined);
-  assert.equal(result?.route, undefined);
-  assert.match(result?.artifact?.content || '', /Actual 偏离现行 Expected/);
-  await applyAgentResult(`RUN-command-${taskId}-backlog`, active.delegation, result!, {
-    executionId: active.executionId,
-  });
-  await completeExecution(active.executionId);
-  const detail = await getTask(taskId);
-  assert.equal(detail?.task.item_type, 'bug');
-  assert.equal(detail?.task.agile_status, 'in repro');
-  assert.equal(detail?.task.current_subagent, 'repro-agent');
-  assert.equal((await inspectTaskDispatch(taskId))[0]?.pipeline, 'repro');
-});
-
-test('inherits a persisted clarification draft after resume and forces status again for the new execution', async () => {
-  const {
-    answerQuestion,
-    createTask,
-    getTask,
-    submitClarificationAnswers,
-  } = await import('./tasks');
-  const { applyAgentResult } = await import('./agent-results');
-  const { completeExecution } = await import('./executions');
-  const { readAgentCommandSubmission } = await import('./agent-command-drafts');
-  const taskId = await createTask({
-    title: '需要确认导出受众',
-    description: '增加导出入口，但没有说明哪些用户可以使用。',
-  });
-  const first = await begin(taskId);
-  await command(first.executionId, first.token!, ['requirement-context', 'status']);
-  await command(first.executionId, first.token!, [
-    'requirement-context', 'intent', 'set', '--text', '为列表提供导出入口',
-  ]);
-  await command(first.executionId, first.token!, [
-    'requirement-context', 'assertion', 'upsert',
-    '--key', 'current-export-audience',
-    '--perspective', 'actual',
-    '--statement', '当前输入没有说明导出入口面向哪些角色',
-    '--evidence', 'reported',
-    '--source', '需求描述',
-  ]);
-  await command(first.executionId, first.token!, ['requirement-context', 'as-is', 'complete']);
-  await command(first.executionId, first.token!, [
-    'requirement-context', 'assertion', 'upsert',
-    '--key', 'target-export-audience',
-    '--perspective', 'target',
-    '--statement', '目标用户可以下载列表数据，但目标角色尚未确认',
-    '--evidence', 'conflicted',
-    '--source', '需求描述',
-    '--decision', 'export-audience',
-  ]);
-  await command(first.executionId, first.token!, [
-    'requirement-context', 'impact', 'upsert',
-    '--key', 'export-audience-impact',
-    '--statement', '导出入口的权限范围取决于目标角色',
-    '--disposition', 'needs_decision',
-    '--rationale', '不同角色会改变业务范围和验收结果',
-    '--source', '需求描述',
-    '--decision', 'export-audience',
-  ]);
-  await command(first.executionId, first.token!, [
-    'requirement-context', 'constraint', 'add',
-    '--key', 'audience-must-be-confirmed',
-    '--text', '目标用户必须由用户确认',
-  ]);
-  const incompleteHumanQuestion = await command(first.executionId, first.token!, [
-    'requirement-context', 'question', 'add',
-    '--key', 'export-audience',
-    '--title', '确认导出能力的目标用户',
-    '--question', '只面向管理员还是同时面向普通成员？',
-    '--impact', '目标用户会改变权限范围和交付边界',
-  ]);
-  assert.match(incompleteHumanQuestion, /Readiness: not_ready/);
-  assert.match(incompleteHumanQuestion, /至少需要两个互斥选项/);
-  assert.doesNotMatch(incompleteHumanQuestion, /request-clarification/);
-  await command(first.executionId, first.token!, [
-    'requirement-context', 'question', 'option-add',
-    '--key', 'export-audience',
-    '--id', 'admin',
-    '--label', '仅管理员',
-    '--consequence', '保持较小权限范围',
-  ]);
-  await command(first.executionId, first.token!, [
-    'requirement-context', 'question', 'option-add',
-    '--key', 'export-audience',
-    '--id', 'all-members',
-    '--label', '所有成员',
-    '--consequence', '需要新增成员权限行为',
-  ]);
-  const completeHumanQuestion = await command(first.executionId, first.token!, [
-    'requirement-context', 'question', 'recommend',
-    '--key', 'export-audience',
-    '--option', 'admin',
-    '--authority', 'needs_user_input',
-    '--reason', '这是满足当前目标的最小范围',
-  ]);
-  assert.match(completeHumanQuestion, /Readiness: structurally_ready/);
-  for (const child of [
-    {
-      key: 'admin-export-mode', title: '管理员导出方式', parentOption: 'admin',
-      question: '管理员导出采用同步还是异步？', recommendation: 'async',
-    },
-    {
-      key: 'member-permission-mode', title: '普通成员权限方式', parentOption: 'all-members',
-      question: '普通成员导出权限如何开放？', recommendation: 'request',
-    },
-  ]) {
-    await command(first.executionId, first.token!, [
-      'requirement-context', 'question', 'add',
-      '--key', child.key, '--title', child.title, '--question', child.question,
-      '--impact', '不同选择会改变后续业务结果',
-    ]);
-    const options = child.key === 'admin-export-mode'
-      ? [['sync', '同步生成'], ['async', '异步生成']]
-      : [['automatic', '自动开放'], ['request', '申请后开放']];
-    for (const [id, label] of options) {
-      await command(first.executionId, first.token!, [
-        'requirement-context', 'question', 'option-add',
-        '--key', child.key, '--id', id, '--label', label,
-        '--consequence', `${label}对应不同的业务流程`,
-      ]);
-    }
-    await command(first.executionId, first.token!, [
-      'requirement-context', 'question', 'recommend',
-      '--key', child.key, '--option', child.recommendation,
-      '--authority', 'needs_user_input', '--reason', '优先保持风险可控',
-    ]);
-    await command(first.executionId, first.token!, [
-      'requirement-context', 'question', 'depends-on',
-      '--key', child.key, '--parent', 'export-audience', '--option', child.parentOption,
-    ]);
-  }
-  await command(first.executionId, first.token!, [
-    'requirement-context', 'question', 'add',
-    '--key', 'audit-boundary', '--title', '审计边界表达',
-    '--question', '是否把既有普通成员无权限规则作为 preserve？',
-    '--impact', '决定影响扫描中的保持项表达',
-  ]);
-  for (const [id, label] of [['preserve', '记录为保持项'], ['ignore', '不记录']]) {
-    await command(first.executionId, first.token!, [
-      'requirement-context', 'question', 'option-add', '--key', 'audit-boundary',
-      '--id', id, '--label', label, '--consequence', `${label}会改变后续影响表达`,
-    ]);
-  }
-  await command(first.executionId, first.token!, [
-    'requirement-context', 'question', 'recommend', '--key', 'audit-boundary',
-    '--option', 'preserve', '--authority', 'agent_authority',
-    '--reason', 'Backlog 负责表达必须保持的既有业务边界',
-  ]);
-  await command(first.executionId, first.token!, [
-    'requirement-context', 'decision-proposal', 'complete',
-  ]);
-  await command(first.executionId, first.token!, [
-    'requirement-context', 'question', 'decide', '--key', 'audit-boundary',
-    '--option', 'preserve', '--reason', 'Backlog 负责表达必须保持的既有业务边界',
-  ]);
-  for (const key of ['export-audience', 'admin-export-mode', 'member-permission-mode']) {
-    await command(first.executionId, first.token!, [
-      'requirement-context', 'question', 'ask', '--key', key,
-    ]);
-  }
-  assert.match(
-    await command(first.executionId, first.token!, ['requirement-context', 'validate']),
-    /Outcome: validation_passed.*Action: `requirement-context request-clarification`/s,
-  );
-  assert.match(
-    await command(first.executionId, first.token!, [
-      'requirement-context', 'request-clarification',
-    ]),
-    /Outcome: waiting_for_human.*Owner: Harness.*Agent Action: end_execution.*Resume Entry: `requirement-context status`/s,
-  );
-
-  const questionResult = await readAgentCommandSubmission(first.executionId);
-  assert.equal(questionResult?.outcome, 'needs_input');
-  assert.equal(questionResult?.classification, undefined);
-  assert.equal(questionResult?.route, undefined);
-  assert.equal(questionResult?.questions[0]?.decisionKey, 'export-audience');
-  assert.equal(questionResult?.questions.length, 3);
-  assert.deepEqual(questionResult?.questions.find((item) => item.decisionKey === 'admin-export-mode')?.activation, [
-    { decisionKey: 'export-audience', optionId: 'admin' },
-  ]);
-  assert.equal(questionResult?.questions.find((item) => item.decisionKey === 'admin-export-mode')?.initialStatus, 'conditional');
-  assert.match(questionResult?.artifact?.content || '', /状态：Needs Clarification/);
-  assert.match(questionResult?.artifact?.content || '', /Pipeline：feature/);
-  assert.match(questionResult?.artifact?.content || '', /## OPEN QUESTIONS/);
-  assert.match(questionResult?.artifact?.content || '', /决策影响：/);
-  await applyAgentResult('RUN-command-question', first.delegation, questionResult!, {
-    executionId: first.executionId,
-  });
-  await completeExecution(first.executionId);
-
-  let detail = await getTask(taskId);
-  const question = detail?.questions.find((item) => item.decision_key === 'export-audience');
-  assert.equal(detail?.task.run_state, 'waiting_for_answers');
-  assert.ok(question);
-  await answerQuestion({
-    taskId,
-    questionId: question!.question_id,
-    answer: '本轮只面向管理员。',
-    selectedOptionId: 'admin',
-  });
-  detail = await getTask(taskId);
-  const activeChild = detail?.questions.find((item) => item.decision_key === 'admin-export-mode');
-  const prunedChild = detail?.questions.find((item) => item.decision_key === 'member-permission-mode');
-  assert.equal(activeChild?.status, 'pending');
-  assert.equal(prunedChild?.status, 'not_applicable');
-  await answerQuestion({
-    taskId,
-    questionId: activeChild!.question_id,
-    selectedOptionId: 'async',
-  });
-  await submitClarificationAnswers(taskId);
-
-  const resumeDelegation = (await inspectTaskDispatch(taskId))[0];
-  assert.equal(resumeDelegation?.pipeline, 'resume');
-  const resumed = await begin(taskId, 'resume');
-  await assert.rejects(
-    command(resumed.executionId, resumed.token!, ['requirement-context', 'complete']),
-    /尚未查看草稿状态/,
-  );
-  const inherited = await command(resumed.executionId, resumed.token!, [
-    'requirement-context', 'status',
-  ]);
-  assert.match(inherited, /草稿 v2/);
-  assert.match(inherited, /Pipeline：feature/);
-  assert.match(inherited, /## 确认导出能力的目标用户 · export-audience/);
-  assert.match(inherited, /- Decision：仅管理员/);
-  assert.match(inherited, /- Decided By：HUMAN/);
-  assert.match(inherited, /## 管理员导出方式 · admin-export-mode/);
-  assert.match(inherited, /- Decision：异步生成/);
-  assert.match(inherited, /## 审计边界表达 · audit-boundary/);
-  assert.match(inherited, /- Decided By：AGENT/);
-  assert.doesNotMatch(inherited, /普通成员权限方式/);
-  assert.match(inherited, /current-export-audience · actual · reported · active/);
-  assert.match(inherited, /audience-must-be-confirmed：目标用户必须由用户确认/);
-  await command(resumed.executionId, resumed.token!, [
-    'requirement-context', 'assertion', 'upsert',
-    '--key', 'current-export-rule',
-    '--perspective', 'expected',
-    '--statement', '现有产品没有面向普通成员的导出承诺',
-    '--evidence', 'reported',
-    '--source', '用户回答与当前需求描述',
-  ]);
-  await command(resumed.executionId, resumed.token!, [
-    'requirement-context', 'assertion', 'upsert',
-    '--key', 'target-export-audience',
-    '--perspective', 'target',
-    '--statement', '本轮导出入口只面向管理员',
-    '--evidence', 'decided',
-    '--source', '用户对 export-audience 的回答',
-    '--decision', 'export-audience',
-  ]);
-  await command(resumed.executionId, resumed.token!, [
-    'requirement-context', 'impact', 'upsert',
-    '--key', 'export-audience-impact',
-    '--statement', '新增管理员导出能力，同时保持普通成员无导出入口',
-    '--disposition', 'change',
-    '--rationale', '用户已确认本轮只面向管理员',
-    '--source', '用户对 export-audience 的回答',
-    '--decision', 'export-audience',
-  ]);
-  await command(resumed.executionId, resumed.token!, [
-    'requirement-context', 'change', 'set',
-    '--text', '为管理员新增列表导出入口，普通成员行为保持不变',
-  ]);
-  await command(resumed.executionId, resumed.token!, [
-    'requirement-context', 'acceptance', 'upsert',
-    '--key', 'admin-can-export',
-    '--text', '管理员可以下载列表数据，普通成员看不到导出入口',
-    '--source', '用户对 export-audience 的回答',
-  ]);
-  await command(resumed.executionId, resumed.token!, [
-    'requirement-context', 'constraint', 'add',
-    '--key', 'audience-must-be-confirmed',
-    '--text', '本轮导出能力只面向管理员',
-  ]);
-  await command(resumed.executionId, resumed.token!, [
-    'requirement-context', 'scope', 'include',
-    '--key', 'admin-export',
-    '--text', '管理员使用列表导出入口',
-  ]);
-  const revised = await command(resumed.executionId, resumed.token!, ['requirement-context', 'status']);
-  assert.match(revised, /约束：1/);
-  assert.match(revised, /audience-must-be-confirmed：本轮导出能力只面向管理员/);
-  await command(resumed.executionId, resumed.token!, ['requirement-context', 'decision-resolution', 'complete']);
-  await completeBacklogAnswerReview(resumed.executionId, resumed.token!);
-  await command(resumed.executionId, resumed.token!, ['requirement-context', 'to-be', 'complete']);
-  await command(resumed.executionId, resumed.token!, ['requirement-context', 'impact-scan', 'complete']);
-  await command(resumed.executionId, resumed.token!, ['requirement-context', 'scope', 'complete']);
-  await command(resumed.executionId, resumed.token!, ['requirement-context', 'acceptance', 'complete']);
-  assert.match(
-    await command(resumed.executionId, resumed.token!, ['requirement-context', 'validate']),
-    /Outcome: validation_passed.*Action: `requirement-context complete`/s,
-  );
-  await command(resumed.executionId, resumed.token!, ['requirement-context', 'complete']);
-
-  const completedResult = await readAgentCommandSubmission(resumed.executionId);
-  assert.equal(completedResult?.outcome, 'completed');
-  assert.match(completedResult?.artifact?.content || '', /状态：Aligned/);
-  assert.match(completedResult?.artifact?.content || '', /Pipeline：feature/);
-  assert.match(completedResult?.artifact?.content || '', /## DECISIONS/);
-  assert.match(completedResult?.artifact?.content || '', /决定：仅管理员/);
-  assert.doesNotMatch(completedResult?.artifact?.content || '', /## OPEN QUESTIONS/);
-  await applyAgentResult('RUN-command-resume', resumed.delegation, completedResult!, {
-    executionId: resumed.executionId,
-  });
-  await completeExecution(resumed.executionId);
-
-  detail = await getTask(taskId);
-  assert.equal(detail?.task.agile_status, 'in plan');
-  assert.equal(detail?.questions.find((item) => item.question_id === question?.question_id)?.status, 'resolved');
-  assert.ok(detail?.documents.some((document) =>
-    document.kind === 'context' && document.content.includes('决定：仅管理员')));
-});
-
-test('keeps corrected business conclusions traceable instead of deleting or silently reactivating them', async () => {
-  const { createTask } = await import('./tasks');
-  const taskId = await createTask({ title: '显式修订业务影响' });
-  const active = await begin(taskId);
-  await command(active.executionId, active.token!, ['requirement-context', 'status']);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'intent', 'set', '--text', '确认导出能力的真实业务影响',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'upsert',
-    '--key', 'old-current-rule',
-    '--perspective', 'actual',
-    '--statement', '初步认为定时导出复用页面筛选',
-    '--evidence', 'inferred',
-    '--source', '初步仓库检索',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'upsert',
-    '--key', 'verified-current-rule',
-    '--perspective', 'actual',
-    '--statement', '项目不存在定时导出业务入口',
-    '--evidence', 'observed',
-    '--source', '仓库入口和产品路由检索',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'assertion', 'supersede',
-    '--key', 'old-current-rule',
-    '--by', 'verified-current-rule',
-    '--reason', '进一步调查推翻了初步推断',
-  ]);
-  await assert.rejects(
-    command(active.executionId, active.token!, [
-      'requirement-context', 'assertion', 'upsert',
-      '--key', 'old-current-rule',
-      '--perspective', 'actual',
-      '--statement', '尝试无痕恢复旧结论',
-      '--evidence', 'inferred',
-      '--source', '无',
-    ]),
-    /已是 superseded/,
-  );
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'impact', 'upsert',
-    '--key', 'scheduled-export',
-    '--statement', '可能影响定时导出',
-    '--disposition', 'needs_decision',
-    '--rationale', '初步认为存在同类入口',
-    '--source', '初步仓库检索',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'impact', 'dismiss',
-    '--key', 'scheduled-export',
-    '--reason', '确认项目不存在该业务场景',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'acceptance', 'upsert',
-    '--key', 'obsolete-acceptance',
-    '--text', '定时导出继承页面筛选',
-    '--source', '初步推断',
-  ]);
-  await command(active.executionId, active.token!, [
-    'requirement-context', 'acceptance', 'dismiss',
-    '--key', 'obsolete-acceptance',
-    '--reason', '对应业务场景不存在',
-  ]);
-  const status = await command(active.executionId, active.token!, ['requirement-context', 'status']);
-  assert.match(status, /old-current-rule · actual · inferred · superseded/);
-  assert.match(status, /进一步调查推翻了初步推断/);
-  assert.match(status, /scheduled-export · needs_decision · dismissed/);
-  assert.match(status, /确认项目不存在该业务场景/);
-  assert.match(status, /obsolete-acceptance · dismissed/);
-  assert.match(status, /语义修订记录：7/);
-});
-
-test('exposes only the new business-context protocol and rejects every legacy context command', async () => {
-  const { createTask } = await import('./tasks');
-  const taskId = await createTask({ title: '只使用新业务上下文协议' });
-  const active = await begin(taskId);
-  await assert.rejects(
-    command(active.executionId, active.token!, ['help']),
-    /help 必须指定一个主题.*context\|assertion\|impact\|decision-proposal\|decision-resolution\|answer-review\|scope\|finish/s,
-  );
-
-  const contextHelp = await command(active.executionId, active.token!, ['help', 'context']);
-  assert.match(contextHelp, /只读上下文工具/);
-  assert.match(contextHelp, /先执行当前角色的 status/);
-
-  const assertionHelp = await command(active.executionId, active.token!, ['help', 'assertion']);
-  assert.match(assertionHelp, /requirement-context intent set/);
-  assert.match(assertionHelp, /requirement-context assertion upsert/);
-  assert.match(assertionHelp, /Actual 和 Target 各至少需要一条.*Bug 还必须具备可靠 Expected/);
-  assert.match(assertionHelp, /既有需求规格.*代码或运行证据显示不同的 Actual.*必须同时记录 Expected 与 Actual/s);
-  assert.match(assertionHelp, /本次新增或改变后的结果.*属于 Target/s);
-  assert.match(assertionHelp, /不写测试命令、测试步骤、技术验证形式或实现细节/);
-  assert.match(assertionHelp, /observed\s+通过运行/);
-  assert.match(assertionHelp, /dismiss.*supersede/s);
-  assert.match(assertionHelp, /使用 supersede 前.*先创建同类型、不同 key 的 active 新结论/s);
-
-  const impactHelp = await command(active.executionId, active.token!, ['help', 'impact']);
-  assert.match(impactHelp, /requirement-context impact upsert/);
-  assert.match(impactHelp, /needs_decision\s+是否改变属于新的业务选择/);
-  assert.match(impactHelp, /technical\s+Analysis Obligation/);
-  assert.match(impactHelp, /只定义 Analysis 必须回答什么/);
-
-  const proposalHelp = await command(active.executionId, active.token!, ['help', 'decision-proposal']);
-  assert.match(proposalHelp, /只完整提出 Decision Tree/);
-  assert.match(proposalHelp, /建议决定权/);
-  assert.match(proposalHelp, /规格与代码现状冲突、遗漏影响处置/);
-  assert.match(proposalHelp, /不要主动改良、替换或扩展输入业务方案/);
-  assert.match(proposalHelp, /普通问题本身不要求 assertion 或 impact 反向引用/);
-  const resolutionHelp = await command(active.executionId, active.token!, ['help', 'decision-resolution']);
-  assert.match(resolutionHelp, /只回答已经完整提出/);
-  assert.match(resolutionHelp, /自动决策强度只出现在当前/);
-  assert.match(resolutionHelp, /逐字复用原 decision key/);
-  const answerReviewHelp = await command(active.executionId, active.token!, ['help', 'answer-review']);
-  assert.match(answerReviewHelp, /HUMAN、Agent、上游或项目证据/);
-  assert.match(answerReviewHelp, /answer-review expand/);
-
-  const scopeHelp = await command(active.executionId, active.token!, ['help', 'scope']);
-  assert.match(scopeHelp, /Pipeline 已在需求创建时确定/);
-  assert.match(scopeHelp, /不重新分类或选择后续节点/);
-  assert.doesNotMatch(scopeHelp, /classification set|feature\|bug\|tech\|other/);
-  assert.match(scopeHelp, /约束与范围.*可选边界/s);
-  assert.match(scopeHelp, /约束不用于提前记录技术设计/);
-
-  const finishHelp = await command(active.executionId, active.token!, ['help', 'finish']);
-  assert.match(finishHelp, /as-is complete → decision-proposal complete → decision-resolution complete → answer-review complete → to-be complete/);
-  assert.match(finishHelp, /影响扫描发现新的需求级业务分叉/);
-  assert.match(finishHelp, /requirement-context request-clarification/);
-  assert.match(finishHelp, /新的 resume execution 恢复 decision_resolution/);
-
-  const allTopicHelp = [contextHelp, assertionHelp, impactHelp, proposalHelp, resolutionHelp, answerReviewHelp, scopeHelp, finishHelp].join('\n');
-  assert.doesNotMatch(allTopicHelp, /requirement-context goal set/);
-  assert.doesNotMatch(allTopicHelp, /requirement-context outcome set/);
-  assert.doesNotMatch(allTopicHelp, /requirement-context fact /);
-
-  await assert.rejects(
-    command(active.executionId, active.token!, ['help', 'unknown']),
-    /可用主题：context、assertion、impact、decision-proposal、decision-resolution、answer-review、scope、finish/,
-  );
-  await command(active.executionId, active.token!, ['requirement-context', 'status']);
-  for (const args of [
-    ['requirement-context', 'goal', 'set', '--text', 'legacy'],
-    ['requirement-context', 'outcome', 'set', '--text', 'legacy'],
-    ['requirement-context', 'fact', 'add', '--key', 'legacy', '--statement', 'legacy', '--source', 'legacy'],
-  ]) {
-    await assert.rejects(
-      command(active.executionId, active.token!, args),
-      /未知命令/,
-    );
-  }
-});
-
-test('rejects commands with another execution token', async () => {
-  const { createTask } = await import('./tasks');
-  const firstTask = await createTask({ title: 'Token scope A' });
-  const secondTask = await createTask({ title: 'Token scope B' });
-  const first = await begin(firstTask);
-  const second = await begin(secondTask);
-  await assert.rejects(
-    command(first.executionId, second.token!, ['requirement-context', 'status']),
-    /命令凭证无效/,
-  );
-});
-
-test('exposes the same execution-scoped protocol through the cross-platform Node CLI', async () => {
-  const { createTask } = await import('./tasks');
-  const taskId = await createTask({ title: 'Node CLI command surface' });
-  const active = await begin(taskId);
-  const env = { ...process.env } as NodeJS.ProcessEnv;
-  delete env.LOOP_TEST;
-  delete env.LOOP_TEST_SETUP_PID;
-  delete env.NODE_TEST_CONTEXT;
-  env.LOOP_EXECUTION_ID = active.executionId;
-  env.LOOP_EXECUTION_TOKEN = active.token!;
-  env.LOOP_APP_ROOT = process.cwd();
-  const result = spawnSync(
-    process.execPath,
-    [join(process.cwd(), 'scripts', 'loop', 'loop-agent.mjs'), 'requirement-context', 'status'],
-    {
-      cwd: process.env.LOOP_WORKSPACE_ROOT_OVERRIDE,
-      env,
-      encoding: 'utf8',
-    },
-  );
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /需求上下文草稿 v1/);
-  assert.match(result.stdout, /Outcome: state_restored/);
-  assert.match(result.stdout, /## PHASE\s+as_is/);
-  assert.match(result.stdout, /缺少 Reported Intent/);
-
-  const rejected = spawnSync(
-    process.execPath,
-    [join(process.cwd(), 'scripts', 'loop', 'loop-agent.mjs'), 'requirement-context', 'as-is', 'complete'],
-    {
-      cwd: process.env.LOOP_WORKSPACE_ROOT_OVERRIDE,
-      env,
-      encoding: 'utf8',
-    },
-  );
-  assert.equal(rejected.status, 1);
-  assert.match(rejected.stderr, /# COMMAND RESULT/);
-  assert.match(rejected.stderr, /Outcome: rejected/);
-  assert.match(rejected.stderr, /Action: correct_and_retry/);
-  assert.match(rejected.stderr, /缺少 Reported Intent/);
-
-  const directory = mkdtempSync(join(tmpdir(), 'loop-agent-command-'));
-  const outsideDirectory = mkdtempSync(join(tmpdir(), 'loop-agent-command-outside-'));
-  try {
-    env.LOOP_AGENT_TMP_DIR = directory;
-    const goalPath = join(directory, 'intent.txt');
-    writeFileSync(goalPath, '从 UTF-8 文件恢复一段较长的业务意图');
-    const fileResult = spawnSync(
-      process.execPath,
-      [
-        join(process.cwd(), 'scripts', 'loop', 'loop-agent.mjs'),
-        'requirement-context', 'intent', 'set', '--text-file', goalPath,
-      ],
-      {
-        cwd: process.env.LOOP_WORKSPACE_ROOT_OVERRIDE,
-        env,
-        encoding: 'utf8',
-      },
-    );
-    assert.equal(fileResult.status, 0, fileResult.stderr);
-    assert.match(fileResult.stdout, /Outcome: accepted/);
-    assert.match(fileResult.stdout, /Changed: 业务意图/);
-    assert.match(
-      await command(active.executionId, active.token!, ['requirement-context', 'status']),
-      /从 UTF-8 文件恢复一段较长的业务意图/,
-    );
-
-    const outsidePath = join(outsideDirectory, 'outside.txt');
-    writeFileSync(outsidePath, '不能从当前 Agent 临时目录之外读取');
-    const outsideResult = spawnSync(
-      process.execPath,
-      [
-        join(process.cwd(), 'scripts', 'loop', 'loop-agent.mjs'),
-        'requirement-context', 'intent', 'set', '--text-file', outsidePath,
-      ],
-      {
-        cwd: process.env.LOOP_WORKSPACE_ROOT_OVERRIDE,
-        env,
-        encoding: 'utf8',
-      },
-    );
-    assert.equal(outsideResult.status, 1);
-    assert.match(outsideResult.stderr, /必须读取 \$LOOP_AGENT_TMP_DIR 内的文件/);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-    rmSync(outsideDirectory, { recursive: true, force: true });
-  }
-});
-
-test('story splitter help explains business units, source coverage, dependencies, and revisions', async () => {
-  const { taskId, delegation } = await taskReadyForSplit('交付规划命令帮助');
-  const active = await beginDelegation(delegation, `${taskId}-delivery-plan-help`);
-
-  await assert.rejects(
-    command(active.executionId, active.token!, ['help']),
-    /help 必须指定一个主题.*context\|unit\|source\|dependency\|revision\|finish/s,
-  );
-
-  const unitHelp = await command(active.executionId, active.token!, ['help', 'unit']);
-  assert.match(unitHelp, /不能按数据库、API、页面或测试等技术层拆分/);
-  assert.match(unitHelp, /至少承接一项 change 或 acceptance/);
-
-  const sourceHelp = await command(active.executionId, active.token!, ['help', 'source']);
-  assert.match(sourceHelp, /Agent 不能创建或改写来源/);
-  assert.match(sourceHelp, /preserve\s+相关单元必须继承的不变约束/);
-  assert.match(sourceHelp, /所有冻结输入都必须被至少一个有效单元承接/);
-  assert.match(sourceHelp, /不会自动迁移来源关联/);
-
-  const dependencyHelp = await command(active.executionId, active.token!, ['help', 'dependency']);
-  assert.match(dependencyHelp, /不能为了执行顺序被强行串联/);
-  assert.match(dependencyHelp, /当前草稿中的 active 单元/);
-  assert.match(dependencyHelp, /既有历史单元不能作为 --on/);
-  assert.match(dependencyHelp, /多个有效单元时必须填写排序与依赖说明/);
-
-  const revisionHelp = await command(active.executionId, active.token!, ['help', 'revision']);
-  assert.match(revisionHelp, /补充或纠正同一个业务闭环时使用相同 key/);
-  assert.match(revisionHelp, /不能重新激活/);
-  assert.match(revisionHelp, /不会自动迁移来源、顺序或依赖/);
-
-  const finishHelp = await command(active.executionId, active.token!, ['help', 'finish']);
-  assert.match(finishHelp, /\$LOOP_AGENT_TMP_DIR/);
-  assert.match(finishHelp, /当前 execution 结束后 Harness 会清理临时目录/);
-  assert.match(finishHelp, /1 至 50 个有效交付单元/);
-  assert.match(finishHelp, /交付规划 Agent 不向用户提问/);
-  assert.match(finishHelp, /PLANNING BASIS.*DELIVERY UNITS.*COVERAGE & ORDER.*FINALIZE/s);
-  assert.match(finishHelp, /验证后任何编辑都会使验证失效/);
-  assert.match(finishHelp, /delivery-plan complete/);
-
-  await assert.rejects(
-    command(active.executionId, active.token!, ['help', 'unknown']),
-    /可用主题：context、unit、source、dependency、revision、finish/,
-  );
-});
-
-test('story splitter progressively restores, validates and submits an ordered delivery plan', async () => {
   const { getTask } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const { applyAgentResult } = await import('./agent-results');
-  const {
-    completeExecution,
-    failExecutionWithRetryPolicy,
-  } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
-  const { taskId, delegation } = await taskReadyForSplit('渐进式交付拆分');
-  const first = await beginDelegation(delegation, 'delivery-plan-first');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { taskId, delegation } = await taskReadyForSplit('YAML 交付拆分');
+  const active = await begin(delegation, taskId);
 
-  await assert.rejects(
-    command(first.executionId, first.token!, [
-      'delivery-plan', 'rationale', 'set', '--text', '按用户可独立验收的业务闭环拆分',
-    ]),
-    /尚未查看草稿状态/,
-  );
-  const initial = await command(first.executionId, first.token!, ['delivery-plan', 'status']);
-  assert.match(initial, /交付计划草稿 v1/);
-  assert.match(initial, /PLANNING BASIS · planning_basis/);
-  assert.match(initial, /Status: not_ready/);
-  assert.match(initial, /缺少拆分依据/);
-  assert.doesNotMatch(initial, /## SUBMIT/);
-  const rationaleSet = await command(first.executionId, first.token!, [
-    'delivery-plan', 'rationale', 'set', '--text', '按用户可独立验收的业务闭环拆分',
-  ]);
-  assert.match(rationaleSet, /Readiness: structurally_ready/);
-  assert.match(rationaleSet, /Submit: `delivery-plan basis complete`/);
-  const basisComplete = await command(first.executionId, first.token!, ['delivery-plan', 'basis', 'complete']);
-  assert.match(basisComplete, /Outcome: phase_completed.*From: planning_basis.*To: delivery_units/s);
-  assert.match(basisComplete, /DELIVERY UNITS · delivery_units/);
-  await command(first.executionId, first.token!, [
-    'delivery-plan', 'unit', 'upsert',
-    '--key', 'download-filtered-csv',
-    '--title', '管理员下载当前筛选结果',
-    '--actor', '管理员',
-    '--trigger', '管理员在已有筛选条件的列表页点击导出',
-    '--outcome', '浏览器下载只包含筛选命中数据的 CSV 文件',
-    '--acceptance', '下载文件的记录与字段均和当前筛选结果一致',
-  ]);
-  await failExecutionWithRetryPolicy(first.executionId, '模拟 Agent 进程中断', {
-    kind: 'agent-execution',
-    maxRetries: 3,
-  });
+  assert.match(await command(active.executionId, active.token!, ['help']), /通用命令链/);
+  await assert.rejects(command(active.executionId, active.token!, ['delivery-plan', 'status']), /当前草稿使用通用命令链/);
+  const status = await command(active.executionId, active.token!, ['status']);
+  assert.match(status, /Phase: inputs/);
+  assert.match(status, /impact:filtered-export/);
+  assert.match(status, /acceptance:download-matches-filter/);
 
-  const resumed = await beginDelegation(delegation, 'delivery-plan-retry');
-  await assert.rejects(
-    command(resumed.executionId, resumed.token!, ['delivery-plan', 'validate']),
-    /尚未查看草稿状态/,
-  );
-  const restored = await command(resumed.executionId, resumed.token!, ['delivery-plan', 'status']);
-  assert.match(restored, /交付计划草稿 v1/);
-  assert.match(restored, /DELIVERY UNITS · delivery_units/);
-  assert.match(restored, /download-filtered-csv · active：管理员下载当前筛选结果/);
-  await command(resumed.executionId, resumed.token!, [
-    'delivery-plan', 'unit', 'upsert',
-    '--key', 'configure-export-fields',
-    '--title', '管理员确认导出字段',
-    '--actor', '管理员',
-    '--trigger', '管理员打开导出操作',
-    '--outcome', '系统显示并采用当前列表可导出的字段',
-    '--acceptance', '不在当前结果中的隐藏字段不会进入 CSV',
+  await command(active.executionId, active.token!, ['phase', 'complete']);
+  await put(active.executionId, active.token!, 'rationale', '按管理员获得可独立验收结果的业务闭环拆分。');
+  await command(active.executionId, active.token!, ['phase', 'complete']);
+  await put(active.executionId, active.token!, 'units', [
+    'title: 管理员下载当前筛选结果', 'actor: 管理员', 'trigger: 管理员在结果页发起导出',
+    'observableOutcome: 管理员获得与当前筛选一致的文件',
+    'acceptance: 下载文件中的记录与发起导出时的筛选结果一致',
+    'sourceRefs:', '  - impact:filtered-export', '  - acceptance:download-matches-filter',
+    'dependsOn: []',
+  ].join('\n'), 'download-filtered-results');
+  await command(active.executionId, active.token!, ['phase', 'complete']);
+  await put(active.executionId, active.token!, 'coverage', '唯一单元承接全部业务变化和需求级验收语义。');
+  await command(active.executionId, active.token!, ['phase', 'complete']);
+  assert.match(await command(active.executionId, active.token!, ['phase', 'complete']), /Outcome: completed/);
+
+  const result = await readAgentCommandSubmission(active.executionId);
+  assert.equal(result?.deliveryUnits?.[0]?.key, 'download-filtered-results');
+  assert.deepEqual(result?.deliveryUnits?.[0]?.sourceRefs.map((source) => source.key), [
+    'impact:filtered-export', 'acceptance:download-matches-filter',
   ]);
-  const unitsComplete = await command(resumed.executionId, resumed.token!, ['delivery-plan', 'units', 'complete']);
-  assert.match(unitsComplete, /Outcome: phase_completed.*From: delivery_units.*To: coverage_order/s);
-  assert.match(unitsComplete, /COVERAGE & ORDER · coverage_order/);
-  await command(resumed.executionId, resumed.token!, [
-    'delivery-plan', 'coverage', 'set', '--text', '覆盖导出入口、筛选继承与 CSV 下载结果',
+  await applyAgentResult(`RUN-delivery-plan-chain-${taskId}`, delegation, result!, { executionId: active.executionId });
+  await completeExecution(active.executionId);
+  const detail = await getTask(taskId);
+  assert.equal(detail?.stories[0]?.unit_key, 'download-filtered-results');
+  assert.deepEqual(detail?.stories[0]?.context_links.map((link) => link.source_key), [
+    'acceptance:download-matches-filter', 'impact:filtered-export',
   ]);
-  await command(resumed.executionId, resumed.token!, [
-    'delivery-plan', 'ordering', 'set', '--text', '先确认导出字段，再执行文件下载',
-  ]);
-  await command(resumed.executionId, resumed.token!, [
-    'delivery-plan', 'unit', 'move', '--key', 'configure-export-fields', '--position', '1',
-  ]);
-  await assert.rejects(
-    command(resumed.executionId, resumed.token!, ['delivery-plan', 'coverage', 'complete']),
-    /未关联任何规划输入|尚未由任何有效交付单元承接/,
-  );
-  for (const unitKey of ['configure-export-fields', 'download-filtered-csv']) {
-    await command(resumed.executionId, resumed.token!, [
-      'delivery-plan', 'unit', 'source', 'add',
-      '--key', unitKey, '--source', 'impact:filtered-export',
-    ]);
-    await command(resumed.executionId, resumed.token!, [
-      'delivery-plan', 'unit', 'source', 'add',
-      '--key', unitKey, '--source', 'acceptance:download-matches-filter',
-    ]);
-  }
-  await command(resumed.executionId, resumed.token!, [
-    'delivery-plan', 'unit', 'dependency', 'add',
-    '--key', 'download-filtered-csv', '--on', 'configure-export-fields',
-  ]);
-  await command(resumed.executionId, resumed.token!, [
-    'delivery-plan', 'unit', 'dependency', 'add',
-    '--key', 'configure-export-fields', '--on', 'download-filtered-csv',
-  ]);
-  await assert.rejects(
-    command(resumed.executionId, resumed.token!, ['delivery-plan', 'coverage', 'complete']),
-    /前置.*必须排在它之前|依赖存在循环/,
-  );
-  const reopened = await command(resumed.executionId, resumed.token!, [
-    'delivery-plan', 'coverage', 'reopen-units', '--reason', '来源映射暴露出一个技术步骤型候选',
-  ]);
-  assert.match(reopened, /Outcome: phase_completed.*From: coverage_order.*To: delivery_units/s);
-  await command(resumed.executionId, resumed.token!, [
-    'delivery-plan', 'unit', 'upsert',
-    '--key', 'technical-only-candidate',
-    '--title', '准备导出存储结构',
-    '--actor', '系统',
-    '--trigger', '开始实现导出',
-    '--outcome', '内部结构已准备',
-    '--acceptance', '内部结构存在',
-  ]);
-  await command(resumed.executionId, resumed.token!, [
-    'delivery-plan', 'unit', 'dismiss',
-    '--key', 'technical-only-candidate', '--reason', '这是技术步骤，不是独立业务闭环',
-  ]);
-  await command(resumed.executionId, resumed.token!, ['delivery-plan', 'units', 'complete']);
-  await command(resumed.executionId, resumed.token!, [
-    'delivery-plan', 'unit', 'dependency', 'remove',
-    '--key', 'configure-export-fields', '--on', 'download-filtered-csv',
-  ]);
-  await assert.rejects(
-    command(resumed.executionId, resumed.token!, [
-      'delivery-plan', 'unit', 'remove', '--key', 'configure-export-fields',
-    ]),
-    /未知命令/,
-  );
-  const coverageComplete = await command(resumed.executionId, resumed.token!, ['delivery-plan', 'coverage', 'complete']);
-  assert.match(coverageComplete, /Outcome: phase_completed.*From: coverage_order.*To: finalize/s);
-  assert.match(coverageComplete, /FINALIZE · finalize.*## VALIDATE.*delivery-plan validate/s);
-  await assert.rejects(
-    command(resumed.executionId, resumed.token!, ['delivery-plan', 'complete']),
-    /尚未通过当前草稿版本的 validate/,
-  );
-  assert.match(
-    await command(resumed.executionId, resumed.token!, ['delivery-plan', 'validate']),
-    /Outcome: validation_passed.*Readiness: validated.*Action: `delivery-plan complete`/s,
-  );
-  await command(resumed.executionId, resumed.token!, [
-    'delivery-plan', 'coverage', 'set', '--text', '覆盖导出入口、筛选继承与 CSV 下载结果',
-  ]);
-  await assert.rejects(
-    command(resumed.executionId, resumed.token!, ['delivery-plan', 'complete']),
-    /尚未通过当前草稿版本的 validate/,
-  );
-  await command(resumed.executionId, resumed.token!, ['delivery-plan', 'validate']);
-  assert.match(
-    await command(resumed.executionId, resumed.token!, ['delivery-plan', 'complete']),
-    /Outcome: completed.*Agent Action: end_execution/s,
-  );
-  assert.match(
-    await command(resumed.executionId, resumed.token!, ['delivery-plan', 'complete']),
-    /Outcome: already_submitted.*Agent Action: end_execution/s,
-  );
 
   const db = await databaseConnection();
-  assert.deepEqual(
-    (db.prepare(`
-      SELECT from_phase, to_phase
-      FROM delivery_plan_phase_transitions transition_item
-      JOIN agent_work_drafts draft ON draft.draft_id = transition_item.draft_id
-      WHERE draft.task_id = ? AND draft.work_key LIKE 'delivery-plan:%'
-      ORDER BY transition_id
-    `).all(taskId) as { from_phase: string; to_phase: string }[]),
-    [
-      { from_phase: 'planning_basis', to_phase: 'delivery_units' },
-      { from_phase: 'delivery_units', to_phase: 'coverage_order' },
-      { from_phase: 'coverage_order', to_phase: 'delivery_units' },
-      { from_phase: 'delivery_units', to_phase: 'coverage_order' },
-      { from_phase: 'coverage_order', to_phase: 'finalize' },
-    ],
-  );
-
-  const result = await readAgentCommandSubmission(resumed.executionId);
-  assert.deepEqual(
-    result?.deliveryUnits?.map((unit) => unit.title),
-    ['管理员确认导出字段', '管理员下载当前筛选结果'],
-  );
-  assert.doesNotMatch(result?.artifact?.content || '', /稳定标识|configure-export-fields|impact:filtered-export|acceptance:download-matches-filter/);
-  assert.match(result?.artifact?.content || '', /先确认导出字段，再执行文件下载/);
-  assert.match(result?.artifact?.content || '', /准备导出存储结构：已排除；这是技术步骤，不是独立业务闭环/);
-  assert.match(result?.artifact?.content || '', /业务变化：管理员可以下载当前筛选命中的结果/);
-  assert.match(result?.artifact?.content || '', /验收语义：下载内容与当前筛选结果一致/);
-  assert.deepEqual(result?.deliveryUnits?.[1]?.dependsOn, ['configure-export-fields']);
-  await applyAgentResult(`RUN-command-split-${taskId}`, delegation, result!, {
-    executionId: resumed.executionId,
-  });
-  await completeExecution(resumed.executionId);
-
-  const detail = await getTask(taskId);
-  assert.deepEqual(
-    detail?.stories.map((story) => story.title),
-    ['管理员确认导出字段', '管理员下载当前筛选结果'],
-  );
-  assert.equal(detail?.stories[0]?.unit_key, 'configure-export-fields');
-  assert.equal(detail?.stories[1]?.depends_on_story_indexes[0], 1);
-  assert.deepEqual(
-    detail?.stories[1]?.context_links.map((link) => link.source_key),
-    ['acceptance:download-matches-filter', 'impact:filtered-export'],
-  );
-  assert.equal(detail?.task.current_subagent, 'analyst-agent');
-  assert.equal(detail?.task.agile_status, 'ready for dev');
+  assert.deepEqual(db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'delivery_plan_%'`).all(), []);
+  const columns = db.prepare('PRAGMA table_info(stories)').all() as { name: string }[];
+  assert.equal(columns.some((column) => column.name === 'source_delivery_plan_draft_id'), false);
+  assert.equal(columns.some((column) => column.name === 'source_command_chain_draft_id'), true);
 });
 
-test('feedback split uses the same progressive protocol with an isolated draft', async () => {
-  const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+test('Delivery Plan final gate rejects uncovered sources and invalid dependencies', async () => {
+  const { taskId, delegation } = await taskReadyForSplit('交付拆分门禁');
+  const active = await begin(delegation, `${taskId}-gate`);
+  await command(active.executionId, active.token!, ['status']);
+  await command(active.executionId, active.token!, ['phase', 'complete']);
+  await put(active.executionId, active.token!, 'rationale', '按可独立验收闭环拆分。');
+  await command(active.executionId, active.token!, ['phase', 'complete']);
+  await put(active.executionId, active.token!, 'units', [
+    'title: 不完整导出单元', 'actor: 管理员', 'trigger: 发起导出',
+    'observableOutcome: 获得导出文件', 'acceptance: 文件可以下载',
+    'sourceRefs: [impact:filtered-export]', 'dependsOn: [missing-unit]',
+  ].join('\n'), 'incomplete-export');
+  await command(active.executionId, active.token!, ['phase', 'complete']);
+  await put(active.executionId, active.token!, 'coverage', '候选覆盖说明。');
+  await command(active.executionId, active.token!, ['phase', 'complete']);
+  await assert.rejects(command(active.executionId, active.token!, ['phase', 'complete']), /依赖了不存在的单元 missing-unit[\s\S]*acceptance:download-matches-filter 尚未由任何交付单元承接/);
+});
+
+test('feedback split freezes only the current feedback group in the generic chain', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { taskId, delegation: splitDelegation } = await taskReadyForSplit('评论追加交付拆分');
+  const { taskId, delegation } = await taskReadyForSplit('反馈追加拆分');
   const feedbackDelegation: DelegationEnvelope = {
-    ...splitDelegation,
-    pipeline: 'feedback-split',
-    description: '将范围新增评论拆为追加交付单元',
-    feedbackBatchId: `FB-${taskId}`,
-    feedbackGroupId: `FG-${taskId}`,
+    ...delegation, pipeline: 'feedback-split', feedbackBatchId: `FB-${taskId}`, feedbackGroupId: `FG-${taskId}`,
   };
   const db = await databaseConnection();
-  db.prepare(`
-    INSERT INTO feedback_batches(batch_id, task_id, status, batch_number)
-    VALUES(?, ?, 'executing', 1)
-  `).run(feedbackDelegation.feedbackBatchId, taskId);
+  db.prepare(`INSERT INTO feedback_batches(batch_id, task_id, status, batch_number) VALUES(?, ?, 'executing', 1)`)
+    .run(feedbackDelegation.feedbackBatchId, taskId);
   db.prepare(`
     INSERT INTO feedback_groups(
       group_id, batch_id, group_key, work_type, status, title, reason,
       acceptance_json, affected_story_indexes_json, group_order
-    ) VALUES(?, ?, 'batch-delete-scope', 'scope_addition', 'waiting_for_plan',
-      '批量删除范围', '新增批量删除能力', ?, '[]', 1)
-  `).run(
-    feedbackDelegation.feedbackGroupId,
-    feedbackDelegation.feedbackBatchId,
-    JSON.stringify(['仅选中记录被删除，失败项有明确提示']),
-  );
-  const active = await beginDelegation(feedbackDelegation, 'feedback-split');
-  assert.match(
-    await command(active.executionId, active.token!, ['help', 'unit']),
-    /delivery-plan unit upsert/,
-  );
-  const status = await command(active.executionId, active.token!, ['delivery-plan', 'status']);
-  assert.match(status, /交付计划草稿 v1/);
-  assert.doesNotMatch(status, /download-filtered-csv/);
-  await command(active.executionId, active.token!, [
-    'delivery-plan', 'rationale', 'set', '--text', '评论新增了一个可独立验收的业务范围',
-  ]);
-  await command(active.executionId, active.token!, ['delivery-plan', 'basis', 'complete']);
-  await command(active.executionId, active.token!, [
-    'delivery-plan', 'unit', 'upsert',
-    '--key', 'batch-delete',
-    '--title', '管理员批量删除筛选结果',
-    '--actor', '管理员',
-    '--trigger', '管理员选择多条记录并确认删除',
-    '--outcome', '选中记录被删除且列表刷新',
-    '--acceptance', '仅选中记录被删除，失败项有明确提示',
-  ]);
-  await command(active.executionId, active.token!, ['delivery-plan', 'units', 'complete']);
-  await command(active.executionId, active.token!, [
-    'delivery-plan', 'coverage', 'set', '--text', '只覆盖评论要求的批量删除能力',
-  ]);
-  await command(active.executionId, active.token!, [
-    'delivery-plan', 'unit', 'source', 'add',
-    '--key', 'batch-delete', '--source', 'change:feedback:batch-delete-scope',
-  ]);
-  await command(active.executionId, active.token!, [
-    'delivery-plan', 'unit', 'source', 'add',
-    '--key', 'batch-delete', '--source', 'acceptance:feedback:batch-delete-scope:1',
-  ]);
-  await command(active.executionId, active.token!, ['delivery-plan', 'coverage', 'complete']);
-  await command(active.executionId, active.token!, ['delivery-plan', 'validate']);
-  await command(active.executionId, active.token!, ['delivery-plan', 'complete']);
-  const result = await readAgentCommandSubmission(active.executionId);
-  assert.equal(result?.deliveryUnits?.[0]?.key, 'batch-delete');
-  assert.equal(result?.deliveryUnits?.[0]?.sourceRefs.length, 2);
+    ) VALUES(?, ?, 'batch-delete', 'scope_addition', 'waiting_for_plan',
+      '批量删除', '新增批量删除能力', ?, '[]', 1)
+  `).run(feedbackDelegation.feedbackGroupId, feedbackDelegation.feedbackBatchId, JSON.stringify(['仅选中记录被删除，失败项有明确提示']));
+  const active = await begin(feedbackDelegation, `${taskId}-feedback`);
+  const status = await command(active.executionId, active.token!, ['status']);
+  assert.match(status, /change:feedback:batch-delete/);
+  assert.match(status, /acceptance:feedback:batch-delete:1/);
+  assert.doesNotMatch(status, /impact:filtered-export/);
 });

@@ -1,17 +1,22 @@
 import { businessAnalysisPhases, businessAnalysisWorkflow } from './business-analysis-workflow';
-import { deliveryAnalysisNormalCommandPath } from './delivery-analysis-workflow';
+import { DELIVERY_ANALYSIS_AGENT, DELIVERY_ANALYSIS_TERMINAL_ACTIONS, deliveryAnalysisNormalCommandPath } from './delivery-analysis-workflow';
 import { deliveryPlanNormalCommandPath } from './delivery-plan-workflow';
 import { developmentNormalCommandPath } from './development-workflow';
+import { feedbackTriageNormalCommandPath, feedbackVerifyNormalCommandPath } from './feedback-workflow';
 import { requirementContextNormalCommandPath } from './requirement-context-workflow';
+import { reproductionNormalCommandPath } from './reproduction-workflow';
+import { reviewNormalCommandPath } from './review-workflow';
 import { verificationNormalCommandPath } from './verification-workflow';
 
 export type AgentCommandProfile = {
   id: string;
   agent: string;
   pipelines: string[];
+  supportsResume?: boolean;
   namespace: string;
   draftType: 'direct' | 'requirement_context' | 'delivery_plan' | 'reproduction' | 'analysis' | 'development' | 'verification' | 'feedback' | 'review' | 'business_analysis';
   terminalActions: string[];
+  commandChainId?: string;
 };
 
 export type AgentCommandChain = {
@@ -67,10 +72,8 @@ const PROFILES: AgentCommandProfile[] = [
     pipelines: ['backlog', 'resume'],
     namespace: 'requirement-context',
     draftType: 'requirement_context',
-    terminalActions: [
-      'requirement-context complete',
-      'requirement-context request-clarification',
-    ],
+    terminalActions: ['phase complete'],
+    commandChainId: 'requirement-context',
   },
   {
     id: 'reproduction',
@@ -78,21 +81,18 @@ const PROFILES: AgentCommandProfile[] = [
     pipelines: ['repro', 'resume', 'feedback-repro'],
     namespace: 'reproduction',
     draftType: 'reproduction',
-    terminalActions: [
-      'reproduction complete',
-      'reproduction request-alignment',
-    ],
+    terminalActions: ['phase complete'],
+    commandChainId: 'reproduction',
   },
   {
     id: 'delivery-analysis',
-    agent: 'analyst-agent',
-    pipelines: ['analysis', 'resume'],
+    agent: DELIVERY_ANALYSIS_AGENT,
+    pipelines: ['analysis'],
     namespace: 'delivery-analysis',
     draftType: 'analysis',
-    terminalActions: [
-      'delivery-analysis complete',
-      'delivery-analysis request-clarification',
-    ],
+    terminalActions: [...DELIVERY_ANALYSIS_TERMINAL_ACTIONS],
+    supportsResume: true,
+    commandChainId: 'delivery-analysis',
   },
   {
     id: 'implementation',
@@ -100,11 +100,8 @@ const PROFILES: AgentCommandProfile[] = [
     pipelines: ['dev', 'resume'],
     namespace: 'implementation',
     draftType: 'development',
-    terminalActions: [
-      'implementation complete',
-      'implementation request-input',
-      'implementation fail',
-    ],
+    terminalActions: ['phase complete'],
+    commandChainId: 'development',
   },
   {
     id: 'verification',
@@ -112,10 +109,8 @@ const PROFILES: AgentCommandProfile[] = [
     pipelines: ['test', 'resume'],
     namespace: 'verification',
     draftType: 'verification',
-    terminalActions: [
-      'verification complete',
-      'verification request-input',
-    ],
+    terminalActions: ['phase complete'],
+    commandChainId: 'verification',
   },
   {
     id: 'feedback-triage',
@@ -123,10 +118,8 @@ const PROFILES: AgentCommandProfile[] = [
     pipelines: ['feedback-triage'],
     namespace: 'feedback',
     draftType: 'feedback',
-    terminalActions: [
-      'feedback triage-complete',
-      'feedback request-clarification',
-    ],
+    terminalActions: ['phase complete'],
+    commandChainId: 'feedback-triage',
   },
   {
     id: 'feedback-verify',
@@ -134,10 +127,8 @@ const PROFILES: AgentCommandProfile[] = [
     pipelines: ['feedback-verify'],
     namespace: 'feedback',
     draftType: 'feedback',
-    terminalActions: [
-      'feedback resolve',
-      'feedback reopen',
-    ],
+    terminalActions: ['phase complete'],
+    commandChainId: 'feedback-verify',
   },
   {
     id: 'review',
@@ -145,9 +136,8 @@ const PROFILES: AgentCommandProfile[] = [
     pipelines: ['review', 'feedback-report'],
     namespace: 'review',
     draftType: 'review',
-    terminalActions: [
-      'review complete',
-    ],
+    terminalActions: ['phase complete'],
+    commandChainId: 'review',
   },
   {
     id: 'delivery-plan',
@@ -155,15 +145,15 @@ const PROFILES: AgentCommandProfile[] = [
     pipelines: ['split', 'feedback-split'],
     namespace: 'delivery-plan',
     draftType: 'delivery_plan',
-    terminalActions: [
-      'delivery-plan complete',
-    ],
+    terminalActions: ['phase complete'],
+    commandChainId: 'delivery-plan',
   },
 ];
 
 export function agentCommandProfile(agent: string, pipeline: string) {
   return PROFILES.find((profile) =>
-    profile.agent === agent && profile.pipelines.includes(pipeline)) || null;
+    profile.agent === agent
+      && (profile.pipelines.includes(pipeline) || (pipeline === 'resume' && profile.supportsResume))) || null;
 }
 
 export function agentCommandProfiles() {
@@ -193,10 +183,14 @@ const PIPELINE_LABELS: Record<string, string> = {
 function primaryCommandPath(profile: AgentCommandProfile, pipeline: string) {
   if (pipeline === 'direct') return ['direct run', 'direct submit --summary-file <简短结论> [--result-file <完整结果>]'];
   if (pipeline === 'backlog' || pipeline === 'resume' && profile.draftType === 'requirement_context') return requirementContextNormalCommandPath();
+  if (profile.draftType === 'reproduction') return reproductionNormalCommandPath();
   if (pipeline === 'analysis') return deliveryAnalysisNormalCommandPath();
   if (pipeline === 'dev') return developmentNormalCommandPath();
   if (pipeline === 'test') return verificationNormalCommandPath();
-  if (pipeline === 'split') return deliveryPlanNormalCommandPath();
+  if (profile.draftType === 'review') return reviewNormalCommandPath();
+  if (pipeline === 'feedback-triage') return feedbackTriageNormalCommandPath();
+  if (pipeline === 'feedback-verify') return feedbackVerifyNormalCommandPath();
+  if (profile.draftType === 'delivery_plan') return deliveryPlanNormalCommandPath();
   if (profile.draftType === 'business_analysis') {
     const workflow = businessAnalysisWorkflow(profile.agent);
     if (workflow) return businessAnalysisPhases(profile.agent as Parameters<typeof businessAnalysisPhases>[0], false)
@@ -300,7 +294,6 @@ export function agentContextHelpLines(appRoot: string) {
 }
 
 function terminalActionUsage(action: string) {
-  if (action === 'implementation fail') return `${action} --reason <原因与证据>`;
   if (action === 'business-design return-gap') return `${action} --reason-file <需求意图缺口> [--artifact-file <缺口报告>]`;
   if (action === 'requirement-spec return-gap') return `${action} --target <intent|business_design> --reason-file <理由> [--artifact-file <缺口报告>]`;
   if (action === 'spec-review approve') return `${action} --artifact-file <完整需求规格>`;
@@ -336,11 +329,39 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
       ...agentContextHelpLines(appRoot),
     ].join('\n');
   }
+  if (profile.commandChainId) {
+    return [
+      '# Agent Tool Contract',
+      '当前 execution 使用 YAML 声明的通用命令链。命令不绑定 Agent namespace；Artifact、Decision 和 Phase 是共享协议。',
+      '',
+      '**首次必须执行：**',
+      '```bash',
+      `${command} status`,
+      '```',
+      '',
+      'status 会恢复草稿、当前 Phase、稳定 key 和当前工作包允许的命令。未查看状态前，所有编辑、校验和提交都会被拒绝。',
+      '',
+      '**通用帮助：**',
+      '```bash',
+      `${command} help`,
+      '```',
+      '',
+      '**执行规则：**',
+      '- 只执行 status 当前工作包列出的命令；Artifact/Decision 编辑不会自动推进 Phase。',
+      '- 长文本和 YAML 写入 `$LOOP_AGENT_TMP_DIR` 后使用对应 `--content-file`、`--decision-file` 等参数。',
+      '- 所有 Phase 都使用 `phase complete` 完成；Harness 会按 Phase type 校验、推进、等待输入或完成整个命令链。',
+      '- Artifact 必须通过当前工作包列出的命令写入，不能把内容直接附加在 `phase complete` 上。',
+      '- 发现遗漏时使用 `phase rewind --to <earlier-phase> --reason <原因>` 回到任一更早阶段。',
+      '- 普通最终文本和 CLI exit 0 都不是终点；只有末尾 Phase 的 `phase complete` 成功后才能结束 execution。',
+      '- 命令失败时修正后自行重试，不能以普通最终文本代替提交。',
+      '',
+      '## 冻结业务上下文（只读）',
+      ...agentContextHelpLines(appRoot),
+    ].join('\n');
+  }
   const helpTopics = profile.draftType === 'requirement_context'
     ? 'context|assertion|impact|decision-proposal|decision-resolution|answer-review|scope|finish'
-    : profile.draftType === 'delivery_plan'
-      ? 'context|unit|source|dependency|revision|finish'
-      : profile.draftType === 'analysis'
+    : profile.draftType === 'analysis'
         ? 'context|impact|decision-proposal|decision-resolution|answer-review|contract|finish'
         : profile.draftType === 'development'
           ? 'context|evidence|review|commit|input|finish'
@@ -373,7 +394,7 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
     '```bash',
     `${command} help <${helpTopics}>`,
     '```',
-    ...(['requirement_context', 'delivery_plan', 'analysis', 'development', 'verification', 'review', 'business_analysis'].includes(profile.draftType)
+    ...(['requirement_context', 'analysis', 'development', 'verification', 'review', 'business_analysis'].includes(profile.draftType)
       ? ['', `\`${profile.namespace}\` 的 help 必须指定一个主题；当前阶段可执行命令以 \`status\` 返回的工作包为准。`]
       : []),
     '',

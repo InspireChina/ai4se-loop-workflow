@@ -20,12 +20,15 @@ test('projects the current structured phase and latest Agent domain command', as
   db.prepare(`
     INSERT INTO agent_work_drafts(
       draft_id, work_key, draft_version, draft_type, task_id, story_index,
-      agent, status, change_seq, last_execution_id, status_viewed_execution_id
-    ) VALUES(?, ?, 1, 'verification', ?, 1, 'test-agent', 'editing', 4, ?, ?)
+      agent, status, change_seq, last_execution_id, status_viewed_execution_id, command_chain_id
+    ) VALUES(?, ?, 1, 'verification', ?, 1, 'test-agent', 'editing', 4, ?, ?, 'verification')
   `).run(draftId, `verification:${taskId}:1`, taskId, executionId, executionId);
-  db.prepare(`INSERT INTO verification_drafts(draft_id, workflow_phase) VALUES(?, 'execute')`).run(draftId);
+  db.prepare(`
+    INSERT INTO command_chain_drafts(draft_id, command_chain_id, definition_version, workflow_phase)
+    VALUES(?, 'verification', 1, 'execute')
+  `).run(draftId);
 
-  const command = `node "/app/scripts/loop/loop-agent.mjs" verification result record --key smoke`;
+  const command = `node "/app/scripts/loop/loop-agent.mjs" artifact put --artifact verification --block results --key smoke`;
   db.prepare(`
     INSERT INTO execution_receipts(receipt_id, execution_id, kind, receipt_key, payload_json)
     VALUES(?, ?, 'tool_event', '00000001', ?), (?, ?, 'tool_event', '00000002', ?)
@@ -39,6 +42,7 @@ test('projects the current structured phase and latest Agent domain command', as
   assert.equal(progress[0].agent, 'test-agent');
   assert.equal(progress[0].currentPhase, 'execute');
   assert.deepEqual(progress[0].stages.map((stage) => [stage.label, stage.status]), [
+    ['FROZEN VERIFICATION INPUTS', 'completed'],
     ['验证计划', 'completed'],
     ['执行验证', 'current'],
     ['证据复核', 'pending'],
@@ -68,10 +72,13 @@ test('does not expose a historical draft after its Agent has stopped running', a
   db.prepare(`
     INSERT INTO agent_work_drafts(
       draft_id, work_key, draft_version, draft_type, task_id, story_index,
-      agent, status, change_seq, last_execution_id, status_viewed_execution_id
-    ) VALUES(?, ?, 1, 'verification', ?, 1, 'test-agent', 'waiting_for_answers', 8, ?, ?)
+      agent, status, change_seq, last_execution_id, status_viewed_execution_id, command_chain_id
+    ) VALUES(?, ?, 1, 'verification', ?, 1, 'test-agent', 'waiting_for_answers', 8, ?, ?, 'verification')
   `).run(draftId, `verification:${taskId}:1`, taskId, executionId, executionId);
-  db.prepare(`INSERT INTO verification_drafts(draft_id, workflow_phase) VALUES(?, 'finalize')`).run(draftId);
+  db.prepare(`
+    INSERT INTO command_chain_drafts(draft_id, command_chain_id, definition_version, workflow_phase)
+    VALUES(?, 'verification', 1, 'finalize')
+  `).run(draftId);
 
   assert.deepEqual(agentCommandProgressInDb(db, taskId), []);
 });

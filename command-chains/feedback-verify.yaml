@@ -1,0 +1,51 @@
+version: 1
+id: feedback-verify
+agent: feedback-agent
+
+artifacts:
+  feedback:
+    blocks:
+      target:
+        title: FROZEN FEEDBACK TARGET
+        cardinality: one
+        format: yaml
+        writable: false
+        required: true
+        fields:
+          commentId: { type: string, required: true }
+          groupId: { type: string, required: true }
+      summary:
+        title: FEEDBACK VERIFICATION SUMMARY
+        cardinality: one
+        format: markdown
+        required: true
+      evidence:
+        title: INDEPENDENT FEEDBACK EVIDENCE
+        cardinality: many
+        format: text
+        required: true
+      conclusion:
+        title: FEEDBACK VERIFICATION CONCLUSION
+        cardinality: one
+        format: yaml
+        required: true
+        fields:
+          verdict: { type: enum, required: true, values: [resolved, reopened] }
+          reason: { type: string, required: true }
+
+phases:
+  # 内置输入门禁：冻结当前只允许验证的一条反馈评论及其工作组。
+  inputs:
+    type: builtin
+    builtin: feedback-verify-inputs
+
+  # Artifact Phase：独立检查反馈要求是否满足，登记可定位证据、摘要和 resolved/reopened 结论。
+  verify:
+    type: artifact
+    artifacts: [feedback.summary, feedback.evidence, feedback.conclusion]
+    instructions: 只验证当前冻结评论。使用独立观察证据判断要求是否满足；resolved 表示已满足，reopened 表示仍未满足并将形成新的前向反馈批次。不要修改历史交付物或验证其他评论。
+
+  # 内置最终门禁：校验目标、独立证据与结论，并编译单评论反馈验证结果。
+  finalize:
+    type: builtin
+    builtin: feedback-verify-finalize

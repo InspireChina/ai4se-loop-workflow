@@ -1,35 +1,37 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  DELIVERY_PLAN_COMMAND_CHAIN,
   DELIVERY_PLAN_PHASE_ORDER,
   DELIVERY_PLAN_PHASE_SEQUENCE,
   DELIVERY_PLAN_WORKFLOW,
   deliveryPlanNormalCommandPath,
 } from './delivery-plan-workflow';
 
-test('defines the Delivery Plan phase order and work packets in one catalog', () => {
+test('loads Delivery Plan entirely from YAML', () => {
   assert.deepEqual(DELIVERY_PLAN_PHASE_ORDER, [
-    'planning_basis', 'delivery_units', 'coverage_order', 'finalize',
+    'inputs', 'planning_basis', 'delivery_units', 'coverage_order', 'finalize',
   ]);
   assert.equal(
     DELIVERY_PLAN_PHASE_SEQUENCE,
-    'PLANNING BASIS → DELIVERY UNITS → COVERAGE & ORDER → FINALIZE',
+    'FROZEN PLAN INPUTS → PLANNING BASIS → DELIVERY UNITS → COVERAGE ORDER → FINALIZE',
   );
-  for (const phase of DELIVERY_PLAN_PHASE_ORDER) {
-    const packet = DELIVERY_PLAN_WORKFLOW[phase];
-    assert.ok(packet.title);
-    assert.ok(packet.objective);
-    assert.ok(packet.required);
-    assert.ok(packet.prohibited);
-    assert.ok(packet.commands.length);
-    assert.ok(packet.reviewBeforeSubmit.length);
-    assert.match(packet.submit, /^delivery-plan /);
-  }
+  assert.equal(DELIVERY_PLAN_WORKFLOW.inputs.builtin, 'delivery-plan-inputs');
+  assert.equal(DELIVERY_PLAN_WORKFLOW.finalize.builtin, 'delivery-plan-finalize');
+  assert.equal(DELIVERY_PLAN_COMMAND_CHAIN.artifacts['delivery-plan'].blocks.sources.writable, false);
   assert.deepEqual(deliveryPlanNormalCommandPath(), [
-    'delivery-plan basis complete',
-    'delivery-plan units complete',
-    'delivery-plan coverage complete',
-    'delivery-plan validate',
-    'delivery-plan complete',
+    'status',
+    'phase complete', 'phase complete', 'phase complete', 'phase complete', 'phase complete',
+  ]);
+});
+
+test('declares units and coverage as generic Artifact blocks', () => {
+  assert.deepEqual(DELIVERY_PLAN_WORKFLOW.delivery_units.artifactBlocks, [
+    { artifactId: 'delivery-plan', blockId: 'units' },
+  ]);
+  assert.deepEqual(DELIVERY_PLAN_WORKFLOW.coverage_order.artifactBlocks, [
+    { artifactId: 'delivery-plan', blockId: 'units' },
+    { artifactId: 'delivery-plan', blockId: 'coverage' },
+    { artifactId: 'delivery-plan', blockId: 'ordering' },
   ]);
 });

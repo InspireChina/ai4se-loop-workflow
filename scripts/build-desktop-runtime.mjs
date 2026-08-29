@@ -46,6 +46,7 @@ await mkdir(join(outputRoot, '.next'), { recursive: true });
 await cp(join(projectRoot, '.next', 'static'), join(outputRoot, '.next', 'static'), { recursive: true });
 await cp(join(projectRoot, 'migrations'), join(outputRoot, 'migrations'), { recursive: true });
 await cp(join(projectRoot, 'app-migrations'), join(outputRoot, 'app-migrations'), { recursive: true });
+await cp(join(projectRoot, 'command-chains'), join(outputRoot, 'command-chains'), { recursive: true });
 // Next standalone traces the cache implementation but omits this public
 // package entrypoint, which bundled runners import for best-effort revalidation.
 await copyFile(join(projectRoot, 'node_modules', 'next', 'cache.js'), join(outputRoot, 'node_modules', 'next', 'cache.js'));

@@ -1,0 +1,79 @@
+version: 1
+id: verification
+agent: test-agent
+
+artifacts:
+  verification:
+    blocks:
+      sources:
+        title: FROZEN VERIFICATION INPUTS
+        cardinality: many
+        format: yaml
+        writable: false
+        required: true
+        fields:
+          kind: { type: enum, required: true, values: [acceptance, focus, guardrail, recovery] }
+          description: { type: string, required: true }
+          oracle: { type: string, required: true }
+          sourceRef: { type: string, required: true }
+      scenarios:
+        title: VERIFICATION SCENARIOS
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          channel: { type: enum, required: true, values: [frontend, api] }
+          title: { type: string, required: true }
+          setup: { type: string, required: true }
+          steps: { type: string, required: true }
+          expected: { type: string, required: true }
+          coverageRefs: { type: array, required: true, minItems: 1 }
+      results:
+        title: VERIFICATION RESULTS
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          status: { type: enum, required: true, values: [passed, failed, blocked] }
+          failureKind: { type: enum, values: [implementation, specification, environment, inconclusive] }
+          evidence: { type: string, required: true }
+          actualBehavior: { type: string }
+      evidence-review:
+        title: EVIDENCE REVIEW
+        cardinality: one
+        format: yaml
+        required: true
+        fields:
+          summary: { type: string, required: true }
+          residualRisk: { type: string }
+
+phases:
+  # 内置输入门禁：冻结当前 Delivery Spec 的验收、验证关注点、保护项和活动恢复事项，作为独立测试 Oracle。
+  inputs:
+    type: builtin
+    builtin: verification-inputs
+
+  # 内置计划门禁：在观察 Actual 前建立覆盖全部冻结输入的黑盒场景，并要求 Acceptance 至少有一个真实 frontend 闭环。
+  plan:
+    type: builtin
+    builtin: verification-plan
+    artifacts: [verification.scenarios]
+
+  # 内置执行门禁：逐项登记独立观察结果；新风险可追加新场景，但冻结场景不能改写。缺少环境或证据时登记 runtime input 并暂停。
+  execute:
+    type: builtin
+    builtin: verification-execution
+    artifacts:
+      - verification.scenarios
+      - verification.results
+
+  # Artifact Phase：复核证据是否真正支持状态与最小责任分类，并披露不影响当前结论的残余风险。
+  evidence_review:
+    type: artifact
+    artifacts: [verification.evidence-review]
+    instructions: 逐项复核 Expected、Actual、独立证据和 failureKind 是否一致。人工观察必须明确来源；证据不足、分类错误或仍会改变结论时回退 execute，不能把它降格为残余风险。
+
+  # 内置最终门禁：绑定当前冻结输入，确定性编译 passed 或 failed 结果；环境阻塞必须先通过 runtime input 解决。
+  finalize:
+    type: builtin
+    builtin: verification-finalize

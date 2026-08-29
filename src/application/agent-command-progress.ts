@@ -4,7 +4,9 @@ import { businessAnalysisPhases, businessAnalysisWorkflow, type BusinessAnalysis
 import { DELIVERY_ANALYSIS_PHASE_ORDER, DELIVERY_ANALYSIS_WORKFLOW } from '../domain/delivery-analysis-workflow';
 import { DELIVERY_PLAN_PHASE_ORDER, DELIVERY_PLAN_WORKFLOW } from '../domain/delivery-plan-workflow';
 import { DEVELOPMENT_PHASE_ORDER, DEVELOPMENT_WORKFLOW } from '../domain/development-workflow';
+import { FEEDBACK_TRIAGE_PHASE_ORDER, FEEDBACK_TRIAGE_WORKFLOW, FEEDBACK_VERIFY_PHASE_ORDER, FEEDBACK_VERIFY_WORKFLOW } from '../domain/feedback-workflow';
 import { REQUIREMENT_CONTEXT_PHASE_ORDER } from '../domain/requirement-context-workflow';
+import { REPRODUCTION_PHASE_ORDER, REPRODUCTION_WORKFLOW } from '../domain/reproduction-workflow';
 import { REVIEW_PHASE_ORDER, REVIEW_WORKFLOW } from '../domain/review-workflow';
 import { VERIFICATION_PHASE_ORDER, VERIFICATION_WORKFLOW } from '../domain/verification-workflow';
 import { databaseConnection } from '../infrastructure/database';
@@ -44,7 +46,6 @@ type DraftProgressRow = {
   updated_at: string;
   workflow_phase: string | null;
   research_enabled: number | null;
-  review_branch: string | null;
   execution_status: string | null;
   pipeline: string | null;
 };
@@ -87,6 +88,7 @@ const BUSINESS_ANALYSIS_LABELS: Record<string, string> = {
 
 const WORKFLOW_PHASE_LABELS: Record<string, string> = {
   planning_basis: '拆分依据', delivery_units: '交付单元', coverage_order: '覆盖与排序',
+  investigation: '复现与取证', alignment_proposal: '对齐提出', alignment_resolution: '对齐解决',
   impact_scan: '影响扫描', decision_proposal: '决策提出', decision_resolution: '决策收敛',
   answer_review: '答案复核', delivery_contract: '交付契约', implement: '实现', review: '代码审查',
   developer_verify: '开发者验证', commit: '代码提交', plan: '验证计划', execute: '执行验证',
@@ -114,11 +116,7 @@ function phaseDefinition(row: DraftProgressRow): PhaseDefinition {
     return { order: VERIFICATION_PHASE_ORDER, labels: phaseLabels(VERIFICATION_PHASE_ORDER, VERIFICATION_WORKFLOW) };
   }
   if (row.draft_type === 'review') {
-    const branch = row.workflow_phase === 'forward_units' || row.review_branch === 'forward_units'
-      ? 'forward_units'
-      : 'report';
-    const order = REVIEW_PHASE_ORDER.filter((phase) => phase !== (branch === 'forward_units' ? 'report' : 'forward_units'));
-    return { order, labels: phaseLabels(REVIEW_PHASE_ORDER, REVIEW_WORKFLOW) };
+    return { order: REVIEW_PHASE_ORDER, labels: phaseLabels(REVIEW_PHASE_ORDER, REVIEW_WORKFLOW) };
   }
   if (row.draft_type === 'business_analysis') {
     const workflow = businessAnalysisWorkflow(row.agent);
@@ -128,10 +126,12 @@ function phaseDefinition(row: DraftProgressRow): PhaseDefinition {
     }
   }
   if (row.draft_type === 'reproduction') {
-    return { order: ['restore', 'investigate', 'finalize'], labels: { restore: '恢复现场', investigate: '复现与取证', finalize: '校验提交' } };
+    return { order: REPRODUCTION_PHASE_ORDER, labels: phaseLabels(REPRODUCTION_PHASE_ORDER, REPRODUCTION_WORKFLOW) };
   }
   if (row.draft_type === 'feedback') {
-    return { order: ['restore', 'process', 'finalize'], labels: { restore: '恢复反馈', process: '处理反馈', finalize: '提交结论' } };
+    return row.pipeline === 'feedback-verify'
+      ? { order: FEEDBACK_VERIFY_PHASE_ORDER, labels: phaseLabels(FEEDBACK_VERIFY_PHASE_ORDER, FEEDBACK_VERIFY_WORKFLOW) }
+      : { order: FEEDBACK_TRIAGE_PHASE_ORDER, labels: phaseLabels(FEEDBACK_TRIAGE_PHASE_ORDER, FEEDBACK_TRIAGE_WORKFLOW) };
   }
   return { order: ['restore', 'work', 'finalize'], labels: { restore: '恢复状态', work: '执行工作', finalize: '提交结果' } };
 }
@@ -270,23 +270,12 @@ export function agentCommandProgressInDb(db: Database.Database, taskId: string) 
     SELECT work.draft_id, work.draft_type, work.agent, work.status, work.change_seq,
            work.story_index, work.last_execution_id, work.status_viewed_execution_id,
            work.updated_at,
-           COALESCE(context.workflow_phase, plan.workflow_phase, analysis.workflow_phase,
-                    development.workflow_phase, verification.workflow_phase,
-                    review.workflow_phase, business.workflow_phase) AS workflow_phase,
+           COALESCE(business.workflow_phase, chain.workflow_phase) AS workflow_phase,
            business.research_enabled,
-           (SELECT transition.from_phase
-            FROM review_phase_transitions transition
-            WHERE transition.draft_id = work.draft_id
-            ORDER BY transition.transition_id DESC LIMIT 1) AS review_branch,
            execution.status AS execution_status, execution.pipeline
     FROM agent_work_drafts work
-    LEFT JOIN requirement_context_drafts context ON context.draft_id = work.draft_id
-    LEFT JOIN delivery_plan_drafts plan ON plan.draft_id = work.draft_id
-    LEFT JOIN delivery_analysis_drafts analysis ON analysis.draft_id = work.draft_id
-    LEFT JOIN development_drafts development ON development.draft_id = work.draft_id
-    LEFT JOIN verification_drafts verification ON verification.draft_id = work.draft_id
-    LEFT JOIN review_drafts review ON review.draft_id = work.draft_id
     LEFT JOIN business_analysis_drafts business ON business.draft_id = work.draft_id
+    LEFT JOIN command_chain_drafts chain ON chain.draft_id = work.draft_id
     LEFT JOIN execution_attempts execution ON execution.execution_id = work.last_execution_id
     WHERE work.task_id = ?
       AND work.draft_version = (
@@ -325,7 +314,7 @@ export function agentCommandProgressInDb(db: Database.Database, taskId: string) 
       draft_id: '', draft_type: profile.draftType, agent: execution.agent, status: 'editing',
       change_seq: 0, story_index: execution.story_index, last_execution_id: execution.execution_id,
       status_viewed_execution_id: null, updated_at: execution.updated_at, workflow_phase: null,
-      research_enabled: 0, review_branch: null, execution_status: execution.status, pipeline: execution.pipeline,
+      research_enabled: 0, execution_status: execution.status, pipeline: execution.pipeline,
     };
     progress.push(buildDraftProgress(db, provisional));
   }
