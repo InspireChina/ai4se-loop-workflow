@@ -1,12 +1,6 @@
 import { businessAnalysisPhases, businessAnalysisWorkflow } from './business-analysis-workflow';
-import { DELIVERY_ANALYSIS_AGENT, DELIVERY_ANALYSIS_TERMINAL_ACTIONS, deliveryAnalysisNormalCommandPath } from './delivery-analysis-workflow';
-import { deliveryPlanNormalCommandPath } from './delivery-plan-workflow';
-import { developmentNormalCommandPath } from './development-workflow';
-import { feedbackTriageNormalCommandPath, feedbackVerifyNormalCommandPath } from './feedback-workflow';
-import { requirementContextNormalCommandPath } from './requirement-context-workflow';
-import { reproductionNormalCommandPath } from './reproduction-workflow';
-import { reviewNormalCommandPath } from './review-workflow';
-import { verificationNormalCommandPath } from './verification-workflow';
+import { loadCommandChainDefinition } from './command-chain-definition';
+import { DELIVERY_ANALYSIS_AGENT, DELIVERY_ANALYSIS_TERMINAL_ACTIONS } from './delivery-analysis-workflow';
 
 export type AgentCommandProfile = {
   id: string;
@@ -19,9 +13,17 @@ export type AgentCommandProfile = {
   commandChainId?: string;
 };
 
+export type AgentCommandChainPhase = {
+  id: string;
+  title: string;
+  type: 'builtin' | 'artifact' | 'confirmation' | 'direct' | 'legacy';
+  commands: string[];
+};
+
 export type AgentCommandChain = {
   pipeline: string;
-  commands: string[];
+  entryCommand: string | null;
+  phases: AgentCommandChainPhase[];
   terminalActions: string[];
 };
 
@@ -180,24 +182,43 @@ const PIPELINE_LABELS: Record<string, string> = {
   resume: '恢复执行',
 };
 
-function primaryCommandPath(profile: AgentCommandProfile, pipeline: string) {
-  if (pipeline === 'direct') return ['direct run', 'direct submit --summary-file <简短结论> [--result-file <完整结果>]'];
-  if (pipeline === 'backlog' || pipeline === 'resume' && profile.draftType === 'requirement_context') return requirementContextNormalCommandPath();
-  if (profile.draftType === 'reproduction') return reproductionNormalCommandPath();
-  if (pipeline === 'analysis') return deliveryAnalysisNormalCommandPath();
-  if (pipeline === 'dev') return developmentNormalCommandPath();
-  if (pipeline === 'test') return verificationNormalCommandPath();
-  if (profile.draftType === 'review') return reviewNormalCommandPath();
-  if (pipeline === 'feedback-triage') return feedbackTriageNormalCommandPath();
-  if (pipeline === 'feedback-verify') return feedbackVerifyNormalCommandPath();
-  if (profile.draftType === 'delivery_plan') return deliveryPlanNormalCommandPath();
+function commandChainPhases(profile: AgentCommandProfile, pipeline: string): AgentCommandChainPhase[] {
+  if (profile.commandChainId) {
+    const definition = loadCommandChainDefinition(profile.commandChainId);
+    return Object.entries(definition.phases).map(([id, phase]) => ({
+      id,
+      title: phase.title,
+      type: phase.type,
+      commands: [...phase.workCommands, phase.completeCommand],
+    }));
+  }
+  if (pipeline === 'direct') {
+    return [{
+      id: 'direct',
+      title: 'DIRECT',
+      type: 'direct',
+      commands: ['direct submit --summary-file <简短结论> [--result-file <完整结果>]'],
+    }];
+  }
   if (profile.draftType === 'business_analysis') {
     const workflow = businessAnalysisWorkflow(profile.agent);
     if (workflow) return businessAnalysisPhases(profile.agent as Parameters<typeof businessAnalysisPhases>[0], false)
-      .map((phase) => workflow.definitions[phase]?.submit)
-      .filter((command): command is string => Boolean(command));
+      .flatMap((id): AgentCommandChainPhase[] => {
+        const phase = workflow.definitions[id];
+        return phase ? [{
+          id,
+          title: phase.label,
+          type: 'legacy',
+          commands: phase.submit ? [phase.submit] : [],
+        }] : [];
+      });
   }
-  return profile.terminalActions;
+  return [{
+    id: profile.id,
+    title: profile.id.replaceAll('-', ' ').toUpperCase(),
+    type: 'legacy',
+    commands: [...profile.terminalActions],
+  }];
 }
 
 export function agentCommandChains(agent: string): AgentCommandChain[] {
@@ -206,7 +227,8 @@ export function agentCommandChains(agent: string): AgentCommandChain[] {
     const pipeline = profile.pipelines[0];
     return {
       pipeline,
-      commands: primaryCommandPath(profile, pipeline),
+      entryCommand: pipeline === 'direct' ? 'direct run' : 'status',
+      phases: commandChainPhases(profile, pipeline),
       terminalActions: [...profile.terminalActions],
     };
   });

@@ -5,7 +5,7 @@ import { getAgentProfile } from '../../../src/application/agent-profiles';
 import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, OMP_THINKING_LEVELS, getAgentRuntimeSettings, getFlowAgentDefaultRuntimeSettings } from '../../../src/application/project-settings';
 import { AGENT_PROMPT_SEED_REVISION, isFlowAgentId } from '../../../src/domain/agent-profile';
 import { MarkdownContent } from '../../../src/ui/markdown-content';
-import { agentCommandChains, agentCommandProfile, agentContextHelpLines, agentPipelineLabel, loopAgentCommandPrefix } from '../../../src/domain/agent-command-profile';
+import { agentCommandChains, agentCommandProfile, agentContextCommandPrefix, agentPipelineLabel, loopAgentCommandPrefix } from '../../../src/domain/agent-command-profile';
 import { resetAgentPromptAction, saveAgentMemoryAction, saveAgentPromptAction, saveAgentRuntimeAction, setAgentAutoEvolutionAction } from '../../actions';
 
 export const dynamic = 'force-dynamic';
@@ -82,7 +82,7 @@ export default async function AgentDetailPage({ params, searchParams }: { params
   const commandChains = agentCommandChains(agentId);
   const commandProfile = commandChains.length ? agentCommandProfile(agentId, commandChains[0].pipeline) : null;
   const commandPrefix = loopAgentCommandPrefix(process.cwd());
-  const contextPrefix = agentContextHelpLines(process.cwd())[0]?.replace(/^- `|`.*$/g, '') || `${commandPrefix} agent-context`;
+  const contextPrefix = agentContextCommandPrefix(process.cwd());
 
   return <>
     <header className="page-header agent-page-header"><div><Link className="crumb" href="/agents">Agent 配置</Link><p className="eyebrow">{agentId}</p><h1>{detail.definition.label}</h1><p className="muted">{detail.definition.description}</p></div><span className={`badge ${detail.candidatePrompt ? 'amber' : detail.profile.auto_evolve ? 'green' : 'blue'}`}>{detail.candidatePrompt ? `Prompt Canary r${detail.candidatePrompt.revision}` : detail.profile.auto_evolve ? '自动演化已开启' : '自动演化已关闭'}</span></header>
@@ -120,11 +120,18 @@ export default async function AgentDetailPage({ params, searchParams }: { params
         <section className="card settings agent-section-card">
           <div className="settings-section-head"><span className="executor-icon"><CircleDot size={18}/></span><div><strong>Agent 命令链</strong><p className="muted settings-description">只读展示 Harness 为当前 Agent 提供的正常推进路径，便于检查阶段是否过多、职责是否重复或终止条件是否清晰。</p></div><span className="badge">只读</span></div>
           <div className="command-chain-list">{commandChains.map((chain) => <article className="command-chain" key={chain.pipeline}>
-            <div className="command-chain-head"><div><span className="badge">{agentPipelineLabel(chain.pipeline)}</span><code>{chain.pipeline}</code></div><small>{chain.commands.length} 个阶段</small></div>
-            <div className="command-chain-steps" aria-label={`${agentPipelineLabel(chain.pipeline)} 命令顺序`}>
-              {chain.commands.map((command, index) => <span className="command-chain-step" key={`${chain.pipeline}:${command}`}><code>{command}</code>{index < chain.commands.length - 1 && <ArrowRight size={14}/>}</span>)}
+            <div className="command-chain-head"><div><span className="badge">{agentPipelineLabel(chain.pipeline)}</span><code>{chain.pipeline}</code></div><small>{chain.phases.length} 个阶段</small></div>
+            {chain.entryCommand && <div className="command-chain-entry"><span>统一入口</span><code>{chain.entryCommand}</code></div>}
+            <div className="command-chain-phases" aria-label={`${agentPipelineLabel(chain.pipeline)} 阶段顺序`}>
+              {chain.phases.map((phase, index) => <div className="command-chain-phase-wrap" key={`${chain.pipeline}:${phase.id}`}>
+                <section className="command-chain-phase">
+                  <header><span className="command-chain-index">{index + 1}</span><div><strong>{phase.title}</strong><code>{phase.id}</code></div><span className="badge">{phase.type}</span></header>
+                  <div className="command-chain-phase-commands">{phase.commands.map((command) => <code key={`${phase.id}:${command}`}>{command}</code>)}</div>
+                </section>
+                {index < chain.phases.length - 1 && <ArrowRight className="command-chain-phase-arrow" size={15}/>}
+              </div>)}
             </div>
-            <div className="command-chain-terminal"><span>可用终止动作</span>{chain.terminalActions.map((action) => <code key={action}>{action}</code>)}</div>
+            <div className="command-chain-terminal"><span>完成调用链的动作</span>{chain.terminalActions.map((action) => <code key={action}>{action}</code>)}<small>仅在最终阶段或 Harness 明确返回终止结果时结束 execution</small></div>
           </article>)}</div>
         </section>
         <aside className="agent-section-aside">

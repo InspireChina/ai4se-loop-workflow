@@ -1,10 +1,35 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  agentCommandChains,
   agentCommandPrompt,
   agentCommandProfiles,
   agentContextHelpLines,
 } from './agent-command-profile';
+
+test('projects YAML command chains as real phases with their available commands', () => {
+  const [chain] = agentCommandChains('backlog-agent');
+  assert.equal(chain.pipeline, 'backlog');
+  assert.equal(chain.entryCommand, 'status');
+  assert.equal(chain.phases.length, 9);
+  assert.deepEqual(chain.phases.map((phase) => phase.id), [
+    'as_is',
+    'decision_proposal',
+    'decision_resolution',
+    'answer_review',
+    'to_be',
+    'impact_scan',
+    'scope',
+    'acceptance',
+    'finalize',
+  ]);
+  assert.equal(chain.phases[0].title, 'AS IS');
+  assert.equal(chain.phases[0].type, 'artifact');
+  assert.ok(chain.phases[0].commands.some((command) => command.startsWith('artifact put --artifact requirement-context')));
+  assert.ok(chain.phases[1].commands.some((command) => command.startsWith('decision put --tree decisions')));
+  assert.deepEqual(chain.phases.at(-1)?.commands, ['phase complete']);
+  assert.deepEqual(chain.terminalActions, ['phase complete']);
+});
 
 test('injects the complete read-only context and submission contract before Agent work', () => {
   const prompt = agentCommandPrompt('/opt/Loop Work', 'analyst-agent', 'analysis');
