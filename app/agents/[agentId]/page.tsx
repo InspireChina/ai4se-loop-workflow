@@ -43,6 +43,15 @@ function dailyMemoryBody(content: string) {
     .trim();
 }
 
+function commandVisualKind(command: string) {
+  if (command.startsWith('artifact ')) return 'artifact';
+  if (command.startsWith('decision ')) return 'decision';
+  if (command.startsWith('phase ')) return 'phase';
+  if (command.startsWith('check ')) return 'check';
+  if (command.startsWith('runtime-input ')) return 'runtime';
+  return 'read';
+}
+
 export default async function AgentDetailPage({ params, searchParams }: { params: Promise<{ agentId: string }>; searchParams: Promise<{ section?: string | string[]; runtimeMode?: string | string[]; memoryMode?: string | string[]; memoryError?: string | string[]; memoryPromoted?: string | string[] }> }) {
   const [{ agentId }, query] = await Promise.all([params, searchParams]);
   if (!isFlowAgentId(agentId)) notFound();
@@ -121,17 +130,17 @@ export default async function AgentDetailPage({ params, searchParams }: { params
           <div className="settings-section-head"><span className="executor-icon"><CircleDot size={18}/></span><div><strong>Agent 命令链</strong><p className="muted settings-description">只读展示 Harness 为当前 Agent 提供的正常推进路径，便于检查阶段是否过多、职责是否重复或终止条件是否清晰。</p></div><span className="badge">只读</span></div>
           <div className="command-chain-list">{commandChains.map((chain) => <article className="command-chain" key={chain.pipeline}>
             <div className="command-chain-head"><div><span className="badge">{agentPipelineLabel(chain.pipeline)}</span><code>{chain.pipeline}</code></div><small>{chain.phases.length} 个阶段</small></div>
-            {chain.entryCommand && <div className="command-chain-entry"><span>统一入口</span><code>{chain.entryCommand}</code></div>}
+            {chain.entryCommand && <div className="command-chain-entry"><CircleDot size={14}/><span>统一入口</span><code>{chain.entryCommand}</code></div>}
             <div className="command-chain-phases" aria-label={`${agentPipelineLabel(chain.pipeline)} 阶段顺序`}>
               {chain.phases.map((phase, index) => <div className="command-chain-phase-wrap" key={`${chain.pipeline}:${phase.id}`}>
                 <section className="command-chain-phase">
-                  <header><span className="command-chain-index">{index + 1}</span><div><strong>{phase.title}</strong><code>{phase.id}</code></div><span className="badge">{phase.type}</span></header>
-                  <div className="command-chain-phase-commands">{phase.commands.map((command) => <code key={`${phase.id}:${command}`}>{command}</code>)}</div>
+                  <header><span className="command-chain-index">{index + 1}</span><div><strong>{phase.title}</strong><code>{phase.id}</code></div><span className={`badge command-chain-type ${phase.type}`}>{phase.type}</span></header>
+                  <div className="command-chain-phase-commands">{phase.commands.map((command) => <code className={`command-chain-command ${commandVisualKind(command)}`} key={`${phase.id}:${command}`}>{command}</code>)}</div>
                 </section>
                 {index < chain.phases.length - 1 && <ArrowRight className="command-chain-phase-arrow" size={15}/>}
               </div>)}
             </div>
-            <div className="command-chain-terminal"><span>完成调用链的动作</span>{chain.terminalActions.map((action) => <code key={action}>{action}</code>)}<small>仅在最终阶段或 Harness 明确返回终止结果时结束 execution</small></div>
+            <div className="command-chain-terminal"><span className="command-chain-terminal-icon"><Check size={14}/></span><div><strong>完成调用链</strong><small>仅在最终阶段或 Harness 明确返回终止结果时结束 execution</small></div>{chain.terminalActions.map((action) => <code key={action}>{action}</code>)}</div>
           </article>)}</div>
         </section>
         <aside className="agent-section-aside">
