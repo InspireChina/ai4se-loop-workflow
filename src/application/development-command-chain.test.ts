@@ -15,6 +15,7 @@ async function developmentDelegation(title: string) {
   const { databaseConnection } = await import('../infrastructure/database');
   const { createTask, saveDeliverySpec } = await import('./tasks');
   const taskId = await createTask({ title, description: '用户需要在结果页看到明确的完成状态。' });
+  const acceptanceId = `ACCEPTANCE-${taskId}`;
   const db = await databaseConnection();
   db.transaction(() => {
     db.prepare(`
@@ -30,12 +31,29 @@ async function developmentDelegation(title: string) {
       INSERT INTO stories(task_id, story_index, title, directory)
       VALUES(?, 1, '用户看到结果页完成状态', 'story-001')
     `).run(taskId);
+    db.prepare(`
+      INSERT INTO acceptances(
+        acceptance_id, task_id, acceptance_key, scope_type, story_index,
+        statement, oracle, source_ref
+      ) VALUES(?, ?, 'unit:fixture-unit', 'delivery_unit', 1,
+        '结果页从触发到完成状态形成可观察闭环',
+        '页面存在可识别的完成状态', 'TEST:acceptance:fixture')
+    `).run(acceptanceId, taskId);
   })();
   await saveDeliverySpec({
     taskId,
     storyIndex: 1,
     status: 'resolved',
     spec: deliverySpecFixture({
+      acceptances: [{
+        id: acceptanceId,
+        key: 'unit:fixture-unit',
+        scope: 'delivery_unit',
+        statement: '结果页从触发到完成状态形成可观察闭环',
+        oracle: '页面存在可识别的完成状态',
+        sourceRef: 'TEST:acceptance:fixture',
+        revision: 1,
+      }],
       handoff: {
         implementationGuidance: '复用现有结果状态组件。',
         guardrails: [],
@@ -102,15 +120,10 @@ async function enterImplement(executionId: string, token: string) {
 }
 
 async function recordCriteria(executionId: string, token: string) {
-  for (const [key, evidence] of [
-    ['unit-acceptance', '结果页从触发到完成状态形成可观察闭环。'],
-    ['AC-status', '结果状态组件覆盖完成结果分支。'],
-  ]) {
-    await command(executionId, token, [
-      'artifact', 'put', '--artifact', 'development', '--block', 'criteria', '--key', key,
-      '--content', `evidence: ${evidence}`,
-    ]);
-  }
+  await command(executionId, token, [
+    'acceptance', 'assess', '--key', 'unit:fixture-unit', '--result', 'claimed',
+    '--evidence', '结果页从触发到完成状态形成可观察闭环。',
+  ]);
 }
 
 test('Dev Agent runs only through the YAML command chain and trusted command receipts', async () => {
@@ -120,12 +133,12 @@ test('Dev Agent runs only through the YAML command chain and trusted command rec
   assert.match(await command(active.executionId, active.token!, ['help']), /通用命令链/);
   await assert.rejects(
     command(active.executionId, active.token!, ['implementation', 'status']),
-    /当前草稿使用通用命令链/,
+    /只允许 YAML 命令链协议/,
   );
   await enterImplement(active.executionId, active.token!);
   await assert.rejects(
     command(active.executionId, active.token!, ['phase', 'complete']),
-    /unit-acceptance, AC-status/,
+    /unit:fixture-unit/,
   );
   await assert.rejects(command(active.executionId, active.token!, [
     'artifact', 'put', '--artifact', 'development', '--block', 'code-review',
@@ -176,6 +189,13 @@ test('Dev Agent runs only through the YAML command chain and trusted command rec
     SELECT command_chain_id FROM agent_work_drafts WHERE terminal_execution_id = ?
   `).get(active.executionId) as { command_chain_id: string };
   assert.equal(draft.command_chain_id, 'development');
+  const assessment = db.prepare(`
+    SELECT kind, result, evidence FROM acceptance_assessments
+    WHERE execution_id = ?
+  `).get(active.executionId) as { kind: string; result: string; evidence: string };
+  assert.equal(assessment.kind, 'implementation');
+  assert.equal(assessment.result, 'claimed');
+  assert.match(assessment.evidence, /可观察闭环/);
 });
 
 test('Dev runtime input pauses phase complete and resumes the same generic entities', async () => {

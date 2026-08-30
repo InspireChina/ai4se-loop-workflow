@@ -19,33 +19,43 @@ test('persists and validates the global Agent concurrency limit', async () => {
   }
 });
 
-test('inherits the project flow runtime by default and preserves explicit agent overrides', async () => {
+test('inherits the global flow runtime by default and preserves explicit agent configurations', async () => {
   const { FLOW_AGENT_IDS } = await import('../domain/agent-profile');
   const {
+    activateAgentRuntimeConfiguration,
     agentExecutionOptions,
+    createAgentRuntimeConfiguration,
+    deleteAgentRuntimeConfiguration,
     getFlowAgentDefaultRuntimeSettings,
     getAgentRuntimeSettings,
+    inheritFlowRuntimeConfiguration,
     listAgentRuntimeSettings,
+    saveAgentRuntimeConfiguration,
     setFlowAgentDefaultRuntimeSettings,
-    setAgentRuntimeSettings,
   } = await import('./project-settings');
   const defaultsBefore = await getFlowAgentDefaultRuntimeSettings();
   const backlogBefore = await getAgentRuntimeSettings('backlog-agent');
   const devBefore = await getAgentRuntimeSettings('dev-agent');
   const specBefore = await getAgentRuntimeSettings('requirement-spec-agent');
 
+  const created: Array<{ agentId: 'dev-agent' | 'requirement-spec-agent'; configurationId: string }> = [];
+
+  async function createOverride(
+    agentId: 'dev-agent' | 'requirement-spec-agent',
+    name: string,
+    settings: Omit<Parameters<typeof saveAgentRuntimeConfiguration>[0], 'agentId' | 'configurationId' | 'name'>,
+  ) {
+    const configurationId = await createAgentRuntimeConfiguration({ agentId, name });
+    created.push({ agentId, configurationId });
+    await saveAgentRuntimeConfiguration({ ...settings, agentId, configurationId, name });
+    await activateAgentRuntimeConfiguration({ agentId, configurationId });
+  }
+
   async function restoreAgent(agentId: 'backlog-agent' | 'dev-agent' | 'requirement-spec-agent', previous: typeof backlogBefore) {
-    await setAgentRuntimeSettings(agentId, previous.source === 'project_default' ? {
-      inheritProjectDefault: true,
-    } : {
-      executorId: previous.executorId,
-      codexModel: previous.codexModel,
-      codexReasoningEffort: previous.codexReasoningEffort,
-      codexWebSearch: previous.codexWebSearch,
-      claudeModel: previous.claudeModel,
-      ompModel: previous.ompModel,
-      ompThinking: previous.ompThinking,
-    });
+    await inheritFlowRuntimeConfiguration(agentId);
+    if (previous.source === 'agent_configuration') {
+      await activateAgentRuntimeConfiguration({ agentId, configurationId: previous.configurationId });
+    }
   }
 
   try {
@@ -58,8 +68,8 @@ test('inherits the project flow runtime by default and preserves explicit agent 
       ompModel: '',
       ompThinking: 'default',
     });
-    await setAgentRuntimeSettings('backlog-agent', { inheritProjectDefault: true });
-    await setAgentRuntimeSettings('dev-agent', {
+    await inheritFlowRuntimeConfiguration('backlog-agent');
+    await createOverride('dev-agent', '测试 Claude Runtime', {
       executorId: 'claude',
       codexModel: 'gpt-5.6-sol',
       codexReasoningEffort: 'default',
@@ -68,7 +78,7 @@ test('inherits the project flow runtime by default and preserves explicit agent 
       ompModel: '',
       ompThinking: 'default',
     });
-    await setAgentRuntimeSettings('requirement-spec-agent', {
+    await createOverride('requirement-spec-agent', '测试 OMP Runtime', {
       executorId: 'omp',
       codexModel: 'gpt-5.6-sol',
       codexReasoningEffort: 'xhigh',
@@ -80,10 +90,10 @@ test('inherits the project flow runtime by default and preserves explicit agent 
 
     const backlog = await getAgentRuntimeSettings('backlog-agent');
     const dev = await getAgentRuntimeSettings('dev-agent');
-    assert.equal(backlog.source, 'project_default');
+    assert.equal(backlog.source, 'global_default');
     assert.equal(backlog.executorId, 'codex');
     assert.deepEqual(agentExecutionOptions(backlog), { model: 'gpt-5.6-terra', reasoningEffort: 'high', webSearch: true });
-    assert.equal(dev.source, 'agent_override');
+    assert.equal(dev.source, 'agent_configuration');
     assert.equal(dev.executorId, 'claude');
     assert.deepEqual(agentExecutionOptions(dev), { model: 'claude-sonnet-4-6' });
     const spec = await getAgentRuntimeSettings('requirement-spec-agent');
@@ -108,18 +118,16 @@ test('inherits the project flow runtime by default and preserves explicit agent 
     await restoreAgent('backlog-agent', backlogBefore);
     await restoreAgent('dev-agent', devBefore);
     await restoreAgent('requirement-spec-agent', specBefore);
+    for (const item of created) await deleteAgentRuntimeConfiguration(item);
   }
 });
 
-test('persists an optional Claude model and maps it to execution options', async () => {
+test('stores system Runtime outside project settings and maps it to execution options', async () => {
   const { agentExecutionOptions, getAgentExecutorSettings, setAgentExecutorSettings } = await import('./project-settings');
   const { databaseConnection } = await import('../infrastructure/database');
-  const keys = ['agent_executor', 'codex_model', 'codex_reasoning_effort', 'codex_web_search', 'claude_model', 'omp_model', 'omp_thinking'];
+  const previous = await getAgentExecutorSettings();
   const db = await databaseConnection();
-  const placeholders = keys.map(() => '?').join(', ');
-  const backup = db.prepare(`SELECT setting_key, setting_value FROM project_settings WHERE setting_key IN (${placeholders})`).all(...keys) as { setting_key: string; setting_value: string }[];
-  const deleteSettings = db.prepare(`DELETE FROM project_settings WHERE setting_key IN (${placeholders})`);
-  const restore = db.prepare(`INSERT INTO project_settings(setting_key, setting_value) VALUES(?, ?)`);
+  const legacy = db.prepare("SELECT setting_value FROM project_settings WHERE setting_key = 'agent_executor'").get() as { setting_value: string } | undefined;
 
   try {
     await setAgentExecutorSettings({
@@ -136,14 +144,75 @@ test('persists an optional Claude model and maps it to execution options', async
     assert.equal(settings.codexWebSearch, true);
     assert.deepEqual(agentExecutionOptions(settings), { model: 'claude-sonnet-4-6' });
 
+    db.prepare(`
+      INSERT INTO project_settings(setting_key, setting_value) VALUES('agent_executor', 'cursor')
+      ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value
+    `).run();
+    assert.equal((await getAgentExecutorSettings()).executorId, 'claude');
+
     const blank = await setAgentExecutorSettings({ ...settings, claudeModel: '  ' });
     assert.equal(blank.claudeModel, '');
     assert.deepEqual(agentExecutionOptions(blank), {});
   } finally {
-    db.transaction(() => {
-      deleteSettings.run(...keys);
-      for (const row of backup) restore.run(row.setting_key, row.setting_value);
-    })();
+    await setAgentExecutorSettings(previous);
+    if (legacy) {
+      db.prepare(`
+        INSERT INTO project_settings(setting_key, setting_value) VALUES('agent_executor', ?)
+        ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value
+      `).run(legacy.setting_value);
+    } else db.prepare("DELETE FROM project_settings WHERE setting_key = 'agent_executor'").run();
+  }
+});
+
+test('saves, activates, switches, and deletes named Agent Runtime configurations', async () => {
+  const {
+    activateAgentRuntimeConfiguration,
+    createAgentRuntimeConfiguration,
+    deleteAgentRuntimeConfiguration,
+    getAgentRuntimeSettings,
+    inheritFlowRuntimeConfiguration,
+    listAgentRuntimeConfigurations,
+    saveAgentRuntimeConfiguration,
+  } = await import('./project-settings');
+  const agentId = 'test-agent';
+  const previous = await getAgentRuntimeSettings(agentId);
+  let firstId = '';
+  let secondId = '';
+  try {
+    firstId = await createAgentRuntimeConfiguration({ agentId, name: '快速配置 A' });
+    secondId = await createAgentRuntimeConfiguration({ agentId, name: '快速配置 B', fromConfigurationId: firstId });
+    await saveAgentRuntimeConfiguration({
+      agentId,
+      configurationId: firstId,
+      name: '快速配置 A',
+      executorId: 'omp',
+      codexModel: 'gpt-5.6-sol',
+      codexReasoningEffort: 'default',
+      codexWebSearch: false,
+      claudeModel: '',
+      ompModel: 'ollama/qwen3.6:35b',
+      ompThinking: 'high',
+    });
+    await activateAgentRuntimeConfiguration({ agentId, configurationId: firstId });
+    assert.equal((await getAgentRuntimeSettings(agentId)).configurationName, '快速配置 A');
+    assert.equal((await getAgentRuntimeSettings(agentId)).executorId, 'omp');
+
+    await activateAgentRuntimeConfiguration({ agentId, configurationId: secondId });
+    assert.equal((await getAgentRuntimeSettings(agentId)).configurationName, '快速配置 B');
+    await deleteAgentRuntimeConfiguration({ agentId, configurationId: firstId });
+    firstId = '';
+
+    await inheritFlowRuntimeConfiguration(agentId);
+    assert.equal((await getAgentRuntimeSettings(agentId)).source, 'global_default');
+    assert.equal(listAgentRuntimeConfigurations(agentId).length >= 1, true);
+  } finally {
+    await inheritFlowRuntimeConfiguration(agentId);
+    for (const configurationId of [firstId, secondId].filter(Boolean)) {
+      await deleteAgentRuntimeConfiguration({ agentId, configurationId });
+    }
+    if (previous.source === 'agent_configuration') {
+      await activateAgentRuntimeConfiguration({ agentId, configurationId: previous.configurationId });
+    }
   }
 });
 

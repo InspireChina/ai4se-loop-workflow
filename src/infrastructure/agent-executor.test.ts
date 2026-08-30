@@ -146,12 +146,12 @@ test('labels command-driven draft updates as Agent domain commands', () => {
   assert.match(parsed || '', /恢复命令链草稿/);
 });
 
-test('labels Business Analysis packets as Agent domain commands', () => {
+test('labels Business Analysis Artifact writes as generic Agent domain commands', () => {
   const line = JSON.stringify({
     type: 'item.started',
     item: {
       type: 'command_execution',
-      command: 'node "/app/scripts/loop/loop-agent.mjs" business-design decision-proposal complete --artifact-file /tmp/tree.json',
+      command: 'node "/app/scripts/loop/loop-agent.mjs" artifact put --artifact business-solution --block exploration --content-file /tmp/exploration.md',
     },
   });
   const parsed = getAgentExecutor('codex').parseStdout(line, {
@@ -161,7 +161,7 @@ test('labels Business Analysis packets as Agent domain commands', () => {
     pipeline: 'ba-design',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /提交业务方案工作包/);
+  assert.match(parsed || '', /登记交付物/);
 });
 
 test('labels quoted delivery-plan Artifact writes as generic domain actions', () => {
@@ -346,14 +346,14 @@ test('labels independent verification results as generic Artifact actions', () =
   assert.match(parsed || '', /登记交付物/);
 });
 
-test('labels progressive feedback grouping as an Agent domain action', () => {
+test('labels feedback grouping Artifact writes as a generic Agent domain action', () => {
   const line = JSON.stringify({
     type: 'tool_call',
     subtype: 'started',
     tool_call: {
       shellToolCall: {
         args: {
-          command: 'node "/app/scripts/loop/loop-agent.mjs" feedback group comment add --key empty-state --id COMMENT-1',
+          command: 'node "/app/scripts/loop/loop-agent.mjs" artifact put --artifact feedback --block groups --key empty-state --content-file /tmp/group.yaml',
         },
       },
     },
@@ -365,17 +365,17 @@ test('labels progressive feedback grouping as an Agent domain action', () => {
     pipeline: 'feedback-triage',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /更新反馈工作组/);
+  assert.match(parsed || '', /登记交付物/);
 });
 
-test('labels progressive Review reconciliation as an Agent domain action', () => {
+test('labels Review reconciliation Artifact writes as a generic Agent domain action', () => {
   const line = JSON.stringify({
     type: 'tool_call',
     subtype: 'started',
     tool_call: {
       shellToolCall: {
         args: {
-          command: 'node "/app/scripts/loop/loop-agent.mjs" review reconciliation upsert --key final-outcome --subject DELIVERY_UNIT:REQ-1:1',
+          command: 'node "/app/scripts/loop/loop-agent.mjs" artifact put --artifact review --block reconciliations --key final-outcome --content-file /tmp/reconciliation.yaml',
         },
       },
     },
@@ -387,7 +387,7 @@ test('labels progressive Review reconciliation as an Agent domain action', () =>
     pipeline: 'review',
   });
   assert.match(parsed || '', /tool=agent-command/);
-  assert.match(parsed || '', /保存最终事实对账/);
+  assert.match(parsed || '', /登记交付物/);
 });
 
 test('labels progressive Evolution Agent commands as domain actions', () => {

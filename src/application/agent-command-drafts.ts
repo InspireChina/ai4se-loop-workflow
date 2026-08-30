@@ -9,12 +9,8 @@ import {
 } from '../domain/agent-command-profile';
 import { databaseConnection, hash } from '../infrastructure/database';
 import {
-  businessAnalysisHelp,
-  cloneBusinessAnalysisDraft,
-  initializeBusinessAnalysisDraft,
-  runBusinessAnalysisCommand,
-} from './business-analysis-command-drafts';
-import { directHelp, runDirectCommand } from './direct-command';
+  directHelp, runDirectCommand,
+} from './direct-command';
 import { parseAgentCommand } from '../domain/agent-command';
 import {
   cloneCommandChainDraft,
@@ -55,21 +51,6 @@ type DraftRow = {
   command_chain_id: string | null;
 };
 
-
-type FlagMap = Map<string, string>;
-
-function required(flags: FlagMap, name: string) {
-  const value = flags.get(name)?.trim();
-  if (!value) throw new Error(`缺少 --${name}`);
-  return value;
-}
-
-function bounded(value: string, label: string, max = 4000) {
-  const normalized = value.trim();
-  if (!normalized) throw new Error(`${label}不能为空`);
-  if (normalized.length > max) throw new Error(`${label}不能超过 ${max} 个字符`);
-  return normalized;
-}
 
 function executionInDb(db: Awaited<ReturnType<typeof databaseConnection>>, executionId: string) {
   return db.prepare(`
@@ -160,6 +141,9 @@ function createDraft(
   source?: DraftRow,
 ) {
   return db.transaction(() => {
+    if (!profile.commandChainId) {
+      throw new Error(`${profile.agent}/${execution.pipeline} 未绑定 YAML 命令链`);
+    }
     const draftId = randomUUID();
     const version = (source?.draft_version || 0) + 1;
     db.prepare(`
@@ -176,16 +160,11 @@ function createDraft(
       execution.story_index,
       execution.agent,
       execution.execution_id,
-      profile.commandChainId || null,
+      profile.commandChainId,
     );
     const created = db.prepare('SELECT * FROM agent_work_drafts WHERE draft_id = ?').get(draftId) as DraftRow;
-    if (profile.commandChainId) {
-      if (source) cloneCommandChainDraft(db, source, created);
-      else initializeCommandChainDraft(db, execution, created);
-    } else if (profile.draftType === 'business_analysis') {
-      if (source) cloneBusinessAnalysisDraft(db, source, created, execution.agent, Boolean(execution.web_search_enabled));
-      else initializeBusinessAnalysisDraft(db, created, execution.agent, Boolean(execution.web_search_enabled));
-    }
+    if (source) cloneCommandChainDraft(db, source, created);
+    else initializeCommandChainDraft(db, execution, created);
     return created;
   })();
 }
@@ -209,39 +188,6 @@ function ensureDraft(
   }
   return createDraft(db, execution, profile, workKey, latest);
 }
-
-function assertViewed(draft: DraftRow, executionId: string, namespace = 'requirement-context') {
-  if (draft.status_viewed_execution_id !== executionId) {
-    throw new Error(`本次启动尚未查看草稿状态。请先执行 ${namespace} status，再继续编辑或提交`);
-  }
-  if (draft.status !== 'editing') {
-    throw new Error(`当前草稿状态为 ${draft.status}，不能继续编辑`);
-  }
-}
-
-function touchDraft(db: Awaited<ReturnType<typeof databaseConnection>>, draftId: string) {
-  db.prepare(`
-    UPDATE agent_work_drafts
-    SET change_seq = change_seq + 1, updated_at = CURRENT_TIMESTAMP
-    WHERE draft_id = ?
-  `).run(draftId);
-}
-
-function nextOrdinal(
-  db: Awaited<ReturnType<typeof databaseConnection>>,
-  table: string,
-  draftId: string,
-) {
-  return (db.prepare(`
-    SELECT COALESCE(MAX(ordinal), 0) + 1 AS value FROM ${table} WHERE draft_id = ?
-  `).get(draftId) as { value: number }).value;
-}
-
-const LONG_TEXT_FILE_HELP = [
-  '长文本参数：',
-  '  长文本必须写入 $LOOP_AGENT_TMP_DIR 指向的工作区 .tmp/agent-<execution-id> 目录，再使用对应的 --*-file 参数读取 UTF-8 文件；不要自行拼接路径。',
-  '  当前 execution 结束后 Harness 会清理临时目录；不要把临时文件写入源码目录或提交到 Git。',
-];
 
 function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?: string | null) {
   const appRoot = process.env.LOOP_APP_ROOT?.trim() || '<Harness Command Root>';
@@ -279,44 +225,9 @@ function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?:
     ].join('\n');
   }
   if (topic) {
-    if (profile.draftType === 'business_analysis') {
-      return [
-        `当前身份：${execution.agent} · ${execution.pipeline}`,
-        `帮助主题：${topic}`,
-        '',
-        ...businessAnalysisHelp(execution.agent, topic),
-        '',
-        ...LONG_TEXT_FILE_HELP,
-        `  其他主题：${command} help <context|workflow|artifact|decision|finish>`,
-      ].join('\n');
-    }
     throw new Error(`当前角色 help 不支持主题：${topic}。可用主题：context`);
   }
-  const common = [
-    `当前身份：${execution.agent} · ${execution.pipeline}`,
-    '',
-    '公共诊断命令：',
-    `  ${command} help`,
-    `  ${command} whoami`,
-    '',
-    '只读上下文工具：',
-    '这些命令只读取当前 execution 创建时冻结的 Context Snapshot，不修改需求、草稿或流程状态。',
-    ...agentContextHelpLines(appRoot),
-    '',
-    '每次启动必须先执行：',
-    `  ${profile.namespace} status`,
-    '',
-    '草稿命令：',
-  ];
-  if (profile.draftType === 'business_analysis') {
-    return [
-      ...common,
-      ...businessAnalysisHelp(execution.agent, null),
-      '',
-      ...LONG_TEXT_FILE_HELP,
-    ].join('\n');
-  }
-  throw new Error(`当前角色没有旧 namespace help：${profile.namespace}`);
+  throw new Error('通用命令链 help 只支持 context 主题；当前阶段的具体命令请执行 status');
 }
 
 export async function issueAgentCommandToken(executionId: string) {
@@ -364,27 +275,11 @@ export async function runAgentCommand(input: {
   const command = parsed.raw;
 
   if (parsed.kind === 'help') {
-    if (profile.commandChainId && !positionals[1]) return commandChainHelp();
-    if (profile.commandChainId && positionals[1] !== 'context') {
-      throw new Error('通用命令链 help 只支持 context 主题；当前阶段的具体命令请执行 status');
-    }
     if (positionals.length > 2) throw new Error('help 最多接受一个主题');
-    if (['requirement_context', 'analysis', 'development', 'verification', 'review', 'business_analysis'].includes(profile.draftType) && !positionals[1]) {
-      const topics = profile.draftType === 'requirement_context'
-        ? 'context|assertion|impact|decision-proposal|decision-resolution|answer-review|scope|finish'
-        : profile.draftType === 'analysis'
-            ? 'context|impact|decision-proposal|decision-resolution|answer-review|contract|finish'
-            : profile.draftType === 'development'
-              ? 'context|evidence|review|commit|input|finish'
-            : profile.draftType === 'verification'
-              ? 'context|plan|execute|evidence|input|finish'
-              : profile.draftType === 'business_analysis'
-                ? 'context|workflow|artifact|decision|finish'
-                : 'context|reconciliation|gap|assessment|report|forward|finish';
-      throw new Error(
-        `${profile.namespace} help 必须指定一个主题：help <${topics}>。`
-        + `当前阶段可执行命令请查看 ${profile.namespace} status 返回的 AVAILABLE COMMANDS。`,
-      );
+    if (profile.draftType === 'direct') return helpText(execution, profile, positionals[1] || null);
+    if (!positionals[1]) return commandChainHelp();
+    if (positionals[1] !== 'context') {
+      throw new Error('通用命令链 help 只支持 context 主题；当前阶段的具体命令请执行 status');
     }
     return helpText(execution, profile, positionals[1] || null);
   }
@@ -393,25 +288,23 @@ export async function runAgentCommand(input: {
   }
   const genericCommand = [
     'status', 'delivery-unit', 'delivery-spec', 'artifact', 'decision',
-    'check', 'runtime-input', 'phase', 'draft',
+    'acceptance', 'check', 'runtime-input', 'phase', 'draft',
   ].includes(positionals[0] || '');
-  if (!genericCommand && !command.startsWith(profile.namespace)) {
-    throw new Error(`当前 execution 不允许命令：${command || '(empty)'}。请使用 loop-agent help`);
-  }
-
   if (profile.draftType === 'direct') {
+    if (!command.startsWith(profile.namespace)) {
+      throw new Error(`当前 execution 不允许命令：${command || '(empty)'}。请使用 loop-agent help`);
+    }
     return runDirectCommand({ db, execution, command, flags });
   }
+  if (!genericCommand) {
+    throw new Error(`当前 execution 只允许 YAML 命令链协议：${command || '(empty)'}。请先执行 status`);
+  }
 
-  let draft = ensureDraft(db, execution, profile, workKey);
-  if (profile.commandChainId) {
-    if (!genericCommand) throw new Error('当前草稿使用通用命令链，请先执行 status');
-    return runCommandChainCommand({ db, execution, draft, command, positionals, flags });
+  if (!profile.commandChainId) {
+    throw new Error(`${profile.agent}/${execution.pipeline} 未绑定 YAML 命令链`);
   }
-  if (profile.draftType === 'business_analysis') {
-    return runBusinessAnalysisCommand({ db, execution, draft, command, flags });
-  }
-  throw new Error(`当前 execution 没有可用命令处理器：${command}`);
+  const draft = ensureDraft(db, execution, profile, workKey);
+  return runCommandChainCommand({ db, execution, draft, command, positionals, flags });
 }
 
 export const agentCommandDraftInternals = {

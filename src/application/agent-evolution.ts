@@ -12,6 +12,7 @@ import {
   ensureAgentRuntimeWorkspace,
   getAgentProfile,
 } from './agent-profiles';
+import { createAgentConfigurationPromptCandidate } from './agent-configurations';
 
 export type EvolutionEvidence = {
   executionId: string;
@@ -194,48 +195,24 @@ async function createPromptCandidate(agentId: FlowAgentId, observation: Evolutio
   const addition = [marker, `- ${observation.guidance}`].join('\n');
   const content = `${detail.currentPrompt.content.trim()}\n\n## 自动演化建议\n\n${addition}`;
   if (content.length > 100_000 || addition.length > 1_200 || !safeEvolutionGuidance(addition)) return;
-  const candidateId = randomUUID();
-  const revision = detail.currentPrompt.version + 1;
-  const evidenceJson = JSON.stringify({
-    executionId: evidence.executionId,
-    fingerprint: observation.fingerprint,
+  const candidate = createAgentConfigurationPromptCandidate({
+    agentId,
+    content,
+    reason: `自动演化：${observation.fingerprint}`,
+    evidence: {
+      executionId: evidence.executionId,
+      fingerprint: observation.fingerprint,
+    },
   });
-  const created = db.transaction(() => {
-    const current = db.prepare(`
-      SELECT version, content_hash FROM agent_prompts WHERE agent_id = ?
-    `).get(agentId) as { version: number; content_hash: string } | undefined;
-    const existing = db.prepare(`
-      SELECT 1 FROM agent_prompt_candidates WHERE agent_id = ?
-    `).get(agentId);
-    if (
-      existing
-      || current?.version !== detail.currentPrompt.version
-      || current?.content_hash !== detail.currentPrompt.content_hash
-    ) return false;
-    db.prepare(`
-      INSERT INTO agent_prompt_candidates(
-        candidate_id, agent_id, revision, base_prompt_revision, content, content_hash,
-        source, reason, evidence_json, remaining_runs
-      ) VALUES(?, ?, ?, ?, ?, ?, 'evolution', ?, ?, 3)
-    `).run(
-      candidateId,
-      agentId,
-      revision,
-      detail.currentPrompt.version,
-      content,
-      hash(content),
-      `自动演化：${observation.fingerprint}`,
-      evidenceJson,
-    );
+  if (!candidate) return;
+  db.transaction(() => {
     db.prepare(`
       UPDATE agent_profiles
       SET candidate_prompt_version = ?, canary_remaining = 3, last_evolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
       WHERE agent_id = ?
-    `).run(revision, agentId);
+    `).run(candidate.revision, agentId);
     db.prepare("UPDATE agent_observations SET status = 'prompt_candidate' WHERE agent_id = ? AND fingerprint = ?").run(agentId, observation.fingerprint);
-    return true;
   }).immediate();
-  if (!created) return;
   await ensureAgentRuntimeWorkspace();
 }
 

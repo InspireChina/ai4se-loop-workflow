@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { BUSINESS_ANALYSIS_AGENT_IDS } from '../domain/business-analysis-workflow';
+import { BUSINESS_ANALYSIS_AGENT_IDS } from '../domain/agent-profile';
 import { taskDetailVisibility } from './task-detail-visibility';
 
 test('shows decision alignment throughout the standalone Business Analysis pipeline', () => {

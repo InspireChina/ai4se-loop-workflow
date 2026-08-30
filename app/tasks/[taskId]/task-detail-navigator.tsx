@@ -1,14 +1,14 @@
 'use client';
 
 import { Children, type ReactNode, useState } from 'react';
-import { Activity, GitBranch, LayoutDashboard, MessageSquareText, PackageOpen, ShieldCheck, SlidersHorizontal } from 'lucide-react';
+import { Activity, FileCheck2, GitBranch, LayoutDashboard, PackageOpen, ShieldCheck, SlidersHorizontal } from 'lucide-react';
 
 const icons = {
   overview: LayoutDashboard,
   decisions: GitBranch,
   deliverables: PackageOpen,
-  collaboration: MessageSquareText,
   activity: Activity,
+  closure: FileCheck2,
   actions: SlidersHorizontal,
   audit: ShieldCheck,
 };

@@ -4,14 +4,15 @@ agent: backlog-agent
 
 artifacts:
   requirement-context:
+    title: 业务变化上下文
     blocks:
       intent:
-        title: BUSINESS INTENT
+        title: 业务意图
         cardinality: one
         format: markdown
         required: true
       assertions:
-        title: BUSINESS ASSERTIONS
+        title: 业务断言
         cardinality: many
         format: yaml
         required: true
@@ -22,17 +23,17 @@ artifacts:
           source: { type: string, required: true }
           decision: { type: string }
       answer-review:
-        title: ANSWER REVIEW
+        title: 答案复查
         cardinality: one
         format: markdown
         required: true
       change-summary:
-        title: CHANGE SUMMARY
+        title: 变化摘要
         cardinality: one
         format: markdown
         required: true
       impacts:
-        title: BUSINESS IMPACTS
+        title: 业务影响
         cardinality: many
         format: yaml
         required: true
@@ -43,7 +44,7 @@ artifacts:
           source: { type: string, required: true }
           decision: { type: string }
       scope:
-        title: SCOPE
+        title: 范围
         cardinality: many
         format: yaml
         required: true
@@ -51,20 +52,16 @@ artifacts:
           direction: { type: enum, required: true, values: [included, excluded] }
           content: { type: string, required: true }
       constraints:
-        title: CONSTRAINTS
+        title: 约束
         cardinality: many
         format: yaml
         fields:
           content: { type: string, required: true }
       acceptance:
-        title: ACCEPTANCE
+        title: 验收语义
         cardinality: many
         format: yaml
-        required: true
-        fields:
-          content: { type: string, required: true }
-          source: { type: string, required: true }
-
+        writable: false
 phases:
   # Artifact Phase：调查输入规格与实时项目事实，形成业务意图和可追溯的 Actual；Bug 还应记录权威 Existing Expected。
   as_is:
@@ -113,11 +110,11 @@ phases:
       - requirement-context.constraints
     instructions: 至少登记一项 included 范围；把相关但未选择、独立扩展或推迟的事项登记为 excluded。范围和约束只能收敛已有语义，不能创造新的业务规则。
 
-  # Artifact Phase：根据最终 TO-BE 与 Scope 形成需求级、用户可观察的验收语义。
+  # 内置 Acceptance Phase：形成具有永久身份、可跨 Agent 分配和验证的需求级验收语义；Harness 将实体只读投影到《业务变化上下文》的 ACCEPTANCE Block。
   acceptance:
-    type: artifact
+    type: builtin
+    builtin: acceptance-definition
     artifacts: [requirement-context.acceptance]
-    instructions: 登记需求级验收语义，覆盖最终 Target 与 In Scope 业务结果。只描述可观察的业务结果，不写测试步骤、技术验证方式或实现方案。
 
   # 内置最终门禁：校验 AS-IS、决策、TO-BE、影响、范围和验收之间的结构与语义完整性，并编译冻结业务变化上下文。
   finalize:

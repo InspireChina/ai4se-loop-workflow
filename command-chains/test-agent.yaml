@@ -4,9 +4,10 @@ agent: test-agent
 
 artifacts:
   verification:
+    title: 独立验证报告
     blocks:
       sources:
-        title: FROZEN VERIFICATION INPUTS
+        title: 冻结验证输入
         cardinality: many
         format: yaml
         writable: false
@@ -17,7 +18,7 @@ artifacts:
           oracle: { type: string, required: true }
           sourceRef: { type: string, required: true }
       scenarios:
-        title: VERIFICATION SCENARIOS
+        title: 验证场景
         cardinality: many
         format: yaml
         required: true
@@ -29,7 +30,7 @@ artifacts:
           expected: { type: string, required: true }
           coverageRefs: { type: array, required: true, minItems: 1 }
       results:
-        title: VERIFICATION RESULTS
+        title: 验证结果
         cardinality: many
         format: yaml
         required: true
@@ -39,7 +40,7 @@ artifacts:
           evidence: { type: string, required: true }
           actualBehavior: { type: string }
       evidence-review:
-        title: EVIDENCE REVIEW
+        title: 证据复核
         cardinality: one
         format: yaml
         required: true

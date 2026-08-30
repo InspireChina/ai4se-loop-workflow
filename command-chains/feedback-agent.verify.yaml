@@ -4,9 +4,10 @@ agent: feedback-agent
 
 artifacts:
   feedback:
+    title: 反馈验证
     blocks:
       target:
-        title: FROZEN FEEDBACK TARGET
+        title: 冻结反馈目标
         cardinality: one
         format: yaml
         writable: false
@@ -15,17 +16,17 @@ artifacts:
           commentId: { type: string, required: true }
           groupId: { type: string, required: true }
       summary:
-        title: FEEDBACK VERIFICATION SUMMARY
+        title: 反馈验证摘要
         cardinality: one
         format: markdown
         required: true
       evidence:
-        title: INDEPENDENT FEEDBACK EVIDENCE
+        title: 独立反馈证据
         cardinality: many
         format: text
         required: true
       conclusion:
-        title: FEEDBACK VERIFICATION CONCLUSION
+        title: 反馈验证结论
         cardinality: one
         format: yaml
         required: true

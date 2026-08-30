@@ -191,7 +191,49 @@ export async function forwardReviewClosureGaps(input: {
             task_id, story_index, source_key, source_kind, content, source_ref
           ) VALUES(?, ?, ?, ?, ?, ?)
         `).run(input.taskId, storyIndex, item.key, item.kind, item.content, item.ref);
+        if (item.kind === 'acceptance') {
+          const acceptanceId = randomUUID();
+          db.prepare(`
+            INSERT INTO acceptances(
+              acceptance_id, task_id, acceptance_key, scope_type, story_index,
+              statement, oracle, source_ref, source_command_chain_draft_id
+            ) VALUES(?, ?, ?, 'requirement', NULL, ?, ?, ?, ?)
+          `).run(
+            acceptanceId,
+            input.taskId,
+            item.key,
+            item.content,
+            item.content,
+            item.ref,
+            sourceDraft?.draft_id || null,
+          );
+          db.prepare(`
+            INSERT INTO delivery_unit_acceptances(task_id, story_index, acceptance_id, relation)
+            VALUES(?, ?, ?, 'assigned')
+          `).run(input.taskId, storyIndex, acceptanceId);
+        }
       }
+
+      const unitAcceptanceId = randomUUID();
+      db.prepare(`
+        INSERT INTO acceptances(
+          acceptance_id, task_id, acceptance_key, scope_type, story_index,
+          statement, oracle, source_ref, source_command_chain_draft_id
+        ) VALUES(?, ?, ?, 'delivery_unit', ?, ?, ?, ?, ?)
+      `).run(
+        unitAcceptanceId,
+        input.taskId,
+        `unit:review-gap:${suffix}`,
+        storyIndex,
+        unit.acceptance,
+        unit.observableOutcome,
+        `REVIEW_GAP:${input.sourceResultId}:unit:${unit.key}:acceptance`,
+        sourceDraft?.draft_id || null,
+      );
+      db.prepare(`
+        INSERT INTO delivery_unit_acceptances(task_id, story_index, acceptance_id, relation)
+        VALUES(?, ?, ?, 'unit')
+      `).run(input.taskId, storyIndex, unitAcceptanceId);
 
       for (const gapKey of unit.gapKeys) {
         const gap = gapsByKey.get(gapKey)!;

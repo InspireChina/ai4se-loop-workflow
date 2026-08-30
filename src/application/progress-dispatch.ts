@@ -13,6 +13,7 @@ import {
 } from './executions';
 import { retryNotBeforeForFailure } from './execution-retry-policy';
 import { requirementDependencyGateOpenInDb } from './task-dependencies';
+import { isActiveAgentConfigurationPromptCandidate } from './agent-configurations';
 
 export type DispatchWaitReason =
   | 'active-execution'
@@ -435,11 +436,9 @@ async function activate(input: { reservationId: string; prepared: PreparedExecut
     if (attempt.task_is_paused) return invalidate('requirement-paused');
     if (['done', 'cancelled'].includes(attempt.task_status)) return invalidate('requirement-terminal');
     if (input.prepared.evolutionCandidateId) {
-      const candidate = db.prepare(`
-        SELECT 1 FROM agent_prompt_candidates
-        WHERE candidate_id = ? AND agent_id = ?
-      `).get(input.prepared.evolutionCandidateId, attempt.agent);
-      if (!candidate) return invalidate('canary-deferred');
+      if (!isActiveAgentConfigurationPromptCandidate(attempt.agent, input.prepared.evolutionCandidateId)) {
+        return invalidate('canary-deferred');
+      }
       const activeCanary = db.prepare(`
         SELECT 1 FROM execution_attempts
         WHERE evolution_candidate_id = ? AND execution_id != ?

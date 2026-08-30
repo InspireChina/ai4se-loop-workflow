@@ -1,10 +1,11 @@
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { parse } from 'yaml';
+import { activeCommandChainYaml } from '../infrastructure/agent-configuration-store';
+import { COMMAND_CHAIN_FILE_BY_ID, commandChainCatalogItem } from './command-chain-catalog';
 
 export type CommandChainFieldDefinition = {
   type: 'string' | 'enum' | 'array';
   required: boolean;
+  label?: string;
   values?: string[];
   minItems?: number;
 };
@@ -15,6 +16,7 @@ export type CommandChainBlockDefinition = {
   format: 'markdown' | 'yaml' | 'text';
   writable: boolean;
   required: boolean;
+  render: boolean;
   fields: Record<string, CommandChainFieldDefinition>;
 };
 
@@ -54,16 +56,37 @@ export type CommandChainDefinition = {
   version: number;
   id: string;
   agent: string;
-  artifacts: Record<string, { blocks: Record<string, CommandChainBlockDefinition> }>;
+  artifacts: Record<string, { title: string; blocks: Record<string, CommandChainBlockDefinition> }>;
   decisionTrees: Record<string, CommandChainDecisionTreeDefinition>;
   phases: Record<string, CommandChainPhaseDefinition>;
 };
 
+export { COMMAND_CHAIN_FILE_BY_ID } from './command-chain-catalog';
+
 const REQUIRED_BUILT_IN_PHASES: Record<string, string[]> = {
+  'idea-context': [
+    'decision-proposal',
+    'decision-resolution',
+    'decision-answer-review',
+    'business-analysis-finalize',
+  ],
+  'business-design': [
+    'decision-proposal',
+    'decision-resolution',
+    'decision-answer-review',
+    'business-analysis-finalize',
+  ],
+  'requirement-spec': [
+    'business-analysis-finalize',
+  ],
+  'spec-review': [
+    'business-analysis-finalize',
+  ],
   'requirement-context': [
     'decision-proposal',
     'decision-resolution',
     'decision-answer-review',
+    'acceptance-definition',
     'requirement-context-finalize',
   ],
   'delivery-plan': [
@@ -111,6 +134,24 @@ const REQUIRED_BUILT_IN_PHASES: Record<string, string[]> = {
     'feedback-verify-finalize',
   ],
 };
+
+export function commandChainAuthoringGuide(commandChainId: string) {
+  const requiredBuiltins = REQUIRED_BUILT_IN_PHASES[commandChainId] || [];
+  return [
+    '根节点只允许 version、id、agent、artifacts、phases；不要声明 decisionTrees。',
+    'version 是正整数；id 与 agent 不得改变。',
+    'artifacts.<artifact> 必须声明文档 title；每个 Block 必须声明 title、cardinality(one|many)、format(markdown|yaml|text)。',
+    'Block 默认进入最终文档；仅工作过程使用的 Block 声明 render: false。Block 还可声明 required、writable。',
+    'YAML Block 可声明 fields，field type 只允许 string、enum、array；所有声明字段都会按顺序渲染，label 是面向人的字段名。',
+    'phases 是有序映射，声明顺序就是执行顺序。每个 Phase 必须使用 type: builtin、artifact 或 confirmation。',
+    'artifact Phase 只允许 type、artifacts、instructions；artifacts 引用使用 <artifact>.<block>。',
+    'confirmation Phase 只允许 type、instructions。',
+    'builtin Phase 只允许 type、builtin、artifacts；不得自行配置命令、validator、transition、objective 等 Harness 内部属性。',
+    `当前命令链必须保留并按相对顺序包含这些内置 Phase：${requiredBuiltins.length ? requiredBuiltins.join(' → ') : '无' }。`,
+    '不要手写命令。Artifact 命令由 Block 自动生成，Decision、Acceptance、Phase 和终止门禁由 builtin 自动生成。',
+    '允许新增、删除、重排普通 artifact/confirmation Phase，但不能形成绕过必要 builtin 的完成路径。',
+  ].join('\n');
+}
 
 function builtInDecisionTree(id: string): CommandChainDecisionTreeDefinition {
   if (id !== 'decisions') throw new Error(`未知内置 Decision Tree：${id}`);
@@ -173,6 +214,35 @@ function builtInPhase(
 ): CommandChainPhaseDefinition {
   const navigation = phaseNavigation(phaseId, phaseIds);
 
+  if (id === 'acceptance-definition') {
+    if (commandChainId !== 'requirement-context') {
+      throw new Error('acceptance-definition 仅用于 Requirement Context');
+    }
+    if (artifacts.length !== 1
+      || artifacts[0].artifactId !== 'requirement-context'
+      || artifacts[0].blockId !== 'acceptance') {
+      throw new Error(`内置 Phase phases.${phaseId} 必须将 Acceptance 投影到 requirement-context.acceptance`);
+    }
+    const workCommands = [
+      'acceptance put --key <key> --content-file <yaml>',
+      'acceptance remove --key <key>',
+    ];
+    return {
+      type: 'builtin', builtin: id,
+      artifactBlocks: artifacts.map(({ artifactId, blockId }) => ({ artifactId, blockId })),
+      title: 'ACCEPTANCE',
+      instructions: '根据最终 Target 与 Scope 定义需求级、用户可观察的 Acceptance。每项 Acceptance 必须使用稳定 key，声明可观察结果、判定 Oracle 和来源；不要写测试步骤或实现方案。Acceptance 是跨 Agent 流转的内置实体，不是 Artifact。',
+      objective: '定义可被 Delivery Unit 分配、Dev 实现、Test 独立验证和 Review 结算的需求级 Acceptance。',
+      required: '至少定义一项 Acceptance；每项都有稳定 key、可观察 statement、oracle 和来源。',
+      prohibited: '不要直接写入投影 Artifact，也不要写技术实现或测试步骤。',
+      contexts: ['acceptance-definitions'], workCommands,
+      completeCommand: navigation.completeCommand, rewindCommand: navigation.rewindCommand,
+      commands: phaseCommands(workCommands, navigation),
+      reviewBeforeSubmit: ['每项 Acceptance 都能独立判断成立或不成立。'],
+      validators: ['acceptance-required'], transitions: navigation.transitions,
+    };
+  }
+
   if (id === 'delivery-unit') {
     const workCommands = ['delivery-unit current'];
     return {
@@ -221,7 +291,7 @@ function builtInPhase(
       type: 'builtin', builtin: id, artifactBlocks: [], title: 'FROZEN VERIFICATION INPUTS',
       instructions: '读取并确认 Harness 从当前 Delivery Spec 与活动恢复事项冻结的验证输入。这些输入是独立测试的只读 Oracle，不要根据当前实现或 Dev 自述改写 Expected。',
       objective: '确认本轮不可变的独立验证输入。',
-      required: '存在 Delivery Unit Acceptance，并且每项输入都有稳定 key、Oracle 和来源。',
+      required: '至少存在一项 Acceptance，并且每项输入都有稳定 key、Oracle 和来源。',
       prohibited: '不要修改、删除或绕过冻结验证输入。',
       contexts: ['verification-inputs'], workCommands: [],
       completeCommand: navigation.completeCommand, rewindCommand: navigation.rewindCommand,
@@ -243,7 +313,7 @@ function builtInPhase(
       type: 'builtin', builtin: id,
       artifactBlocks: artifacts.map(({ artifactId, blockId }) => ({ artifactId, blockId })),
       title: 'PLAN',
-      instructions: '在观察当前 Actual 前建立独立黑盒场景。每个场景必须包含准备、真实入口动作、可观察 Expected 和冻结来源引用；全部输入都要覆盖，unit-acceptance 至少由一个 frontend 场景覆盖。缺少执行资源时登记 runtime input。',
+      instructions: '在观察当前 Actual 前建立独立黑盒场景。每个场景必须包含准备、真实入口动作、可观察 Expected 和冻结来源引用；全部输入都要覆盖，至少一项 Acceptance 由 frontend 场景覆盖。缺少执行资源时登记 runtime input。',
       objective: '建立覆盖冻结 Oracle 的独立黑盒验证计划。',
       required: '全部冻结输入都有场景覆盖，Acceptance 至少有一个 frontend 业务闭环。',
       prohibited: '不要根据当前实现或 Dev 自述改变 Expected，也不要在计划中预判通过。',
@@ -305,16 +375,13 @@ function builtInPhase(
     };
   }
   if (id === 'implementation-evidence') {
-    const criteria = artifacts.find((artifact) => artifact.blockId === 'criteria');
     const recovery = artifacts.find((artifact) => artifact.blockId === 'recovery-resolutions');
-    if (!criteria || !recovery || artifacts.length !== 2) {
-      throw new Error(`内置 Phase phases.${phaseId} 必须声明 criteria 和 recovery-resolutions Artifact Block`);
-    }
-    if (criteria.block.cardinality !== 'many' || !criteria.block.required) {
-      throw new Error(`内置 Phase phases.${phaseId} 的 criteria 必须是 required cardinality: many`);
+    if (!recovery || artifacts.length !== 1 || recovery.block.cardinality !== 'many') {
+      throw new Error(`内置 Phase phases.${phaseId} 必须声明 cardinality: many 的 recovery-resolutions Artifact Block`);
     }
     const artifactBlocks = artifacts.map(({ artifactId, blockId }) => ({ artifactId, blockId }));
     const workCommands = [
+      'acceptance assess --key <key> --result claimed --evidence-file <text>',
       ...artifactCommands(artifacts),
       'runtime-input put --key <key> --title <title> --question <question> --why <why> --recommendation <recommendation>',
       'runtime-input remove --key <key>',
@@ -324,7 +391,7 @@ function builtInPhase(
       builtin: id,
       artifactBlocks,
       title: 'IMPLEMENT',
-      instructions: '依据冻结 Delivery Spec 完成最小充分实现，并使用 Artifact 命令逐项登记验收证据和活动恢复事项。需要外部运行信息时登记稳定 runtime input；不要用计划、意图或待执行检查冒充已实现证据。',
+      instructions: '依据冻结 Delivery Spec 完成最小充分实现，并通过 acceptance assess 对每项内置 Acceptance 登记实现声明；活动恢复事项仍通过 Artifact 登记。需要外部运行信息时登记稳定 runtime input；不要用计划、意图或待执行检查冒充已实现证据。',
       objective: '完成真实实现并逐项登记验收证据与恢复事项。',
       required: '每项冻结验收语义都有实现证据，全部活动恢复事项已经声明处理，运行信息请求均已回答。',
       prohibited: '不要改变业务契约、扩大当前交付单元或提前声明测试通过。',
@@ -336,7 +403,6 @@ function builtInPhase(
       reviewBeforeSubmit: ['每项验收证据都指向真实实现位置或行为。'],
       validators: [
         'artifact-schema',
-        `artifact-required:${criteria.artifactId}.${criteria.blockId}`,
         'development-criteria',
         'development-recovery',
         'runtime-input-complete',
@@ -380,6 +446,7 @@ function builtInPhase(
     const requirementContext = commandChainId === 'requirement-context';
     const reproduction = commandChainId === 'reproduction';
     const feedback = commandChainId === 'feedback-triage';
+    const businessAnalysis = commandChainId === 'idea-context' || commandChainId === 'business-design';
     const workCommands = [
       'decision put --tree decisions --key <key> --content-file <yaml>',
       'decision remove --tree decisions --key <key>',
@@ -395,6 +462,8 @@ function builtInPhase(
           ? '只有缺失的用户事实会改变复现环境、触发条件或观察结论时，才一次建立完整对齐问题、互斥选项、依赖和推荐。成功复现或可由当前项目事实继续调查时不要创建 Decision；本阶段不要关闭问题或请求用户确认。'
           : feedback
             ? '只有歧义会改变反馈工作组边界、工作类型或验收语义，且不能从冻结评论和项目事实判断时，才一次建立完整澄清问题、互斥选项和推荐。不要为实现细节或可直接分流的评论创建问题。'
+            : businessAnalysis
+              ? '一次建立当前 Business Analysis 职责范围内会形成不同业务结果的完整决策树、选项、依赖和推荐。只提出不回答，不把可调查事实伪装成用户问题。'
             : '一次建立会改变 Dev 或 Test 交付结果的完整决策树、选项、依赖和推荐。每个活动决策必须有稳定 key、至少两个选项、推荐项、推荐理由和建议决定权；本阶段不要关闭决策或请求用户确认。',
       objective: requirementContext
         ? '建立会改变最终业务上下文的完整决策树、选项、依赖和推荐。'
@@ -411,7 +480,7 @@ function builtInPhase(
       reviewBeforeSubmit: ['根节点与条件子节点已经一次建立。', '依赖无环，推荐项存在于选项中。'],
       validators: [
         'artifact-schema',
-        ...(['requirement-context', 'reproduction', 'feedback-triage'].includes(commandChainId) ? [] : ['impact-links']),
+        ...(['requirement-context', 'reproduction', 'feedback-triage', 'idea-context', 'business-design'].includes(commandChainId) ? [] : ['impact-links']),
         'decision-schema',
         'decision-graph',
       ],
@@ -422,6 +491,7 @@ function builtInPhase(
     const requirementContext = commandChainId === 'requirement-context';
     const reproduction = commandChainId === 'reproduction';
     const feedback = commandChainId === 'feedback-triage';
+    const businessAnalysis = commandChainId === 'idea-context' || commandChainId === 'business-design';
     const workCommands = [
       'decision resolve --tree decisions --key <key> --option <id> --authority <authority> --decision-file <text> --rationale-file <text> --evidence-file <text>',
       'decision ask --tree decisions --key <key>',
@@ -437,7 +507,9 @@ function builtInPhase(
         ? '继承冻结业务输入、项目证据和已有用户答案，并按当前自动决策强度关闭完整决策树。活动决策必须解决，或组成完整 HUMAN 批次后提交等待用户输入；发现遗漏时返回 proposal。'
         : reproduction
           ? '使用已有用户答案关闭原 Decision；尚无答案且确实缺少必要复现事实时，组成完整 HUMAN 批次后提交等待用户输入。不要把可以继续调查的技术问题转给用户，也不要替用户捏造运行事实。'
-        : '按上游承诺、项目证据、Agent 权限和用户决定权关闭完整决策树。活动决策必须解决，或组成完整 HUMAN 批次后提交等待用户输入；发现选项遗漏时返回 proposal 或 impact scan。',
+          : businessAnalysis
+            ? '按冻结上游语义、可靠事实、Agent 权限和用户决定权关闭完整决策树。活动决策必须解决，或组成完整 HUMAN 批次后提交等待用户输入；发现遗漏时回到 proposal。'
+          : '按上游承诺、项目证据、Agent 权限和用户决定权关闭完整决策树。活动决策必须解决，或组成完整 HUMAN 批次后提交等待用户输入；发现选项遗漏时返回 proposal 或 impact scan。',
       objective: requirementContext
         ? '按冻结输入、项目证据、Agent 权限和用户决定权关闭需求级决策树。'
         : reproduction
@@ -455,7 +527,7 @@ function builtInPhase(
       reviewBeforeSubmit: ['用户答案在原 decision key 上以 user 权限关闭。', '已解决决策不再留下 needs_decision 影响。'],
       validators: [
         'artifact-schema',
-        ...(['requirement-context', 'reproduction', 'feedback-triage'].includes(commandChainId) ? [] : ['impact-links']),
+        ...(['requirement-context', 'reproduction', 'feedback-triage', 'idea-context', 'business-design'].includes(commandChainId) ? [] : ['impact-links']),
         'decision-schema',
         'decision-graph',
         'decision-resolution',
@@ -490,7 +562,7 @@ function builtInPhase(
       validators: [
         'artifact-schema',
         `artifact-required:${artifact.artifactId}.${artifact.blockId}`,
-        ...(['requirement-context', 'reproduction', 'feedback-triage'].includes(commandChainId) ? [] : ['impact-links']),
+        ...(['requirement-context', 'reproduction', 'feedback-triage', 'idea-context', 'business-design'].includes(commandChainId) ? [] : ['impact-links']),
         'decision-schema',
         'decision-graph',
         'decision-complete',
@@ -699,6 +771,31 @@ function builtInPhase(
       validators: ['artifact-schema', 'feedback-verify-inputs', 'feedback-verify-complete'], transitions: navigation.transitions,
     };
   }
+  if (id === 'business-analysis-finalize') {
+    if (!['idea-context', 'business-design', 'requirement-spec', 'spec-review'].includes(commandChainId)) {
+      throw new Error('business-analysis-finalize 仅用于 Business Analysis 命令链');
+    }
+    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+    return {
+      type: 'builtin', builtin: id, artifactBlocks: [], title: 'FINALIZE',
+      instructions: '最终校验当前 Business Analysis 产物、决策和回流分支。Harness 将根据结构化 gap 确定性选择推进、批准或回流；发现内容缺口时使用 phase rewind 返回对应阶段修正。',
+      objective: '编译结构完整、职责明确且可直接交给下一 Agent 的 Business Analysis 结果。',
+      required: '正常分支的正式产物完整；回流分支至少有一个证据充分且目标一致的结构化 gap；全部决策已经关闭。',
+      prohibited: '不要在最终阶段补写前序 Artifact，也不要同时提交正常产物和回流 gap。',
+      contexts: [], workCommands: [],
+      completeCommand: navigation.completeCommand, rewindCommand: navigation.rewindCommand,
+      commands: phaseCommands([], navigation),
+      reviewBeforeSubmit: ['最终结果只选择推进、批准或单一目标回流中的一个分支。'],
+      validators: [
+        'artifact-schema',
+        ...(commandChainId === 'idea-context' || commandChainId === 'business-design'
+          ? ['decision-schema', 'decision-graph', 'decision-complete']
+          : []),
+        'business-analysis-complete',
+      ],
+      transitions: navigation.transitions,
+    };
+  }
   throw new Error(`未知内置 Phase：${id}`);
 }
 
@@ -766,17 +863,23 @@ function parseFields(value: unknown, path: string) {
     return [name, {
       type: type as CommandChainFieldDefinition['type'],
       required: boolean(field.required, `${path}.${name}.required`, false),
+      ...(field.label === undefined ? {} : { label: string(field.label, `${path}.${name}.label`) }),
       ...(values ? { values } : {}),
       ...(field.minItems === undefined ? {} : { minItems: positiveInteger(field.minItems, `${path}.${name}.minItems`) }),
     }];
   })) as Record<string, CommandChainFieldDefinition>;
 }
 
-export function loadCommandChainDefinition(id: string): CommandChainDefinition {
-  const file = join(process.env.LOOP_APP_ROOT || process.cwd(), 'command-chains', `${id}.yaml`);
-  const root = object(parse(readFileSync(file, 'utf8')), id);
+export function parseCommandChainDefinition(id: string, yaml: string): CommandChainDefinition {
+  const root = object(parse(yaml), id);
   const definitionId = string(root.id, 'id');
   if (definitionId !== id) throw new Error(`命令链 YAML id 必须是 ${id}`);
+  const catalog = commandChainCatalogItem(id);
+  if (!catalog) throw new Error(`未知命令链：${id}`);
+  const agent = string(root.agent, 'agent');
+  if (agent !== catalog.agentId) {
+    throw new Error(`命令链 YAML ${id} 必须绑定 Agent ${catalog.agentId}`);
+  }
   if (root.decisionTrees !== undefined) {
     throw new Error('命令链 YAML 不再支持顶层 decisionTrees；Decision Tree 由内置 Decision Phase 提供');
   }
@@ -794,12 +897,16 @@ export function loadCommandChainDefinition(id: string): CommandChainDefinition {
         format: format as CommandChainBlockDefinition['format'],
         writable: boolean(block.writable, `artifacts.${artifactId}.blocks.${blockId}.writable`, true),
         required: boolean(block.required, `artifacts.${artifactId}.blocks.${blockId}.required`, false),
+        render: boolean(block.render, `artifacts.${artifactId}.blocks.${blockId}.render`, true),
         fields: parseFields(block.fields, `artifacts.${artifactId}.blocks.${blockId}.fields`),
       }];
     }));
-    return [artifactId, { blocks }];
+    return [artifactId, {
+      title: string(artifact.title, `artifacts.${artifactId}.title`),
+      blocks,
+    }];
   })) as CommandChainDefinition['artifacts'];
-  const resolveArtifactReferences = (value: unknown, path: string) => {
+  const resolveArtifactReferences = (value: unknown, path: string, allowReadOnly = false) => {
     const references = strings(value, path);
     if (!references.length) throw new Error(`命令链 YAML ${path} 不能为空`);
     if (new Set(references).size !== references.length) throw new Error(`命令链 YAML ${path} 不能重复`);
@@ -809,7 +916,7 @@ export function loadCommandChainDefinition(id: string): CommandChainDefinition {
       const [artifactId, blockId] = parts;
       const block = artifacts[artifactId]?.blocks[blockId];
       if (!block) throw new Error(`命令链 YAML ${path} 引用了未声明的 Block ${reference}`);
-      if (!block.writable) throw new Error(`命令链 YAML ${path} 不能写入只读 Block ${reference}`);
+      if (!allowReadOnly && !block.writable) throw new Error(`命令链 YAML ${path} 不能写入只读 Block ${reference}`);
       return { artifactId, blockId, block };
     });
   };
@@ -846,13 +953,17 @@ export function loadCommandChainDefinition(id: string): CommandChainDefinition {
       const builtin = string(phase.builtin, `phases.${phaseId}.builtin`);
       const phaseArtifacts = phase.artifacts === undefined
         ? []
-        : resolveArtifactReferences(phase.artifacts, `phases.${phaseId}.artifacts`);
+        : resolveArtifactReferences(phase.artifacts, `phases.${phaseId}.artifacts`, true);
       const artifactBuiltins = [
         'decision-resolution', 'decision-answer-review', 'implementation-evidence', 'command-verification',
         'verification-plan', 'verification-execution', 'review-reconciliation', 'review-output',
+        'acceptance-definition',
       ];
       if (!artifactBuiltins.includes(builtin) && phaseArtifacts.length) {
         throw new Error(`内置 Phase ${builtin} 不接受 Artifact Block`);
+      }
+      if (builtin !== 'acceptance-definition' && phaseArtifacts.some(({ block }) => !block.writable)) {
+        throw new Error(`内置 Phase ${builtin} 不能写入只读 Artifact Block`);
       }
       if (builtin === 'decision-answer-review') {
         if (phaseArtifacts.length !== 1) throw new Error(`内置 Phase phases.${phaseId} 必须声明一个 Artifact Block`);
@@ -963,9 +1074,15 @@ export function loadCommandChainDefinition(id: string): CommandChainDefinition {
   return {
     version: positiveInteger(root.version, 'version'),
     id: definitionId,
-    agent: string(root.agent, 'agent'),
+    agent,
     artifacts,
     decisionTrees,
     phases,
   };
+}
+
+export function loadCommandChainDefinition(id: string): CommandChainDefinition {
+  const yaml = activeCommandChainYaml(id);
+  if (!yaml) throw new Error(`命令链配置不存在：${id}`);
+  return parseCommandChainDefinition(id, yaml);
 }

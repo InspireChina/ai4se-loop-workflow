@@ -1,4 +1,5 @@
 import type Database from 'better-sqlite3';
+import { randomUUID } from 'node:crypto';
 import type { DeliveryUnitContract } from '../domain/delivery-unit';
 
 export type DeliveryUnitOrigin =
@@ -65,7 +66,59 @@ export function insertDeliveryUnitContractsInDb(
         source.content,
         source.sourceRef,
       );
+      if (source.kind === 'acceptance') {
+        const acceptanceKey = source.key.startsWith('acceptance:')
+          ? source.key.slice('acceptance:'.length)
+          : source.key;
+        let acceptance = db.prepare(`
+          SELECT acceptance_id FROM acceptances
+          WHERE task_id = ? AND acceptance_key = ? AND lifecycle = 'active'
+        `).get(input.taskId, acceptanceKey) as { acceptance_id: string } | undefined;
+        if (!acceptance) {
+          const acceptanceId = randomUUID();
+          db.prepare(`
+            INSERT INTO acceptances(
+              acceptance_id, task_id, acceptance_key, scope_type, story_index,
+              statement, oracle, source_ref, source_command_chain_draft_id
+            ) VALUES(?, ?, ?, 'requirement', NULL, ?, ?, ?, ?)
+          `).run(
+            acceptanceId,
+            input.taskId,
+            acceptanceKey,
+            source.content,
+            source.content,
+            source.sourceRef,
+            input.sourceCommandChainDraftId || null,
+          );
+          acceptance = { acceptance_id: acceptanceId };
+        }
+        db.prepare(`
+          INSERT INTO delivery_unit_acceptances(task_id, story_index, acceptance_id, relation)
+          VALUES(?, ?, ?, 'assigned')
+        `).run(input.taskId, storyIndex, acceptance.acceptance_id);
+      }
     }
+    const unitAcceptanceId = randomUUID();
+    const unitAcceptanceKey = `unit:${unit.key}`;
+    db.prepare(`
+      INSERT INTO acceptances(
+        acceptance_id, task_id, acceptance_key, scope_type, story_index,
+        statement, oracle, source_ref, source_command_chain_draft_id
+      ) VALUES(?, ?, ?, 'delivery_unit', ?, ?, ?, ?, ?)
+    `).run(
+      unitAcceptanceId,
+      input.taskId,
+      unitAcceptanceKey,
+      storyIndex,
+      unit.acceptance,
+      unit.observableOutcome,
+      `DELIVERY_UNIT:${input.taskId}:${unit.key}:acceptance`,
+      input.sourceCommandChainDraftId || null,
+    );
+    db.prepare(`
+      INSERT INTO delivery_unit_acceptances(task_id, story_index, acceptance_id, relation)
+      VALUES(?, ?, ?, 'unit')
+    `).run(input.taskId, storyIndex, unitAcceptanceId);
   }
 
   for (const unit of input.units) {

@@ -174,6 +174,11 @@ test('parses a versionable Delivery Spec and normalizes the legacy review verdic
         sourceRefs: [{ key: 'acceptance:closure', kind: 'acceptance', content: 'Closure is acknowledged', sourceRef: 'TEST:closure' }],
         dependsOn: [],
       },
+      acceptances: [{
+        id: 'ACCEPTANCE-closure', key: 'unit:closure', scope: 'delivery_unit',
+        statement: 'The user can acknowledge the report without an approval gate',
+        oracle: 'The unit is visibly closed', sourceRef: 'TEST:closure', revision: 1,
+      }],
       summary: 'Closure affects acknowledgement without adding an approval gate.',
       impacts: [{
         key: 'closure-flow',
@@ -244,6 +249,11 @@ test('keeps unresolved analysis decisions in the question flow without requiring
         sourceRefs: [{ key: 'acceptance:output', kind: 'acceptance', content: 'Output is visible', sourceRef: 'TEST:output' }],
         dependsOn: [],
       },
+      acceptances: [{
+        id: 'ACCEPTANCE-visible-output', key: 'unit:visible-output', scope: 'delivery_unit',
+        statement: 'Output follows the chosen contract',
+        oracle: 'The chosen output is visible', sourceRef: 'TEST:output', revision: 1,
+      }],
       summary: 'The output contract is the only unresolved delivery impact.',
       impacts: [{
         key: 'output-contract',

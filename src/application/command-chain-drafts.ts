@@ -1,17 +1,7 @@
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { parse, stringify } from 'yaml';
 import { agentResultSchema, deliverySpecSchema, type AgentResult, type DeliverySpec } from '../domain/agent-result';
-import {
-  DELIVERY_ANALYSIS_COMMAND_CHAIN,
-} from '../domain/delivery-analysis-workflow';
-import { DELIVERY_PLAN_COMMAND_CHAIN } from '../domain/delivery-plan-workflow';
-import { DEVELOPMENT_COMMAND_CHAIN } from '../domain/development-workflow';
-import { FEEDBACK_TRIAGE_COMMAND_CHAIN, FEEDBACK_VERIFY_COMMAND_CHAIN } from '../domain/feedback-workflow';
-import { REQUIREMENT_CONTEXT_COMMAND_CHAIN } from '../domain/requirement-context-workflow';
-import { REPRODUCTION_COMMAND_CHAIN } from '../domain/reproduction-workflow';
-import { REVIEW_COMMAND_CHAIN } from '../domain/review-workflow';
-import { VERIFICATION_COMMAND_CHAIN } from '../domain/verification-workflow';
-import type { CommandChainBlockDefinition, CommandChainDefinition } from '../domain/command-chain-definition';
+import { loadCommandChainDefinition, type CommandChainBlockDefinition, type CommandChainDefinition } from '../domain/command-chain-definition';
 import { deliveryUnitContractSchema, type DeliveryUnitContract } from '../domain/delivery-unit';
 import { analysisDecisionMode } from '../domain/requirement-metadata';
 import { databaseConnection } from '../infrastructure/database';
@@ -48,6 +38,35 @@ type ArtifactRow = {
   content_format: 'markdown' | 'yaml' | 'text';
   content: string;
   ordinal: number;
+};
+
+type AcceptanceDraftItemRow = {
+  acceptance_key: string;
+  statement: string;
+  oracle: string;
+  source: string;
+  ordinal: number;
+};
+
+type AcceptanceRow = {
+  acceptance_id: string;
+  acceptance_key: string;
+  scope_type: 'requirement' | 'delivery_unit';
+  story_index: number | null;
+  statement: string;
+  oracle: string;
+  source_ref: string;
+  revision: number;
+};
+
+type AcceptanceAssessmentRow = {
+  acceptance_id: string;
+  acceptance_key: string;
+  kind: 'implementation' | 'verification' | 'review';
+  agent: string;
+  execution_id: string;
+  result: 'claimed' | 'passed' | 'failed' | 'blocked';
+  evidence: string;
 };
 
 type DecisionContent = {
@@ -149,6 +168,104 @@ function artifactRows(db: Db, draftId: string) {
   `).all(draftId) as ArtifactRow[];
 }
 
+function acceptanceDraftItems(db: Db, draftId: string) {
+  return db.prepare(`
+    SELECT acceptance_key, statement, oracle, source, ordinal
+    FROM command_chain_acceptance_items
+    WHERE draft_id = ? ORDER BY ordinal, acceptance_key
+  `).all(draftId) as AcceptanceDraftItemRow[];
+}
+
+function activeRequirementAcceptances(db: Db, taskId: string) {
+  return db.prepare(`
+    SELECT acceptance_id, acceptance_key, scope_type, story_index, statement,
+           oracle, source_ref, revision
+    FROM acceptances
+    WHERE task_id = ? AND scope_type = 'requirement' AND lifecycle = 'active'
+    ORDER BY acceptance_key
+  `).all(taskId) as AcceptanceRow[];
+}
+
+function activeTaskAcceptances(db: Db, taskId: string) {
+  return db.prepare(`
+    SELECT acceptance_id, acceptance_key, scope_type, story_index, statement,
+           oracle, source_ref, revision
+    FROM acceptances
+    WHERE task_id = ? AND lifecycle = 'active'
+    ORDER BY scope_type, story_index, acceptance_key
+  `).all(taskId) as AcceptanceRow[];
+}
+
+function deliveryUnitAcceptances(db: Db, taskId: string, storyIndex: number) {
+  return db.prepare(`
+    SELECT acceptance.acceptance_id, acceptance.acceptance_key, acceptance.scope_type,
+           acceptance.story_index, acceptance.statement, acceptance.oracle,
+           acceptance.source_ref, acceptance.revision
+    FROM delivery_unit_acceptances link
+    JOIN acceptances acceptance ON acceptance.acceptance_id = link.acceptance_id
+    WHERE link.task_id = ? AND link.story_index = ? AND acceptance.lifecycle = 'active'
+    ORDER BY CASE link.relation WHEN 'assigned' THEN 0 ELSE 1 END, acceptance.acceptance_key
+  `).all(taskId, storyIndex) as AcceptanceRow[];
+}
+
+function acceptanceAssessments(db: Db, draftId: string, kind?: string) {
+  return db.prepare(`
+    SELECT assessment.acceptance_id, acceptance.acceptance_key, assessment.kind,
+           assessment.agent, assessment.execution_id, assessment.result, assessment.evidence
+    FROM acceptance_assessments assessment
+    JOIN acceptances acceptance ON acceptance.acceptance_id = assessment.acceptance_id
+    WHERE assessment.draft_id = ?
+      AND (? IS NULL OR assessment.kind = ?)
+    ORDER BY acceptance.acceptance_key, assessment.created_at
+  `).all(draftId, kind || null, kind || null) as AcceptanceAssessmentRow[];
+}
+
+function publishRequirementAcceptances(db: Db, draft: CommandChainDraftRow) {
+  const items = acceptanceDraftItems(db, draft.draft_id);
+  const keys = new Set(items.map((item) => item.acceptance_key));
+  const existing = activeRequirementAcceptances(db, draft.task_id);
+  for (const acceptance of existing) {
+    if (!keys.has(acceptance.acceptance_key)) {
+      db.prepare(`
+        UPDATE acceptances SET lifecycle = 'superseded', updated_at = CURRENT_TIMESTAMP
+        WHERE acceptance_id = ?
+      `).run(acceptance.acceptance_id);
+    }
+  }
+  for (const item of items) {
+    const current = db.prepare(`
+      SELECT acceptance_id, revision, statement, oracle, source_ref
+      FROM acceptances WHERE task_id = ? AND acceptance_key = ?
+    `).get(draft.task_id, item.acceptance_key) as {
+      acceptance_id: string;
+      revision: number;
+      statement: string;
+      oracle: string;
+      source_ref: string;
+    } | undefined;
+    const sourceRef = `REQUIREMENT:${draft.task_id}:acceptance:${item.acceptance_key}`;
+    if (current) {
+      const changed = current.statement !== item.statement
+        || current.oracle !== item.oracle
+        || current.source_ref !== sourceRef;
+      db.prepare(`
+        UPDATE acceptances
+        SET scope_type = 'requirement', story_index = NULL, statement = ?, oracle = ?,
+            source_ref = ?, source_command_chain_draft_id = ?,
+            revision = revision + ?, lifecycle = 'active', updated_at = CURRENT_TIMESTAMP
+        WHERE acceptance_id = ?
+      `).run(item.statement, item.oracle, sourceRef, draft.draft_id, changed ? 1 : 0, current.acceptance_id);
+    } else {
+      db.prepare(`
+        INSERT INTO acceptances(
+          acceptance_id, task_id, acceptance_key, scope_type, story_index,
+          statement, oracle, source_ref, source_command_chain_draft_id
+        ) VALUES(?, ?, ?, 'requirement', NULL, ?, ?, ?, ?)
+      `).run(randomUUID(), draft.task_id, item.acceptance_key, item.statement, item.oracle, sourceRef, draft.draft_id);
+    }
+  }
+}
+
 function decisionRows(db: Db, draftId: string) {
   return db.prepare(`
     SELECT tree_id, decision_key, content, status, selected_option_id, authority,
@@ -247,14 +364,12 @@ function activeRecoveries(db: Db, draft: CommandChainDraftRow) {
 }
 
 function developmentCriteria(spec: DeliverySpec) {
-  return [
-    { key: 'unit-acceptance', description: spec.unit.acceptance, oracle: spec.unit.observableOutcome },
-    ...spec.handoff.verificationFocus.map((focus) => ({
-      key: focus.key,
-      description: focus.expected,
-      oracle: focus.oracle,
-    })),
-  ];
+  return spec.acceptances.map((acceptance) => ({
+    key: acceptance.key,
+    description: acceptance.statement,
+    oracle: acceptance.oracle,
+    acceptanceId: acceptance.id,
+  }));
 }
 
 function developmentEvidenceErrors(db: Db, draft: CommandChainDraftRow) {
@@ -262,12 +377,11 @@ function developmentEvidenceErrors(db: Db, draft: CommandChainDraftRow) {
   let expected: ReturnType<typeof developmentCriteria> = [];
   try { expected = developmentCriteria(currentDeliverySpec(db, draft.task_id, draft.story_index)); }
   catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
-  const artifacts = decodedArtifacts(artifactRows(db, draft.draft_id));
-  const evidence = artifacts.filter((artifact) => artifact.block_id === 'criteria');
+  const evidence = acceptanceAssessments(db, draft.draft_id, 'implementation');
   const expectedKeys = new Set(expected.map((criterion) => criterion.key));
-  const unknown = evidence.map((item) => item.item_key).filter((key) => !expectedKeys.has(key));
+  const unknown = evidence.map((item) => item.acceptance_key).filter((key) => !expectedKeys.has(key));
   const missing = expected.map((criterion) => criterion.key)
-    .filter((key) => !evidence.some((item) => item.item_key === key));
+    .filter((key) => !evidence.some((item) => item.acceptance_key === key && item.result === 'claimed'));
   if (unknown.length) errors.push(`验收证据引用了不存在的 Delivery Spec key：${unknown.join(', ')}`);
   if (missing.length) errors.push(`以下验收语义尚未证明：${missing.join(', ')}`);
   return errors;
@@ -350,6 +464,8 @@ function currentDeliveryUnit(db: Db, taskId: string, storyIndex: number | null):
     source_ref: string;
   }[];
   if (!sources.length) throw new Error('交付单元没有可追溯的上游来源');
+  const acceptances = deliveryUnitAcceptances(db, taskId, storyIndex);
+  if (!acceptances.length) throw new Error('交付单元没有内置 Acceptance');
   const dependencies = db.prepare(`
     SELECT upstream.unit_key
     FROM delivery_unit_dependencies dependency
@@ -412,10 +528,13 @@ function verificationInputSources(db: Db, draft: CommandChainDraftRow): Verifica
   const spec = deliverySpecSchema.parse(JSON.parse(row.spec_json));
   const prefix = `DELIVERY_SPEC:${draft.task_id}:${draft.story_index}:r${row.revision}`;
   return [
-    {
-      key: 'unit-acceptance', kind: 'acceptance', description: spec.unit.acceptance,
-      oracle: spec.unit.observableOutcome, sourceRef: `${prefix}:unit-acceptance`,
-    },
+    ...spec.acceptances.map((acceptance) => ({
+      key: `acceptance:${acceptance.key}`,
+      kind: 'acceptance' as const,
+      description: acceptance.statement,
+      oracle: acceptance.oracle,
+      sourceRef: `ACCEPTANCE:${acceptance.id}:r${acceptance.revision}`,
+    })),
     ...spec.handoff.verificationFocus.map((focus) => ({
       key: `focus:${focus.key}`, kind: 'focus' as const, description: focus.expected,
       oracle: focus.oracle, sourceRef: `${prefix}:focus:${focus.key}`,
@@ -461,6 +580,50 @@ function verificationSourcesMatch(db: Db, draft: CommandChainDraftRow) {
     .filter((artifact) => artifact.artifact_id === 'verification' && artifact.block_id === 'sources')
     .map((artifact) => ({ key: artifact.item_key, content: artifact.content }));
   return JSON.stringify(actual) === JSON.stringify(expected);
+}
+
+function publishVerificationAssessments(
+  db: Db,
+  draft: CommandChainDraftRow,
+  executionId: string,
+) {
+  const spec = currentDeliverySpec(db, draft.task_id, draft.story_index);
+  const state = verificationState(decodedArtifacts(artifactRows(db, draft.draft_id)));
+  for (const acceptance of spec.acceptances) {
+    const sourceKey = `acceptance:${acceptance.key}`;
+    const scenarios = state.scenarios.filter((scenario) => scenario.coverageRefs.includes(sourceKey));
+    const results = scenarios.map((scenario) => ({
+      scenario,
+      result: state.results.find((candidate) => candidate.key === scenario.key),
+    }));
+    if (!results.length || results.some((item) => !item.result)) {
+      throw new Error(`Acceptance ${acceptance.key} 缺少完整验证结果`);
+    }
+    const result = results.some((item) => item.result!.status === 'failed')
+      ? 'failed'
+      : results.some((item) => item.result!.status === 'blocked')
+        ? 'blocked'
+        : 'passed';
+    const evidence = results.map((item) =>
+      `${item.scenario.key}: ${item.result!.evidence}`).join('\n');
+    const stored = db.prepare(`
+      SELECT acceptance_id FROM acceptances
+      WHERE acceptance_id = ? AND task_id = ? AND lifecycle = 'active'
+    `).get(acceptance.id, draft.task_id) as { acceptance_id: string } | undefined;
+    if (!stored) throw new Error(`Acceptance 实体不存在或已失效：${acceptance.key}`);
+    db.prepare(`
+      INSERT INTO acceptance_assessments(
+        assessment_id, draft_id, acceptance_id, task_id, story_index,
+        kind, agent, execution_id, result, evidence
+      ) VALUES(?, ?, ?, ?, ?, 'verification', 'test-agent', ?, ?, ?)
+      ON CONFLICT(draft_id, acceptance_id, kind) DO UPDATE SET
+        execution_id = excluded.execution_id, result = excluded.result,
+        evidence = excluded.evidence, updated_at = CURRENT_TIMESTAMP
+    `).run(
+      randomUUID(), draft.draft_id, acceptance.id, draft.task_id, draft.story_index,
+      executionId, result, evidence,
+    );
+  }
 }
 
 type ReviewMode = 'closure' | 'report_correction';
@@ -578,9 +741,19 @@ function reviewClosureSubjects(db: Db, draft: CommandChainDraftRow): ReviewSubje
       key: ref, kind: 'impact', content: `[${item.disposition}] ${item.statement}\n原因：${item.rationale}`, sourceRef: ref,
     });
   }
-  for (const item of context.acceptance) {
-    const ref = `REQUIREMENT_CONTEXT:${context.draftId}:acceptance:${item.key}`;
-    subjects.push({ key: ref, kind: 'acceptance', content: item.content, sourceRef: ref });
+  for (const acceptance of activeTaskAcceptances(db, draft.task_id)) {
+    const ref = `ACCEPTANCE:${acceptance.acceptance_id}:r${acceptance.revision}`;
+    subjects.push({
+      key: ref,
+      kind: 'acceptance',
+      content: [
+        `Acceptance：${acceptance.acceptance_key}`,
+        `范围：${acceptance.scope_type}${acceptance.story_index ? ` · 交付单元 ${acceptance.story_index}` : ''}`,
+        `承诺：${acceptance.statement}`,
+        `Oracle：${acceptance.oracle}`,
+      ].join('\n'),
+      sourceRef: ref,
+    });
   }
   const units = db.prepare(`
     SELECT s.story_index, s.unit_key, s.title, s.actor, s.trigger_condition,
@@ -819,7 +992,7 @@ function feedbackExecutionContext(execution: CommandChainExecutionRow) {
 
 function initializeFeedbackInputs(db: Db, execution: CommandChainExecutionRow, draft: CommandChainDraftRow) {
   const context = feedbackExecutionContext(execution);
-  if (draft.command_chain_id === FEEDBACK_TRIAGE_COMMAND_CHAIN.id) {
+  if (draft.command_chain_id === 'feedback-triage') {
     if (!context.batchId) throw new Error('反馈分流缺少冻结批次');
     const commentIds = (db.prepare(`
       SELECT comment_id FROM feedback_batch_comments WHERE batch_id = ? ORDER BY ordinal, comment_id
@@ -896,6 +1069,39 @@ export function cloneCommandChainDraft(db: Db, source: CommandChainDraftRow, tar
     WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
   db.prepare(`
+    INSERT INTO command_chain_acceptance_items(
+      draft_id, acceptance_key, statement, oracle, source, ordinal, updated_at
+    )
+    SELECT ?, acceptance_key, statement, oracle, source, ordinal, updated_at
+    FROM command_chain_acceptance_items WHERE draft_id = ?
+  `).run(target.draft_id, source.draft_id);
+  const assessments = db.prepare(`
+    SELECT acceptance_id, task_id, story_index, kind, agent, execution_id, result, evidence
+    FROM acceptance_assessments WHERE draft_id = ?
+  `).all(source.draft_id) as {
+    acceptance_id: string;
+    task_id: string;
+    story_index: number | null;
+    kind: string;
+    agent: string;
+    execution_id: string;
+    result: string;
+    evidence: string;
+  }[];
+  const insertAssessment = db.prepare(`
+    INSERT INTO acceptance_assessments(
+      assessment_id, draft_id, acceptance_id, task_id, story_index,
+      kind, agent, execution_id, result, evidence
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (const assessment of assessments) {
+    insertAssessment.run(
+      randomUUID(), target.draft_id, assessment.acceptance_id, assessment.task_id,
+      assessment.story_index, assessment.kind, assessment.agent,
+      assessment.execution_id, assessment.result, assessment.evidence,
+    );
+  }
+  db.prepare(`
     INSERT INTO command_chain_decisions(
       draft_id, tree_id, decision_key, content, status, selected_option_id,
       authority, decision_text, rationale, evidence, human_requested, ordinal, updated_at
@@ -904,33 +1110,38 @@ export function cloneCommandChainDraft(db: Db, source: CommandChainDraftRow, tar
            authority, decision_text, rationale, evidence, human_requested, ordinal, updated_at
     FROM command_chain_decisions WHERE draft_id = ?
   `).run(target.draft_id, source.draft_id);
-  if (target.command_chain_id === DEVELOPMENT_COMMAND_CHAIN.id && source.status !== 'waiting_for_answers') {
+  const targetDefinition = definitionForDraft(target);
+  if (target.command_chain_id === 'development' && source.status !== 'waiting_for_answers') {
     db.prepare(`UPDATE command_chain_drafts SET workflow_phase = ? WHERE draft_id = ?`)
-      .run(Object.keys(DEVELOPMENT_COMMAND_CHAIN.phases)[0], target.draft_id);
+      .run(Object.keys(targetDefinition.phases)[0], target.draft_id);
     db.prepare(`DELETE FROM command_chain_checks WHERE draft_id = ?`).run(target.draft_id);
     db.prepare(`
       DELETE FROM command_chain_artifact_blocks
       WHERE draft_id = ? AND block_id IN ('code-review', 'recovery-resolutions')
     `).run(target.draft_id);
   }
-  if (target.command_chain_id === VERIFICATION_COMMAND_CHAIN.id) {
+  if (target.command_chain_id === 'verification') {
+    const inputsPhase = phaseIdForBuiltin(targetDefinition, 'verification-inputs');
+    const executePhase = phaseIdForBuiltin(targetDefinition, 'verification-execution');
+    db.prepare(`DELETE FROM acceptance_assessments WHERE draft_id = ?`).run(target.draft_id);
     if (!verificationSourcesMatch(db, target)) {
       db.prepare(`DELETE FROM command_chain_artifact_blocks WHERE draft_id = ? AND artifact_id = 'verification'`)
         .run(target.draft_id);
-      db.prepare(`UPDATE command_chain_drafts SET workflow_phase = 'inputs' WHERE draft_id = ?`).run(target.draft_id);
+      db.prepare(`UPDATE command_chain_drafts SET workflow_phase = ? WHERE draft_id = ?`).run(inputsPhase, target.draft_id);
       initializeVerificationInputs(db, target);
     } else if (source.status !== 'waiting_for_answers') {
-      db.prepare(`UPDATE command_chain_drafts SET workflow_phase = 'execute' WHERE draft_id = ?`).run(target.draft_id);
+      db.prepare(`UPDATE command_chain_drafts SET workflow_phase = ? WHERE draft_id = ?`).run(executePhase, target.draft_id);
       db.prepare(`
         DELETE FROM command_chain_artifact_blocks
         WHERE draft_id = ? AND artifact_id = 'verification' AND block_id IN ('results', 'evidence-review')
       `).run(target.draft_id);
     }
   }
-  if (target.command_chain_id === REVIEW_COMMAND_CHAIN.id) {
+  if (target.command_chain_id === 'review') {
+    const inputsPhase = phaseIdForBuiltin(targetDefinition, 'review-inputs');
     db.prepare(`DELETE FROM command_chain_artifact_blocks WHERE draft_id = ? AND artifact_id = 'review'`)
       .run(target.draft_id);
-    db.prepare(`UPDATE command_chain_drafts SET workflow_phase = 'inputs' WHERE draft_id = ?`).run(target.draft_id);
+    db.prepare(`UPDATE command_chain_drafts SET workflow_phase = ? WHERE draft_id = ?`).run(inputsPhase, target.draft_id);
     initializeReviewInputs(db, reviewExecutionForDraft(db, target), target);
   }
 }
@@ -946,6 +1157,8 @@ function parseObject(content: string, label: string) {
 function validateBlockContent(definition: CommandChainBlockDefinition, content: string, label: string) {
   if (definition.format !== 'yaml') return bounded(content, label);
   const value = parseObject(content, label);
+  const undeclared = Object.keys(value).filter((name) => !definition.fields[name]);
+  if (undeclared.length) throw new Error(`${label} 包含未声明字段：${undeclared.join('、')}`);
   for (const [name, field] of Object.entries(definition.fields)) {
     const input = value[name];
     if (field.required && (input === undefined || input === null || input === '')) {
@@ -1015,20 +1228,14 @@ function parseDecision(content: string, definition: CommandChainDefinition, tree
 }
 
 function definitionForDraft(draft: CommandChainDraftRow) {
-  const definitions = [
-    REQUIREMENT_CONTEXT_COMMAND_CHAIN,
-    DELIVERY_PLAN_COMMAND_CHAIN,
-    REPRODUCTION_COMMAND_CHAIN,
-    DELIVERY_ANALYSIS_COMMAND_CHAIN,
-    DEVELOPMENT_COMMAND_CHAIN,
-    VERIFICATION_COMMAND_CHAIN,
-    REVIEW_COMMAND_CHAIN,
-    FEEDBACK_TRIAGE_COMMAND_CHAIN,
-    FEEDBACK_VERIFY_COMMAND_CHAIN,
-  ];
-  const definition = definitions.find((candidate) => candidate.id === draft.command_chain_id);
-  if (!definition) throw new Error(`未知命令链：${draft.command_chain_id || '(empty)'}`);
-  return definition;
+  if (!draft.command_chain_id) throw new Error('未知命令链：(empty)');
+  return loadCommandChainDefinition(draft.command_chain_id);
+}
+
+function phaseIdForBuiltin(definition: CommandChainDefinition, builtin: string) {
+  const match = Object.entries(definition.phases).find(([, phase]) => phase.builtin === builtin);
+  if (!match) throw new Error(`命令链 ${definition.id} 缺少内置 Phase ${builtin}`);
+  return match[0];
 }
 
 function commandAllowed(definition: CommandChainDefinition, phase: string, command: string) {
@@ -1074,12 +1281,13 @@ export type RequirementContextProjection = {
   }[];
   scope: { key: string; direction: 'included' | 'excluded'; content: string }[];
   constraints: { key: string; content: string }[];
-  acceptance: { key: string; content: string; source: string }[];
+  acceptance: { key: string; content: string; oracle: string; source: string }[];
 };
 
 function requirementContextProjection(
   draftId: string,
   artifacts: ReturnType<typeof decodedArtifacts>,
+  acceptances: AcceptanceDraftItemRow[],
 ): RequirementContextProjection {
   const one = (blockId: string) => artifacts.find((artifact) => artifact.block_id === blockId);
   const many = (blockId: string) => artifacts.filter((artifact) => artifact.block_id === blockId);
@@ -1121,10 +1329,12 @@ function requirementContextProjection(
       key: artifact.item_key,
       content: String((artifact.value as Record<string, string>).content || ''),
     })),
-    acceptance: many('acceptance').map((artifact) => {
-      const value = artifact.value as Record<string, string>;
-      return { key: artifact.item_key, content: value.content, source: value.source };
-    }),
+    acceptance: acceptances.map((acceptance) => ({
+      key: acceptance.acceptance_key,
+      content: acceptance.statement,
+      oracle: acceptance.oracle,
+      source: acceptance.source,
+    })),
   };
 }
 
@@ -1141,6 +1351,7 @@ export function latestRequirementContextProjection(db: Db, taskId: string) {
   return requirementContextProjection(
     draft.draft_id,
     decodedArtifacts(artifactRows(db, draft.draft_id)),
+    acceptanceDraftItems(db, draft.draft_id),
   );
 }
 
@@ -1226,11 +1437,11 @@ function deliveryPlanInputSources(
       content: impact.statement,
       sourceRef: `REQUIREMENT_CONTEXT:${context.draftId}:impact:${impact.key}`,
       })),
-    ...context.acceptance.map((item) => ({
-      key: `acceptance:${item.key}`,
+    ...activeRequirementAcceptances(db, execution.task_id).map((item) => ({
+      key: `acceptance:${item.acceptance_key}`,
       kind: 'acceptance' as const,
-      content: item.content,
-      sourceRef: `REQUIREMENT_CONTEXT:${context.draftId}:acceptance:${item.key}`,
+      content: item.statement,
+      sourceRef: `ACCEPTANCE:${item.acceptance_id}:r${item.revision}`,
     })),
   ];
   if (!sources.length) throw new Error('业务变化上下文没有可供交付规划消费的影响或验收语义');
@@ -1395,8 +1606,8 @@ function verificationState(artifacts: ReturnType<typeof decodedArtifacts>) {
 function verificationPlanErrors(artifacts: ReturnType<typeof decodedArtifacts>) {
   const state = verificationState(artifacts);
   const errors: string[] = [];
-  if (!state.sources.some((source) => source.key === 'unit-acceptance' && source.kind === 'acceptance')) {
-    errors.push('验证输入缺少 Delivery Unit Acceptance');
+  if (!state.sources.some((source) => source.kind === 'acceptance')) {
+    errors.push('验证输入缺少 Acceptance');
   }
   if (!state.scenarios.length) errors.push('验证计划至少需要一个场景');
   const sourceKeys = new Set(state.sources.map((source) => source.key));
@@ -1412,9 +1623,10 @@ function verificationPlanErrors(artifacts: ReturnType<typeof decodedArtifacts>) 
       errors.push(`冻结验证输入 ${source.key} 尚未被任何场景覆盖`);
     }
   }
-  if (!state.scenarios.some((scenario) =>
-    scenario.channel === 'frontend' && scenario.coverageRefs.includes('unit-acceptance'))) {
-    errors.push('unit-acceptance 必须由至少一个 frontend 场景覆盖');
+  if (!state.scenarios.some((scenario) => scenario.channel === 'frontend'
+    && scenario.coverageRefs.some((key) => state.sources.some((source) =>
+      source.kind === 'acceptance' && source.key === key)))) {
+    errors.push('至少一项 Acceptance 必须由 frontend 场景覆盖');
   }
   return errors;
 }
@@ -1756,7 +1968,11 @@ function requirementContextErrors(
   artifacts: ReturnType<typeof decodedArtifacts>,
   decisions: ReturnType<typeof decodedDecisions>,
 ) {
-  const context = requirementContextProjection(draft.draft_id, artifacts);
+  const context = requirementContextProjection(
+    draft.draft_id,
+    artifacts,
+    acceptanceDraftItems(db, draft.draft_id),
+  );
   const errors: string[] = [];
   const reliable = context.assertions.filter((assertion) =>
     assertion.evidence !== 'inferred' && assertion.evidence !== 'conflicted');
@@ -1827,6 +2043,16 @@ function currentAnalysisDecisionMode(db: Db, draft: CommandChainDraftRow) {
 
 function renderBuiltInContexts(db: Db, draft: CommandChainDraftRow, contexts: string[]) {
   const lines: string[] = [];
+  if (contexts.includes('acceptance-definitions')) {
+    const items = acceptanceDraftItems(db, draft.draft_id);
+    lines.push(
+      '## ACCEPTANCE DEFINITIONS', '',
+      ...(items.length
+        ? items.map((item) => `- ${item.acceptance_key}：${item.statement}\n  - Oracle: ${item.oracle}\n  - Source: ${item.source}`)
+        : ['- None']),
+      '',
+    );
+  }
   if (contexts.includes('delivery-plan-inputs')) {
     const state = deliveryPlanState(decodedArtifacts(artifactRows(db, draft.draft_id)));
     lines.push(
@@ -1899,7 +2125,9 @@ function renderBuiltInContexts(db: Db, draft: CommandChainDraftRow, contexts: st
     const spec = currentDeliverySpec(db, draft.task_id, draft.story_index);
     const artifacts = artifactRows(db, draft.draft_id);
     const covered = new Set(
-      artifacts.filter((artifact) => artifact.block_id === 'criteria').map((artifact) => artifact.item_key),
+      acceptanceAssessments(db, draft.draft_id, 'implementation')
+        .filter((assessment) => assessment.result === 'claimed')
+        .map((assessment) => assessment.acceptance_key),
     );
     const resolvedRecoveries = new Set(
       artifacts.filter((artifact) => artifact.block_id === 'recovery-resolutions').map((artifact) => artifact.item_key),
@@ -1947,6 +2175,67 @@ function renderBuiltInContexts(db: Db, draft: CommandChainDraftRow, contexts: st
   return lines;
 }
 
+function businessAnalysisCompleteErrors(
+  draft: CommandChainDraftRow,
+  artifacts: ReturnType<typeof decodedArtifacts>,
+) {
+  const definition = definitionForDraft(draft);
+  const selected = (blockId: string) => artifacts.filter((artifact) => artifact.block_id === blockId);
+  const has = (blockId: string) => selected(blockId).length > 0;
+  const missing = (blockIds: string[]) => blockIds.filter((blockId) => !has(blockId));
+  const errors: string[] = [];
+
+  if (definition.id === 'idea-context') {
+    const absent = missing(['problem', 'actors', 'goals', 'success']);
+    if (absent.length) errors.push(`需求意图简报缺少核心 Block：${absent.join('、')}`);
+    return errors;
+  }
+
+  if (definition.id === 'business-design') {
+    const gaps = selected('upstream-gaps');
+    const outputBlocks = ['summary', 'actors', 'scenarios', 'flows', 'rules', 'states', 'scope', 'success', 'dependencies'];
+    if (gaps.length) {
+      const conflicting = outputBlocks.filter(has);
+      if (conflicting.length) errors.push(`需求意图回流不能同时提交业务方案 Block：${conflicting.join('、')}`);
+      return errors;
+    }
+    const absent = missing(['summary', 'actors', 'scenarios', 'flows', 'rules', 'scope', 'success']);
+    if (absent.length) errors.push(`业务方案缺少核心 Block：${absent.join('、')}`);
+    return errors;
+  }
+
+  if (definition.id === 'requirement-spec') {
+    const gaps = selected('upstream-gaps');
+    if (gaps.length) {
+      const targets = new Set(gaps.map((gap) => String((gap.value as Record<string, unknown>).target || '')));
+      if (targets.size !== 1) errors.push('需求规格的全部上游缺口必须指向同一个职责目标');
+      if (has('final')) errors.push('存在上游缺口时不能同时提交最终需求规格');
+      return errors;
+    }
+    const absent = missing(['draft', 'verification', 'final']);
+    if (absent.length) errors.push(`需求规格正常推进分支缺少 Block：${absent.join('、')}`);
+    return errors;
+  }
+
+  if (definition.id === 'spec-review') {
+    const gaps = selected('gaps');
+    if (gaps.length) {
+      const targets = new Set(gaps.map((gap) => String((gap.value as Record<string, unknown>).target || '')));
+      if (targets.size !== 1) errors.push('规格审查的全部阻断缺口必须指向同一个职责目标');
+      if (has('approved-specification')) errors.push('存在阻断缺口时不能同时批准需求规格');
+      if (!selected('findings').some((finding) =>
+        String((finding.value as Record<string, unknown>).verdict || '') === 'gap')) {
+        errors.push('规格审查声明了阻断缺口，但没有对应的 gap 检查发现');
+      }
+      return errors;
+    }
+    if (!has('approved-specification')) errors.push('规格审查无阻断缺口时必须登记完整批准规格');
+    return errors;
+  }
+
+  return [`未知 Business Analysis 命令链：${definition.id}`];
+}
+
 function validatorErrors(db: Db, draft: CommandChainDraftRow, names: string[]) {
   const definition = definitionForDraft(draft);
   const artifacts = decodedArtifacts(artifactRows(db, draft.draft_id));
@@ -1955,6 +2244,9 @@ function validatorErrors(db: Db, draft: CommandChainDraftRow, names: string[]) {
   if (names.includes('delivery-unit')) {
     try { currentDeliveryUnit(db, draft.task_id, draft.story_index); }
     catch (error) { errors.push(error instanceof Error ? error.message : String(error)); }
+  }
+  if (names.includes('acceptance-required') && !acceptanceDraftItems(db, draft.draft_id).length) {
+    errors.push('至少需要定义一项 Acceptance');
   }
   if (names.includes('delivery-spec')) {
     try { currentDeliverySpec(db, draft.task_id, draft.story_index); }
@@ -2040,6 +2332,9 @@ function validatorErrors(db: Db, draft: CommandChainDraftRow, names: string[]) {
   if (names.includes('delivery-contract')) {
     if (!artifacts.some((row) => row.block_id === 'summary')) errors.push('缺少交付分析 summary');
     if (!artifacts.some((row) => row.block_id === 'contract')) errors.push('缺少冻结交付 contract');
+  }
+  if (names.includes('business-analysis-complete')) {
+    errors.push(...businessAnalysisCompleteErrors(draft, artifacts));
   }
   if (names.includes('requirement-context-complete')) {
     errors.push(...requirementContextErrors(db, draft, artifacts, decisions));
@@ -2163,6 +2458,7 @@ function renderWorkPacket(db: Db, draft: CommandChainDraftRow) {
     '## REWIND', '', phase.rewindCommand ? `- \`${phase.rewindCommand}\`` : '- Not available from the initial phase', '',
     '## CURRENT DRAFT', '',
     `- Artifact Blocks: ${artifacts.length}`,
+    `- Acceptances: ${acceptanceDraftItems(db, draft.draft_id).length}`,
     ...[...blockCounts].map(([block, count]) => `  - ${block}: ${count}`),
     ...artifacts.flatMap((artifact) => [
       `- \`${artifact.artifact_id}.${artifact.block_id}${artifact.item_key ? `.${artifact.item_key}` : ''}\``,
@@ -2212,6 +2508,192 @@ function decisionQuestions(
   }));
 }
 
+function markdownArtifactValue(value: unknown): string {
+  if (Array.isArray(value)) return value.map(String).join('、');
+  if (value && typeof value === 'object') {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, item]) => `  - ${key}：${markdownArtifactValue(item)}`)
+      .join('\n');
+  }
+  return String(value ?? '');
+}
+
+const PRIMARY_ARTIFACT_FIELDS = [
+  'claim', 'name', 'title', 'content', 'outcome', 'action', 'statement', 'reason',
+  'subject', 'state', 'expected', 'finding', 'summary', 'target', 'kind',
+];
+
+const ARTIFACT_ENUM_LABELS: Record<string, string> = {
+  high: '高',
+  medium: '中',
+  low: '低',
+  included: '范围内',
+  excluded: '范围外',
+  main: '主流程',
+  exception: '异常流程',
+  recovery: '恢复流程',
+  passed: '通过',
+  gap: '存在缺口',
+  intent: '需求意图',
+  business_design: '业务方案',
+  specification: '需求规格',
+};
+
+function markdownLink(label: string, url: string) {
+  return `[${label.replaceAll(']', '\\]')}](${url.replaceAll(')', '%29')})`;
+}
+
+function artifactFieldValue(name: string, value: unknown, row: Record<string, unknown>) {
+  if (name === 'sourceTitle' && typeof value === 'string' && typeof row.sourceUrl === 'string') {
+    return markdownLink(value, row.sourceUrl);
+  }
+  if (typeof value === 'string' && ARTIFACT_ENUM_LABELS[value]) return ARTIFACT_ENUM_LABELS[value];
+  if (typeof value === 'string' && /^https?:\/\//.test(value)) return markdownLink(value, value);
+  return markdownArtifactValue(value);
+}
+
+function renderYamlArtifactRows(
+  rows: ReturnType<typeof decodedArtifacts>,
+  block: CommandChainBlockDefinition,
+) {
+  const fieldNames = Object.keys(block.fields);
+  return rows.flatMap((row) => {
+    const value = row.value as Record<string, unknown>;
+    const populated = fieldNames.filter((name) => value[name] !== undefined && value[name] !== null && value[name] !== '');
+    const primary = PRIMARY_ARTIFACT_FIELDS.find((name) => populated.includes(name)) || populated[0];
+    if (!primary) return [];
+    const emphasize = ['name', 'title', 'subject', 'state'].includes(primary);
+    const primaryValue = artifactFieldValue(primary, value[primary], value);
+    const lines = [`- ${emphasize ? `**${primaryValue}**` : primaryValue}`];
+    for (const name of populated) {
+      if (name === primary || (name === 'sourceUrl' && populated.includes('sourceTitle'))) continue;
+      const field = block.fields[name];
+      lines.push(`  - **${field.label || name}**：${artifactFieldValue(name, value[name], value)}`);
+    }
+    return [...lines, ''];
+  });
+}
+
+function normalizeEmbeddedMarkdown(content: string) {
+  let fenced = false;
+  return content.trim().split('\n').map((line) => {
+    if (/^\s*(```|~~~)/.test(line)) {
+      fenced = !fenced;
+      return line;
+    }
+    if (fenced) return line;
+    return line.replace(/^(\s*)(#{1,6})(\s+)/, (_match, indent: string, hashes: string, spacing: string) => (
+      `${indent}${'#'.repeat(Math.min(6, hashes.length + 2))}${spacing}`
+    ));
+  }).join('\n');
+}
+
+function renderPublishedArtifact(
+  definition: CommandChainDefinition,
+  artifacts: ReturnType<typeof decodedArtifacts>,
+  onlyBlockIds?: string[],
+) {
+  const entries = Object.entries(definition.artifacts);
+  if (entries.length !== 1) throw new Error(`命令链 ${definition.id} 必须且只能声明一个最终 Artifact`);
+  const [artifactId, artifact] = entries[0];
+  const blocks = Object.entries(artifact.blocks).filter(([blockId, block]) => (
+    block.render && (!onlyBlockIds || onlyBlockIds.includes(blockId))
+  ));
+  const populated = blocks.map(([blockId, block]) => ({
+    blockId,
+    block,
+    rows: artifacts.filter((row) => row.artifact_id === artifactId && row.block_id === blockId),
+  })).filter(({ rows }) => rows.length);
+  if (populated.length === 1 && populated[0].block.format === 'markdown') {
+    return populated[0].rows.map((row) => String(row.value)).join('\n\n').trim();
+  }
+  const lines = [`# ${artifact.title}`, ''];
+  for (const { block, rows } of populated) {
+    if (!rows.length) continue;
+    lines.push(`## ${block.title}`, '');
+    if (block.format === 'markdown') {
+      lines.push(...rows.flatMap((row) => [normalizeEmbeddedMarkdown(String(row.value)), '']));
+      continue;
+    }
+    if (block.format === 'text') {
+      lines.push(...rows.flatMap((row) => [String(row.value), '']));
+      continue;
+    }
+    lines.push(...renderYamlArtifactRows(rows, block));
+  }
+  return lines.join('\n').trim();
+}
+
+function buildBusinessAnalysisResult(db: Db, draft: CommandChainDraftRow, needsInput: boolean): AgentResult {
+  const definition = definitionForDraft(draft);
+  const artifacts = decodedArtifacts(artifactRows(db, draft.draft_id));
+  const decisions = decodedDecisions(decisionRows(db, draft.draft_id), definition);
+  const config = ({
+    'idea-context': {
+      stage: 'intent' as const,
+    },
+    'business-design': {
+      stage: 'business_design' as const,
+    },
+    'requirement-spec': {
+      stage: 'specification' as const,
+    },
+    'spec-review': {
+      stage: 'review' as const,
+    },
+  } as const)[definition.id as 'idea-context' | 'business-design' | 'requirement-spec' | 'spec-review'];
+  if (!config) throw new Error(`未知 Business Analysis 命令链：${definition.id}`);
+
+  if (needsInput) {
+    const questions = decisionQuestions(decisions);
+    return agentResultSchema.parse({
+      outcome: 'needs_input',
+      summary: `${Object.values(definition.artifacts)[0].title}仍有 ${questions.length} 个业务问题需要用户确认`,
+      questions,
+      businessAnalysis: { stage: config.stage, disposition: 'advance' },
+    });
+  }
+
+  const gapBlock = definition.id === 'business-design' || definition.id === 'requirement-spec'
+    ? 'upstream-gaps'
+    : definition.id === 'spec-review' ? 'gaps' : null;
+  const gaps = gapBlock ? artifacts.filter((artifact) => artifact.block_id === gapBlock) : [];
+  if (gaps.length) {
+    const first = gaps[0].value as Record<string, unknown>;
+    const target = definition.id === 'business-design' ? 'intent' : String(first.target || '');
+    const reason = gaps.map((gap) => {
+      const value = gap.value as Record<string, unknown>;
+      return `${gap.item_key}：${String(value.reason || '')}`;
+    }).join('；');
+    return agentResultSchema.parse({
+      outcome: 'completed',
+      summary: reason,
+      artifact: {
+        title: 'Business Analysis 缺口',
+        content: renderPublishedArtifact(definition, artifacts, [gapBlock!]),
+      },
+      businessAnalysis: {
+        stage: config.stage,
+        disposition: 'return_revision',
+        target,
+        reason,
+      },
+    });
+  }
+
+  const artifactTitle = Object.values(definition.artifacts)[0].title;
+  const content = renderPublishedArtifact(definition, artifacts);
+  return agentResultSchema.parse({
+    outcome: 'completed',
+    summary: definition.id === 'spec-review' ? '需求规格已通过独立审查' : `${artifactTitle}已完成`,
+    artifact: { title: artifactTitle, content },
+    businessAnalysis: {
+      stage: config.stage,
+      disposition: definition.id === 'spec-review' ? 'approved' : 'advance',
+    },
+  });
+}
+
 function renderRequirementContextArtifact(
   context: RequirementContextProjection,
   decisions: ReturnType<typeof decodedDecisions>,
@@ -2256,7 +2738,9 @@ function renderRequirementContextArtifact(
       : ['- 无单独排除项']), '',
     '## CONSTRAINTS', '',
     ...(context.constraints.length ? context.constraints.map((item) => `- ${item.content}`) : ['- 无额外约束']), '',
-    '## ACCEPTANCE', '', ...context.acceptance.map((item) => `- ${item.content}`),
+    '## ACCEPTANCE', '', ...context.acceptance.map((item) => (
+      `- **${item.key}**：${item.content}\n  - Oracle：${item.oracle}\n  - 来源：${item.source}`
+    )),
   );
   return lines.join('\n');
 }
@@ -2276,6 +2760,7 @@ function buildRequirementContextResult(db: Db, draft: CommandChainDraftRow, need
   const context = requirementContextProjection(
     draft.draft_id,
     decodedArtifacts(artifactRows(db, draft.draft_id)),
+    acceptanceDraftItems(db, draft.draft_id),
   );
   return agentResultSchema.parse({
     outcome: 'completed',
@@ -2391,6 +2876,15 @@ function buildDeliveryAnalysisSpec(db: Db, draft: CommandChainDraftRow): Deliver
   const many = (block: string) => artifacts.filter((row) => row.block_id === block);
   const spec = {
     unit: currentDeliveryUnit(db, draft.task_id, draft.story_index),
+    acceptances: deliveryUnitAcceptances(db, draft.task_id, draft.story_index!).map((acceptance) => ({
+      id: acceptance.acceptance_id,
+      key: acceptance.acceptance_key,
+      scope: acceptance.scope_type,
+      statement: acceptance.statement,
+      oracle: acceptance.oracle,
+      sourceRef: `ACCEPTANCE:${acceptance.acceptance_id}:r${acceptance.revision}`,
+      revision: acceptance.revision,
+    })),
     summary: String(one('summary')?.value || ''),
     impacts: many('impacts').map((row) => {
       const value = row.value as Record<string, string>;
@@ -2484,7 +2978,7 @@ function buildDevelopmentResult(db: Db, draft: CommandChainDraftRow, needsInput:
   }
   const spec = currentDeliverySpec(db, draft.task_id, draft.story_index);
   const artifacts = decodedArtifacts(artifactRows(db, draft.draft_id));
-  const criteria = artifacts.filter((artifact) => artifact.block_id === 'criteria');
+  const criteria = acceptanceAssessments(db, draft.draft_id, 'implementation');
   const recoveries = artifacts.filter((artifact) => artifact.block_id === 'recovery-resolutions');
   const review = artifacts.find((artifact) => artifact.block_id === 'code-review');
   const risks = artifacts.filter((artifact) => artifact.block_id === 'risks');
@@ -2494,8 +2988,8 @@ function buildDevelopmentResult(db: Db, draft: CommandChainDraftRow, needsInput:
     '# 开发实现结果', '',
     '## 验收证据', '',
     ...developmentCriteria(spec).map((criterion) => {
-      const evidence = criteria.find((item) => item.item_key === criterion.key)?.value as Record<string, string> | undefined;
-      return `- ${criterion.description}：${evidence?.evidence || '未登记'}`;
+      const evidence = criteria.find((item) => item.acceptance_key === criterion.key);
+      return `- ${criterion.key} · ${criterion.description}：${evidence?.evidence || '未登记'}`;
     }),
     '', '## 代码审查', '',
     `- 摘要：${reviewValue.summary || '未登记'}`,
@@ -2714,6 +3208,9 @@ function buildFeedbackVerifyResult(db: Db, draft: CommandChainDraftRow, needsInp
 
 function buildResult(db: Db, draft: CommandChainDraftRow, needsInput: boolean): AgentResult {
   const definition = definitionForDraft(draft);
+  if (['idea-context', 'business-design', 'requirement-spec', 'spec-review'].includes(definition.id)) {
+    return buildBusinessAnalysisResult(db, draft, needsInput);
+  }
   if (definition.id === 'requirement-context') return buildRequirementContextResult(db, draft, needsInput);
   if (definition.id === 'delivery-plan') return buildDeliveryPlanResult(db, draft);
   if (definition.id === 'reproduction') return buildReproductionResult(db, draft, needsInput);
@@ -2733,6 +3230,10 @@ export function commandChainHelp() {
     '  delivery-unit current', '',
     'Delivery Spec：',
     '  delivery-spec current', '',
+    'Acceptance：',
+    '  acceptance put --key <key> --content-file <yaml>',
+    '  acceptance remove --key <key>',
+    '  acceptance assess --key <key> --result <claimed|passed|failed|blocked> --evidence-file <text>', '',
     'Artifact：',
     '  artifact put --artifact <id> --block <id> [--key <key>] --content-file <yaml|markdown>',
     '  artifact remove --artifact <id> --block <id> [--key <key>]', '',
@@ -2798,6 +3299,70 @@ export function runCommandChainCommand(input: {
       '```yaml', stringify(spec).trim(), '```',
     ].join('\n');
   }
+  if (command === 'acceptance put') {
+    if (definition.id !== 'requirement-context') throw new Error('只有 Requirement Context 可以定义 Acceptance');
+    const key = bounded(required(flags, 'key'), 'Acceptance key', 120);
+    if (!/^[a-z0-9][a-z0-9._:-]*$/.test(key)) {
+      throw new Error('Acceptance key 只能使用小写字母、数字、点、下划线、冒号和连字符');
+    }
+    if (key.startsWith('unit:')) throw new Error('unit: 前缀由 Harness 为 Delivery Unit Acceptance 保留');
+    const value = parseObject(required(flags, 'content'), `acceptance/${key}`);
+    const statement = bounded(String(value.statement || ''), 'Acceptance statement', 4000);
+    const oracle = bounded(String(value.oracle || ''), 'Acceptance oracle', 4000);
+    const source = bounded(String(value.source || ''), 'Acceptance source', 4000);
+    const ordinal = nextOrdinal(db, 'command_chain_acceptance_items', draft.draft_id);
+    db.prepare(`
+      INSERT INTO command_chain_acceptance_items(
+        draft_id, acceptance_key, statement, oracle, source, ordinal
+      ) VALUES(?, ?, ?, ?, ?, ?)
+      ON CONFLICT(draft_id, acceptance_key) DO UPDATE SET
+        statement = excluded.statement, oracle = excluded.oracle, source = excluded.source,
+        updated_at = CURRENT_TIMESTAMP
+    `).run(draft.draft_id, key, statement, oracle, source, ordinal);
+    touchDraft(db, draft.draft_id);
+    return `# COMMAND RESULT\n\n- Command: acceptance put\n- Outcome: accepted\n- Changed: ${key}`;
+  }
+  if (command === 'acceptance remove') {
+    if (definition.id !== 'requirement-context') throw new Error('只有 Requirement Context 可以删除 Acceptance 定义');
+    const key = required(flags, 'key');
+    const result = db.prepare(`
+      DELETE FROM command_chain_acceptance_items WHERE draft_id = ? AND acceptance_key = ?
+    `).run(draft.draft_id, key);
+    if (!result.changes) throw new Error(`Acceptance 不存在：${key}`);
+    touchDraft(db, draft.draft_id);
+    return '# COMMAND RESULT\n\n- Command: acceptance remove\n- Outcome: accepted';
+  }
+  if (command === 'acceptance assess') {
+    if (definition.id !== 'development') {
+      throw new Error('当前命令链不能提交 Acceptance 实现声明');
+    }
+    const key = required(flags, 'key');
+    const result = required(flags, 'result');
+    if (result !== 'claimed') throw new Error('Dev Agent 只能提交 result=claimed 的实现声明');
+    const evidence = bounded(required(flags, 'evidence'), 'Acceptance evidence', 20_000);
+    const spec = currentDeliverySpec(db, draft.task_id, draft.story_index);
+    const acceptance = spec.acceptances.find((candidate) => candidate.key === key);
+    if (!acceptance) throw new Error(`Delivery Spec 不包含 Acceptance：${key}`);
+    const stored = db.prepare(`
+      SELECT acceptance_id FROM acceptances
+      WHERE acceptance_id = ? AND task_id = ? AND lifecycle = 'active'
+    `).get(acceptance.id, draft.task_id) as { acceptance_id: string } | undefined;
+    if (!stored) throw new Error(`Acceptance 实体不存在或已失效：${key}`);
+    db.prepare(`
+      INSERT INTO acceptance_assessments(
+        assessment_id, draft_id, acceptance_id, task_id, story_index,
+        kind, agent, execution_id, result, evidence
+      ) VALUES(?, ?, ?, ?, ?, 'implementation', 'dev-agent', ?, 'claimed', ?)
+      ON CONFLICT(draft_id, acceptance_id, kind) DO UPDATE SET
+        execution_id = excluded.execution_id, result = excluded.result,
+        evidence = excluded.evidence, updated_at = CURRENT_TIMESTAMP
+    `).run(
+      randomUUID(), draft.draft_id, acceptance.id, draft.task_id, draft.story_index,
+      execution.execution_id, evidence,
+    );
+    touchDraft(db, draft.draft_id);
+    return `# COMMAND RESULT\n\n- Command: acceptance assess\n- Outcome: accepted\n- Acceptance: ${key}`;
+  }
   if (command === 'artifact put') {
     const artifactId = required(flags, 'artifact');
     const blockId = required(flags, 'block');
@@ -2809,7 +3374,7 @@ export function runCommandChainCommand(input: {
     if (!block) throw new Error(`未声明 Artifact Block：${artifactId}/${blockId}`);
     if (!block.writable) throw new Error(`Artifact Block ${artifactId}/${blockId} 由 Harness 管理，只读`);
     const itemKey = block.cardinality === 'many' ? bounded(required(flags, 'key'), 'Artifact item key', 120) : '';
-    if (definition.id === 'verification' && state.workflow_phase === 'execute' && blockId === 'scenarios') {
+    if (definition.id === 'verification' && phase.builtin === 'verification-execution' && blockId === 'scenarios') {
       const existing = db.prepare(`
         SELECT 1 FROM command_chain_artifact_blocks
         WHERE draft_id = ? AND artifact_id = ? AND block_id = ? AND item_key = ?
@@ -2855,7 +3420,7 @@ export function runCommandChainCommand(input: {
     const block = definition.artifacts[artifactId]?.blocks[blockId];
     if (!block) throw new Error(`未声明 Artifact Block：${artifactId}/${blockId}`);
     if (!block.writable) throw new Error(`Artifact Block ${artifactId}/${blockId} 由 Harness 管理，只读`);
-    if (definition.id === 'verification' && state.workflow_phase === 'execute' && blockId === 'scenarios') {
+    if (definition.id === 'verification' && phase.builtin === 'verification-execution' && blockId === 'scenarios') {
       throw new Error('验证计划已经冻结，EXECUTE 阶段不能删除场景');
     }
     const itemKey = block.cardinality === 'many' ? required(flags, 'key') : '';
@@ -3026,7 +3591,7 @@ export function runCommandChainCommand(input: {
     if (waitingForRuntimeInput) {
       errors = [];
     }
-    if (!rewind && !waitingForInput && target === 'answer_review') {
+    if (!rewind && !waitingForInput && target && definition.phases[target]?.builtin === 'decision-answer-review') {
       errors.push(...validatorErrors(db, draft, ['decision-complete']));
     }
     if (errors.length) throw new Error(`阶段 ${state.workflow_phase} 不能完成：\n${[...new Set(errors)].map((item, index) => `${index + 1}. ${item}`).join('\n')}`);
@@ -3034,6 +3599,12 @@ export function runCommandChainCommand(input: {
     if (!rewind && (waitingForInput || !target)) {
       const result = buildResult(db, draft, waitingForInput);
       db.transaction(() => {
+        if (!waitingForInput && !target && definition.id === 'requirement-context') {
+          publishRequirementAcceptances(db, draft);
+        }
+        if (!waitingForInput && !target && definition.id === 'verification') {
+          publishVerificationAssessments(db, draft, execution.execution_id);
+        }
         db.prepare(`
           UPDATE agent_work_drafts SET status = ?, terminal_action = 'complete', terminal_execution_id = ?,
             submitted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE draft_id = ?
@@ -3064,6 +3635,13 @@ export function runCommandChainCommand(input: {
             WHERE draft_id = ? AND artifact_id = ? AND block_id = ?
           `).run(draft.draft_id, artifactId, blockId);
         }
+        if (definition.id === 'requirement-context') {
+          const acceptanceIndex = phaseIds.findIndex((phaseId) =>
+            definition.phases[phaseId].builtin === 'acceptance-definition');
+          if (acceptanceIndex > targetIndex) {
+            db.prepare(`DELETE FROM command_chain_acceptance_items WHERE draft_id = ?`).run(draft.draft_id);
+          }
+        }
         const proposalIndex = phaseIds.findIndex((phaseId) =>
           definition.phases[phaseId].builtin === 'decision-proposal');
         if (proposalIndex >= 0 && targetIndex <= proposalIndex) {
@@ -3077,13 +3655,15 @@ export function runCommandChainCommand(input: {
         }
       }
       if (rewind && definition.id === 'development') {
-        if (targetIndex <= phaseIds.indexOf('implement')) {
+        const implementationIndex = phaseIds.indexOf(phaseIdForBuiltin(definition, 'implementation-evidence'));
+        const verificationIndex = phaseIds.indexOf(phaseIdForBuiltin(definition, 'command-verification'));
+        if (targetIndex <= implementationIndex) {
           db.prepare(`
             DELETE FROM command_chain_artifact_blocks
             WHERE draft_id = ? AND block_id = 'code-review'
           `).run(draft.draft_id);
         }
-        if (targetIndex <= phaseIds.indexOf('developer_verify')) {
+        if (targetIndex <= verificationIndex) {
           db.prepare(`DELETE FROM command_chain_checks WHERE draft_id = ?`).run(draft.draft_id);
         }
       }

@@ -43,10 +43,10 @@ test('projects the current structured phase and latest Agent domain command', as
   assert.equal(progress[0].currentPhase, 'execute');
   assert.deepEqual(progress[0].stages.map((stage) => [stage.label, stage.status]), [
     ['FROZEN VERIFICATION INPUTS', 'completed'],
-    ['验证计划', 'completed'],
-    ['执行验证', 'current'],
-    ['证据复核', 'pending'],
-    ['最终提交', 'pending'],
+    ['PLAN', 'completed'],
+    ['EXECUTE', 'current'],
+    ['EVIDENCE REVIEW', 'pending'],
+    ['FINALIZE', 'pending'],
   ]);
   assert.deepEqual(progress[0].latestCommand && {
     label: progress[0].latestCommand.label,
@@ -81,4 +81,61 @@ test('does not expose a historical draft after its Agent has stopped running', a
   `).run(draftId);
 
   assert.deepEqual(agentCommandProgressInDb(db, taskId), []);
+});
+
+test('keeps every Agent domain command as one lifecycle record in execution audit', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { createTask } = await import('./tasks');
+  const { agentCommandAuditInDb } = await import('./agent-command-progress');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Command audit projection' });
+  const executionId = randomUUID();
+  db.prepare(`
+    INSERT INTO execution_attempts(
+      execution_id, run_id, task_id, story_index, agent, pipeline,
+      delegation_key, attempt, status, input_hash, input_json, started_at
+    ) VALUES(?, 'RUN-command-audit', ?, 1, 'test-agent', 'test', ?, 1, 'running', 'hash', '{}', CURRENT_TIMESTAMP)
+  `).run(executionId, taskId, `test:${taskId}:1`);
+
+  const domainCommand = (command: string) => `node "/app/scripts/loop/loop-agent.mjs" ${command}`;
+  const insertReceipt = db.prepare(`
+    INSERT INTO execution_receipts(receipt_id, execution_id, kind, receipt_key, payload_json)
+    VALUES(?, ?, 'tool_event', ?, ?)
+  `);
+  insertReceipt.run(randomUUID(), executionId, '00000001', JSON.stringify({
+    phase: 'started', toolCallId: 'call-1', commandHash: 'hash-1', summary: '恢复命令链草稿',
+    input: { command: domainCommand('status') },
+  }));
+  insertReceipt.run(randomUUID(), executionId, '00000002', JSON.stringify({
+    phase: 'completed', toolCallId: 'call-1', commandHash: 'hash-1', success: true,
+    input: { command: domainCommand('status') },
+  }));
+  insertReceipt.run(randomUUID(), executionId, '00000003', JSON.stringify({
+    phase: 'started', toolCallId: 'call-2', commandHash: 'hash-2', summary: '登记交付物',
+    input: { command: domainCommand('artifact put') },
+  }));
+  insertReceipt.run(randomUUID(), executionId, '00000004', JSON.stringify({
+    phase: 'completed', toolCallId: 'call-2', commandHash: 'hash-2', success: false,
+    input: { command: domainCommand('artifact put') },
+  }));
+  insertReceipt.run(randomUUID(), executionId, '00000005', JSON.stringify({
+    phase: 'started', toolCallId: 'call-3', commandHash: 'hash-3', summary: '完成命令链阶段',
+    input: { command: domainCommand('phase complete') },
+  }));
+  insertReceipt.run(randomUUID(), executionId, '00000006', JSON.stringify({
+    phase: 'started', toolCallId: 'call-ignored', summary: '读取普通项目文件',
+    input: { command: 'rg -n TODO src' },
+  }));
+
+  const records = agentCommandAuditInDb(db, taskId);
+  assert.deepEqual(records.map((record) => ({
+    executionId: record.executionId,
+    label: record.label,
+    status: record.status,
+    finished: Boolean(record.finishedAt),
+  })), [
+    { executionId, label: '恢复命令链草稿', status: 'success', finished: true },
+    { executionId, label: '登记交付物', status: 'error', finished: true },
+    { executionId, label: '完成命令链阶段', status: 'running', finished: false },
+  ]);
 });

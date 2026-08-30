@@ -26,6 +26,7 @@ const workspaceDatabases = new Map<string, Database.Database>();
 const workspaceMigrations = new Map<string, Promise<Database.Database>>();
 
 function migrateAppDatabase(database: Database.Database) {
+  database.pragma('busy_timeout = 10000');
   database.exec('CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, executed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)');
   const directory = join(appRoot, 'app-migrations');
   for (const name of readdirSync(directory).filter((item) => item.endsWith('.sql')).sort()) {
@@ -33,7 +34,7 @@ function migrateAppDatabase(database: Database.Database) {
     if (applied) continue;
     database.transaction(() => {
       database.exec(readFileSync(join(directory, name), 'utf8'));
-      database.prepare('INSERT INTO schema_migrations(name) VALUES (?)').run(name);
+      database.prepare('INSERT OR IGNORE INTO schema_migrations(name) VALUES (?)').run(name);
     })();
   }
 }
@@ -42,6 +43,7 @@ export function appDatabaseConnection() {
   if (!appDb) {
     mkdirSync(dataRoot, { recursive: true });
     appDb = new Database(appDbPath);
+    appDb.pragma('busy_timeout = 10000');
     migrateAppDatabase(appDb);
     const existing = appDb.prepare("SELECT setting_value FROM app_settings WHERE setting_key = 'workspace_root'").get();
     if (!existing) {

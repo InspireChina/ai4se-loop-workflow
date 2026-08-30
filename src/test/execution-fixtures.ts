@@ -4,6 +4,7 @@ import type { AgentContextSnapshot } from '../application/agent-context';
 import type { ExecutionAttempt } from '../application/executions';
 import { laneForAgent } from '../application/task-lanes';
 import type { DelegationEnvelope } from '../application/tasks';
+import { isActiveAgentConfigurationPromptCandidate } from '../application/agent-configurations';
 
 export class PromptCanaryDeferredError extends Error {
   constructor(message: string) {
@@ -139,11 +140,7 @@ export async function beginTestExecutionAttempt(input: {
     if (previous?.status === 'applied') return { attempt: previous, recovered: true };
 
     if (input.evolutionCandidateId) {
-      const candidate = db.prepare(`
-        SELECT 1 FROM agent_prompt_candidates
-        WHERE candidate_id = ? AND agent_id = ?
-      `).get(input.evolutionCandidateId, input.delegation.agent);
-      if (!candidate) {
+      if (!isActiveAgentConfigurationPromptCandidate(input.delegation.agent, input.evolutionCandidateId)) {
         throw new PromptCanaryDeferredError('Prompt Canary 已结束，等待使用当前 Prompt 重新派发');
       }
       const active = db.prepare(`

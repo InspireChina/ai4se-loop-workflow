@@ -1,0 +1,152 @@
+version: 1
+id: business-design
+agent: business-design-agent
+
+artifacts:
+  business-solution:
+    title: 业务方案
+    blocks:
+      exploration:
+        title: 业务探索
+        cardinality: one
+        format: markdown
+        required: true
+        render: false
+      research-sources:
+        title: 调研依据
+        cardinality: many
+        format: yaml
+        fields:
+          claim: { type: string, required: true, label: 调研结论 }
+          sourceTitle: { type: string, required: true, label: 来源 }
+          sourceUrl: { type: string, required: true, label: 链接 }
+          applicability: { type: string, required: true, label: 适用范围 }
+          limitations: { type: string, required: true, label: 局限 }
+          confidence: { type: enum, required: true, values: [high, medium, low], label: 置信度 }
+      answer-review:
+        title: 答案复查
+        cardinality: one
+        format: markdown
+        required: true
+        render: false
+      upstream-gaps:
+        title: 需求意图缺口
+        cardinality: many
+        format: yaml
+        fields:
+          reason: { type: string, required: true, label: 缺口 }
+          evidence: { type: string, required: true, label: 证据 }
+      summary:
+        title: 方案摘要
+        cardinality: one
+        format: markdown
+      actors:
+        title: 参与者与职责
+        cardinality: many
+        format: yaml
+        fields:
+          name: { type: string, required: true, label: 参与者 }
+          responsibility: { type: string, required: true, label: 职责 }
+      scenarios:
+        title: 主流程与异常场景
+        cardinality: many
+        format: yaml
+        fields:
+          kind: { type: enum, required: true, values: [main, exception, recovery], label: 类型 }
+          actor: { type: string, required: true, label: 参与者 }
+          trigger: { type: string, required: true, label: 触发条件 }
+          outcome: { type: string, required: true, label: 结果 }
+      flows:
+        title: 业务流程
+        cardinality: many
+        format: yaml
+        fields:
+          scenario: { type: string, required: true, label: 场景 }
+          action: { type: string, required: true, label: 行动 }
+          result: { type: string, required: true, label: 结果 }
+      rules:
+        title: 业务规则
+        cardinality: many
+        format: yaml
+        fields:
+          content: { type: string, required: true, label: 规则 }
+          rationale: { type: string, required: true, label: 原因 }
+      states:
+        title: 业务状态
+        cardinality: many
+        format: yaml
+        fields:
+          state: { type: string, required: true, label: 状态 }
+          meaning: { type: string, required: true, label: 含义 }
+          transitions: { type: array, label: 状态转换 }
+      scope:
+        title: 范围
+        cardinality: many
+        format: yaml
+        fields:
+          direction: { type: enum, required: true, values: [included, excluded], label: 范围 }
+          content: { type: string, required: true, label: 内容 }
+      success:
+        title: 成功结果
+        cardinality: many
+        format: yaml
+        fields:
+          outcome: { type: string, required: true, label: 成功结果 }
+          measure: { type: string, required: true, label: 衡量方式 }
+      dependencies:
+        title: 业务依赖
+        cardinality: many
+        format: yaml
+        fields:
+          content: { type: string, required: true, label: 依赖 }
+          source: { type: string, required: true, label: 来源 }
+
+phases:
+  # Artifact Phase：完整探索参与者任务、场景、流程、规则、异常、状态、候选方案与范围取舍。
+  exploration:
+    type: artifact
+    artifacts: [business-solution.exploration]
+    instructions: 基于已确认需求意图探索完整业务空间，主动寻找主流程、异常、恢复、规则冲突、权限边界和候选方案代价。只提出事实与分叉，不在本阶段暗中关闭决定，也不检查技术实现。
+
+  # 可选 Artifact Phase：仅在实时 Web Search 可用且外部业务模式会改善选项与后果时登记真实来源。
+  research:
+    type: artifact
+    artifacts: [business-solution.research-sources]
+    instructions: 调查可借鉴的业务模式、规则、异常与失败模式，并登记来源的适用性和局限。外部最佳实践只能丰富选项，不能自动成为用户要求。
+
+  # 决策提出：建立完整业务决策树，只登记分叉、选项、依赖、后果与推荐。
+  decision_proposal:
+    type: builtin
+    builtin: decision-proposal
+
+  # 决策解决：按意图承诺、证据、Agent 权限和用户决定权关闭节点；需要用户决定时形成完整批次。
+  decision_resolution:
+    type: builtin
+    builtin: decision-resolution
+
+  # 答案复查：复查所有答案和组合后果；发现新业务分叉时回退 decision_proposal。
+  answer_review:
+    type: builtin
+    builtin: decision-answer-review
+    artifacts: [business-solution.answer-review]
+
+  # Artifact Phase：形成唯一业务方案；若上游意图不足以支撑唯一方案，只登记 upstream-gaps，不伪造方案。
+  solution:
+    type: artifact
+    artifacts:
+      - business-solution.upstream-gaps
+      - business-solution.summary
+      - business-solution.actors
+      - business-solution.scenarios
+      - business-solution.flows
+      - business-solution.rules
+      - business-solution.states
+      - business-solution.scope
+      - business-solution.success
+      - business-solution.dependencies
+    instructions: 没有上游缺口时，根据 Active Decision Path 登记唯一业务方案，至少覆盖摘要、参与者、主异常场景、流程、规则、范围和成功结果；状态与依赖按实际需要登记。若需求意图仍有实质缺口，使用稳定 key 登记 upstream-gaps，并停止编造方案内容。
+
+  # 内置最终门禁：有上游缺口时确定性回流需求意图；否则校验并编译完整业务方案。
+  finalize:
+    type: builtin
+    builtin: business-analysis-finalize

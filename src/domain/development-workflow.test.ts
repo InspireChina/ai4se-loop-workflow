@@ -20,9 +20,9 @@ test('defines Development entirely from the YAML command chain', () => {
   assert.equal(DEVELOPMENT_WORKFLOW.delivery_spec.builtin, 'delivery-spec');
   assert.equal(DEVELOPMENT_WORKFLOW.implement.builtin, 'implementation-evidence');
   assert.deepEqual(DEVELOPMENT_WORKFLOW.implement.artifactBlocks, [
-    { artifactId: 'development', blockId: 'criteria' },
     { artifactId: 'development', blockId: 'recovery-resolutions' },
   ]);
+  assert.match(DEVELOPMENT_WORKFLOW.implement.commands.join('\n'), /acceptance assess/);
   assert.match(DEVELOPMENT_WORKFLOW.implement.commands.join('\n'), /runtime-input put/);
   assert.deepEqual(DEVELOPMENT_WORKFLOW.review.artifactBlocks, [
     { artifactId: 'development', blockId: 'code-review' },

@@ -4,9 +4,10 @@ agent: analyst-agent
 
 artifacts:
   delivery-analysis:
+    title: 交付分析
     blocks:
       impacts:
-        title: AS-IS & IMPACT SCAN
+        title: 现状与影响扫描
         cardinality: many
         format: yaml
         required: true
@@ -16,18 +17,18 @@ artifacts:
           disposition: { type: enum, required: true, values: [change, preserve, exclude, needs_decision] }
           evidence: { type: string, required: true }
           decision: { type: string }
-      answer-review: { title: ANSWER REVIEW, cardinality: one, format: markdown, required: true }
-      summary: { title: SUMMARY, cardinality: one, format: markdown, required: true }
-      contract: { title: DELIVERY CONTRACT, cardinality: one, format: markdown, required: true }
+      answer-review: { title: 答案复查, cardinality: one, format: markdown, required: true }
+      summary: { title: 交付摘要, cardinality: one, format: markdown, required: true }
+      contract: { title: 交付契约, cardinality: one, format: markdown, required: true }
       guardrails:
-        title: GUARDRAILS
+        title: 实现护栏
         cardinality: many
         format: yaml
         fields:
           content: { type: string, required: true }
           rationale: { type: string, required: true }
       verification-focus:
-        title: VERIFICATION FOCUS
+        title: 验证重点
         cardinality: many
         format: yaml
         fields:

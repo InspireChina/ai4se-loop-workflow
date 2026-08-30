@@ -18,6 +18,15 @@ export function deliverySpecFixture(overrides: Partial<DeliverySpec> = {}): Deli
       }],
       dependsOn: [],
     },
+    acceptances: [{
+      id: 'ACCEPTANCE-fixture',
+      key: 'unit:fixture-unit',
+      scope: 'delivery_unit',
+      statement: 'The fixture result can be independently verified',
+      oracle: 'The fixture result is visible from the real user entry point',
+      sourceRef: 'TEST:acceptance:fixture',
+      revision: 1,
+    }],
     summary: 'The fixture affects one deterministic capability and introduces no unresolved decisions.',
     impacts: [{
       key: 'fixture-impact',

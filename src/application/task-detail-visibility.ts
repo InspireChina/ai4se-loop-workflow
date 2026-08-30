@@ -1,4 +1,4 @@
-import { BUSINESS_ANALYSIS_AGENT_IDS } from '../domain/business-analysis-workflow';
+import { BUSINESS_ANALYSIS_AGENT_IDS } from '../domain/agent-profile';
 
 export function taskDetailVisibility(task: {
   itemType: string;

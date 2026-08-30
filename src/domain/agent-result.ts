@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { omitNullObjectProperties } from './schema-normalization';
 import { deliveryUnitContractSchema } from './delivery-unit';
+import { acceptanceReferenceSchema } from './acceptance';
 
 const artifactSchema = z.object({
   title: z.string().min(1).max(240),
@@ -143,6 +144,7 @@ const deliveryDecisionSchema = z.discriminatedUnion('status', [
 
 export const deliverySpecSchema = z.preprocess(omitNullObjectProperties, z.object({
   unit: deliveryUnitContractSchema,
+  acceptances: z.array(acceptanceReferenceSchema).min(1).max(200),
   summary: z.string().min(1).max(10000),
   impacts: z.array(z.object({
     key: z.string().min(1).max(120),
@@ -239,8 +241,25 @@ function duplicateKeys(keys: string[]) {
 }
 
 export function assertDeliverySpecDecisionCoverage(spec: DeliverySpec, questions?: AgentResult['questions']) {
-  const sourceKeys = spec.unit.sourceRefs.map((source) => source.key);
-  const duplicateSourceKeys = duplicateKeys(sourceKeys);
+  const duplicateAcceptanceIds = duplicateKeys(spec.acceptances.map((acceptance) => acceptance.id));
+  if (duplicateAcceptanceIds.length) throw new Error(`交付规格的 Acceptance id 不能重复：${duplicateAcceptanceIds.join(', ')}`);
+  const duplicateAcceptanceKeys = duplicateKeys(spec.acceptances.map((acceptance) => acceptance.key));
+  if (duplicateAcceptanceKeys.length) throw new Error(`交付规格的 Acceptance key 不能重复：${duplicateAcceptanceKeys.join(', ')}`);
+  const unitAcceptanceKey = `unit:${spec.unit.key}`;
+  if (!spec.acceptances.some((acceptance) =>
+    acceptance.scope === 'delivery_unit' && acceptance.key === unitAcceptanceKey)) {
+    throw new Error(`交付规格缺少当前 Delivery Unit Acceptance：${unitAcceptanceKey}`);
+  }
+  const sourceKeys = new Set(spec.unit.sourceRefs
+    .filter((source) => source.kind === 'acceptance')
+    .map((source) => source.key.startsWith('acceptance:') ? source.key.slice('acceptance:'.length) : source.key));
+  const unassigned = spec.acceptances
+    .filter((acceptance) => acceptance.scope === 'requirement' && !sourceKeys.has(acceptance.key));
+  if (unassigned.length) {
+    throw new Error(`交付规格包含未分配给当前单元的 Requirement Acceptance：${unassigned.map((item) => item.key).join(', ')}`);
+  }
+  const deliverySourceKeys = spec.unit.sourceRefs.map((source) => source.key);
+  const duplicateSourceKeys = duplicateKeys(deliverySourceKeys);
   if (duplicateSourceKeys.length) throw new Error(`交付规格的 source key 不能重复：${duplicateSourceKeys.join(', ')}`);
   const duplicateImpactKeys = duplicateKeys(spec.impacts.map((impact) => impact.key));
   if (duplicateImpactKeys.length) throw new Error(`交付规格的 impact key 不能重复：${duplicateImpactKeys.join(', ')}`);
@@ -248,9 +267,6 @@ export function assertDeliverySpecDecisionCoverage(spec: DeliverySpec, questions
   if (duplicateGuardrailKeys.length) throw new Error(`交付规格的 guardrail key 不能重复：${duplicateGuardrailKeys.join(', ')}`);
   const duplicateFocusKeys = duplicateKeys(spec.handoff.verificationFocus.map((focus) => focus.key));
   if (duplicateFocusKeys.length) throw new Error(`交付规格的 verification focus key 不能重复：${duplicateFocusKeys.join(', ')}`);
-  if (spec.handoff.verificationFocus.some((focus) => focus.key === 'unit-acceptance')) {
-    throw new Error('unit-acceptance 是系统保留的交付单元验收 key');
-  }
   const decisionKeys = spec.decisions.map((decision) => decision.key);
   const repeated = duplicateKeys(decisionKeys);
   if (repeated.length) throw new Error(`交付规格的 decision key 不能重复：${repeated.join(', ')}`);

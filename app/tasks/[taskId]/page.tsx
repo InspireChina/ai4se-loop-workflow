@@ -1,7 +1,7 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { AlertTriangle, Bot, Check, CheckCircle2, Clock3, ExternalLink, FileText, GitBranch, Hash, Link2, PauseCircle, Play, Tag } from 'lucide-react';
-import { getAgentCommandProgress } from '../../../src/application/agent-command-progress';
+import { getAgentCommandAudit, getAgentCommandProgress } from '../../../src/application/agent-command-progress';
 import { decisionAlignmentQuestions } from '../../../src/application/decision-alignment';
 import { remainingExecutionRetries } from '../../../src/application/execution-retry-policy';
 import { formatEventTime } from '../../../src/application/event-time';
@@ -17,6 +17,7 @@ import { REQUIREMENT_PIPELINES, type RequirementPipelineId } from '../../../src/
 import { DEFAULT_REQUIREMENT_PRIORITY } from '../../../src/domain/requirement-priority';
 import { CopyButton } from '../../../src/ui/copy-button';
 import { ArtifactDocument } from './artifact-document';
+import { AcceptanceContracts } from './acceptance-contracts';
 import { AgentCommandProgress } from './agent-command-progress';
 import { TaskAutoRefresh } from '../task-auto-refresh';
 import { TaskContextChat } from './task-context-chat';
@@ -212,11 +213,18 @@ export default async function TaskDetail({
   const detailParams = await searchParams;
   const detail = await getTask(taskId);
   if (!detail) notFound();
-  const { task, metadata, dependencies, dependencyGateOpen, lanes, stories, deliverySpecs, questions, runtimeInputs, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
-  const [contextChat, commandProgress] = await Promise.all([
+  const { task, metadata, dependencies, dependencyGateOpen, lanes, stories, deliverySpecs, acceptances, questions, runtimeInputs, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
+  const [contextChat, commandProgress, commandAudit] = await Promise.all([
     getTaskContextChat(taskId),
     getAgentCommandProgress(taskId),
+    getAgentCommandAudit(taskId),
   ]);
+  const commandAuditByExecution = new Map<string, typeof commandAudit>();
+  for (const command of commandAudit) {
+    const records = commandAuditByExecution.get(command.executionId) || [];
+    records.push(command);
+    commandAuditByExecution.set(command.executionId, records);
+  }
   const canEditOriginalInput = executionAttempts.length === 0 && !contextChat.session && !['done', 'cancelled'].includes(task.agile_status);
   const dependencyCandidates = canEditOriginalInput ? await listRequirementDependencyCandidates() : [];
   const pendingDependencies = dependencyGateOpen
@@ -271,6 +279,7 @@ export default async function TaskDetail({
   const unansweredRuntimeInputs = runtimeInputs.filter((input) =>
     input.status === 'pending'
       && (!input.assistance_status || input.assistance_status === 'escalated' || input.assistance_status === 'cancelled'));
+  const activeRuntimeInputCount = runtimeInputs.filter((input) => input.status === 'pending').length;
   const waitingRuntimeLanes = lanes.filter((lane) => lane.status === 'waiting_for_runtime_input');
   const waitingForRuntimeInput = waitingRuntimeLanes.length > 0;
   const systemVerificationAssistance = runtimeInputs.some((input) =>
@@ -314,15 +323,15 @@ export default async function TaskDetail({
   const closureFeedbackCount = reviewDocument
     ? documentComments.filter((comment) => comment.document_id === reviewDocument.document_id && comment.feedback_status !== 'resolved').length
     : 0;
-  const collaborationAttentionCount = unansweredRuntimeInputs.length + closureFeedbackCount;
+  const closureNeedsAttention = task.agile_status === 'ready_to_close' || closureFeedbackCount > 0;
   const navigationItems: TaskDetailNavigationItem[] = [
     { id: 'overview', label: '概览', description: '输入、进度与当前状态', value: statusLabel(task.agile_status) },
     ...(showDecisionAlignment ? [{ id: 'decisions' as const, label: '决策对齐', description: '任务级决策与处理记录', value: pendingDecisions.length ? `${pendingDecisions.length} 项待处理` : `${alignedDecisions.length} 项`, attention: pendingDecisions.length > 0 }] : []),
-    { id: 'deliverables', label: '交付产物', description: '单元、文档与规格', value: deliveryFeedbackCount ? `${deliveryFeedbackCount} 条反馈待处理` : `${deliveryDocuments.length + currentSpecs.length} 项`, attention: deliveryFeedbackCount > 0 },
-    { id: 'collaboration', label: '运行协助与结卡', description: '补充信息与最终报告', value: collaborationAttentionCount ? `${collaborationAttentionCount} 项待处理` : '暂无待处理', attention: collaborationAttentionCount > 0 },
-    { id: 'activity', label: '活动记录', description: '需求推进时间线', value: `${events.length} 条` },
+    { id: 'deliverables', label: '交付产物', description: '单元、验收契约、文档与规格', value: deliveryFeedbackCount ? `${deliveryFeedbackCount} 条反馈待处理` : `${deliveryDocuments.length + currentSpecs.length + acceptances.length} 项`, attention: deliveryFeedbackCount > 0 },
+    { id: 'closure', label: isBusinessAnalysis ? '最终规格' : '结卡报告', description: isBusinessAnalysis ? '审查结果与阅读确认' : '最终报告与阅读确认', value: reviewDocument ? `版本 ${task.review_revision}` : '尚未生成', attention: closureNeedsAttention },
+    { id: 'activity', label: '活动记录', description: '运行协助与推进时间线', value: activeRuntimeInputCount ? `${activeRuntimeInputCount} 项协助中` : `${events.length} 条活动`, attention: unansweredRuntimeInputs.length > 0 },
     { id: 'actions', label: '推进控制', description: '对话、调度与运行状态', value: pipeline.length ? `${pipeline.length} 个待派发` : '当前状态' },
-    { id: 'audit', label: '执行审计', description: 'Agent 输入与验证追溯', value: `${executionAttempts.length} 次` },
+    { id: 'audit', label: '执行审计', description: 'Agent 命令、输入与验证追溯', value: `${executionAttempts.length} 次 · ${commandAudit.length} 条命令` },
   ];
   const initialNavigationId = detailParams.section === 'decisions' && showDecisionAlignment ? 'decisions' : 'overview';
 
@@ -524,6 +533,14 @@ export default async function TaskDetail({
           </form>
         </section>}
 
+        {showDeliveryWorkflow && <section className="task-section">
+          <div className="section-head">
+            <h2>验收契约</h2>
+            <small>{acceptances.length ? `${acceptances.length} 项内置 Acceptance` : '尚未定义'}</small>
+          </div>
+          <AcceptanceContracts acceptances={acceptances}/>
+        </section>}
+
         <section className="task-section">
           <div>
             <div className="section-head"><h2>{isEndToEnd ? 'End to End 产物' : isBusinessAnalysis ? 'Business Analysis 产物' : '交付文档'}</h2><small>{deliveryDocuments.length} 个文档 · {documentComments.filter((comment) => comment.feedback_status !== 'resolved').length} 条待处理反馈</small></div>
@@ -623,6 +640,40 @@ export default async function TaskDetail({
     </div>
 
     <div className="task-detail-panel-stack">
+        {reviewDocument && <section className="task-section">
+          <div className="section-head"><h2>{isBusinessAnalysis ? '通过审查的需求规格说明书' : '结卡报告'}</h2><small>版本 {task.review_revision}</small></div>
+          <div className="card document-list">
+            <div className="document-item"><ArtifactDocument
+              taskId={task.task_id}
+              documentId={reviewDocument.document_id}
+              content={reviewDocument.content}
+              format={reviewDocument.format}
+              revision={reviewDocument.revision}
+              comments={documentComments.filter((comment) => comment.document_id === reviewDocument.document_id)}
+              feedbackGroups={feedbackGroups}
+              allowReopen={!isBusinessAnalysis && task.agile_status !== 'done'}
+              allowComment={task.agile_status !== 'done'}
+            /></div>
+          </div>
+          {task.agile_status === 'ready_to_close' && reviewDocument && blockingFeedback.length > 0 && <div className="release-block">
+            <p className="muted">当前有 {blockingFeedback.length} 条反馈尚未闭环。系统会冻结为一个批次；需要修改的反馈将追加新的交付单元，不会回退或改写既有交付。</p>
+          </div>}
+          {task.agile_status === 'ready_to_close' && reviewDocument && blockingFeedback.length === 0 && <form action={acknowledgeClosureAction} className="release-block">
+            <input type="hidden" name="taskId" value={task.task_id}/>
+            <input type="hidden" name="reviewRevision" value={task.review_revision}/>
+            <button className="button success">{isBusinessAnalysis ? '我已阅读需求规格说明书并结束分析' : '我已阅读结卡报告并关闭需求'}</button>
+          </form>}
+        </section>}
+        {!reviewDocument && <section className="card closure-empty-state">
+          <FileText size={24}/>
+          <div>
+            <h2>{isBusinessAnalysis ? '最终规格尚未生成' : '结卡报告尚未生成'}</h2>
+            <p>{isBusinessAnalysis ? '需求规格通过独立审查后，会在这里提供最终版本和阅读确认。' : '所有交付单元完成并通过整体验收后，会在这里生成最终结卡报告。'}</p>
+          </div>
+        </section>}
+    </div>
+
+    <div className="task-detail-panel-stack">
         {showDeliveryWorkflow && <section className="task-section">
           <div className="section-head">
             <h2>运行信息与验证协助</h2>
@@ -675,36 +726,8 @@ export default async function TaskDetail({
           })}
         </section>}
 
-        {(task.agile_status === 'ready_to_close' || closureAcknowledgements.length > 0) && <section className="task-section">
-          <div className="section-head"><h2>{isBusinessAnalysis ? '通过审查的需求规格说明书' : '结卡报告'}</h2><small>版本 {task.review_revision}</small></div>
-          <div className="card document-list">
-            {reviewDocument ? <div className="document-item"><ArtifactDocument
-              taskId={task.task_id}
-              documentId={reviewDocument.document_id}
-              content={reviewDocument.content}
-              format={reviewDocument.format}
-              revision={reviewDocument.revision}
-              comments={documentComments.filter((comment) => comment.document_id === reviewDocument.document_id)}
-              feedbackGroups={feedbackGroups}
-              allowReopen={!isBusinessAnalysis && task.agile_status !== 'done'}
-              allowComment={task.agile_status !== 'done'}
-            /></div> : <div className="empty">结卡报告不可用，请重新运行 Review Agent。</div>}
-          </div>
-          {task.agile_status === 'ready_to_close' && reviewDocument && blockingFeedback.length > 0 && <div className="release-block">
-            <p className="muted">当前有 {blockingFeedback.length} 条反馈尚未闭环。系统会冻结为一个批次；需要修改的反馈将追加新的交付单元，不会回退或改写既有交付。</p>
-          </div>}
-          {task.agile_status === 'ready_to_close' && reviewDocument && blockingFeedback.length === 0 && <form action={acknowledgeClosureAction} className="release-block">
-            <input type="hidden" name="taskId" value={task.task_id}/>
-            <input type="hidden" name="reviewRevision" value={task.review_revision}/>
-            <button className="button success">{isBusinessAnalysis ? '我已阅读需求规格说明书并结束分析' : '我已阅读结卡报告并关闭需求'}</button>
-          </form>}
-        </section>}
-
-    </div>
-
-    <div className="task-detail-panel-stack">
         <section className="task-section">
-          <div className="section-head"><h2>活动记录</h2><small>{events.length} 条</small></div>
+          <div className="section-head"><h2>推进时间线</h2><small>{events.length} 条活动</small></div>
           <div className="card timeline">{events.length === 0 ? <div className="empty">暂无活动记录。</div> : events.map((event) => <div key={event.event_id}><span/><p><b>{agentLabel(event.actor)}</b> · {terminologyText(event.summary)}</p><small>{formatEventTime(event.created_at)}</small></div>)}</div>
         </section>
     </div>
@@ -773,33 +796,58 @@ export default async function TaskDetail({
     <section className="task-section task-audit-section">
       <div className="section-head">
         <h2>执行审计</h2>
-        <small>{executionAttempts.length} 次执行尝试 · 技术追溯信息</small>
+        <small>{executionAttempts.length} 次执行尝试 · {commandAudit.length} 条 Agent 命令</small>
       </div>
       <details className="card audit-details">
         <summary className="audit-summary">
           <GitBranch size={16}/>
-          <span>查看 Agent 输入版本、提交与验证关联</span>
+          <span>查看完整命令时间线、Agent 输入版本、提交与验证关联</span>
           <small>默认折叠</small>
         </summary>
         <div className="document-list">
-          {executionAttempts.length === 0 ? <div className="empty">尚无执行审计记录。</div> : executionAttempts.map((attempt) => <details key={attempt.execution_id} className="document-item">
-            <summary><GitBranch size={15}/><span>{attempt.lane ? `${attempt.lane === 'analysis' ? '交付分析' : attempt.lane === 'delivery' ? '开发验证' : '控制'} · ` : ''}{deliveryUnitLabel(attempt.story_index)} · {agentLabel(attempt.agent)} · attempt {attempt.attempt}{['planned', 'running', 'retryable_failed', 'system_blocked'].includes(attempt.status) ? ` · 剩余自动重试 ${remainingExecutionRetries(attempt.attempt)}` : ''}</span><small>{attempt.status}</small></summary>
-            <pre>{[
-              `execution: ${attempt.execution_id}`,
-              attempt.dispatch_generation_key ? `reservation: ${attempt.execution_id} · run ${attempt.run_id}` : '',
-              attempt.claimed_resources ? `claimed resources: ${attempt.claimed_resources}` : '',
-              attempt.status === 'planned' ? `preparing since: ${attempt.created_at}` : '',
-              `input hash: ${attempt.input_hash}`,
-              attempt.executor_id ? `runtime: ${attempt.executor_id} · model ${attempt.configured_model || 'default'} · reasoning ${attempt.reasoning_effort || 'default'}` : '',
-              attempt.base_commit ? `base commit: ${attempt.base_commit}` : '',
-              attempt.code_commit ? `code commit: ${attempt.code_commit}` : '',
-              attempt.verification_id ? `verification: ${attempt.verification_id}` : '',
-              attempt.prompt_version ? `prompt: Project r${attempt.prompt_version} · template v${attempt.prompt_template_version || 1} · ${attempt.prompt_hash || ''}` : '',
-              attempt.memory_revision ? `memory: r${attempt.memory_revision} · ${attempt.memory_hash || ''}` : '',
-              attempt.last_error ? `error: ${attempt.last_error}` : '',
-              attempt.retry_not_before ? `retry not before: ${attempt.retry_not_before}` : '',
-            ].filter(Boolean).join('\n')}</pre>
-          </details>)}
+          {executionAttempts.length === 0 ? <div className="empty">尚无执行审计记录。</div> : executionAttempts.map((attempt) => {
+            const commands = commandAuditByExecution.get(attempt.execution_id) || [];
+            return <details key={attempt.execution_id} className="document-item execution-audit-attempt">
+              <summary><GitBranch size={15}/><span>{attempt.lane ? `${attempt.lane === 'analysis' ? '交付分析' : attempt.lane === 'delivery' ? '开发验证' : '控制'} · ` : ''}{deliveryUnitLabel(attempt.story_index)} · {agentLabel(attempt.agent)} · attempt {attempt.attempt}{['planned', 'running', 'retryable_failed', 'system_blocked'].includes(attempt.status) ? ` · 剩余自动重试 ${remainingExecutionRetries(attempt.attempt)}` : ''}</span><small>{attempt.status} · {commands.length} 条命令</small></summary>
+              <div className="execution-command-audit">
+                <div className="execution-command-audit-head">
+                  <strong>Agent 命令记录</strong>
+                  <small>按实际执行顺序保留</small>
+                </div>
+                {commands.length === 0
+                  ? <div className="execution-command-empty">本次执行没有产生 Agent 领域命令。</div>
+                  : <div className="execution-command-list">{commands.map((command, index) => <div className={`execution-command-row ${command.status}`} key={command.id}>
+                    <span className="execution-command-index">{index + 1}</span>
+                    <span className="execution-command-state" aria-label={command.status === 'success' ? '成功' : command.status === 'error' ? '失败' : '执行中'}>
+                      {command.status === 'success' ? <CheckCircle2 size={15}/> : command.status === 'error' ? <AlertTriangle size={15}/> : <Clock3 size={15}/>}
+                    </span>
+                    <div className="execution-command-copy">
+                      <strong>{command.label}</strong>
+                      <small>{command.status === 'success' ? '执行成功' : command.status === 'error' ? '执行失败' : '正在执行'}</small>
+                    </div>
+                    <time>{formatEventTime(command.finishedAt || command.startedAt)}</time>
+                  </div>)}</div>}
+              </div>
+              <details className="execution-technical-details">
+                <summary>技术追溯信息</summary>
+                <pre>{[
+                  `execution: ${attempt.execution_id}`,
+                  attempt.dispatch_generation_key ? `reservation: ${attempt.execution_id} · run ${attempt.run_id}` : '',
+                  attempt.claimed_resources ? `claimed resources: ${attempt.claimed_resources}` : '',
+                  attempt.status === 'planned' ? `preparing since: ${attempt.created_at}` : '',
+                  `input hash: ${attempt.input_hash}`,
+                  attempt.executor_id ? `runtime: ${attempt.executor_id} · model ${attempt.configured_model || 'default'} · reasoning ${attempt.reasoning_effort || 'default'}` : '',
+                  attempt.base_commit ? `base commit: ${attempt.base_commit}` : '',
+                  attempt.code_commit ? `code commit: ${attempt.code_commit}` : '',
+                  attempt.verification_id ? `verification: ${attempt.verification_id}` : '',
+                  attempt.prompt_version ? `prompt: Project r${attempt.prompt_version} · template v${attempt.prompt_template_version || 1} · ${attempt.prompt_hash || ''}` : '',
+                  attempt.memory_revision ? `memory: r${attempt.memory_revision} · ${attempt.memory_hash || ''}` : '',
+                  attempt.last_error ? `error: ${attempt.last_error}` : '',
+                  attempt.retry_not_before ? `retry not before: ${attempt.retry_not_before}` : '',
+                ].filter(Boolean).join('\n')}</pre>
+              </details>
+            </details>;
+          })}
         </div>
       </details>
     </section>

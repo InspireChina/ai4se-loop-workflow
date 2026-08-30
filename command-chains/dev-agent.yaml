@@ -4,23 +4,17 @@ agent: dev-agent
 
 artifacts:
   development:
+    title: 开发实现结果
     blocks:
-      criteria:
-        title: IMPLEMENTATION EVIDENCE
-        cardinality: many
-        format: yaml
-        required: true
-        fields:
-          evidence: { type: string, required: true }
       recovery-resolutions:
-        title: RECOVERY RESOLUTIONS
+        title: 恢复事项处理
         cardinality: many
         format: yaml
         fields:
           summary: { type: string, required: true }
           evidence: { type: string, required: true }
       code-review:
-        title: CODE REVIEW
+        title: 代码审查
         cardinality: one
         format: yaml
         required: true
@@ -28,7 +22,7 @@ artifacts:
           summary: { type: string, required: true }
           evidence: { type: string, required: true }
       risks:
-        title: RESIDUAL RISKS
+        title: 残余风险
         cardinality: many
         format: yaml
         fields:
@@ -44,9 +38,7 @@ phases:
   implement:
     type: builtin
     builtin: implementation-evidence
-    artifacts:
-      - development.criteria
-      - development.recovery-resolutions
+    artifacts: [development.recovery-resolutions]
 
   # Artifact Phase：独立走查当前实现的规范、职责边界、可读性和可维护性；发现阻塞问题时回退 implement。
   review:

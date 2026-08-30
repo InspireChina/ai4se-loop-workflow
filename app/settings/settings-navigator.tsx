@@ -21,7 +21,7 @@ export function SettingsNavigator({ items, children }: { items: SettingsNavigati
   }, []);
 
   return <div className="settings-layout">
-    <nav className="card settings-navigation" aria-label="项目设置分类">
+    <nav className="card settings-navigation" aria-label="设置分类">
       <div className="settings-navigation-head"><strong>设置目录</strong><small>按领域选择配置项</small></div>
       {groups.map((group, groupIndex) => <section className="settings-navigation-section" key={group.label}>
         <div className="settings-navigation-group"><span>{groupIndex + 1}</span><strong>{group.label}</strong></div>

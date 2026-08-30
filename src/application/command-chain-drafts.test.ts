@@ -58,6 +58,19 @@ async function deliveryAnalysisDelegation(title: string) {
         (?, 1, 'preserve:export-engine', 'preserve',
          '保持既有导出计算和任务调度语义', 'TEST:preserve:export-engine')
     `).run(taskId, taskId);
+    db.prepare(`
+      INSERT INTO acceptances(
+        acceptance_id, task_id, acceptance_key, scope_type, story_index,
+        statement, oracle, source_ref
+      ) VALUES(?, ?, 'unit:export-result', 'delivery_unit', 1,
+        '导出完成后结果入口与确认的呈现方式一致',
+        '用户从真实结果入口获得与业务选择一致的可用导出结果',
+        'TEST:acceptance:unit:export-result')
+    `).run(`ACCEPTANCE-unit-${taskId}`, taskId);
+    db.prepare(`
+      INSERT INTO delivery_unit_acceptances(task_id, story_index, acceptance_id, relation)
+      VALUES(?, 1, ?, 'unit')
+    `).run(taskId, `ACCEPTANCE-unit-${taskId}`);
   })();
   const delegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'analyst-agent' && item.storyIndex === 1);
@@ -89,7 +102,7 @@ test('analyst drafts have only the YAML command-chain protocol', async () => {
   assert.match(help, /通用命令链不绑定 Agent namespace/);
   await assert.rejects(
     command(active.executionId, active.token!, ['delivery-analysis', 'status']),
-    /当前草稿使用通用命令链/,
+    /只允许 YAML 命令链协议/,
   );
 
   const status = await command(active.executionId, active.token!, ['status']);

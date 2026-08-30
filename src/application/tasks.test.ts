@@ -2019,7 +2019,7 @@ test('does not consume an Agent slot after Analysis has exited and its result is
   assert.equal(dispatched.length, 4);
 });
 
-test('initializes one project-owned Prompt from the system template without overwriting project edits', async () => {
+test('uses one global Agent Prompt while keeping Memory and legacy Prompt rows project-scoped', async () => {
   const {
     ensureAgentRuntimeWorkspace,
     agentProfileInternals,
@@ -2029,15 +2029,15 @@ test('initializes one project-owned Prompt from the system template without over
     saveAgentMemory,
     saveAgentPrompt,
   } = await import('./agent-profiles');
-  const { databaseConnection, hash } = await import('../infrastructure/database');
+  const { appDatabaseConnection, databaseConnection, hash } = await import('../infrastructure/database');
   const { AGENT_PROFILE_DEFINITIONS } = await import('../domain/agent-profile');
 
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 13);
+  assert.equal(original.profile.prompt_seed_revision, 14);
   assert.equal(original.currentPrompt.version, 1);
-  assert.equal(original.currentPrompt.template_version, 13);
+  assert.equal(original.currentPrompt.template_version, 14);
   assert.equal(original.currentPrompt.source, 'system');
   assert.equal(original.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
   assert.equal('promptHistory' in original, false);
@@ -2060,9 +2060,9 @@ test('initializes one project-owned Prompt from the system template without over
   `).run();
   await ensureAgentRuntimeWorkspace();
   const upgradedSystemSeed = await getAgentProfile('review-agent');
-  assert.equal(upgradedSystemSeed.profile.prompt_seed_revision, 13);
-  assert.equal(upgradedSystemSeed.currentPrompt.version, 2);
-  assert.equal(upgradedSystemSeed.currentPrompt.template_version, 13);
+  assert.equal(upgradedSystemSeed.profile.prompt_seed_revision, 14);
+  assert.equal(upgradedSystemSeed.currentPrompt.version, 1);
+  assert.equal(upgradedSystemSeed.currentPrompt.template_version, 14);
   assert.equal(upgradedSystemSeed.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['review-agent'].prompt);
 
   const legacyPrompt = '判断需求类型并整理上下文，完成时提供分类、流程方向和需求文档。';
@@ -2077,9 +2077,8 @@ test('initializes one project-owned Prompt from the system template without over
   agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
   await ensureAgentRuntimeWorkspace();
   const upgradedSeed = await getAgentProfile('backlog-agent');
-  assert.equal(upgradedSeed.profile.prompt_seed_revision, 0);
   assert.equal(upgradedSeed.currentPrompt.version, 1);
-  assert.equal(upgradedSeed.currentPrompt.content, legacyPrompt);
+  assert.equal(upgradedSeed.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt);
   assert.equal(upgradedSeed.currentPrompt.source, 'system');
   assert.equal(
     (db.prepare("SELECT COUNT(*) AS count FROM agent_prompts WHERE agent_id = 'backlog-agent'").get() as { count: number }).count,
@@ -2090,12 +2089,16 @@ test('initializes one project-owned Prompt from the system template without over
   await ensureAgentRuntimeWorkspace();
   const resetBaseline = await getAgentProfile('backlog-agent');
   assert.equal(resetBaseline.currentPrompt.version, 1);
-  assert.equal(resetBaseline.currentPrompt.template_version, 13);
+  assert.equal(resetBaseline.currentPrompt.template_version, 14);
   assert.match(resetBaseline.currentPrompt.content, /# 工作原则/);
   assert.doesNotMatch(resetBaseline.currentPrompt.content, /完成时提供分类、流程方向/);
   assert.match(
     readFileSync(join(resetBaseline.runtimeDirectory, 'PROMPT.md'), 'utf8'),
     /# 工作原则/,
+  );
+  assert.equal(
+    (appDatabaseConnection().prepare("SELECT COUNT(*) AS count FROM agent_configuration_sets WHERE agent_id = 'backlog-agent' AND is_active = 1").get() as { count: number }).count,
+    1,
   );
   const resumedBacklog = await loadAgentRuntime('backlog-agent', 'resume');
   assert.match(resumedBacklog.prompt, /已有用户决定必须按原 key 继承/);
@@ -2103,8 +2106,8 @@ test('initializes one project-owned Prompt from the system template without over
   assert.match(resumedAnalyst.prompt, /decision key 是跨轮次不可变的系统标识/);
   assert.match(resumedAnalyst.prompt, /逐字复用/);
 
-  const projectPrompt = `${original.currentPrompt.content}\n\n# 当前项目约定\n\n- 在修改前先读取相关交付规格。`;
-  const promptRevision = await saveAgentPrompt({ agentId: 'dev-agent', content: projectPrompt, reason: 'test project prompt' });
+  const projectPrompt = `${original.currentPrompt.content}\n\n# 全局 Agent 约定\n\n- 在修改前先读取相关交付规格。`;
+  const promptRevision = await saveAgentPrompt({ agentId: 'dev-agent', content: projectPrompt, reason: 'test global prompt' });
   const memoryRevision = await saveAgentMemory({
     agentId: 'dev-agent',
     content: '# Durable Memory\n\n- 项目使用 npm test 运行确定性测试。',
@@ -2145,7 +2148,7 @@ test('initializes one project-owned Prompt from the system template without over
   );
   const runtime = await loadAgentRuntime('dev-agent', 'plan');
   assert.equal(runtime.promptVersion, reconciled.currentPrompt.version);
-  assert.equal(runtime.promptTemplateVersion, 13);
+  assert.equal(runtime.promptTemplateVersion, 14);
   assert.equal(runtime.promptHash, hash(projectPrompt));
   assert.equal(runtime.promptStatus, 'active');
   assert.equal(runtime.evolutionCandidateId, null);
@@ -2157,9 +2160,9 @@ test('initializes one project-owned Prompt from the system template without over
   const reset = await getAgentProfile('dev-agent');
   assert.equal(resetRevision, promptRevision + 1);
   assert.equal(reset.currentPrompt.version, resetRevision);
-  assert.equal(reset.currentPrompt.template_version, 13);
+  assert.equal(reset.currentPrompt.template_version, 14);
   assert.equal(reset.currentPrompt.source, 'system');
-  assert.equal(reset.currentPrompt.reason, '用户重置为系统模板 V13');
+  assert.equal(reset.currentPrompt.reason, '用户重置为系统模板 V14');
   assert.equal(reset.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
   assert.equal(reset.currentMemory.revision, memoryRevision);
   assert.equal(reset.candidatePrompt, null);
@@ -2174,9 +2177,9 @@ test('initializes one project-owned Prompt from the system template without over
   );
 });
 
-test('promotes repeated evolution evidence and gates Prompt changes through deterministic Canary runs', async () => {
+test('promotes repeated project evidence into a global Prompt through deterministic Canary runs', async () => {
   const { createTask } = await import('./tasks');
-  const { databaseConnection, hash } = await import('../infrastructure/database');
+  const { appDatabaseConnection, databaseConnection, hash } = await import('../infrastructure/database');
   const { applyEvolutionResult, beginEvolutionRun, updatePromptCanary } = await import('./agent-evolution');
   const { ensureAgentRuntimeWorkspace, getAgentProfile, loadAgentRuntime } = await import('./agent-profiles');
   const { cancelExecution } = await import('./executions');
@@ -2256,7 +2259,7 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
     1,
   );
   assert.equal(
-    (db.prepare("SELECT COUNT(*) AS count FROM agent_prompt_candidates WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
+    (appDatabaseConnection().prepare("SELECT COUNT(*) AS count FROM agent_configuration_prompt_candidates WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
     1,
   );
 
@@ -2335,7 +2338,7 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
     1,
   );
   assert.equal(
-    (db.prepare("SELECT COUNT(*) AS count FROM agent_prompt_candidates WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
+    (appDatabaseConnection().prepare("SELECT COUNT(*) AS count FROM agent_configuration_prompt_candidates WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
     0,
   );
   const promotedPrompt = detail.currentPrompt;
@@ -2367,7 +2370,7 @@ test('promotes repeated evolution evidence and gates Prompt changes through dete
   assert.equal(detail.currentPrompt.version, currentPromptBeforeRejectedCanary.version);
   assert.equal(detail.currentPrompt.content_hash, currentPromptBeforeRejectedCanary.content_hash);
   assert.equal(
-    (db.prepare("SELECT COUNT(*) AS count FROM agent_prompt_candidates WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
+    (appDatabaseConnection().prepare("SELECT COUNT(*) AS count FROM agent_configuration_prompt_candidates WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
     0,
   );
   assert.equal(detail.observations.find((item) => item.fingerprint === 'avoid-ambiguous-tool-order')?.status, 'rejected');

@@ -5,6 +5,12 @@ import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, DEFAULT_AGENT_MEMORY, FLOW_AGENT_IDS, isFlowAgentId, type FlowAgentId } from '../domain/agent-profile';
 import { databaseConnection, hash, paths } from '../infrastructure/database';
+import {
+  activeAgentConfigurationPrompt,
+  activeAgentConfigurationPromptCandidate,
+  saveActiveAgentConfigurationPrompt,
+  syncAgentConfigurationCanaryReceipts,
+} from './agent-configurations';
 
 export type AgentProfile = {
   agent_id: FlowAgentId;
@@ -124,17 +130,11 @@ function materializeAgent(agentId: FlowAgentId, prompt: string, memory: string) 
 
 type AgentDatabase = Awaited<ReturnType<typeof databaseConnection>>;
 type CurrentPromptRow = Omit<CurrentPrompt, 'status'>;
-type PromptCandidateRow = Omit<PromptCandidate, 'status'>;
 
 function currentPromptInDb(db: AgentDatabase, agentId: FlowAgentId): CurrentPrompt {
   const row = db.prepare('SELECT * FROM agent_prompts WHERE agent_id = ?').get(agentId) as CurrentPromptRow | undefined;
   if (!row) throw new Error(`Agent 当前 Prompt 不存在：${agentId}`);
   return { ...row, status: 'active' };
-}
-
-function promptCandidateInDb(db: AgentDatabase, agentId: FlowAgentId): PromptCandidate | null {
-  const row = db.prepare('SELECT * FROM agent_prompt_candidates WHERE agent_id = ?').get(agentId) as PromptCandidateRow | undefined;
-  return row ? { ...row, status: 'candidate' } : null;
 }
 
 function parseDailyMemoryObservations(content: string, durableMemory = ''): DailyMemoryObservation[] {
@@ -177,102 +177,48 @@ function canaryAttemptOutcome(attempt: CanaryAttemptRow): 'active' | 'succeeded'
   }
 }
 
-function reconcilePromptCandidateInDb(db: AgentDatabase, agentId: FlowAgentId) {
-  return db.transaction(() => {
-    const candidate = promptCandidateInDb(db, agentId);
-    if (!candidate) return false;
-    const attempts = db.prepare(`
-      SELECT execution_id, status, result_json
-      FROM execution_attempts
-      WHERE evolution_candidate_id = ?
-      ORDER BY created_at, execution_id
-    `).all(candidate.candidate_id) as CanaryAttemptRow[];
-    const outcomes = attempts.map((attempt) => ({
-      ...attempt,
-      outcome: canaryAttemptOutcome(attempt),
-    }));
-    let fingerprint = '';
-    try {
-      fingerprint = String(JSON.parse(candidate.evidence_json || '{}').fingerprint || '');
-    } catch { /* Invalid evidence can still be safely discarded or promoted. */ }
-
-    const discard = () => {
-      db.prepare('DELETE FROM agent_prompt_candidates WHERE candidate_id = ? AND agent_id = ?').run(candidate.candidate_id, agentId);
-      db.prepare(`
-        UPDATE agent_profiles
-        SET candidate_prompt_version = NULL, canary_remaining = 0, updated_at = CURRENT_TIMESTAMP
-        WHERE agent_id = ?
-      `).run(agentId);
-      if (fingerprint) {
-        db.prepare(`
-          UPDATE agent_observations SET status = 'rejected', last_seen_at = CURRENT_TIMESTAMP
-          WHERE agent_id = ? AND fingerprint = ? AND status = 'prompt_candidate'
-        `).run(agentId, fingerprint);
-      }
-    };
-
-    if (outcomes.some((attempt) => attempt.outcome === 'failed')) {
-      discard();
-      return true;
-    }
-
-    const activeCount = outcomes.filter((attempt) => attempt.outcome === 'active').length;
-    const successes = outcomes.filter((attempt) => attempt.outcome === 'succeeded');
-    const remaining = Math.max(0, 3 - successes.length);
-    if (activeCount === 0 && remaining === 0) {
-      const finalExecutionId = successes.at(-1)?.execution_id || 'unknown';
-      const promotionReason = [candidate.reason, `Canary 通过，最终 execution ${finalExecutionId}`].filter(Boolean).join('；');
-      const currentPrompt = currentPromptInDb(db, agentId);
-      if (currentPrompt.version !== candidate.base_prompt_revision) {
-        discard();
-        return true;
-      }
-      db.prepare(`
-        UPDATE agent_prompts
-        SET version = ?,
-            content = ?,
-            content_hash = ?,
-            source = 'evolution',
-            reason = ?,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE agent_id = ?
-          AND version = ?
-      `).run(
-        candidate.revision,
-        candidate.content,
-        candidate.content_hash,
-        promotionReason,
-        agentId,
-        candidate.base_prompt_revision,
-      );
-      db.prepare('DELETE FROM agent_prompt_candidates WHERE candidate_id = ? AND agent_id = ?').run(candidate.candidate_id, agentId);
-      if (fingerprint) {
-        db.prepare(`
-          UPDATE agent_observations SET status = 'promoted_prompt', last_seen_at = CURRENT_TIMESTAMP
-          WHERE agent_id = ? AND fingerprint = ?
-        `).run(agentId, fingerprint);
-      }
-      db.prepare(`
-        UPDATE agent_profiles
-        SET current_prompt_version = ?, candidate_prompt_version = NULL, canary_remaining = 0,
-            last_evolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-        WHERE agent_id = ?
-      `).run(candidate.revision, agentId);
-      return true;
-    }
-
-    db.prepare(`
-      UPDATE agent_prompt_candidates
-      SET remaining_runs = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE candidate_id = ? AND agent_id = ?
-    `).run(remaining, candidate.candidate_id, agentId);
+function reconcileGlobalPromptCandidateInProject(db: AgentDatabase, agentId: FlowAgentId) {
+  const candidate = activeAgentConfigurationPromptCandidate(agentId);
+  const receipts = candidate
+    ? (db.prepare(`
+        SELECT execution_id, status, result_json
+        FROM execution_attempts
+        WHERE evolution_candidate_id = ?
+        ORDER BY created_at, execution_id
+      `).all(candidate.candidate_id) as CanaryAttemptRow[]).map((attempt) => ({
+        executionId: attempt.execution_id,
+        outcome: canaryAttemptOutcome(attempt),
+      }))
+    : [];
+  const result = syncAgentConfigurationCanaryReceipts({ agentId, receipts });
+  const nextCandidate = activeAgentConfigurationPromptCandidate(agentId);
+  const current = activeAgentConfigurationPrompt(agentId);
+  db.transaction(() => {
     db.prepare(`
       UPDATE agent_profiles
-      SET candidate_prompt_version = ?, canary_remaining = ?, updated_at = CURRENT_TIMESTAMP
+      SET current_prompt_version = ?, candidate_prompt_version = ?, canary_remaining = ?,
+          last_evolved_at = CASE WHEN ? IN ('promoted', 'rejected') THEN CURRENT_TIMESTAMP ELSE last_evolved_at END,
+          updated_at = CURRENT_TIMESTAMP
       WHERE agent_id = ?
-    `).run(candidate.revision, remaining, agentId);
-    return remaining !== candidate.remaining_runs;
-  }).immediate();
+    `).run(
+      current.revision,
+      nextCandidate?.revision || null,
+      nextCandidate?.remaining_runs || 0,
+      result.status,
+      agentId,
+    );
+    if (result.fingerprint && result.status === 'promoted') {
+      db.prepare(`
+        UPDATE agent_observations SET status = 'promoted_prompt', last_seen_at = CURRENT_TIMESTAMP
+        WHERE agent_id = ? AND fingerprint = ?
+      `).run(agentId, result.fingerprint);
+    } else if (result.fingerprint && result.status === 'rejected') {
+      db.prepare(`
+        UPDATE agent_observations SET status = 'rejected', last_seen_at = CURRENT_TIMESTAMP
+        WHERE agent_id = ? AND fingerprint = ? AND status = 'prompt_candidate'
+      `).run(agentId, result.fingerprint);
+    }
+  })();
 }
 
 async function writeManifest() {
@@ -381,7 +327,7 @@ export async function ensureAgentRuntimeWorkspace() {
   }).immediate();
 
   for (const agentId of FLOW_AGENT_IDS) {
-    reconcilePromptCandidateInDb(db, agentId);
+    reconcileGlobalPromptCandidateInProject(db, agentId);
     await reconcileAgentFiles(agentId);
   }
   await writeManifest();
@@ -391,7 +337,7 @@ export async function ensureAgentRuntimeWorkspace() {
 async function reconcileAgentFiles(agentId: FlowAgentId) {
   const db = await databaseConnection();
   const profile = db.prepare('SELECT * FROM agent_profiles WHERE agent_id = ?').get(agentId) as AgentProfile;
-  const prompt = promptCandidateInDb(db, agentId) || currentPromptInDb(db, agentId);
+  const globalPrompt = activeAgentConfigurationPrompt(agentId);
   let memory = db.prepare('SELECT * FROM agent_memory_versions WHERE agent_id = ? AND revision = ?').get(agentId, profile.current_memory_revision) as MemoryVersion;
   const directory = agentDirectory(agentId);
   mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -405,13 +351,13 @@ async function reconcileAgentFiles(agentId: FlowAgentId) {
       memory = next.currentMemory;
     }
   } catch { /* Missing or invalid local files are rematerialized from SQLite. */ }
-  materializeAgent(agentId, prompt.content, memory.content);
+  materializeAgent(agentId, globalPrompt.content, memory.content);
 }
 
 export async function listAgentProfiles() {
   await ensureAgentRuntimeWorkspace();
   const db = await databaseConnection();
-  return db.prepare(`
+  const profiles = db.prepare(`
     SELECT profile.*,
       (SELECT COUNT(*) FROM agent_observations observation WHERE observation.agent_id = profile.agent_id) AS observation_count,
       (SELECT COUNT(*) FROM agent_observations observation WHERE observation.agent_id = profile.agent_id AND observation.status IN ('promoted_memory', 'promoted_prompt')) AS promoted_count,
@@ -423,6 +369,12 @@ export async function listAgentProfiles() {
       WHEN 'dev-agent' THEN 5 WHEN 'test-agent' THEN 6
       WHEN 'review-agent' THEN 7 ELSE 8 END
   `).all() as (AgentProfile & { observation_count: number; promoted_count: number; execution_count: number })[];
+  return profiles.map((profile) => ({
+    ...profile,
+    current_prompt_version: activeAgentConfigurationPrompt(profile.agent_id).revision,
+    candidate_prompt_version: activeAgentConfigurationPromptCandidate(profile.agent_id)?.revision || null,
+    canary_remaining: activeAgentConfigurationPromptCandidate(profile.agent_id)?.remaining_runs || 0,
+  }));
 }
 
 export async function getAgentProfile(agentIdInput: string, ensure = true) {
@@ -430,10 +382,42 @@ export async function getAgentProfile(agentIdInput: string, ensure = true) {
   const agentId = agentIdInput;
   if (ensure) await ensureAgentRuntimeWorkspace();
   const db = await databaseConnection();
-  const profile = db.prepare('SELECT * FROM agent_profiles WHERE agent_id = ?').get(agentId) as AgentProfile | undefined;
+  const storedProfile = db.prepare('SELECT * FROM agent_profiles WHERE agent_id = ?').get(agentId) as AgentProfile | undefined;
+  const globalPrompt = activeAgentConfigurationPrompt(agentId);
+  const globalCandidate = activeAgentConfigurationPromptCandidate(agentId);
+  const profile = storedProfile ? {
+    ...storedProfile,
+    current_prompt_version: globalPrompt.revision,
+    candidate_prompt_version: globalCandidate?.revision || null,
+    canary_remaining: globalCandidate?.remaining_runs || 0,
+  } : undefined;
   if (!profile) throw new Error(`Agent Profile 不存在：${agentId}`);
-  const currentPrompt = currentPromptInDb(db, agentId);
-  const candidatePrompt = promptCandidateInDb(db, agentId);
+  const currentPrompt: CurrentPrompt = {
+    agent_id: agentId,
+    version: globalPrompt.revision,
+    template_version: globalPrompt.templateVersion,
+    content: globalPrompt.content,
+    content_hash: globalPrompt.contentHash,
+    source: globalPrompt.source,
+    reason: globalPrompt.reason,
+    updated_at: globalPrompt.updatedAt,
+    status: 'active',
+  };
+  const candidatePrompt: PromptCandidate | null = globalCandidate ? {
+    candidate_id: globalCandidate.candidate_id,
+    agent_id: globalCandidate.agent_id,
+    revision: globalCandidate.revision,
+    base_prompt_revision: globalCandidate.base_prompt_revision,
+    content: globalCandidate.content,
+    content_hash: globalCandidate.content_hash,
+    source: 'evolution',
+    reason: globalCandidate.reason,
+    evidence_json: globalCandidate.evidence_json,
+    remaining_runs: globalCandidate.remaining_runs,
+    created_at: globalCandidate.created_at,
+    updated_at: globalCandidate.updated_at,
+    status: 'candidate',
+  } : null;
   const currentMemory = db.prepare('SELECT * FROM agent_memory_versions WHERE agent_id = ? AND revision = ?').get(agentId, profile.current_memory_revision) as MemoryVersion;
   const memoryHistory = db.prepare('SELECT * FROM agent_memory_versions WHERE agent_id = ? ORDER BY revision DESC').all(agentId) as MemoryVersion[];
   const observations = db.prepare(`
@@ -453,7 +437,7 @@ export async function getAgentProfile(agentIdInput: string, ensure = true) {
     definition: AGENT_PROFILE_DEFINITIONS[agentId],
     profile,
     currentPrompt,
-    candidatePrompt,
+    candidatePrompt: candidatePrompt as PromptCandidate | null,
     currentMemory,
     memoryHistory,
     observations,
@@ -473,50 +457,24 @@ async function replaceProjectPrompt(
 ) {
   const content = promptSchema.parse(contentInput);
   const db = await databaseConnection();
-  const replaced = db.transaction(() => {
-    const profile = db.prepare('SELECT * FROM agent_profiles WHERE agent_id = ?').get(agentId) as AgentProfile;
-    const currentPrompt = currentPromptInDb(db, agentId);
-    const candidate = promptCandidateInDb(db, agentId);
-    const templateVersion = templateVersionInput ?? currentPrompt.template_version;
-    if (
-      skipIfUnchanged
-      && currentPrompt.content_hash === hash(content)
-      && currentPrompt.template_version === templateVersion
-      && !candidate
-    ) {
-      return { revision: currentPrompt.version, memoryRevision: profile.current_memory_revision };
-    }
-    const revision = currentPrompt.version + 1;
-    let candidateFingerprint = '';
-    try {
-      candidateFingerprint = String(JSON.parse(candidate?.evidence_json || '{}').fingerprint || '');
-    } catch { /* Invalid candidate evidence does not block a human replacement. */ }
-    db.prepare(`
-      UPDATE agent_prompts
-      SET version = ?,
-          template_version = ?,
-          content = ?,
-          content_hash = ?,
-          source = ?,
-          reason = ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE agent_id = ?
-    `).run(revision, templateVersion, content, hash(content), source, reason, agentId);
-    db.prepare('DELETE FROM agent_prompt_candidates WHERE agent_id = ?').run(agentId);
-    if (candidateFingerprint) {
-      db.prepare(`
-        UPDATE agent_observations SET status = 'rejected', last_seen_at = CURRENT_TIMESTAMP
-        WHERE agent_id = ? AND fingerprint = ? AND status = 'prompt_candidate'
-      `).run(agentId, candidateFingerprint);
-    }
-    db.prepare(`
-      UPDATE agent_profiles
-      SET current_prompt_version = ?, candidate_prompt_version = NULL, canary_remaining = 0,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE agent_id = ?
-    `).run(revision, agentId);
-    return { revision, memoryRevision: profile.current_memory_revision };
-  }).immediate();
+  const current = activeAgentConfigurationPrompt(agentId);
+  if (skipIfUnchanged && current.contentHash === hash(content)) return current.revision;
+  const configuration = saveActiveAgentConfigurationPrompt({
+    agentId,
+    content,
+    source,
+    reason,
+    templateVersion: templateVersionInput || AGENT_PROMPT_SEED_REVISION,
+  });
+  const replaced = { revision: configuration.promptRevision, memoryRevision: (db.prepare(`
+    SELECT current_memory_revision FROM agent_profiles WHERE agent_id = ?
+  `).get(agentId) as { current_memory_revision: number }).current_memory_revision };
+  db.prepare(`
+    UPDATE agent_profiles
+    SET current_prompt_version = ?, candidate_prompt_version = NULL, canary_remaining = 0,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE agent_id = ?
+  `).run(replaced.revision, agentId);
   const memory = db.prepare(`
     SELECT content FROM agent_memory_versions WHERE agent_id = ? AND revision = ?
   `).get(agentId, replaced.memoryRevision) as { content: string };
@@ -537,8 +495,7 @@ async function createMemoryVersion(agentId: FlowAgentId, contentInput: string, s
     `).run(agentId, revision, content, hash(content), source, reason, evidence ? JSON.stringify(evidence) : null);
     db.prepare('UPDATE agent_profiles SET current_memory_revision = ?, updated_at = CURRENT_TIMESTAMP WHERE agent_id = ?').run(revision, agentId);
   })();
-  const prompt = promptCandidateInDb(db, agentId) || currentPromptInDb(db, agentId);
-  materializeAgent(agentId, prompt.content, content);
+  materializeAgent(agentId, activeAgentConfigurationPrompt(agentId).content, content);
   await writeManifest();
   return revision;
 }
@@ -546,7 +503,7 @@ async function createMemoryVersion(agentId: FlowAgentId, contentInput: string, s
 export async function saveAgentPrompt(input: { agentId: string; content: unknown; reason?: unknown }) {
   if (!isFlowAgentId(input.agentId)) throw new Error('未知 Agent');
   await ensureAgentRuntimeWorkspace();
-  const revision = await replaceProjectPrompt(input.agentId, String(input.content ?? ''), String(input.reason || '用户编辑项目 Agent Prompt'));
+  const revision = await replaceProjectPrompt(input.agentId, String(input.content ?? ''), String(input.reason || '用户编辑全局 Agent Prompt'));
   try { revalidatePath('/agents', 'layout'); } catch { /* Non-request usage. */ }
   return revision;
 }
@@ -682,5 +639,4 @@ export const agentProfileInternals = {
   parseDailyMemoryObservations,
   agentDirectory,
   atomicWrite,
-  promptCandidateInDb,
 };

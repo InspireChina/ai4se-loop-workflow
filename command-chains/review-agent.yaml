@@ -4,9 +4,10 @@ agent: review-agent
 
 artifacts:
   review:
+    title: 结卡报告
     blocks:
       subjects:
-        title: FROZEN CLOSURE SUBJECTS
+        title: 冻结结卡主题
         cardinality: many
         format: yaml
         writable: false
@@ -18,7 +19,7 @@ artifacts:
           contractRef: { type: string }
           storyIndex: { type: string }
       evidence-sources:
-        title: FROZEN EVIDENCE SOURCES
+        title: 冻结证据来源
         cardinality: many
         format: yaml
         writable: false
@@ -31,7 +32,7 @@ artifacts:
           fingerprint: { type: string, required: true }
           independentTest: { type: enum, required: true, values: [yes, no] }
       meta:
-        title: FROZEN REVIEW META
+        title: 冻结审查元数据
         cardinality: one
         format: yaml
         writable: false
@@ -42,7 +43,7 @@ artifacts:
           reviewRevision: { type: string, required: true }
           reviewDocumentId: { type: string }
       reconciliations:
-        title: FINAL FACT RECONCILIATIONS
+        title: 最终事实对账
         cardinality: many
         format: yaml
         fields:
@@ -50,7 +51,7 @@ artifacts:
           result: { type: string, required: true }
           evidenceRefs: { type: array, required: true, minItems: 1 }
       gaps:
-        title: CLOSURE GAPS
+        title: 结卡缺口
         cardinality: many
         format: yaml
         fields:
@@ -59,7 +60,7 @@ artifacts:
           reason: { type: string, required: true }
           boundary: { type: string, required: true }
       assessment:
-        title: CLOSURE ASSESSMENT
+        title: 结卡评估
         cardinality: one
         format: yaml
         required: true
@@ -68,14 +69,14 @@ artifacts:
           evidenceBoundary: { type: string, required: true }
           residualRisk: { type: string }
       report-sections:
-        title: CLOSURE REPORT SECTIONS
+        title: 结卡报告章节
         cardinality: many
         format: yaml
         fields:
           kind: { type: enum, required: true, values: [outcome, scope, decisions, implementation, verification, deviations, risks, feedback] }
           content: { type: string, required: true }
       forward-units:
-        title: FORWARD DELIVERY UNITS
+        title: 前向交付单元
         cardinality: many
         format: yaml
         fields:

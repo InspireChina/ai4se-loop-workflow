@@ -90,7 +90,7 @@ test('Repro Agent pauses for missing facts and resumes the same YAML command cha
   const first = await begin(delegation, `${taskId}-first`);
 
   assert.match(await command(first.executionId, first.token!, ['help']), /通用命令链/);
-  await assert.rejects(command(first.executionId, first.token!, ['reproduction', 'status']), /当前草稿使用通用命令链/);
+  await assert.rejects(command(first.executionId, first.token!, ['reproduction', 'status']), /只允许 YAML 命令链协议/);
   const status = await command(first.executionId, first.token!, ['status']);
   assert.match(status, /Phase: investigation/);
   assert.match(status, /reproduction\.verdict/);

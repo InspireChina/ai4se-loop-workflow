@@ -93,44 +93,33 @@ test('advertises a role-specific command guide for every progressive flow Agent'
   assert.match(direct || '', /direct run/);
   assert.match(direct || '', /direct submit/);
   assert.doesNotMatch(direct || '', /direct status|needs_input|request-input/);
-  assert.match(backlog || '', /通用命令链/);
-  assert.match(backlog || '', /phase complete/);
-  assert.match(backlog || '', /phase rewind --to <earlier-phase>/);
-  assert.match(splitter || '', /通用命令链/);
-  assert.match(splitter || '', /phase complete/);
-  assert.match(splitter || '', /phase rewind --to <earlier-phase>/);
-  assert.match(analyst || '', /通用命令链/);
-  assert.match(analyst || '', /phase complete/);
-  assert.match(analyst || '', /phase rewind --to <earlier-phase>/);
-  assert.match(development || '', /通用命令链/);
-  assert.match(development || '', /phase complete/);
-  assert.match(development || '', /phase rewind --to <earlier-phase>/);
-  assert.match(verification || '', /通用命令链/);
-  assert.match(verification || '', /phase complete/);
-  assert.match(verification || '', /phase rewind --to <earlier-phase>/);
-  assert.match(review || '', /通用命令链/);
-  assert.match(review || '', /phase complete/);
-  assert.match(review || '', /phase rewind --to <earlier-phase>/);
-  for (const prompt of [ideaContext, businessDesign, requirementSpec, specReview]) {
-    assert.match(prompt || '', /help <context\|workflow\|artifact\|decision\|finish>/);
-    assert.match(prompt || '', /命令统一返回 `COMMAND RESULT`/);
+  const progressivePrompts = [
+    ideaContext,
+    businessDesign,
+    requirementSpec,
+    specReview,
+    backlog,
+    splitter,
+    analyst,
+    development,
+    verification,
+    review,
+  ];
+  for (const prompt of progressivePrompts) {
+    assert.match(prompt || '', /通用命令链/);
+    assert.match(prompt || '', /loop-agent\.mjs" status/);
+    assert.match(prompt || '', /loop-agent\.mjs" help/);
+    assert.match(prompt || '', /phase complete/);
+    assert.match(prompt || '', /phase rewind --to <earlier-phase>/);
   }
-  assert.match(ideaContext || '', /idea-context request-clarification/);
-  assert.match(businessDesign || '', /business-design request-clarification/);
-  assert.match(requirementSpec || '', /requirement-spec return-gap/);
-  assert.match(specReview || '', /spec-review approve/);
+  for (const prompt of [ideaContext, businessDesign, requirementSpec, specReview]) {
+    assert.doesNotMatch(prompt || '', /idea-context |business-design |requirement-spec |spec-review /);
+    assert.doesNotMatch(prompt || '', /request-clarification|return-gap|return-revision|approve/);
+  }
   assert.doesNotMatch(review || '', /review request-input/);
   assert.doesNotMatch(verification || '', /verification (?:complete|request-input|pass|fail|block)/);
   assert.doesNotMatch(development || '', /help <[^>]*handoff/);
   assert.doesNotMatch(development || '', /implementation fail --reason <原因与证据>/);
   assert.doesNotMatch(analyst || '', /--reason <原因与证据>/);
-  for (const prompt of [direct, ideaContext, businessDesign, requirementSpec, specReview]) {
-    assert.doesNotMatch(prompt || '', /loop-agent\.mjs" help\n/);
-  }
-  assert.match(analyst || '', /loop-agent\.mjs" help\n/);
-  assert.match(backlog || '', /loop-agent\.mjs" help\n/);
-  assert.match(splitter || '', /loop-agent\.mjs" help\n/);
-  assert.match(development || '', /loop-agent\.mjs" help\n/);
-  assert.match(verification || '', /loop-agent\.mjs" help\n/);
-  assert.match(review || '', /loop-agent\.mjs" help\n/);
+  assert.doesNotMatch(direct || '', /loop-agent\.mjs" help\n/);
 });

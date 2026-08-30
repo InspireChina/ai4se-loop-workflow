@@ -114,6 +114,27 @@ export type Story = {
   depends_on_story_indexes: number[];
 };
 export type DeliverySpecRecord = { spec_id: string; task_id: string; story_index: number; revision: number; status: 'draft' | 'waiting_for_answers' | 'resolved' | 'superseded'; spec_json: string; source_result_id: string | null; created_at: string; resolved_at: string | null };
+export type AcceptanceRecord = {
+  acceptance_id: string;
+  task_id: string;
+  acceptance_key: string;
+  scope_type: 'requirement' | 'delivery_unit';
+  story_index: number | null;
+  statement: string;
+  oracle: string;
+  source_ref: string;
+  revision: number;
+  lifecycle: 'active' | 'superseded';
+  assigned_story_indexes: number[];
+  assessments: {
+    kind: 'implementation' | 'verification' | 'review';
+    agent: string;
+    execution_id: string;
+    result: 'claimed' | 'passed' | 'failed' | 'blocked';
+    evidence: string;
+    created_at: string;
+  }[];
+};
 export type Document = {
   document_id: string;
   task_id: string;
@@ -484,6 +505,33 @@ export async function getTask(taskId: string) {
       .map((dependency) => dependency.depends_on_story_index),
   }));
   const deliverySpecs = db.prepare('SELECT * FROM story_specs WHERE task_id = ? ORDER BY story_index, revision').all(taskId) as DeliverySpecRecord[];
+  const acceptanceRows = db.prepare(`
+    SELECT * FROM acceptances
+    WHERE task_id = ? AND lifecycle = 'active'
+    ORDER BY scope_type, story_index, acceptance_key
+  `).all(taskId) as Omit<AcceptanceRecord, 'assigned_story_indexes' | 'assessments'>[];
+  const acceptanceAssignments = db.prepare(`
+    SELECT acceptance_id, story_index
+    FROM delivery_unit_acceptances
+    WHERE task_id = ? ORDER BY story_index
+  `).all(taskId) as { acceptance_id: string; story_index: number }[];
+  const acceptanceAssessmentRows = db.prepare(`
+    SELECT assessment.acceptance_id, assessment.kind, assessment.agent,
+           assessment.execution_id, assessment.result, assessment.evidence,
+           assessment.created_at
+    FROM acceptance_assessments assessment
+    WHERE assessment.task_id = ?
+    ORDER BY assessment.created_at, assessment.assessment_id
+  `).all(taskId) as (AcceptanceRecord['assessments'][number] & { acceptance_id: string })[];
+  const acceptances: AcceptanceRecord[] = acceptanceRows.map((acceptance) => ({
+    ...acceptance,
+    assigned_story_indexes: acceptanceAssignments
+      .filter((assignment) => assignment.acceptance_id === acceptance.acceptance_id)
+      .map((assignment) => assignment.story_index),
+    assessments: acceptanceAssessmentRows
+      .filter((assessment) => assessment.acceptance_id === acceptance.acceptance_id)
+      .map(({ acceptance_id: _acceptanceId, ...assessment }) => assessment),
+  }));
   const questions = db.prepare('SELECT * FROM questions WHERE task_id = ? ORDER BY created_at').all(taskId) as Question[];
   const runtimeInputs = db.prepare(`
     SELECT request.*,
@@ -551,6 +599,7 @@ export async function getTask(taskId: string) {
     lanes,
     stories,
     deliverySpecs,
+    acceptances,
     questions,
     runtimeInputs,
     documents,

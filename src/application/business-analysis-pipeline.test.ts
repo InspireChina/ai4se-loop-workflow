@@ -1,56 +1,22 @@
-import { beginTestExecutionAttempt } from '../test/execution-fixtures';
-import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
+import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import type { DelegationEnvelope } from './tasks';
 
-function intentBriefModuleCommands(summary: string, sourceUrl?: string): string[][] {
-  return [
-    ['idea-context', 'brief', 'problem', 'set', '--text', summary],
-    ['idea-context', 'brief', 'actor', 'upsert', '--key', 'project-team', '--name', '项目团队', '--role', '使用正式产物理解目标并采取后续行动。'],
-    ['idea-context', 'brief', 'goal', 'upsert', '--key', 'primary-goal', '--text', summary],
-    ['idea-context', 'brief', 'success', 'upsert', '--key', 'observable-success', '--text', `用户能够确认：${summary}`],
-    ...(sourceUrl ? [[
-      'idea-context', 'brief', 'source', 'upsert', '--key', 'research-source',
-      '--title', 'OpenAI Codex documentation', '--reference', sourceUrl,
-      '--usage', '用于补充外部背景与评价维度，不替代用户目标；适用范围受官方资料内容限制。',
-    ]] : []),
-  ];
-}
+const put = (artifact: string, block: string, content: string, key?: string) => [
+  'artifact', 'put', '--artifact', artifact, '--block', block,
+  ...(key ? ['--key', key] : []), '--content', content,
+];
 
-function businessSolutionModuleCommands(summary: string, sourceUrl?: string): string[][] {
-  return [
-    ['business-design', 'solution', 'summary', 'set', '--text', summary],
-    ['business-design', 'solution', 'actor', 'upsert', '--key', 'project-member', '--name', '项目成员', '--responsibility', '发起业务流程并使用结果采取行动。'],
-    ['business-design', 'solution', 'scenario', 'upsert', '--key', 'main-flow', '--type', 'main', '--title', '完成主要业务目标', '--actor', '项目成员', '--trigger', '用户需要获得目标结果', '--outcome', summary],
-    ['business-design', 'solution', 'flow', 'upsert', '--key', 'main-step', '--scenario', 'main-flow', '--position', '1', '--action', '用户发起并完成主要流程', '--result', summary],
-    ['business-design', 'solution', 'rule', 'upsert', '--key', 'traceable-result', '--text', '结果必须清楚展示其业务依据。'],
-    ['business-design', 'solution', 'scope', 'include', '--key', 'primary-scope', '--text', summary],
-    ['business-design', 'solution', 'success', 'upsert', '--key', 'observable-success', '--text', `项目成员能够确认：${summary}`],
-    ...(sourceUrl ? [[
-      'business-design', 'solution', 'source', 'upsert', '--key', 'research-source',
-      '--title', 'OpenAI Codex documentation', '--reference', sourceUrl,
-      '--usage', '用于补充方案评价维度，不替代产品决定；适用范围受官方资料内容限制。',
-    ]] : []),
-  ];
-}
+const yaml = (value: Record<string, unknown>) => JSON.stringify(value);
 
-async function executeBusinessAnalysisAgent(
-  delegation: DelegationEnvelope,
-  commands: string[][],
-  suffix: string,
-) {
-  const { completeExecution } = await import('./executions');
-  const {
-    issueAgentCommandToken,
-    readAgentCommandSubmission,
-    runAgentCommand,
-  } = await import('./agent-command-drafts');
-  const { applyAgentResult } = await import('./agent-results');
+async function startAgent(delegation: DelegationEnvelope, suffix: string) {
+  const { issueAgentCommandToken, runAgentCommand } = await import('./agent-command-drafts');
   const started = await beginTestExecutionAttempt({
-    runId: `RUN-ba-${suffix}`,
+    runId: `RUN-ba-yaml-${suffix}`,
     delegation,
-    prompt: 'Business Analysis progressive command test',
+    prompt: 'YAML command chain Business Analysis test',
   });
   const token = await issueAgentCommandToken(started.attempt.execution_id);
   assert.ok(token);
@@ -59,648 +25,332 @@ async function executeBusinessAnalysisAgent(
     token,
     args,
   });
-  assert.match(await run([delegation.agent === 'idea-context-agent' ? 'idea-context'
-    : delegation.agent === 'business-design-agent' ? 'business-design'
-      : delegation.agent === 'requirement-spec-agent' ? 'requirement-spec'
-        : 'spec-review', 'status']), /NEXT WORK PACKET/);
+  assert.match(await run(['status']), /NEXT WORK PACKET/);
+  return { started, run };
+}
+
+async function executeAgent(delegation: DelegationEnvelope, commands: string[][], suffix: string) {
+  const { completeExecution } = await import('./executions');
+  const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+  const { applyAgentResult } = await import('./agent-results');
+  const { started, run } = await startAgent(delegation, suffix);
   for (const command of commands) await run(command);
   const result = await readAgentCommandSubmission(started.attempt.execution_id);
-  assert.ok(result);
-  await applyAgentResult(`RUN-ba-${suffix}`, delegation, result, {
+  assert.ok(result, `${delegation.agent} did not submit an Agent Result`);
+  await applyAgentResult(`RUN-ba-yaml-${suffix}`, delegation, result, {
     executionId: started.attempt.execution_id,
   });
   await completeExecution(started.attempt.execution_id);
   return result;
 }
 
-test('runs Business Analysis from a raw idea to an independently approved and revisable requirement specification', async () => {
-  const { acknowledgeClosure, addDocumentComment, createTask, getTask } = await import('./tasks');
-  const taskId = await createTask({
-    title: '让团队更早发现项目健康风险',
-    description: '希望有一个项目体检能力，但目标用户、检查内容和结果形态尚未确定。',
-    itemType: 'business-analysis',
-    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
-  });
+function intentSynthesisCommands(summary: string) {
+  return [
+    put('requirement-intent', 'problem', `# 核心问题\n\n${summary}`),
+    put('requirement-intent', 'actors', yaml({ name: '项目成员', role: '风险处理者', need: '尽早理解项目健康风险并采取行动' }), 'project-member'),
+    put('requirement-intent', 'goals', yaml({ content: '在风险扩大前识别项目健康异常', source: '原始需求' }), 'early-risk'),
+    put('requirement-intent', 'success', yaml({ outcome: '项目成员看到可解释的健康风险', measure: '每个风险均有依据与建议行动' }), 'observable-risk'),
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+  ];
+}
 
-  let delegation = (await inspectTaskDispatch(taskId))[0];
-  assert.equal(delegation.agent, 'idea-context-agent');
-  const intentResult = await executeBusinessAnalysisAgent(delegation, [
-    ['idea-context', 'discovery', 'complete', '--artifact', '# 调查\n\n团队需要更早识别项目健康风险。'],
-    ['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify({ summary: '目标可以从现有想法唯一归纳', questions: [] })],
-    ...intentBriefModuleCommands('帮助项目团队在风险扩大前识别健康异常，并获得可采取行动的解释。'),
-    ['idea-context', 'synthesis', 'complete'],
-    ['idea-context', 'complete'],
-  ], `${taskId}-intent`);
-  assert.match(intentResult.artifact?.content || '', /^# 需求意图简报\n/);
-  assert.match(intentResult.artifact?.content || '', /## 问题与背景[\s\S]*## 目标参与者[\s\S]*## 业务目标/);
-  assert.doesNotMatch(intentResult.artifact?.content || '', /^\s*\{/);
+function intentCommands(summary: string) {
+  return [
+    put('requirement-intent', 'discovery', `# 调查\n\n${summary}`),
+    ['phase', 'complete'],
+    put('requirement-intent', 'research-sources', yaml({
+      claim: '项目健康风险需要在扩大前被识别。',
+      sourceTitle: '项目健康指南',
+      sourceUrl: 'https://example.com/project-health',
+      applicability: '用于界定可观察的风险结果。',
+      limitations: '不替代当前项目事实。',
+      confidence: 'high',
+    }), 'research-source-internal-key'),
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+    put('requirement-intent', 'answer-review', '全部适用分支已经检查，没有新的需求意图问题。'),
+    ['phase', 'complete'],
+    ...intentSynthesisCommands(summary),
+  ];
+}
 
-  delegation = (await inspectTaskDispatch(taskId))[0];
-  assert.equal(delegation.agent, 'business-design-agent');
-  const designStatus = await executeBusinessAnalysisAgent(delegation, [
-    ['business-design', 'exploration', 'complete', '--artifact', '# 探索\n\n覆盖项目状态、风险信号、解释与后续行动。'],
-    ['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify({ summary: '当前没有必须分叉的业务决定', questions: [] })],
-    ['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify({ notes: '没有活动决策节点', agentDecisions: [], humanDecisionKeys: [] })],
-    ['business-design', 'decision-resolution', 'audit-complete', '--artifact', '# 答案审查\n\n当前没有活动决策节点，也没有新增业务语义。'],
-    ...businessSolutionModuleCommands('项目成员可发起体检，查看分项状态、风险依据和建议行动。'),
-    ['business-design', 'solution', 'complete'],
-    ['business-design', 'complete'],
-  ], `${taskId}-design`);
-  assert.equal(designStatus.businessAnalysis?.stage, 'business_design');
-  assert.match(designStatus.artifact?.content || '', /^# 业务方案\n/);
-  assert.match(designStatus.artifact?.content || '', /## 主场景[\s\S]*## 业务流程[\s\S]*## 业务规则/);
-  assert.doesNotMatch(designStatus.artifact?.content || '', /^\s*\{/);
+function designCommands(summary: string) {
+  return [
+    put('business-solution', 'exploration', '# 探索\n\n覆盖项目状态、风险信号、解释、异常与后续行动。'),
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+    put('business-solution', 'answer-review', '全部业务分支已经检查，没有新的业务决定。'),
+    ['phase', 'complete'],
+    put('business-solution', 'summary', summary),
+    put('business-solution', 'actors', yaml({ name: '项目成员', responsibility: '发起体检并处理风险' }), 'project-member'),
+    put('business-solution', 'scenarios', yaml({ kind: 'main', actor: '项目成员', trigger: '需要了解项目健康状态', outcome: summary }), 'main-flow'),
+    put('business-solution', 'flows', yaml({ scenario: 'main-flow', action: '发起项目体检并阅读分项结果', result: summary }), 'inspect-health'),
+    put('business-solution', 'rules', yaml({ content: '每个风险必须展示业务依据', rationale: '结果需要可解释且可行动' }), 'traceable-risk'),
+    put('business-solution', 'scope', yaml({ direction: 'included', content: '项目级健康体检与风险解释' }), 'project-health'),
+    put('business-solution', 'success', yaml({ outcome: summary, measure: '用户可以理解并采取行动' }), 'actionable-result'),
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+  ];
+}
 
-  const specification = '# AS IS\n\n项目成员缺少统一的健康风险视图。\n\n# TO BE\n\n项目成员可发起项目体检并查看分项状态、风险依据和建议行动。\n\n# ACTORS\n\n项目成员。\n\n# SCENARIOS\n\n发起体检并阅读结果。\n\n# BUSINESS RULES\n\n每个风险必须展示依据。\n\n# SCOPE\n\n项目级体检结果。\n\n# OUT OF SCOPE\n\n自动修复。\n\n# ACCEPTANCE\n\n用户可以看到分项状态、风险依据和建议行动。\n\n# DEPENDENCIES\n\n无。\n\n# ASSUMPTIONS\n\n用户可以访问目标项目。';
-  delegation = (await inspectTaskDispatch(taskId))[0];
-  assert.equal(delegation.agent, 'requirement-spec-agent');
-  await executeBusinessAnalysisAgent(delegation, [
-    ['requirement-spec', 'composition', 'complete', '--artifact', specification],
-    ['requirement-spec', 'verification', 'complete', '--artifact', specification],
-    ['requirement-spec', 'complete'],
-  ], `${taskId}-spec`);
+function specificationCommands(specification: string) {
+  return [
+    put('requirement-specification', 'draft', specification),
+    ['phase', 'complete'],
+    put('requirement-specification', 'verification', '已检查目标覆盖、决策继承、场景、规则、范围与验收一致性。'),
+    put('requirement-specification', 'final', specification),
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+  ];
+}
 
-  delegation = (await inspectTaskDispatch(taskId))[0];
-  assert.equal(delegation.agent, 'spec-review-agent');
-  const review = await executeBusinessAnalysisAgent(delegation, [
-    ['spec-review', 'inspection', 'complete', '--artifact', '# 独立审查\n\n规格忠实继承需求意图和业务方案。'],
-    ['spec-review', 'classification', 'complete', '--artifact', JSON.stringify({ summary: '没有阻断缺口', gaps: [] })],
-    ['spec-review', 'approve', '--artifact', specification],
-  ], `${taskId}-review`);
-  assert.equal(review.businessAnalysis?.disposition, 'approved');
+function reviewCommands(specification: string) {
+  return [
+    put('specification-review', 'findings', yaml({
+      subject: '目标、场景、规则、范围、验收与来源追踪',
+      verdict: 'passed',
+      evidence: '需求意图、业务方案与最终规格逐项一致',
+      reason: '没有发现阻断规格成立的缺口',
+    }), 'complete-review'),
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+    put('specification-review', 'verdict-summary', '需求规格完整、一致、可追踪且可验证。'),
+    put('specification-review', 'approved-specification', specification),
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+  ];
+}
 
-  const ready = await getTask(taskId);
-  assert.equal(ready?.task.agile_status, 'ready_to_close');
-  assert.equal(ready?.task.closure_status, 'awaiting_read');
-  assert.equal((await inspectTaskDispatch(taskId)).length, 0);
-  assert.match(ready?.documents.find((document) => document.document_id === ready.task.review_document_id)?.content || '', /# ACCEPTANCE/);
+const specification = [
+  '# AS IS', '', '项目成员缺少统一的健康风险视图。', '',
+  '# TO BE', '', '项目成员可发起项目体检并查看分项状态、风险依据和建议行动。', '',
+  '# ACTORS', '', '项目成员。', '',
+  '# SCENARIOS', '', '发起体检并阅读结果；异常时展示无法取得的检查项。', '',
+  '# BUSINESS RULES', '', '每个风险必须展示依据。', '',
+  '# SCOPE', '', '项目级体检结果。', '',
+  '# OUT OF SCOPE', '', '自动修复。', '',
+  '# ACCEPTANCE', '', '用户可以看到分项状态、风险依据和建议行动。', '',
+  '# DEPENDENCIES', '', '无。', '',
+  '# ASSUMPTIONS', '', '用户可以访问目标项目。',
+].join('\n');
 
-  const firstReviewRevision = ready!.task.review_revision;
-  const commentId = await addDocumentComment({
-    taskId,
-    documentId: ready!.task.review_document_id!,
-    anchorType: 'file',
-    intent: 'change_request',
-    content: '请明确结果同时展示风险等级。',
-  });
-  const revising = await getTask(taskId);
-  assert.equal(revising?.task.agile_status, 'backlog');
-  assert.equal(revising?.task.current_subagent, 'requirement-spec-agent');
-  assert.equal(revising?.task.review_document_id, null);
-  assert.equal(revising?.documentComments.find((comment) => comment.comment_id === commentId)?.feedback_status, 'in_progress');
-
-  const revisedSpecification = specification.replace('分项状态、风险依据和建议行动', '分项状态、风险等级、风险依据和建议行动');
-  delegation = (await inspectTaskDispatch(taskId))[0];
-  assert.equal(delegation.agent, 'requirement-spec-agent');
-  assert.deepEqual(delegation.feedbackIds, [commentId]);
-  await executeBusinessAnalysisAgent(delegation, [
-    ['requirement-spec', 'composition', 'complete', '--artifact', revisedSpecification],
-    ['requirement-spec', 'verification', 'complete', '--artifact', revisedSpecification],
-    ['requirement-spec', 'complete'],
-  ], `${taskId}-spec-revision`);
-
-  delegation = (await inspectTaskDispatch(taskId))[0];
-  assert.equal(delegation.agent, 'spec-review-agent');
-  assert.deepEqual(delegation.feedbackIds, [commentId]);
-  await executeBusinessAnalysisAgent(delegation, [
-    ['spec-review', 'inspection', 'complete', '--artifact', '# 独立审查\n\n修订后的规格明确包含风险等级。'],
-    ['spec-review', 'classification', 'complete', '--artifact', JSON.stringify({ summary: '评论已落实且没有阻断缺口', gaps: [] })],
-    ['spec-review', 'approve', '--artifact', revisedSpecification],
-  ], `${taskId}-review-revision`);
-
-  const revised = await getTask(taskId);
-  assert.equal(revised?.task.agile_status, 'ready_to_close');
-  assert.equal(revised?.task.review_revision, firstReviewRevision + 1);
-  assert.equal(revised?.documentComments.find((comment) => comment.comment_id === commentId)?.feedback_status, 'resolved');
-  assert.match(revised?.documents.find((document) => document.document_id === revised.task.review_document_id)?.content || '', /风险等级/);
-
-  await acknowledgeClosure({ taskId, reviewRevision: revised!.task.review_revision });
-  assert.equal((await getTask(taskId))?.task.agile_status, 'done');
+test('declares every End-to-End Agent command chain in YAML', async () => {
+  const { REQUIREMENT_PIPELINES } = await import('../domain/pipeline-catalog');
+  const { agentCommandChains, agentCommandProfiles } = await import('../domain/agent-command-profile');
+  const { commandChainCatalogItem } = await import('../domain/command-chain-catalog');
+  const { loadCommandChainDefinition } = await import('../domain/command-chain-definition');
+  const endToEnd = REQUIREMENT_PIPELINES.find((pipeline) => pipeline.id === 'end-to-end');
+  assert.ok(endToEnd);
+  const agents = endToEnd.stages.flatMap((stage) => stage.agentId ? [stage.agentId] : []);
+  assert.deepEqual(agents, [
+    'idea-context-agent', 'business-design-agent', 'requirement-spec-agent', 'spec-review-agent',
+    'backlog-agent', 'story-splitter-agent', 'analyst-agent', 'dev-agent', 'test-agent', 'review-agent',
+  ]);
+  for (const agent of agents) {
+    const profiles = agentCommandProfiles().filter((profile) => profile.agent === agent);
+    assert.equal(profiles.length, 1, `${agent} must have exactly one End-to-End command profile`);
+    assert.ok(profiles[0].commandChainId, `${agent} profile is not bound to YAML`);
+    const catalog = commandChainCatalogItem(profiles[0].commandChainId!);
+    assert.ok(catalog, `${agent} command chain is missing from the catalog`);
+    assert.equal(catalog.agentId, agent);
+    assert.match(catalog.fileName, new RegExp(`^${agent}\\.yaml$`));
+    assert.equal(loadCommandChainDefinition(catalog.id).agent, agent);
+    const chains = agentCommandChains(agent);
+    assert.equal(chains.length, 1, `${agent} must expose one YAML command chain`);
+    for (const chain of chains) {
+      assert.equal(chain.entryCommand, 'status');
+      assert.ok(chain.phases.length > 0);
+    }
+  }
+  for (const id of ['idea-context', 'business-design', 'requirement-spec', 'spec-review']) {
+    const definition = loadCommandChainDefinition(id);
+    assert.equal(definition.phases[Object.keys(definition.phases).at(-1)!].builtin, 'business-analysis-finalize');
+  }
 });
 
-test('hands an approved End to End specification directly to Develop without human acknowledgement', async () => {
-  const { createTask, getTask } = await import('./tasks');
+test('rejects undeclared fields before an Artifact Block can enter the rendered document', async () => {
+  const { createTask } = await import('./tasks');
+  const { completeExecution } = await import('./executions');
+  const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { applyAgentResult } = await import('./agent-results');
   const taskId = await createTask({
+    title: '拒绝未声明的产物字段',
+    itemType: 'end-to-end',
+    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
+  });
+  const delegation = (await inspectTaskDispatch(taskId))[0];
+  const { started, run } = await startAgent(delegation, `${taskId}-strict-artifact`);
+  await run(put('requirement-intent', 'discovery', '已完成调查。'));
+  await run(['phase', 'complete']);
+  await assert.rejects(
+    run(put('requirement-intent', 'research-sources', yaml({
+      claim: '已查明事实。',
+      sourceTitle: '来源',
+      sourceUrl: 'https://example.com/source',
+      applicability: '适用于当前需求。',
+      limitations: '不替代项目证据。',
+      confidence: 'high',
+      debugOnly: '不能进入产物',
+    }), 'source')),
+    /包含未声明字段：debugOnly/,
+  );
+  for (const command of [
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+    put('requirement-intent', 'answer-review', '没有新的问题。'),
+    ['phase', 'complete'],
+    ...intentSynthesisCommands('形成严格、可读的需求意图。'),
+  ]) await run(command);
+  const result = await readAgentCommandSubmission(started.attempt.execution_id);
+  assert.ok(result);
+  await applyAgentResult(`RUN-ba-yaml-${taskId}-strict-artifact`, delegation, result, {
+    executionId: started.attempt.execution_id,
+  });
+  await completeExecution(started.attempt.execution_id);
+});
+
+test('runs the End-to-End Business Analysis front half through YAML command chains', async () => {
+  const { createTask, getTask } = await import('./tasks');
+  const taskId = await createTask({
     title: '从想法自动交付项目体检能力',
-    description: '从模糊想法开始完成业务分析，并自动进入开发交付。',
+    description: '从模糊想法开始形成可执行需求规格，并自动进入开发交付。',
     itemType: 'end-to-end',
     metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
   });
 
   let delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'idea-context-agent');
-  await executeBusinessAnalysisAgent(delegation, [
-    ['idea-context', 'discovery', 'complete', '--artifact', '# 调查\n\n团队需要更早识别项目健康风险。'],
-    ['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify({ summary: '目标可以唯一归纳', questions: [] })],
-    ...intentBriefModuleCommands('帮助项目团队在风险扩大前识别健康异常。'),
-    ['idea-context', 'synthesis', 'complete'],
-    ['idea-context', 'complete'],
-  ], `${taskId}-intent`);
+  const intent = await executeAgent(delegation, intentCommands('帮助项目成员在风险扩大前识别健康异常。'), `${taskId}-intent`);
+  assert.equal(intent.businessAnalysis?.stage, 'intent');
+  assert.match(intent.artifact?.content || '', /^# 需求意图简报/);
+  assert.match(intent.artifact?.content || '', /## 调研依据/);
+  assert.match(intent.artifact?.content || '', /项目健康风险需要在扩大前被识别。/);
+  assert.match(intent.artifact?.content || '', /\*\*来源\*\*：\[项目健康指南\]\(https:\/\/example\.com\/project-health\)/);
+  assert.match(intent.artifact?.content || '', /\*\*置信度\*\*：高/);
+  assert.doesNotMatch(intent.artifact?.content || '', /research-source-internal-key/);
+  assert.doesNotMatch(intent.artifact?.content || '', /## 意图调查|## 答案复查/);
+  assert.match(intent.artifact?.content || '', /## 问题与背景\n\n### 核心问题/);
 
   delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'business-design-agent');
-  await executeBusinessAnalysisAgent(delegation, [
-    ['business-design', 'exploration', 'complete', '--artifact', '# 探索\n\n覆盖状态、风险依据和建议行动。'],
-    ['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify({ summary: '没有必须分叉的决定', questions: [] })],
-    ['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify({ notes: '没有活动决策节点', agentDecisions: [], humanDecisionKeys: [] })],
-    ['business-design', 'decision-resolution', 'audit-complete', '--artifact', '# 答案审查\n\n没有新增业务语义。'],
-    ...businessSolutionModuleCommands('项目成员可发起体检并查看风险依据和建议行动。'),
-    ['business-design', 'solution', 'complete'],
-    ['business-design', 'complete'],
-  ], `${taskId}-design`);
+  const design = await executeAgent(delegation, designCommands('项目成员可发起体检，查看分项状态、风险依据和建议行动。'), `${taskId}-design`);
+  assert.equal(design.businessAnalysis?.stage, 'business_design');
+  assert.match(design.artifact?.content || '', /## 主流程与异常场景/);
 
-  const specification = '# AS IS\n\n缺少统一健康风险视图。\n\n# TO BE\n\n项目成员可查看体检结果。\n\n# ACTORS\n\n项目成员。\n\n# SCENARIOS\n\n发起并阅读体检。\n\n# BUSINESS RULES\n\n风险必须展示依据。\n\n# SCOPE\n\n项目级体检。\n\n# OUT OF SCOPE\n\n自动修复。\n\n# ACCEPTANCE\n\n展示状态、依据和建议行动。\n\n# DEPENDENCIES\n\n无。\n\n# ASSUMPTIONS\n\n用户可访问项目。';
   delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'requirement-spec-agent');
-  await executeBusinessAnalysisAgent(delegation, [
-    ['requirement-spec', 'composition', 'complete', '--artifact', specification],
-    ['requirement-spec', 'verification', 'complete', '--artifact', specification],
-    ['requirement-spec', 'complete'],
-  ], `${taskId}-spec`);
+  const spec = await executeAgent(delegation, specificationCommands(specification), `${taskId}-spec`);
+  assert.equal(spec.artifact?.content, specification);
 
   delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'spec-review-agent');
-  await executeBusinessAnalysisAgent(delegation, [
-    ['spec-review', 'inspection', 'complete', '--artifact', '# 独立审查\n\n规格完整继承需求意图和业务方案。'],
-    ['spec-review', 'classification', 'complete', '--artifact', JSON.stringify({ summary: '没有阻断缺口', gaps: [] })],
-    ['spec-review', 'approve', '--artifact', specification],
-  ], `${taskId}-review`);
+  const review = await executeAgent(delegation, reviewCommands(specification), `${taskId}-review`);
+  assert.equal(review.businessAnalysis?.disposition, 'approved');
 
-  const handedOff = await getTask(taskId);
-  assert.equal(handedOff?.task.item_type, 'end-to-end');
-  assert.equal(handedOff?.task.agile_status, 'backlog');
-  assert.equal(handedOff?.task.current_subagent, 'backlog-agent');
-  assert.equal(handedOff?.task.run_state, 'runnable');
-  assert.equal(handedOff?.task.closure_status, 'none');
-  assert.equal(handedOff?.task.review_document_id, null);
-  assert.match(handedOff?.documents.find((document) => document.kind === 'ba_review')?.content || '', /# ACCEPTANCE/);
-
-  const developEntry = (await inspectTaskDispatch(taskId))[0];
-  assert.equal(developEntry.pipeline, 'backlog');
-  assert.equal(developEntry.agent, 'backlog-agent');
-
-  await applyAgentResult(`RUN-e2e-backlog-${taskId}`, developEntry, {
-    outcome: 'completed',
-    summary: '业务变化上下文已完成，按照既定 End to End Pipeline 进入交付规划。',
-    artifact: {
-      title: '业务变化上下文',
-      content: '# 业务变化上下文\n\n保留既定 End to End Pipeline。',
-    },
-    questions: [],
-    runtimeInputs: [],
-    feedbackResolutions: [],
-    recoveryResolutions: [],
-  });
-  const planning = await getTask(taskId);
-  assert.equal(planning?.task.item_type, 'end-to-end');
-  assert.equal(planning?.task.agile_status, 'in plan');
-  assert.equal(planning?.task.current_subagent, 'story-splitter-agent');
-  assert.equal((await inspectTaskDispatch(taskId))[0]?.pipeline, 'split');
+  const detail = await getTask(taskId);
+  assert.equal(detail?.task.current_subagent, 'backlog-agent');
+  assert.equal(detail?.task.run_state, 'runnable');
+  assert.match(detail?.documents.find((document) => document.kind === 'ba_review')?.content || '', /# ACCEPTANCE/);
 });
 
-test('dynamically inserts Research for intent and business design and requires current web-search evidence', async () => {
-  const { createTask } = await import('./tasks');
-  const { completeExecution, recordExecutionReceipt } = await import('./executions');
-  const { issueAgentCommandToken, readAgentCommandSubmission, runAgentCommand } = await import('./agent-command-drafts');
-  const { applyAgentResult } = await import('./agent-results');
-  const taskId = await createTask({
-    title: '定义对 Agent 友好的项目',
-    description: '希望识别项目是否适合由 Agent 持续开发。',
-    itemType: 'business-analysis',
-    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
-  });
-  const research = JSON.stringify({
-    summary: '官方资料强调可定位指令、可运行验证和明确项目上下文。',
-    questions: [{ question: '什么条件让项目更适合由编码 Agent 持续处理？', reason: '该定义会影响需求目标和方案评价标准。' }],
-    findings: [{
-      claim: '项目应向 Agent 提供可定位的持久指令和可执行验证路径。',
-      sourceTitle: 'OpenAI Codex documentation',
-      sourceUrl: 'https://developers.openai.com/codex/',
-      sourceType: 'official',
-      applicability: '可用于定义项目对 Agent 友好的外部背景，但不能替代用户对成功结果的决定。',
-      limitations: '官方文档不定义当前产品必须采用的具体体检规则。',
-      confidence: 'high',
-    }],
-    unresolved: [],
-  });
-
-  let delegation = (await inspectTaskDispatch(taskId))[0];
-  const intent = await beginTestExecutionAttempt({
-    runId: `RUN-ba-research-${taskId}-intent`,
-    delegation,
-    prompt: 'Intent research',
-    executorId: 'codex',
-    webSearchEnabled: true,
-  });
-  const intentToken = await issueAgentCommandToken(intent.attempt.execution_id);
-  assert.ok(intentToken);
-  const runIntent = (args: string[]) => runAgentCommand({ executionId: intent.attempt.execution_id, token: intentToken, args });
-  const intentStatus = await runIntent(['idea-context', 'status']);
-  assert.match(intentStatus, /Live Research: enabled/);
-  const intentResearchPacket = await runIntent(['idea-context', 'discovery', 'complete', '--artifact', '# DISCOVERY\n\n需要定义 Agent 友好的项目条件。']);
-  assert.match(intentResearchPacket, /Phase: RESEARCH/);
-  await assert.rejects(
-    runIntent(['idea-context', 'research', 'complete', '--artifact', research]),
-    /必须至少成功完成一次 Web Search/,
-  );
-  await recordExecutionReceipt(intent.attempt.execution_id, 'tool_event', '00000001', {
-    name: 'loop.agent.tool', phase: 'completed', executor: 'codex', tool: 'web_search', success: true,
-  });
-  const intentProposal = await runIntent(['idea-context', 'research', 'complete', '--artifact', research]);
-  assert.match(intentProposal, /Phase: CLARIFICATION PROPOSAL/);
-  await runIntent(['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify({ summary: '没有目标歧义', questions: [] })]);
-  for (const command of intentBriefModuleCommands('定义项目对 Agent 的友好程度。')) await runIntent(command);
-  await assert.rejects(
-    runIntent(['idea-context', 'synthesis', 'complete']),
-    /必须登记至少一个调研依据/,
-  );
-  await runIntent([
-    'idea-context', 'brief', 'source', 'upsert', '--key', 'codex-docs',
-    '--title', 'OpenAI Codex documentation', '--reference', 'https://developers.openai.com/codex/',
-    '--usage', '用于定义外部背景，不替代用户目标；官方文档不规定本产品的具体业务方案。',
-  ]);
-  await runIntent(['idea-context', 'synthesis', 'complete']);
-  await runIntent(['idea-context', 'complete']);
-  const intentResult = await readAgentCommandSubmission(intent.attempt.execution_id);
-  await applyAgentResult(`RUN-ba-research-${taskId}-intent`, delegation, intentResult!, { executionId: intent.attempt.execution_id });
-  await completeExecution(intent.attempt.execution_id);
-
-  delegation = (await inspectTaskDispatch(taskId))[0];
-  assert.equal(delegation.agent, 'business-design-agent');
-  const design = await beginTestExecutionAttempt({
-    runId: `RUN-ba-research-${taskId}-design`,
-    delegation,
-    prompt: 'Business design research',
-    executorId: 'codex',
-    webSearchEnabled: true,
-  });
-  const designToken = await issueAgentCommandToken(design.attempt.execution_id);
-  assert.ok(designToken);
-  const runDesign = (args: string[]) => runAgentCommand({ executionId: design.attempt.execution_id, token: designToken, args });
-  await runDesign(['business-design', 'status']);
-  const designResearchPacket = await runDesign(['business-design', 'exploration', 'complete', '--artifact', '# EXPLORATION\n\n探索项目上下文、验证路径和持续维护模式。']);
-  assert.match(designResearchPacket, /Phase: RESEARCH/);
-  await recordExecutionReceipt(design.attempt.execution_id, 'tool_event', '00000001', {
-    name: 'loop.agent.tool', phase: 'completed', executor: 'codex', tool: 'web_search', success: true,
-  });
-  await runDesign(['business-design', 'research', 'complete', '--artifact', research]);
-  await runDesign(['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify({ summary: '当前没有必须分叉的业务决定', questions: [] })]);
-  await runDesign(['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify({ notes: '没有活动节点', agentDecisions: [], humanDecisionKeys: [] })]);
-  await runDesign(['business-design', 'decision-resolution', 'audit-complete', '--artifact', '# 答案审查\n\n没有新增语义。']);
-  for (const command of businessSolutionModuleCommands(
-    '从项目上下文、验证能力和维护反馈三个方面形成体检结果。',
-    'https://developers.openai.com/codex/',
-  )) await runDesign(command);
-  await runDesign(['business-design', 'solution', 'complete']);
-  await runDesign(['business-design', 'complete']);
-  const designResult = await readAgentCommandSubmission(design.attempt.execution_id);
-  await applyAgentResult(`RUN-ba-research-${taskId}-design`, delegation, designResult!, { executionId: design.attempt.execution_id });
-  await completeExecution(design.attempt.execution_id);
-  assert.equal((await inspectTaskDispatch(taskId))[0]?.agent, 'requirement-spec-agent');
-});
-
-test('injects decision strength only while Idea Context answers and audits fully autonomous decisions before synthesis', async () => {
-  const { createTask, getTask } = await import('./tasks');
+test('uses generic Decision commands for Business Analysis HUMAN clarification and resume', async () => {
+  const { answerQuestion, createTask, getTask, submitClarificationAnswers } = await import('./tasks');
   const { completeExecution } = await import('./executions');
-  const {
-    issueAgentCommandToken,
-    readAgentCommandSubmission,
-    runAgentCommand,
-  } = await import('./agent-command-drafts');
+  const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { applyAgentResult } = await import('./agent-results');
   const taskId = await createTask({
-    title: '想办法让项目风险更早暴露',
+    title: '确认项目体检的主要参与者',
+    description: '需要明确体检首先帮助谁采取行动。',
     itemType: 'business-analysis',
-    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
+    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'balanced' }],
   });
-  const delegation = (await inspectTaskDispatch(taskId))[0];
-  const started = await beginTestExecutionAttempt({ runId: `RUN-ba-intent-mode-${taskId}`, delegation, prompt: 'Intent answer policy' });
-  const token = await issueAgentCommandToken(started.attempt.execution_id);
-  assert.ok(token);
-  const run = (args: string[]) => runAgentCommand({ executionId: started.attempt.execution_id, token, args });
-
-  const discoveryStatus = await run(['idea-context', 'status']);
-  assert.doesNotMatch(discoveryStatus, /Decision Mode|fully_autonomous/);
-  await run(['idea-context', 'discovery', 'complete', '--artifact', '# 调查\n\n目标用户可能是项目负责人或全体项目成员。']);
-  const proposal = {
-    summary: '目标参与者存在会改变成功结果的歧义',
-    questions: [{
-      key: 'primary-actor',
+  let delegation = (await inspectTaskDispatch(taskId))[0];
+  const first = await startAgent(delegation, `${taskId}-question-1`);
+  await first.run(put('requirement-intent', 'discovery', '# 调查\n\n主要参与者会改变成功结果。'));
+  await first.run(['phase', 'complete']);
+  await first.run(['phase', 'complete']);
+  await first.run([
+    'decision', 'put', '--tree', 'decisions', '--key', 'primary-actor', '--content', yaml({
+      type: 'business',
       title: '主要目标参与者',
       question: '项目体检首先帮助谁采取行动？',
       impact: '参与者不同会改变结果表达和成功标准。',
-      options: [{ id: 'lead', label: '项目负责人', consequences: ['集中承担风险处置'] }, { id: 'team', label: '全体项目成员', consequences: ['团队共同识别和处置风险'] }],
-      recommendationOption: 'team',
-      recommendationReason: '项目健康风险通常需要团队共同消化和行动。',
-      proposedAuthority: 'human',
-      activation: [],
-    }],
-  };
-  const answerPacket = await run(['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify(proposal)]);
-  assert.match(answerPacket, /Phase: CLARIFICATION RESOLUTION/);
-  assert.match(answerPacket, /Decision Mode: fully_autonomous/);
-  assert.match(answerPacket, /Policy Scope: 仅在当前 CLARIFICATION RESOLUTION/);
-  const resolved = await run(['idea-context', 'clarification-resolution', 'complete', '--artifact', JSON.stringify({
-    notes: '根据需求目标选择能共同识别并处理风险的参与者。',
-    agentDecisions: [{ key: 'primary-actor', optionId: 'team', reason: '团队共同处理更符合提前暴露风险的目标。' }],
-    humanDecisionKeys: [],
-  })]);
-  assert.match(resolved, /Outcome: answer_audit_required/);
-  assert.match(resolved, /Agent Answers: 1/);
-  assert.match(resolved, /HUMAN Answers: 0/);
-  assert.doesNotMatch(resolved, /Decision Mode|fully_autonomous/);
-  const audited = await run(['idea-context', 'clarification-resolution', 'audit-complete', '--artifact', '# 答案审查\n\n参与者选择没有引入当前问题树外的新语义。']);
-  assert.match(audited, /To: synthesis/);
-  for (const command of intentBriefModuleCommands('帮助全体项目成员更早识别并共同处理项目健康风险。')) await run(command);
-  await run(['idea-context', 'synthesis', 'complete']);
-  await run(['idea-context', 'complete']);
-  const result = await readAgentCommandSubmission(started.attempt.execution_id);
-  assert.equal(result?.outcome, 'completed');
-  assert.equal(result?.questions.length, 0);
-  await applyAgentResult(`RUN-ba-intent-mode-${taskId}`, delegation, result!, { executionId: started.attempt.execution_id });
-  await completeExecution(started.attempt.execution_id);
-  const detail = await getTask(taskId);
-  const decision = detail?.questions.find((question) => question.decision_key === 'primary-actor');
-  assert.equal(decision?.decision_authority, 'agent');
-  assert.equal(decision?.selected_option_id, 'team');
-  assert.equal(detail?.task.current_subagent, 'business-design-agent');
-});
-
-test('audits an Idea Context custom answer and returns to clarification proposal for incremental questions', async () => {
-  const { answerQuestion, createTask, getTask, submitClarificationAnswers } = await import('./tasks');
-  const { completeExecution } = await import('./executions');
-  const { issueAgentCommandToken, readAgentCommandSubmission, runAgentCommand } = await import('./agent-command-drafts');
-  const { applyAgentResult } = await import('./agent-results');
-  const taskId = await createTask({
-    title: '定义项目体检是否成功',
-    itemType: 'business-analysis',
-    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'balanced' }],
+      options: [
+        { id: 'lead', label: '项目负责人', consequence: '集中承担风险处置' },
+        { id: 'team', label: '全体项目成员', consequence: '团队共同识别和处置风险' },
+      ],
+      recommendation: { option: 'team', reason: '项目健康风险需要团队共同消化和行动。', authority: 'agent_authority' },
+      dependencies: [],
+    }),
+  ]);
+  await first.run(['phase', 'complete']);
+  await first.run(['decision', 'ask', '--tree', 'decisions', '--key', 'primary-actor']);
+  await first.run(['phase', 'complete']);
+  const waiting = await readAgentCommandSubmission(first.started.attempt.execution_id);
+  assert.equal(waiting?.outcome, 'needs_input');
+  assert.equal(waiting?.questions[0]?.decisionKey, 'primary-actor');
+  await applyAgentResult(`RUN-ba-yaml-${taskId}-question-1`, delegation, waiting!, {
+    executionId: first.started.attempt.execution_id,
   });
-  const proposal = {
-    summary: '成功结果存在不同解释，需要用户明确',
-    questions: [{
-      key: 'success-outcome',
-      title: '需求成功结果',
-      question: '项目体检首先要带来什么成功结果？',
-      impact: '它决定后续业务方案优化的目标。',
-      options: [{ id: 'awareness', label: '风险被及时看见', consequences: ['关注风险发现'] }, { id: 'closure', label: '风险被持续关闭', consequences: ['关注后续行动'] }],
-      recommendationOption: 'closure',
-      recommendationReason: '只有形成行动闭环才能持续改善项目健康。',
-      proposedAuthority: 'human',
-      activation: [],
-    }],
-  };
-  const resolution = {
-    notes: '成功结果属于需求意图核心，按平衡策略交给 HUMAN。',
-    agentDecisions: [],
-    humanDecisionKeys: ['success-outcome'],
-  };
-
-  let delegation = (await inspectTaskDispatch(taskId))[0];
-  const first = await beginTestExecutionAttempt({ runId: `RUN-ba-intent-expand-${taskId}-1`, delegation, prompt: 'Intent clarification proposal' });
-  const firstToken = await issueAgentCommandToken(first.attempt.execution_id);
-  assert.ok(firstToken);
-  const firstRun = (args: string[]) => runAgentCommand({ executionId: first.attempt.execution_id, token: firstToken, args });
-  await firstRun(['idea-context', 'status']);
-  await firstRun(['idea-context', 'discovery', 'complete', '--artifact', '# 调查\n\n成功可能表示发现风险，也可能表示关闭风险。']);
-  await firstRun(['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify(proposal)]);
-  await firstRun(['idea-context', 'clarification-resolution', 'complete', '--artifact', JSON.stringify(resolution)]);
-  await firstRun(['idea-context', 'request-clarification']);
-  const needsInput = await readAgentCommandSubmission(first.attempt.execution_id);
-  await applyAgentResult(`RUN-ba-intent-expand-${taskId}-1`, delegation, needsInput!, { executionId: first.attempt.execution_id });
-  await completeExecution(first.attempt.execution_id);
+  await completeExecution(first.started.attempt.execution_id);
 
   let detail = await getTask(taskId);
-  const question = detail?.questions.find((item) => item.decision_key === 'success-outcome');
-  await answerQuestion({
-    taskId,
-    questionId: question!.question_id,
-    answer: '30 天内至少关闭 80% 的阻断风险。',
-  });
-  await submitClarificationAnswers(taskId);
-
-  delegation = (await inspectTaskDispatch(taskId))[0];
-  const resumed = await beginTestExecutionAttempt({ runId: `RUN-ba-intent-expand-${taskId}-2`, delegation, prompt: 'Intent answer audit' });
-  const resumedToken = await issueAgentCommandToken(resumed.attempt.execution_id);
-  assert.ok(resumedToken);
-  const resumedRun = (args: string[]) => runAgentCommand({ executionId: resumed.attempt.execution_id, token: resumedToken, args });
-  const restored = await resumedRun(['idea-context', 'status']);
-  assert.match(restored, /clarification-resolution expand/);
-  const expanded = await resumedRun([
-    'idea-context', 'clarification-resolution', 'expand', '--artifact',
-    '# 答案审查\n\n自定义答案引入了“阻断风险”的判定口径，需要增量确认。',
-  ]);
-  assert.match(expanded, /To: clarification_proposal/);
-  const followUp = {
-    summary: '只补充阻断风险的判定口径',
-    questions: [{
-      key: 'blocking-risk-definition',
-      title: '阻断风险定义',
-      question: '什么风险计入阻断风险？',
-      impact: '它决定 80% 成功指标的统计口径。',
-      options: [{ id: 'delivery-blocked', label: '已阻止关键交付', consequences: ['口径客观'] }, { id: 'high-probability', label: '高概率将阻止交付', consequences: ['可以更早预警'] }],
-      recommendationOption: 'delivery-blocked',
-      recommendationReason: '已发生阻断更容易形成一致统计口径。',
-      proposedAuthority: 'agent',
-      activation: [],
-    }],
-  };
-  await resumedRun(['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify(followUp)]);
-  const closed = await resumedRun(['idea-context', 'clarification-resolution', 'complete', '--artifact', JSON.stringify({
-    notes: '增量口径可以按平衡策略由 Agent 关闭。',
-    agentDecisions: [{ key: 'blocking-risk-definition', optionId: 'delivery-blocked', reason: '客观且便于审计。' }],
-    humanDecisionKeys: [],
-  })]);
-  assert.match(closed, /Outcome: answer_audit_required/);
-  const followUpAudited = await resumedRun([
-    'idea-context', 'clarification-resolution', 'audit-complete', '--artifact',
-    '# 答案审查\n\n阻断风险定义已经闭合，没有引入新的需求意图分支。',
-  ]);
-  assert.match(followUpAudited, /To: synthesis/);
-  for (const command of intentBriefModuleCommands('帮助团队在 30 天内关闭至少 80% 已阻止关键交付的风险。')) await resumedRun(command);
-  await resumedRun(['idea-context', 'synthesis', 'complete']);
-  await resumedRun(['idea-context', 'complete']);
-  const completed = await readAgentCommandSubmission(resumed.attempt.execution_id);
-  await applyAgentResult(`RUN-ba-intent-expand-${taskId}-2`, delegation, completed!, { executionId: resumed.attempt.execution_id });
-  await completeExecution(resumed.attempt.execution_id);
-  detail = await getTask(taskId);
-  assert.equal(detail?.questions.find((item) => item.decision_key === 'success-outcome')?.answer, '30 天内至少关闭 80% 的阻断风险。');
-  assert.equal(detail?.questions.find((item) => item.decision_key === 'blocking-risk-definition')?.decision_authority, 'agent');
-  assert.equal(detail?.task.current_subagent, 'business-design-agent');
-});
-
-test('audits a Business Design custom answer and expands only the newly introduced decision branch', async () => {
-  const {
-    answerQuestion,
-    createTask,
-    getTask,
-    submitClarificationAnswers,
-    updateTask,
-  } = await import('./tasks');
-  const { completeExecution } = await import('./executions');
-  const {
-    issueAgentCommandToken,
-    readAgentCommandSubmission,
-    runAgentCommand,
-  } = await import('./agent-command-drafts');
-  const { applyAgentResult } = await import('./agent-results');
-  const taskId = await createTask({
-    title: '确定项目体检结果对谁可见',
-    itemType: 'business-analysis',
-    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'balanced' }],
-  });
-  await updateTask(taskId, 'human', { current_subagent: 'business-design-agent' });
-  const proposal = {
-    summary: '结果可见范围会改变隐私边界，需要用户决定',
-    questions: [{
-      key: 'result-visibility',
-      title: '体检结果可见范围',
-      question: '项目体检结果默认对谁可见？',
-      impact: '这会改变团队透明度和敏感信息暴露范围。',
-      options: [{ id: 'initiator', label: '仅发起人', consequences: ['隐私更强'] }, { id: 'members', label: '项目成员', consequences: ['团队可共同处理风险'] }],
-      recommendationOption: 'members',
-      recommendationReason: '体检目标是让团队共同识别并处理风险。',
-      proposedAuthority: 'human',
-      activation: [],
-    }],
-  };
-  const resolution = {
-    notes: '该节点改变用户可观察权限边界，交给 HUMAN。',
-    agentDecisions: [],
-    humanDecisionKeys: ['result-visibility'],
-  };
-
-  let delegation = (await inspectTaskDispatch(taskId))[0];
-  assert.equal(delegation.agent, 'business-design-agent');
-  const first = await beginTestExecutionAttempt({ runId: `RUN-ba-human-${taskId}-1`, delegation, prompt: 'Business decision proposal' });
-  const firstToken = await issueAgentCommandToken(first.attempt.execution_id);
-  assert.ok(firstToken);
-  const firstRun = (args: string[]) => runAgentCommand({ executionId: first.attempt.execution_id, token: firstToken, args });
-  const initialStatus = await firstRun(['business-design', 'status']);
-  assert.doesNotMatch(initialStatus, /Decision Mode/);
-  await firstRun(['business-design', 'exploration', 'complete', '--artifact', '# 探索\n\n体检结果需要明确可见边界。']);
-  const resolutionPacket = await firstRun(['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify(proposal)]);
-  assert.match(resolutionPacket, /Decision Mode: balanced/);
-  assert.match(resolutionPacket, /Policy Scope: 仅在当前 DECISION RESOLUTION/);
-  const requestNext = await firstRun(['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify(resolution)]);
-  assert.match(requestNext, /business-design request-clarification/);
-  await firstRun(['business-design', 'request-clarification']);
-  const needsInput = await readAgentCommandSubmission(first.attempt.execution_id);
-  assert.equal(needsInput?.outcome, 'needs_input');
-  await applyAgentResult(`RUN-ba-human-${taskId}-1`, delegation, needsInput!, { executionId: first.attempt.execution_id });
-  await completeExecution(first.attempt.execution_id);
-
-  let detail = await getTask(taskId);
-  const question = detail?.questions.find((item) => item.decision_key === 'result-visibility');
-  assert.equal(question?.status, 'pending');
-  await answerQuestion({
-    taskId,
-    questionId: question!.question_id,
-    answer: '普通风险对项目成员可见，严重风险仅对项目负责人可见。',
-  });
+  const question = detail?.questions.find((item) => item.decision_key === 'primary-actor');
+  assert.ok(question);
+  await answerQuestion({ taskId, questionId: question.question_id, answer: '全体项目成员共同处理。' });
   await submitClarificationAnswers(taskId);
 
   delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.pipeline, 'resume');
-  const resumed = await beginTestExecutionAttempt({ runId: `RUN-ba-human-${taskId}-2`, delegation, prompt: 'Business decision resume' });
-  const resumedToken = await issueAgentCommandToken(resumed.attempt.execution_id);
-  assert.ok(resumedToken);
-  const resumedRun = (args: string[]) => runAgentCommand({ executionId: resumed.attempt.execution_id, token: resumedToken, args });
-  const restored = await resumedRun(['business-design', 'status']);
-  assert.match(restored, /Phase: decision_resolution/);
-  assert.match(restored, /decision-resolution expand/);
-  await assert.rejects(
-    resumedRun(['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify({
-      notes: '尝试覆盖已经回答的 HUMAN 节点。',
-      agentDecisions: [{ key: 'result-visibility', optionId: 'members', reason: '不应被接受。' }],
-      humanDecisionKeys: [],
-    })]),
-    /已经发布给 HUMAN 的节点不能改由 Agent 回答/,
-  );
-  const auditRequired = await resumedRun(['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify(resolution)]);
-  assert.match(auditRequired, /Outcome: answer_audit_required/);
-  const expanded = await resumedRun([
-    'business-design', 'decision-resolution', 'expand', '--artifact',
-    '# 答案审查\n\n自定义答案引入严重程度边界，需要增量确认其判定方式。',
+  const resumed = await startAgent(delegation, `${taskId}-question-2`);
+  await resumed.run([
+    'decision', 'resolve', '--tree', 'decisions', '--key', 'primary-actor', '--option', 'team',
+    '--authority', 'user', '--decision', '全体项目成员共同处理', '--rationale', '继承用户回答', '--evidence', '用户澄清答案',
   ]);
-  assert.match(expanded, /To: decision_proposal/);
-  await assert.rejects(
-    resumedRun(['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify(proposal)]),
-    /不得重问或改名覆盖已有节点：result-visibility/,
-  );
-  const followUpProposal = {
-    summary: '只补充自定义答案新引入的严重程度边界',
-    questions: [{
-      key: 'severe-risk-boundary',
-      title: '严重风险边界',
-      question: '什么条件下体检风险属于严重风险？',
-      impact: '该边界决定结果可见范围。',
-      options: [{ id: 'any-blocker', label: '存在阻断项', consequences: ['边界明确且易于解释'] }, { id: 'score-threshold', label: '综合评分达到阈值', consequences: ['可综合多个风险信号'] }],
-      recommendationOption: 'any-blocker',
-      recommendationReason: '阻断项是更直接且可解释的严重风险信号。',
-      proposedAuthority: 'agent',
-      activation: [],
-    }],
-  };
-  await resumedRun(['business-design', 'decision-proposal', 'complete', '--artifact', JSON.stringify(followUpProposal)]);
-  const advanced = await resumedRun(['business-design', 'decision-resolution', 'complete', '--artifact', JSON.stringify({
-    notes: '增量节点可以按平衡策略由 Agent 关闭。',
-    agentDecisions: [{ key: 'severe-risk-boundary', optionId: 'any-blocker', reason: '阻断项边界直接、透明且符合风险解释目标。' }],
-    humanDecisionKeys: [],
-  })]);
-  assert.match(advanced, /Outcome: answer_audit_required/);
-  const followUpAudited = await resumedRun([
-    'business-design', 'decision-resolution', 'audit-complete', '--artifact',
-    '# 答案审查\n\n严重风险边界已经闭合，没有引入新的业务方案分支。',
-  ]);
-  assert.match(followUpAudited, /To: solution/);
-  for (const command of businessSolutionModuleCommands('普通风险对项目成员可见；存在阻断项时仅项目负责人可查看严重风险。')) await resumedRun(command);
-  await resumedRun(['business-design', 'solution', 'complete']);
-  await resumedRun(['business-design', 'complete']);
-  const completed = await readAgentCommandSubmission(resumed.attempt.execution_id);
+  await resumed.run(['phase', 'complete']);
+  await resumed.run(put('requirement-intent', 'answer-review', '用户答案没有引入新的需求意图分支。'));
+  await resumed.run(['phase', 'complete']);
+  for (const command of intentSynthesisCommands('帮助全体项目成员共同识别并处理项目健康风险。')) await resumed.run(command);
+  const completed = await readAgentCommandSubmission(resumed.started.attempt.execution_id);
   assert.equal(completed?.businessAnalysis?.disposition, 'advance');
-  await applyAgentResult(`RUN-ba-human-${taskId}-2`, delegation, completed!, { executionId: resumed.attempt.execution_id });
-  await completeExecution(resumed.attempt.execution_id);
+  await applyAgentResult(`RUN-ba-yaml-${taskId}-question-2`, delegation, completed!, {
+    executionId: resumed.started.attempt.execution_id,
+  });
+  await completeExecution(resumed.started.attempt.execution_id);
   detail = await getTask(taskId);
-  assert.equal(detail?.task.current_subagent, 'requirement-spec-agent');
-  assert.equal(detail?.questions.find((item) => item.decision_key === 'result-visibility')?.answer, '普通风险对项目成员可见，严重风险仅对项目负责人可见。');
-  assert.equal(detail?.questions.find((item) => item.decision_key === 'severe-risk-boundary')?.decision_authority, 'agent');
+  assert.equal(detail?.task.current_subagent, 'business-design-agent');
 });
 
-test('keeps migrated protocol v1 Business Analysis drafts on the legacy artifact command path', async () => {
-  const { createTask } = await import('./tasks');
-  const { databaseConnection } = await import('../infrastructure/database');
-  const { issueAgentCommandToken, readAgentCommandSubmission, runAgentCommand } = await import('./agent-command-drafts');
+test('routes structured Business Analysis gaps without namespace-specific terminal commands', async () => {
+  const { createTask, getTask } = await import('./tasks');
   const taskId = await createTask({
-    title: '继续升级前已经启动的需求意图草稿',
+    title: '业务方案发现需求意图缺口',
+    description: '先形成意图，再由业务方案判断是否足以唯一设计。',
     itemType: 'business-analysis',
     metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
   });
-  const delegation = (await inspectTaskDispatch(taskId))[0];
-  const started = await beginTestExecutionAttempt({
-    runId: `RUN-ba-legacy-${taskId}`,
-    delegation,
-    prompt: 'Legacy Business Analysis draft compatibility',
-  });
-  const token = await issueAgentCommandToken(started.attempt.execution_id);
-  assert.ok(token);
-  const run = (args: string[]) => runAgentCommand({ executionId: started.attempt.execution_id, token, args });
-  await run(['idea-context', 'status']);
-
-  const db = await databaseConnection();
-  db.prepare(`
-    UPDATE business_analysis_drafts SET protocol_version = 1
-    WHERE draft_id = (
-      SELECT draft_id FROM agent_work_drafts WHERE last_execution_id = ?
-    )
-  `).run(started.attempt.execution_id);
-
-  await run(['idea-context', 'discovery', 'complete', '--artifact', '# 调查\n\n升级前草稿继续使用原协议。']);
-  await run(['idea-context', 'clarification-proposal', 'complete', '--artifact', JSON.stringify({ summary: '没有需要确认的分支', questions: [] })]);
-  const legacyArtifact = '# 需求意图简报\n\n这是升级前已经开始编辑的正式产物。';
-  await run(['idea-context', 'synthesis', 'complete', '--artifact', legacyArtifact]);
-  await run(['idea-context', 'complete']);
-  const result = await readAgentCommandSubmission(started.attempt.execution_id);
-  assert.equal(result?.artifact?.content, legacyArtifact);
+  let delegation = (await inspectTaskDispatch(taskId))[0];
+  await executeAgent(delegation, intentCommands('帮助项目成员理解项目健康。'), `${taskId}-intent`);
+  delegation = (await inspectTaskDispatch(taskId))[0];
+  assert.equal(delegation.agent, 'business-design-agent');
+  const result = await executeAgent(delegation, [
+    put('business-solution', 'exploration', '# 探索\n\n成功结果缺少可判断边界，不能形成唯一业务方案。'),
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+    put('business-solution', 'answer-review', '没有活动决策，但上游成功结果仍不足。'),
+    ['phase', 'complete'],
+    put('business-solution', 'upstream-gaps', yaml({ reason: '缺少成功结果的可判断边界', evidence: '需求意图只表达“理解健康”，没有定义何时算成功' }), 'success-boundary'),
+    ['phase', 'complete'],
+    ['phase', 'complete'],
+  ], `${taskId}-gap`);
+  assert.equal(result.businessAnalysis?.disposition, 'return_revision');
+  assert.equal(result.businessAnalysis?.target, 'intent');
+  assert.equal((await getTask(taskId))?.task.current_subagent, 'idea-context-agent');
 });

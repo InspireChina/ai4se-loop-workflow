@@ -4,9 +4,10 @@ agent: story-splitter-agent
 
 artifacts:
   delivery-plan:
+    title: 交付计划
     blocks:
       sources:
-        title: FROZEN PLAN INPUTS
+        title: 冻结规划输入
         cardinality: many
         format: yaml
         writable: false
@@ -16,12 +17,12 @@ artifacts:
           content: { type: string, required: true }
           sourceRef: { type: string, required: true }
       rationale:
-        title: SPLIT RATIONALE
+        title: 拆分依据
         cardinality: one
         format: markdown
         required: true
       units:
-        title: DELIVERY UNITS
+        title: 交付单元
         cardinality: many
         format: yaml
         required: true
@@ -34,12 +35,12 @@ artifacts:
           sourceRefs: { type: array, required: true, minItems: 1 }
           dependsOn: { type: array }
       coverage:
-        title: COVERAGE
+        title: 整体覆盖
         cardinality: one
         format: markdown
         required: true
       ordering:
-        title: ORDERING
+        title: 顺序与依赖
         cardinality: one
         format: markdown
 

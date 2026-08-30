@@ -4,9 +4,10 @@ agent: feedback-agent
 
 artifacts:
   feedback:
+    title: 反馈分流
     blocks:
       inputs:
-        title: FROZEN FEEDBACK COMMENTS
+        title: 冻结反馈评论
         cardinality: many
         format: yaml
         writable: false
@@ -14,7 +15,7 @@ artifacts:
         fields:
           commentId: { type: string, required: true }
       meta:
-        title: FROZEN FEEDBACK BATCH
+        title: 冻结反馈批次
         cardinality: one
         format: yaml
         writable: false
@@ -23,12 +24,12 @@ artifacts:
           batchId: { type: string, required: true }
           totalStories: { type: string, required: true }
       summary:
-        title: FEEDBACK TRIAGE SUMMARY
+        title: 反馈分流摘要
         cardinality: one
         format: markdown
         required: true
       groups:
-        title: FEEDBACK WORK GROUPS
+        title: 反馈工作组
         cardinality: many
         format: yaml
         required: true
@@ -41,7 +42,7 @@ artifacts:
           affectedDeliveryUnits: { type: array, required: true }
           acceptance: { type: array, required: true }
       answer-review:
-        title: CLARIFICATION ANSWER REVIEW
+        title: 澄清答案复查
         cardinality: one
         format: markdown
         required: true

@@ -1,7 +1,7 @@
 'use server';
 
 import { redirect } from 'next/navigation';
-import { normalizeWorkspaceRoot, setAgentConcurrency, setAgentExecutorSettings, setAgentRuntimeSettings, setFlowAgentDefaultRuntimeSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
+import { normalizeWorkspaceRoot, setAgentConcurrency, setAgentExecutorSettings, setFlowAgentDefaultRuntimeSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
 import { resetAgentPromptToSystemTemplate, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
 import {
   addDocumentComment,
@@ -225,21 +225,6 @@ function redirectToAgentSection(agentId: string, sectionInput: FormDataEntryValu
   const section = String(sectionInput || '');
   const allowedSections = new Set(['runtime', 'prompt', 'memory', 'evolution', 'diagnostics']);
   redirect(`/agents/${agentId}${allowedSections.has(section) ? `?section=${section}` : ''}`);
-}
-
-export async function saveAgentRuntimeAction(formData: FormData) {
-  const agentId = String(formData.get('agentId'));
-  await setAgentRuntimeSettings(agentId, {
-    inheritProjectDefault: formData.get('inheritProjectDefault'),
-    executorId: formData.get('agentExecutor'),
-    codexModel: formData.get('codexModel'),
-    codexReasoningEffort: formData.get('codexReasoningEffort'),
-    codexWebSearch: formData.get('codexWebSearch'),
-    claudeModel: formData.get('claudeModel'),
-    ompModel: formData.get('ompModel'),
-    ompThinking: formData.get('ompThinking'),
-  });
-  redirectToAgentSection(agentId, formData.get('section'));
 }
 
 export async function saveLangfuseSettingsAction(formData: FormData) {

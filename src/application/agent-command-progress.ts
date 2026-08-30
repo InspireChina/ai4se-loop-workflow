@@ -1,14 +1,6 @@
 import type Database from 'better-sqlite3';
 import { agentCommandProfile } from '../domain/agent-command-profile';
-import { businessAnalysisPhases, businessAnalysisWorkflow, type BusinessAnalysisAgentId } from '../domain/business-analysis-workflow';
-import { DELIVERY_ANALYSIS_PHASE_ORDER, DELIVERY_ANALYSIS_WORKFLOW } from '../domain/delivery-analysis-workflow';
-import { DELIVERY_PLAN_PHASE_ORDER, DELIVERY_PLAN_WORKFLOW } from '../domain/delivery-plan-workflow';
-import { DEVELOPMENT_PHASE_ORDER, DEVELOPMENT_WORKFLOW } from '../domain/development-workflow';
-import { FEEDBACK_TRIAGE_PHASE_ORDER, FEEDBACK_TRIAGE_WORKFLOW, FEEDBACK_VERIFY_PHASE_ORDER, FEEDBACK_VERIFY_WORKFLOW } from '../domain/feedback-workflow';
-import { REQUIREMENT_CONTEXT_PHASE_ORDER } from '../domain/requirement-context-workflow';
-import { REPRODUCTION_PHASE_ORDER, REPRODUCTION_WORKFLOW } from '../domain/reproduction-workflow';
-import { REVIEW_PHASE_ORDER, REVIEW_WORKFLOW } from '../domain/review-workflow';
-import { VERIFICATION_PHASE_ORDER, VERIFICATION_WORKFLOW } from '../domain/verification-workflow';
+import { loadCommandChainDefinition } from '../domain/command-chain-definition';
 import { databaseConnection } from '../infrastructure/database';
 
 export type AgentCommandProgressStage = {
@@ -34,9 +26,19 @@ export type AgentCommandProgress = {
   updatedAt: string;
 };
 
+export type AgentCommandAuditRecord = {
+  executionId: string;
+  id: string;
+  label: string;
+  status: 'running' | 'success' | 'error';
+  startedAt: string;
+  finishedAt: string | null;
+};
+
 type DraftProgressRow = {
   draft_id: string;
   draft_type: string;
+  command_chain_id: string | null;
   agent: string;
   status: string;
   change_seq: number;
@@ -45,7 +47,6 @@ type DraftProgressRow = {
   status_viewed_execution_id: string | null;
   updated_at: string;
   workflow_phase: string | null;
-  research_enabled: number | null;
   execution_status: string | null;
   pipeline: string | null;
 };
@@ -60,78 +61,33 @@ type ActiveExecutionRow = {
 };
 
 type ToolReceiptRow = {
+  execution_id?: string;
+  receipt_key: string;
   payload_json: string;
   created_at: string;
 };
 
+type DomainCommandEvent = {
+  executionId: string;
+  receiptKey: string;
+  toolCallId: string;
+  commandHash: string;
+  phase: string;
+  summary: string;
+  success: boolean | null;
+  createdAt: string;
+};
+
 type PhaseDefinition = { order: readonly string[]; labels: Record<string, string> };
 
-const REQUIREMENT_CONTEXT_LABELS: Record<string, string> = {
-  as_is: '现状基线',
-  decision_proposal: '决策提出',
-  decision_resolution: '决策收敛',
-  answer_review: '答案复核',
-  to_be: '目标状态',
-  impact_scan: '影响扫描',
-  scope: '范围边界',
-  acceptance: '验收语义',
-  finalize: '最终提交',
-};
-
-const BUSINESS_ANALYSIS_LABELS: Record<string, string> = {
-  discovery: '需求调查', research: '实时调研', clarification_proposal: '澄清提出',
-  clarification_resolution: '澄清收敛', synthesis: '需求综合', exploration: '方案探索',
-  decision_proposal: '决策提出', decision_resolution: '决策收敛', solution: '业务方案',
-  composition: '规格编写', verification: '规格校验', inspection: '独立检查',
-  classification: '缺口分类', verdict: '审查结论', finalize: '最终提交',
-};
-
-const WORKFLOW_PHASE_LABELS: Record<string, string> = {
-  planning_basis: '拆分依据', delivery_units: '交付单元', coverage_order: '覆盖与排序',
-  investigation: '复现与取证', alignment_proposal: '对齐提出', alignment_resolution: '对齐解决',
-  impact_scan: '影响扫描', decision_proposal: '决策提出', decision_resolution: '决策收敛',
-  answer_review: '答案复核', delivery_contract: '交付契约', implement: '实现', review: '代码审查',
-  developer_verify: '开发者验证', commit: '代码提交', plan: '验证计划', execute: '执行验证',
-  evidence_review: '证据复核', fact_reconciliation: '事实对账', closure_assessment: '结卡评估',
-  report: '生成报告', forward_units: '前向补齐', finalize: '最终提交',
-};
-
-const phaseLabels = <T extends string>(order: readonly T[], workflow: Record<T, { title: string }>) =>
-  Object.fromEntries(order.map((phase) => [phase, WORKFLOW_PHASE_LABELS[phase] || workflow[phase].title])) as Record<string, string>;
-
 function phaseDefinition(row: DraftProgressRow): PhaseDefinition {
-  if (row.draft_type === 'requirement_context') {
-    return { order: REQUIREMENT_CONTEXT_PHASE_ORDER, labels: REQUIREMENT_CONTEXT_LABELS };
-  }
-  if (row.draft_type === 'delivery_plan') {
-    return { order: DELIVERY_PLAN_PHASE_ORDER, labels: phaseLabels(DELIVERY_PLAN_PHASE_ORDER, DELIVERY_PLAN_WORKFLOW) };
-  }
-  if (row.draft_type === 'analysis') {
-    return { order: DELIVERY_ANALYSIS_PHASE_ORDER, labels: phaseLabels(DELIVERY_ANALYSIS_PHASE_ORDER, DELIVERY_ANALYSIS_WORKFLOW) };
-  }
-  if (row.draft_type === 'development') {
-    return { order: DEVELOPMENT_PHASE_ORDER, labels: phaseLabels(DEVELOPMENT_PHASE_ORDER, DEVELOPMENT_WORKFLOW) };
-  }
-  if (row.draft_type === 'verification') {
-    return { order: VERIFICATION_PHASE_ORDER, labels: phaseLabels(VERIFICATION_PHASE_ORDER, VERIFICATION_WORKFLOW) };
-  }
-  if (row.draft_type === 'review') {
-    return { order: REVIEW_PHASE_ORDER, labels: phaseLabels(REVIEW_PHASE_ORDER, REVIEW_WORKFLOW) };
-  }
-  if (row.draft_type === 'business_analysis') {
-    const workflow = businessAnalysisWorkflow(row.agent);
-    if (workflow) {
-      const order = businessAnalysisPhases(row.agent as BusinessAnalysisAgentId, Boolean(row.research_enabled));
-      return { order, labels: { ...BUSINESS_ANALYSIS_LABELS } };
-    }
-  }
-  if (row.draft_type === 'reproduction') {
-    return { order: REPRODUCTION_PHASE_ORDER, labels: phaseLabels(REPRODUCTION_PHASE_ORDER, REPRODUCTION_WORKFLOW) };
-  }
-  if (row.draft_type === 'feedback') {
-    return row.pipeline === 'feedback-verify'
-      ? { order: FEEDBACK_VERIFY_PHASE_ORDER, labels: phaseLabels(FEEDBACK_VERIFY_PHASE_ORDER, FEEDBACK_VERIFY_WORKFLOW) }
-      : { order: FEEDBACK_TRIAGE_PHASE_ORDER, labels: phaseLabels(FEEDBACK_TRIAGE_PHASE_ORDER, FEEDBACK_TRIAGE_WORKFLOW) };
+  if (row.command_chain_id) {
+    const definition = loadCommandChainDefinition(row.command_chain_id);
+    const order = Object.keys(definition.phases);
+    return {
+      order,
+      labels: Object.fromEntries(order.map((phase) => [phase, definition.phases[phase].title])),
+    };
   }
   return { order: ['restore', 'work', 'finalize'], labels: { restore: '恢复状态', work: '执行工作', finalize: '提交结果' } };
 }
@@ -204,36 +160,93 @@ function verificationAssistanceProgress(db: Database.Database, row: ActiveExecut
   };
 }
 
-function latestDomainCommand(db: Database.Database, executionId: string | null) {
-  if (!executionId) return null;
-  const rows = db.prepare(`
-    SELECT payload_json, created_at
-    FROM execution_receipts
-    WHERE execution_id = ? AND kind = 'tool_event'
-    ORDER BY receipt_key DESC
-    LIMIT 120
-  `).all(executionId) as ToolReceiptRow[];
-  const events = rows.flatMap((row) => {
+function domainCommandEvents(rows: ToolReceiptRow[], fallbackExecutionId = '') {
+  return rows.flatMap((row): DomainCommandEvent[] => {
     try {
       const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
       const input = payload.input as Record<string, unknown> | undefined;
       const command = typeof input?.command === 'string' ? input.command : '';
       if (!/loop-agent\.(?:mjs|cjs)/i.test(command)) return [];
-      return [{ payload, createdAt: row.created_at }];
+      return [{
+        executionId: row.execution_id || fallbackExecutionId,
+        receiptKey: row.receipt_key,
+        toolCallId: typeof payload.toolCallId === 'string' ? payload.toolCallId : '',
+        commandHash: typeof payload.commandHash === 'string' ? payload.commandHash : '',
+        phase: typeof payload.phase === 'string' ? payload.phase : '',
+        summary: typeof payload.summary === 'string' ? payload.summary : '',
+        success: typeof payload.success === 'boolean' ? payload.success : null,
+        createdAt: row.created_at,
+      }];
     } catch {
       return [];
     }
   });
-  const latest = events[0];
+}
+
+function commandIdentity(event: DomainCommandEvent) {
+  return event.toolCallId || event.commandHash;
+}
+
+function domainCommandAuditRecords(rows: ToolReceiptRow[], fallbackExecutionId = '') {
+  const records: AgentCommandAuditRecord[] = [];
+  const activeRecords = new Map<string, AgentCommandAuditRecord>();
+  const events = domainCommandEvents(rows, fallbackExecutionId);
+
+  for (const event of events) {
+    const identity = commandIdentity(event);
+    const activeKey = `${event.executionId}:${identity}`;
+    if (event.phase === 'started') {
+      const record: AgentCommandAuditRecord = {
+        executionId: event.executionId,
+        id: identity ? `${activeKey}:${event.receiptKey}` : `${event.executionId}:${event.receiptKey}`,
+        label: event.summary || '执行 Agent 领域命令',
+        status: 'running',
+        startedAt: event.createdAt,
+        finishedAt: null,
+      };
+      records.push(record);
+      if (identity) activeRecords.set(activeKey, record);
+      continue;
+    }
+
+    if (event.phase !== 'completed') continue;
+    const record = identity ? activeRecords.get(activeKey) : undefined;
+    if (record) {
+      record.status = event.success === true ? 'success' : 'error';
+      record.finishedAt = event.createdAt;
+      activeRecords.delete(activeKey);
+      continue;
+    }
+
+    records.push({
+      executionId: event.executionId,
+      id: identity ? `${activeKey}:${event.receiptKey}` : `${event.executionId}:${event.receiptKey}`,
+      label: '执行 Agent 领域命令',
+      status: event.success === true ? 'success' : 'error',
+      startedAt: event.createdAt,
+      finishedAt: event.createdAt,
+    });
+  }
+  return records;
+}
+
+function latestDomainCommand(db: Database.Database, executionId: string | null) {
+  if (!executionId) return null;
+  const rows = db.prepare(`
+    SELECT receipt_key, payload_json, created_at
+    FROM execution_receipts
+    WHERE execution_id = ? AND kind = 'tool_event'
+    ORDER BY receipt_key
+  `).all(executionId) as ToolReceiptRow[];
+  const events = domainCommandEvents(rows, executionId);
+  const latest = events.at(-1);
   if (!latest) return null;
-  const commandHash = String(latest.payload.commandHash || '');
-  const started = events.find((event) => event.payload.phase === 'started'
-    && (!commandHash || event.payload.commandHash === commandHash));
-  const phase = String(latest.payload.phase || '');
-  const success = latest.payload.success;
+  const identity = commandIdentity(latest);
+  const started = [...events].reverse().find((event) => event.phase === 'started'
+    && (!identity || commandIdentity(event) === identity));
   return {
-    label: String(started?.payload.summary || (phase === 'started' ? latest.payload.summary : '') || '执行 Agent 领域命令'),
-    status: phase === 'started' ? 'running' as const : success === true ? 'success' as const : 'error' as const,
+    label: started?.summary || (latest.phase === 'started' ? latest.summary : '') || '执行 Agent 领域命令',
+    status: latest.phase === 'started' ? 'running' as const : latest.success === true ? 'success' as const : 'error' as const,
     createdAt: latest.createdAt,
   };
 }
@@ -267,14 +280,12 @@ function buildDraftProgress(db: Database.Database, row: DraftProgressRow): Agent
 
 export function agentCommandProgressInDb(db: Database.Database, taskId: string) {
   const drafts = db.prepare(`
-    SELECT work.draft_id, work.draft_type, work.agent, work.status, work.change_seq,
+    SELECT work.draft_id, work.draft_type, work.command_chain_id, work.agent, work.status, work.change_seq,
            work.story_index, work.last_execution_id, work.status_viewed_execution_id,
            work.updated_at,
-           COALESCE(business.workflow_phase, chain.workflow_phase) AS workflow_phase,
-           business.research_enabled,
+           chain.workflow_phase,
            execution.status AS execution_status, execution.pipeline
     FROM agent_work_drafts work
-    LEFT JOIN business_analysis_drafts business ON business.draft_id = work.draft_id
     LEFT JOIN command_chain_drafts chain ON chain.draft_id = work.draft_id
     LEFT JOIN execution_attempts execution ON execution.execution_id = work.last_execution_id
     WHERE work.task_id = ?
@@ -311,10 +322,11 @@ export function agentCommandProgressInDb(db: Database.Database, taskId: string) 
       continue;
     }
     const provisional: DraftProgressRow = {
-      draft_id: '', draft_type: profile.draftType, agent: execution.agent, status: 'editing',
+      draft_id: '', draft_type: profile.draftType, command_chain_id: profile.commandChainId || null,
+      agent: execution.agent, status: 'editing',
       change_seq: 0, story_index: execution.story_index, last_execution_id: execution.execution_id,
       status_viewed_execution_id: null, updated_at: execution.updated_at, workflow_phase: null,
-      research_enabled: 0, execution_status: execution.status, pipeline: execution.pipeline,
+      execution_status: execution.status, pipeline: execution.pipeline,
     };
     progress.push(buildDraftProgress(db, provisional));
   }
@@ -324,4 +336,20 @@ export function agentCommandProgressInDb(db: Database.Database, taskId: string) 
 export async function getAgentCommandProgress(taskId: string) {
   const db = await databaseConnection();
   return agentCommandProgressInDb(db, taskId);
+}
+
+export function agentCommandAuditInDb(db: Database.Database, taskId: string) {
+  const rows = db.prepare(`
+    SELECT receipt.execution_id, receipt.receipt_key, receipt.payload_json, receipt.created_at
+    FROM execution_receipts receipt
+    JOIN execution_attempts execution ON execution.execution_id = receipt.execution_id
+    WHERE execution.task_id = ? AND receipt.kind = 'tool_event'
+    ORDER BY execution.created_at, receipt.execution_id, receipt.receipt_key
+  `).all(taskId) as ToolReceiptRow[];
+  return domainCommandAuditRecords(rows);
+}
+
+export async function getAgentCommandAudit(taskId: string) {
+  const db = await databaseConnection();
+  return agentCommandAuditInDb(db, taskId);
 }

@@ -1,16 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import test from 'node:test';
-import { loadCommandChainDefinition } from './command-chain-definition';
+import { parseCommandChainDefinition } from './command-chain-definition';
+
+let currentDefinitionYaml = '';
+
+function loadTestDefinition() {
+  return parseCommandChainDefinition('delivery-analysis', currentDefinitionYaml);
+}
 
 function withDefinition(
   phases: Record<string, unknown>,
   run: () => void,
   artifacts: Record<string, unknown> = {},
 ) {
-  const definitionArtifacts = {
+  const rawArtifacts = {
     'delivery-analysis': {
       blocks: {
         impacts: {
@@ -18,28 +21,27 @@ function withDefinition(
           cardinality: 'many',
           format: 'yaml',
           required: true,
+          render: false,
+          fields: {
+            finding: { type: 'string', required: true, label: '发现' },
+          },
         },
       },
     },
     ...artifacts,
   };
-  const root = mkdtempSync(join(tmpdir(), 'loop-command-chain-'));
-  mkdirSync(join(root, 'command-chains'));
-  writeFileSync(join(root, 'command-chains', 'delivery-analysis.yaml'), [
+  const definitionArtifacts = Object.fromEntries(Object.entries(rawArtifacts).map(([artifactId, artifact]) => [
+    artifactId,
+    { title: artifactId, ...(artifact as Record<string, unknown>) },
+  ]));
+  currentDefinitionYaml = [
     'version: 2',
     'id: delivery-analysis',
     'agent: analyst-agent',
     `artifacts: ${JSON.stringify(definitionArtifacts)}`,
     `phases: ${JSON.stringify(phases)}`,
-  ].join('\n'));
-  const previous = process.env.LOOP_APP_ROOT;
-  process.env.LOOP_APP_ROOT = root;
-  try { run(); }
-  finally {
-    if (previous === undefined) delete process.env.LOOP_APP_ROOT;
-    else process.env.LOOP_APP_ROOT = previous;
-    rmSync(root, { recursive: true, force: true });
-  }
+  ].join('\n');
+  run();
 }
 
 test('requires the built-in Delivery Unit phase', () => {
@@ -50,7 +52,7 @@ test('requires the built-in Delivery Unit phase', () => {
     finalize: { type: 'confirmation', instructions: '最终确认' },
   }, () => {
     assert.throws(
-      () => loadCommandChainDefinition('delivery-analysis'),
+      () => loadTestDefinition(),
       /必须且只能声明一次内置 Phase delivery-unit/,
     );
   });
@@ -65,7 +67,7 @@ test('requires every built-in Phase to declare the common type field', () => {
     finalize: { type: 'confirmation', instructions: '最终确认' },
   }, () => {
     assert.throws(
-      () => loadCommandChainDefinition('delivery-analysis'),
+      () => loadTestDefinition(),
       /phases\.delivery_unit 必须声明 type: builtin/,
     );
   });
@@ -79,35 +81,35 @@ test('requires the built-in Decision phases', () => {
     finalize: { type: 'confirmation', instructions: '最终确认' },
   }, () => {
     assert.throws(
-      () => loadCommandChainDefinition('delivery-analysis'),
+      () => loadTestDefinition(),
       /必须且只能声明一次内置 Phase decision-proposal/,
     );
   });
 });
 
 test('rejects the removed top-level decisionTrees declaration', () => {
-  const root = mkdtempSync(join(tmpdir(), 'loop-command-chain-'));
-  mkdirSync(join(root, 'command-chains'));
-  writeFileSync(join(root, 'command-chains', 'delivery-analysis.yaml'), [
+  const yaml = [
     'version: 2',
     'id: delivery-analysis',
     'agent: analyst-agent',
     'artifacts: {}',
     'decisionTrees: {}',
     'phases: {}',
-  ].join('\n'));
-  const previous = process.env.LOOP_APP_ROOT;
-  process.env.LOOP_APP_ROOT = root;
-  try {
+  ].join('\n');
+  assert.throws(
+    () => parseCommandChainDefinition('delivery-analysis', yaml),
+    /不再支持顶层 decisionTrees/,
+  );
+});
+
+test('requires YAML to bind the Agent declared by the command-chain catalog', () => {
+  withDefinition({}, () => {
+    const yaml = currentDefinitionYaml.replace('agent: analyst-agent', 'agent: dev-agent');
     assert.throws(
-      () => loadCommandChainDefinition('delivery-analysis'),
-      /不再支持顶层 decisionTrees/,
+      () => parseCommandChainDefinition('delivery-analysis', yaml),
+      /必须绑定 Agent analyst-agent/,
     );
-  } finally {
-    if (previous === undefined) delete process.env.LOOP_APP_ROOT;
-    else process.env.LOOP_APP_ROOT = previous;
-    rmSync(root, { recursive: true, force: true });
-  }
+  });
 });
 
 test('rejects the removed hand-written Phase shape', () => {
@@ -129,7 +131,7 @@ test('rejects the removed hand-written Phase shape', () => {
     finalize: { type: 'confirmation', instructions: '最终确认' },
   }, () => {
     assert.throws(
-      () => loadCommandChainDefinition('delivery-analysis'),
+      () => loadTestDefinition(),
       /必须声明 type: builtin、type: artifact 或 type: confirmation/,
     );
   });
@@ -144,7 +146,7 @@ test('requires decision answer review to declare its Artifact Block', () => {
     finalize: { type: 'confirmation', instructions: '最终确认' },
   }, () => {
     assert.throws(
-      () => loadCommandChainDefinition('delivery-analysis'),
+      () => loadTestDefinition(),
       /phases\.answer_review 必须声明一个 Artifact Block/,
     );
   });
@@ -158,7 +160,7 @@ test('derives decision answer review Artifact commands and validation from YAML'
     answer_review: { type: 'builtin', builtin: 'decision-answer-review', artifacts: ['analysis.review-result'] },
     finalize: { type: 'confirmation', instructions: '最终确认' },
   }, () => {
-    const phase = loadCommandChainDefinition('delivery-analysis').phases.answer_review;
+    const phase = loadTestDefinition().phases.answer_review;
     assert.deepEqual(phase.artifactBlocks, [{ artifactId: 'analysis', blockId: 'review-result' }]);
     assert.ok(phase.commands.includes(
       'artifact put --artifact analysis --block review-result --content-file <text>',
@@ -186,7 +188,8 @@ test('derives a terminal confirmation without validators', () => {
     answer_review: { type: 'builtin', builtin: 'decision-answer-review', artifacts: ['analysis.review-result'] },
     finalize: { type: 'confirmation', instructions: '复查全部结果后确认提交。' },
   }, () => {
-    const phase = loadCommandChainDefinition('delivery-analysis').phases.finalize;
+    const definition = loadTestDefinition();
+    const phase = definition.phases.finalize;
     assert.equal(phase.type, 'confirmation');
     assert.equal(phase.builtin, null);
     assert.deepEqual(phase.artifactBlocks, []);
@@ -195,6 +198,9 @@ test('derives a terminal confirmation without validators', () => {
       'phase complete',
       'phase rewind --to <earlier-phase> --reason <原因>',
     ]);
+    assert.equal(definition.artifacts['delivery-analysis'].title, 'delivery-analysis');
+    assert.equal(definition.artifacts['delivery-analysis'].blocks.impacts.render, false);
+    assert.equal(definition.artifacts['delivery-analysis'].blocks.impacts.fields.finding.label, '发现');
   }, {
     analysis: {
       blocks: {
@@ -218,7 +224,7 @@ test('derives an intermediate confirmation as an unchecked phase transition', ()
     answer_review: { type: 'builtin', builtin: 'decision-answer-review', artifacts: ['analysis.review-result'] },
     finalize: { type: 'confirmation', instructions: '最终确认。' },
   }, () => {
-    const phase = loadCommandChainDefinition('delivery-analysis').phases.checkpoint;
+    const phase = loadTestDefinition().phases.checkpoint;
     assert.deepEqual(phase.validators, []);
     assert.deepEqual(phase.commands, [
       'phase complete',

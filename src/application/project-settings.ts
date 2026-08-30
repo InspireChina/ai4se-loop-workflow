@@ -1,11 +1,12 @@
 import { revalidatePath } from 'next/cache';
+import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
 import { AGENT_EXECUTORS, type AgentExecutorId } from '../domain/agent-executor';
 import { FLOW_AGENT_IDS, isFlowAgentId, type FlowAgentId } from '../domain/agent-profile';
 import type { AgentExecutionOptions } from '../infrastructure/agent-executor';
-import { databaseConnection, setConfiguredWorkspaceRoot } from '../infrastructure/database';
+import { appDatabaseConnection, databaseConnection, setConfiguredWorkspaceRoot } from '../infrastructure/database';
 import { advanceRuntimeEventRevisionInDb, publishRuntimeInvalidation } from './runtime-events';
 
 export const AGENT_EXECUTOR_OPTIONS: ReadonlyArray<{
@@ -67,11 +68,27 @@ export type AgentExecutorSettings = {
 
 export type AgentRuntimeSettings = AgentExecutorSettings & {
   agentId: FlowAgentId;
-  source: 'project_default' | 'agent_override';
+  source: 'global_default' | 'agent_configuration';
+  configurationId: string;
+  configurationName: string;
 };
 
-type AgentRuntimeSettingsRow = {
-  agent_id: string;
+export type GlobalRuntimeConfiguration = AgentExecutorSettings & {
+  configurationId: string;
+  scope: 'system' | 'flow' | 'agent';
+  agentId: FlowAgentId | null;
+  name: string;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type GlobalRuntimeConfigurationRow = {
+  configuration_id: string;
+  scope: GlobalRuntimeConfiguration['scope'];
+  agent_id: FlowAgentId | null;
+  name: string;
+  is_active: number;
   executor_id: string;
   codex_model: string;
   codex_reasoning_effort: string;
@@ -79,7 +96,12 @@ type AgentRuntimeSettingsRow = {
   claude_model: string;
   omp_model: string;
   omp_thinking: string;
+  created_at: string;
+  updated_at: string;
 };
+
+const runtimeConfigurationNameSchema = z.string().trim().min(1, '配置名称不能为空').max(80, '配置名称不能超过 80 个字符');
+let globalRuntimeSeedsEnsured = false;
 
 export type LangfuseSettings = {
   enabled: boolean;
@@ -172,174 +194,269 @@ export function setWorkspaceRoot(input: unknown) {
   return root;
 }
 
+type RuntimeSettingsInput = {
+  executorId?: unknown;
+  codexModel?: unknown;
+  codexReasoningEffort?: unknown;
+  codexWebSearch?: unknown;
+  claudeModel?: unknown;
+  ompModel?: unknown;
+  ompThinking?: unknown;
+};
+
+function parseExecutorSettingsInput(input: RuntimeSettingsInput): AgentExecutorSettings {
+  return {
+    executorId: executorSchema.parse(input.executorId),
+    codexModel: codexModelSchema.parse(input.codexModel ?? DEFAULT_CODEX_MODEL),
+    codexReasoningEffort: codexReasoningEffortSchema.parse(input.codexReasoningEffort ?? 'default'),
+    codexWebSearch: input.codexWebSearch === true || input.codexWebSearch === 'on' || input.codexWebSearch === 'true',
+    claudeModel: claudeModelSchema.parse(input.claudeModel ?? DEFAULT_CLAUDE_MODEL),
+    ompModel: ompModelSchema.parse(input.ompModel ?? DEFAULT_OMP_MODEL),
+    ompThinking: ompThinkingSchema.parse(input.ompThinking ?? 'default'),
+  };
+}
+
+function runtimeConfigurationFromRow(row: GlobalRuntimeConfigurationRow): GlobalRuntimeConfiguration {
+  const executor = executorSchema.safeParse(row.executor_id);
+  const model = codexModelSchema.safeParse(row.codex_model);
+  const effort = codexReasoningEffortSchema.safeParse(row.codex_reasoning_effort);
+  const claudeModel = claudeModelSchema.safeParse(row.claude_model);
+  const ompModel = ompModelSchema.safeParse(row.omp_model);
+  const ompThinking = ompThinkingSchema.safeParse(row.omp_thinking);
+  return {
+    configurationId: row.configuration_id,
+    scope: row.scope,
+    agentId: row.agent_id,
+    name: row.name,
+    active: Boolean(row.is_active),
+    executorId: executor.success ? executor.data : 'cursor',
+    codexModel: model.success ? model.data : DEFAULT_CODEX_MODEL,
+    codexReasoningEffort: effort.success ? effort.data : 'default',
+    codexWebSearch: Boolean(row.codex_web_search),
+    claudeModel: claudeModel.success ? claudeModel.data : DEFAULT_CLAUDE_MODEL,
+    ompModel: ompModel.success ? ompModel.data : DEFAULT_OMP_MODEL,
+    ompThinking: ompThinking.success ? ompThinking.data : 'default',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+function ensureGlobalRuntimeConfigurationSeeds() {
+  if (globalRuntimeSeedsEnsured) return;
+  const db = appDatabaseConnection();
+  db.transaction(() => {
+    for (const scope of ['system', 'flow'] as const) {
+      let active = db.prepare(`
+        SELECT configuration_id FROM global_runtime_configurations
+        WHERE scope = ? AND agent_id IS NULL AND is_active = 1
+      `).get(scope) as { configuration_id: string } | undefined;
+      if (!active) {
+        const existing = db.prepare(`
+          SELECT configuration_id FROM global_runtime_configurations
+          WHERE scope = ? AND agent_id IS NULL ORDER BY created_at, configuration_id LIMIT 1
+        `).get(scope) as { configuration_id: string } | undefined;
+        if (existing) {
+          db.prepare(`UPDATE global_runtime_configurations SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE configuration_id = ?`).run(existing.configuration_id);
+          active = existing;
+        } else {
+          const configurationId = `builtin-${scope}-runtime-default`;
+          db.prepare(`
+            INSERT OR IGNORE INTO global_runtime_configurations(
+              configuration_id, scope, agent_id, name, is_active, executor_id,
+              codex_model, codex_reasoning_effort, codex_web_search,
+              claude_model, omp_model, omp_thinking
+            ) VALUES(?, ?, NULL, ?, 1, 'cursor', ?, 'default', 1, '', '', 'default')
+          `).run(configurationId, scope, scope === 'system' ? '系统辅助默认' : '流程 Agent 默认', DEFAULT_CODEX_MODEL);
+          active = { configuration_id: configurationId };
+        }
+      }
+    }
+  })();
+  globalRuntimeSeedsEnsured = true;
+}
+
+function runtimeConfigurations(scope: GlobalRuntimeConfiguration['scope'], agentId: FlowAgentId | null) {
+  ensureGlobalRuntimeConfigurationSeeds();
+  const rows = appDatabaseConnection().prepare(`
+    SELECT * FROM global_runtime_configurations
+    WHERE scope = ? AND agent_id IS ?
+    ORDER BY is_active DESC, updated_at DESC, name
+  `).all(scope, agentId) as GlobalRuntimeConfigurationRow[];
+  return rows.map(runtimeConfigurationFromRow);
+}
+
+function activeRuntimeConfiguration(scope: GlobalRuntimeConfiguration['scope'], agentId: FlowAgentId | null) {
+  return runtimeConfigurations(scope, agentId).find((configuration) => configuration.active) || null;
+}
+
+async function invalidateGlobalRuntime(reason: string, agentId?: FlowAgentId) {
+  const db = await databaseConnection();
+  const revision = advanceRuntimeEventRevisionInDb(db, 'dispatch.invalidated');
+  await publishRuntimeInvalidation('dispatch.invalidated', revision, reason);
+  try {
+    revalidatePath('/settings');
+    revalidatePath('/agents');
+    if (agentId) revalidatePath(`/agents/${agentId}`);
+  } catch { /* CLI usage has no request context. */ }
+}
+
+export function listAgentRuntimeConfigurations(agentIdInput: string) {
+  if (!isFlowAgentId(agentIdInput)) throw new Error(`未知 Agent：${agentIdInput}`);
+  return runtimeConfigurations('agent', agentIdInput);
+}
+
+export async function createAgentRuntimeConfiguration(input: {
+  agentId: string;
+  name: unknown;
+  fromConfigurationId?: unknown;
+}) {
+  if (!isFlowAgentId(input.agentId)) throw new Error(`未知 Agent：${input.agentId}`);
+  const name = runtimeConfigurationNameSchema.parse(input.name);
+  const sourceId = String(input.fromConfigurationId || '');
+  const source = sourceId
+    ? listAgentRuntimeConfigurations(input.agentId).find((configuration) => configuration.configurationId === sourceId)
+    : null;
+  const settings = source || await getAgentRuntimeSettings(input.agentId);
+  const configurationId = randomUUID();
+  appDatabaseConnection().prepare(`
+    INSERT INTO global_runtime_configurations(
+      configuration_id, scope, agent_id, name, is_active, executor_id,
+      codex_model, codex_reasoning_effort, codex_web_search, claude_model, omp_model, omp_thinking
+    ) VALUES(?, 'agent', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    configurationId, input.agentId, name, settings.executorId, settings.codexModel,
+    settings.codexReasoningEffort, settings.codexWebSearch ? 1 : 0,
+    settings.claudeModel, settings.ompModel, settings.ompThinking,
+  );
+  await invalidateGlobalRuntime('global-agent-runtime-created', input.agentId);
+  return configurationId;
+}
+
+export async function saveAgentRuntimeConfiguration(input: RuntimeSettingsInput & {
+  agentId: string;
+  configurationId: unknown;
+  name: unknown;
+}) {
+  if (!isFlowAgentId(input.agentId)) throw new Error(`未知 Agent：${input.agentId}`);
+  const name = runtimeConfigurationNameSchema.parse(input.name);
+  const settings = parseExecutorSettingsInput(input);
+  const result = appDatabaseConnection().prepare(`
+    UPDATE global_runtime_configurations
+    SET name = ?, executor_id = ?, codex_model = ?, codex_reasoning_effort = ?,
+        codex_web_search = ?, claude_model = ?, omp_model = ?, omp_thinking = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE configuration_id = ? AND scope = 'agent' AND agent_id = ?
+  `).run(
+    name, settings.executorId, settings.codexModel, settings.codexReasoningEffort,
+    settings.codexWebSearch ? 1 : 0, settings.claudeModel, settings.ompModel,
+    settings.ompThinking, String(input.configurationId), input.agentId,
+  );
+  if (!result.changes) throw new Error('Runtime 配置不存在');
+  await invalidateGlobalRuntime('global-agent-runtime-saved', input.agentId);
+}
+
+export async function activateAgentRuntimeConfiguration(input: { agentId: string; configurationId: unknown }) {
+  if (!isFlowAgentId(input.agentId)) throw new Error(`未知 Agent：${input.agentId}`);
+  const configurationId = String(input.configurationId);
+  const db = appDatabaseConnection();
+  db.transaction(() => {
+    const exists = db.prepare(`
+      SELECT 1 FROM global_runtime_configurations
+      WHERE configuration_id = ? AND scope = 'agent' AND agent_id = ?
+    `).get(configurationId, input.agentId);
+    if (!exists) throw new Error('Runtime 配置不存在');
+    db.prepare(`UPDATE global_runtime_configurations SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE scope = 'agent' AND agent_id = ?`).run(input.agentId);
+    db.prepare(`UPDATE global_runtime_configurations SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE configuration_id = ?`).run(configurationId);
+  })();
+  await invalidateGlobalRuntime('global-agent-runtime-activated', input.agentId);
+}
+
+export async function inheritFlowRuntimeConfiguration(agentIdInput: string) {
+  if (!isFlowAgentId(agentIdInput)) throw new Error(`未知 Agent：${agentIdInput}`);
+  appDatabaseConnection().prepare(`
+    UPDATE global_runtime_configurations SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+    WHERE scope = 'agent' AND agent_id = ?
+  `).run(agentIdInput);
+  await invalidateGlobalRuntime('global-agent-runtime-inherited', agentIdInput);
+}
+
+export async function deleteAgentRuntimeConfiguration(input: { agentId: string; configurationId: unknown }) {
+  if (!isFlowAgentId(input.agentId)) throw new Error(`未知 Agent：${input.agentId}`);
+  const db = appDatabaseConnection();
+  const row = db.prepare(`
+    SELECT is_active FROM global_runtime_configurations
+    WHERE configuration_id = ? AND scope = 'agent' AND agent_id = ?
+  `).get(String(input.configurationId), input.agentId) as { is_active: number } | undefined;
+  if (!row) throw new Error('Runtime 配置不存在');
+  if (row.is_active) throw new Error('不能删除当前生效 Runtime 配置');
+  db.prepare(`DELETE FROM global_runtime_configurations WHERE configuration_id = ?`).run(String(input.configurationId));
+  await invalidateGlobalRuntime('global-agent-runtime-deleted', input.agentId);
+}
+
 export async function getAgentExecutorId(): Promise<AgentExecutorId> {
   return (await getAgentExecutorSettings()).executorId;
 }
 
 export async function getAgentExecutorSettings(): Promise<AgentExecutorSettings> {
-  const settings = await readProjectSettings(['agent_executor', 'codex_model', 'codex_reasoning_effort', 'codex_web_search', 'claude_model', 'omp_model', 'omp_thinking']);
-  const executor = executorSchema.safeParse(settings.agent_executor);
-  const model = codexModelSchema.safeParse(settings.codex_model);
-  const effort = codexReasoningEffortSchema.safeParse(settings.codex_reasoning_effort);
-  const claudeModel = claudeModelSchema.safeParse(settings.claude_model ?? DEFAULT_CLAUDE_MODEL);
-  const ompModel = ompModelSchema.safeParse(settings.omp_model ?? DEFAULT_OMP_MODEL);
-  const ompThinking = ompThinkingSchema.safeParse(settings.omp_thinking ?? 'default');
-  return {
-    executorId: executor.success ? executor.data : 'cursor',
-    codexModel: model.success ? model.data : DEFAULT_CODEX_MODEL,
-    codexReasoningEffort: effort.success ? effort.data : 'default',
-    codexWebSearch: settings.codex_web_search === undefined ? true : enabledFlag(settings.codex_web_search),
-    claudeModel: claudeModel.success ? claudeModel.data : DEFAULT_CLAUDE_MODEL,
-    ompModel: ompModel.success ? ompModel.data : DEFAULT_OMP_MODEL,
-    ompThinking: ompThinking.success ? ompThinking.data : 'default',
-  };
+  const active = activeRuntimeConfiguration('system', null);
+  if (!active) throw new Error('系统辅助 Runtime 配置不存在');
+  return active;
 }
 
-function parseAgentRuntimeSettings(row: AgentRuntimeSettingsRow | undefined, agentId: FlowAgentId, fallback: AgentExecutorSettings): AgentRuntimeSettings {
-  const executor = executorSchema.safeParse(row?.executor_id);
-  const model = codexModelSchema.safeParse(row?.codex_model);
-  const effort = codexReasoningEffortSchema.safeParse(row?.codex_reasoning_effort);
-  const claudeModel = claudeModelSchema.safeParse(row?.claude_model ?? fallback.claudeModel);
-  const ompModel = ompModelSchema.safeParse(row?.omp_model ?? fallback.ompModel);
-  const ompThinking = ompThinkingSchema.safeParse(row?.omp_thinking ?? fallback.ompThinking);
-  return {
-    agentId,
-    executorId: executor.success ? executor.data : fallback.executorId,
-    codexModel: model.success ? model.data : fallback.codexModel,
-    codexReasoningEffort: effort.success ? effort.data : fallback.codexReasoningEffort,
-    codexWebSearch: row ? Boolean(row.codex_web_search) : fallback.codexWebSearch,
-    claudeModel: claudeModel.success ? claudeModel.data : fallback.claudeModel,
-    ompModel: ompModel.success ? ompModel.data : fallback.ompModel,
-    ompThinking: ompThinking.success ? ompThinking.data : fallback.ompThinking,
-    source: row ? 'agent_override' : 'project_default',
-  };
-}
-
-export async function getFlowAgentDefaultRuntimeSettings(): Promise<AgentExecutorSettings> {
-  const settings = await readProjectSettings([
-    'flow_agent_executor', 'flow_codex_model', 'flow_codex_reasoning_effort',
-    'flow_codex_web_search', 'flow_claude_model', 'flow_omp_model', 'flow_omp_thinking',
-  ]);
-  const systemFallback = await getAgentExecutorSettings();
-  const executor = executorSchema.safeParse(settings.flow_agent_executor);
-  const model = codexModelSchema.safeParse(settings.flow_codex_model);
-  const effort = codexReasoningEffortSchema.safeParse(settings.flow_codex_reasoning_effort);
-  const claudeModel = claudeModelSchema.safeParse(settings.flow_claude_model ?? systemFallback.claudeModel);
-  const ompModel = ompModelSchema.safeParse(settings.flow_omp_model ?? systemFallback.ompModel);
-  const ompThinking = ompThinkingSchema.safeParse(settings.flow_omp_thinking ?? systemFallback.ompThinking);
-  return {
-    executorId: executor.success ? executor.data : systemFallback.executorId,
-    codexModel: model.success ? model.data : systemFallback.codexModel,
-    codexReasoningEffort: effort.success ? effort.data : systemFallback.codexReasoningEffort,
-    codexWebSearch: settings.flow_codex_web_search === undefined ? true : enabledFlag(settings.flow_codex_web_search),
-    claudeModel: claudeModel.success ? claudeModel.data : systemFallback.claudeModel,
-    ompModel: ompModel.success ? ompModel.data : systemFallback.ompModel,
-    ompThinking: ompThinking.success ? ompThinking.data : systemFallback.ompThinking,
-  };
+export async function getFlowAgentDefaultRuntimeSettings(): Promise<GlobalRuntimeConfiguration> {
+  const active = activeRuntimeConfiguration('flow', null);
+  if (!active) throw new Error('流程 Agent 默认 Runtime 配置不存在');
+  return active;
 }
 
 export async function getAgentRuntimeSettings(agentIdInput: string): Promise<AgentRuntimeSettings> {
   if (!isFlowAgentId(agentIdInput)) throw new Error(`未知 Agent：${agentIdInput}`);
-  const [db, fallback] = await Promise.all([databaseConnection(), getFlowAgentDefaultRuntimeSettings()]);
-  const row = db.prepare('SELECT * FROM agent_runtime_settings WHERE agent_id = ?').get(agentIdInput) as AgentRuntimeSettingsRow | undefined;
-  return parseAgentRuntimeSettings(row, agentIdInput, fallback);
+  const selected = activeRuntimeConfiguration('agent', agentIdInput);
+  const effective = selected || await getFlowAgentDefaultRuntimeSettings();
+  return {
+    agentId: agentIdInput,
+    executorId: effective.executorId,
+    codexModel: effective.codexModel,
+    codexReasoningEffort: effective.codexReasoningEffort,
+    codexWebSearch: effective.codexWebSearch,
+    claudeModel: effective.claudeModel,
+    ompModel: effective.ompModel,
+    ompThinking: effective.ompThinking,
+    source: selected ? 'agent_configuration' : 'global_default',
+    configurationId: effective.configurationId,
+    configurationName: effective.name,
+  };
 }
 
 export async function listAgentRuntimeSettings(): Promise<AgentRuntimeSettings[]> {
-  const [db, fallback] = await Promise.all([databaseConnection(), getFlowAgentDefaultRuntimeSettings()]);
-  const rows = db.prepare('SELECT * FROM agent_runtime_settings').all() as AgentRuntimeSettingsRow[];
-  const byAgent = new Map(rows.map((row) => [row.agent_id, row]));
-  return FLOW_AGENT_IDS.map((agentId) => parseAgentRuntimeSettings(byAgent.get(agentId), agentId, fallback));
+  return Promise.all(FLOW_AGENT_IDS.map((agentId) => getAgentRuntimeSettings(agentId)));
 }
 
-export async function setAgentRuntimeSettings(agentIdInput: string, input: { inheritProjectDefault?: unknown; executorId?: unknown; codexModel?: unknown; codexReasoningEffort?: unknown; codexWebSearch?: unknown; claudeModel?: unknown; ompModel?: unknown; ompThinking?: unknown }) {
-  if (!isFlowAgentId(agentIdInput)) throw new Error(`未知 Agent：${agentIdInput}`);
-  const inheritProjectDefault = input.inheritProjectDefault === true || input.inheritProjectDefault === 'on' || input.inheritProjectDefault === 'true';
-  const db = await databaseConnection();
-  if (inheritProjectDefault) {
-    db.prepare('DELETE FROM agent_runtime_settings WHERE agent_id = ?').run(agentIdInput);
-    try {
-      revalidatePath('/agents');
-      revalidatePath(`/agents/${agentIdInput}`);
-    } catch { /* CLI usage has no request context. */ }
-    return getAgentRuntimeSettings(agentIdInput);
-  }
-  const executorId = executorSchema.parse(input.executorId);
-  const codexModel = codexModelSchema.parse(input.codexModel ?? DEFAULT_CODEX_MODEL);
-  const codexReasoningEffort = codexReasoningEffortSchema.parse(input.codexReasoningEffort ?? 'default');
-  const codexWebSearch = input.codexWebSearch === true || input.codexWebSearch === 'on' || input.codexWebSearch === 'true';
-  const claudeModel = claudeModelSchema.parse(input.claudeModel ?? DEFAULT_CLAUDE_MODEL);
-  const ompModel = ompModelSchema.parse(input.ompModel ?? DEFAULT_OMP_MODEL);
-  const ompThinking = ompThinkingSchema.parse(input.ompThinking ?? 'default');
-  db.prepare(`
-    INSERT INTO agent_runtime_settings(
-      agent_id, executor_id, codex_model, codex_reasoning_effort, codex_web_search, claude_model,
-      omp_model, omp_thinking
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(agent_id) DO UPDATE SET
-      executor_id = excluded.executor_id,
-      codex_model = excluded.codex_model,
-      codex_reasoning_effort = excluded.codex_reasoning_effort,
-      codex_web_search = excluded.codex_web_search,
-      claude_model = excluded.claude_model,
-      omp_model = excluded.omp_model,
-      omp_thinking = excluded.omp_thinking,
-      updated_at = CURRENT_TIMESTAMP
-  `).run(agentIdInput, executorId, codexModel, codexReasoningEffort, codexWebSearch ? 1 : 0, claudeModel, ompModel, ompThinking);
-  try {
-    revalidatePath('/agents');
-    revalidatePath(`/agents/${agentIdInput}`);
-  } catch { /* CLI usage has no request context. */ }
-  return { agentId: agentIdInput, executorId, codexModel, codexReasoningEffort, codexWebSearch, claudeModel, ompModel, ompThinking, source: 'agent_override' } satisfies AgentRuntimeSettings;
+async function saveScopedRuntimeConfiguration(scope: 'system' | 'flow', input: RuntimeSettingsInput) {
+  const settings = parseExecutorSettingsInput(input);
+  const current = activeRuntimeConfiguration(scope, null);
+  if (!current) throw new Error('全局 Runtime 配置不存在');
+  appDatabaseConnection().prepare(`
+    UPDATE global_runtime_configurations
+    SET executor_id = ?, codex_model = ?, codex_reasoning_effort = ?,
+        codex_web_search = ?, claude_model = ?, omp_model = ?, omp_thinking = ?,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE configuration_id = ?
+  `).run(
+    settings.executorId, settings.codexModel, settings.codexReasoningEffort,
+    settings.codexWebSearch ? 1 : 0, settings.claudeModel, settings.ompModel,
+    settings.ompThinking, current.configurationId,
+  );
+  await invalidateGlobalRuntime(`global-${scope}-runtime-saved`);
+  return settings;
 }
 
-export async function setAgentExecutorSettings(input: { executorId: unknown; codexModel?: unknown; codexReasoningEffort?: unknown; codexWebSearch?: unknown; claudeModel?: unknown; ompModel?: unknown; ompThinking?: unknown }) {
-  const executorId = executorSchema.parse(input.executorId);
-  const codexModel = codexModelSchema.parse(input.codexModel ?? DEFAULT_CODEX_MODEL);
-  const codexReasoningEffort = codexReasoningEffortSchema.parse(input.codexReasoningEffort ?? 'default');
-  const codexWebSearch = input.codexWebSearch === true || input.codexWebSearch === 'on' || input.codexWebSearch === 'true';
-  const claudeModel = claudeModelSchema.parse(input.claudeModel ?? DEFAULT_CLAUDE_MODEL);
-  const ompModel = ompModelSchema.parse(input.ompModel ?? DEFAULT_OMP_MODEL);
-  const ompThinking = ompThinkingSchema.parse(input.ompThinking ?? 'default');
-  const db = await databaseConnection();
-  const upsert = db.prepare(`INSERT INTO project_settings(setting_key, setting_value) VALUES(?, ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP`);
-  db.transaction(() => {
-    upsert.run('agent_executor', executorId);
-    upsert.run('codex_model', codexModel);
-    upsert.run('codex_reasoning_effort', codexReasoningEffort);
-    upsert.run('codex_web_search', codexWebSearch ? 'true' : 'false');
-    upsert.run('claude_model', claudeModel);
-    upsert.run('omp_model', ompModel);
-    upsert.run('omp_thinking', ompThinking);
-  })();
-  try { revalidatePath('/settings'); } catch { /* CLI usage has no request context. */ }
-  return { executorId, codexModel, codexReasoningEffort, codexWebSearch, claudeModel, ompModel, ompThinking };
+export async function setAgentExecutorSettings(input: RuntimeSettingsInput) {
+  return saveScopedRuntimeConfiguration('system', input);
 }
 
-export async function setFlowAgentDefaultRuntimeSettings(input: { executorId: unknown; codexModel?: unknown; codexReasoningEffort?: unknown; codexWebSearch?: unknown; claudeModel?: unknown; ompModel?: unknown; ompThinking?: unknown }) {
-  const executorId = executorSchema.parse(input.executorId);
-  const codexModel = codexModelSchema.parse(input.codexModel ?? DEFAULT_CODEX_MODEL);
-  const codexReasoningEffort = codexReasoningEffortSchema.parse(input.codexReasoningEffort ?? 'default');
-  const codexWebSearch = input.codexWebSearch === true || input.codexWebSearch === 'on' || input.codexWebSearch === 'true';
-  const claudeModel = claudeModelSchema.parse(input.claudeModel ?? DEFAULT_CLAUDE_MODEL);
-  const ompModel = ompModelSchema.parse(input.ompModel ?? DEFAULT_OMP_MODEL);
-  const ompThinking = ompThinkingSchema.parse(input.ompThinking ?? 'default');
-  const db = await databaseConnection();
-  const upsert = db.prepare(`INSERT INTO project_settings(setting_key, setting_value) VALUES(?, ?) ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value, updated_at = CURRENT_TIMESTAMP`);
-  db.transaction(() => {
-    upsert.run('flow_agent_executor', executorId);
-    upsert.run('flow_codex_model', codexModel);
-    upsert.run('flow_codex_reasoning_effort', codexReasoningEffort);
-    upsert.run('flow_codex_web_search', codexWebSearch ? 'true' : 'false');
-    upsert.run('flow_claude_model', claudeModel);
-    upsert.run('flow_omp_model', ompModel);
-    upsert.run('flow_omp_thinking', ompThinking);
-  })();
-  try {
-    revalidatePath('/settings');
-    revalidatePath('/agents');
-  } catch { /* CLI usage has no request context. */ }
-  return { executorId, codexModel, codexReasoningEffort, codexWebSearch, claudeModel, ompModel, ompThinking } satisfies AgentExecutorSettings;
+export async function setFlowAgentDefaultRuntimeSettings(input: RuntimeSettingsInput) {
+  return saveScopedRuntimeConfiguration('flow', input);
 }
 
 export async function setAgentExecutorId(input: unknown) {

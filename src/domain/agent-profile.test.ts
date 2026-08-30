@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
-test('ships rigorous V13 seed prompts for every flow Agent', () => {
-  assert.equal(AGENT_PROMPT_SEED_REVISION, 13);
+test('ships rigorous V14 seed prompts for every flow Agent', () => {
+  assert.equal(AGENT_PROMPT_SEED_REVISION, 14);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
     assert.ok(prompt.length >= 450, `${agentId} seed prompt is too small to define a reliable role contract`);
@@ -11,26 +11,26 @@ test('ships rigorous V13 seed prompts for every flow Agent', () => {
     assert.match(prompt, /# (?:完成条件|判定规则)/, agentId);
     assert.match(prompt, /# (?:决策边界|禁止事项)/, agentId);
   }
-  assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /DISCOVERY → \[RESEARCH\] → CLARIFICATION PROPOSAL → CLARIFICATION RESOLUTION → SYNTHESIS → FINALIZE/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /DISCOVERY → RESEARCH → CLARIFICATION PROPOSAL → CLARIFICATION RESOLUTION → ANSWER REVIEW → SYNTHESIS → FINALIZE/);
   assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /必须实际使用 Web Search/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /CLARIFICATION RESOLUTION 才读取.*自动决策强度/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /CLARIFICATION RESOLUTION 才按.*自动决策强度/);
   assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /提出和回答必须分开/);
   assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /HUMAN 与 Agent 答案、空问题树和完全自主模式.*穷尽性审查/);
   assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /Frontier.*整个 frontier.*下一轮/s);
   assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /不是只判断.*答案有没有引出新问题.*主动寻找仍未确认/s);
   assert.match(AGENT_PROFILE_DEFINITIONS['idea-context-agent'].prompt, /frontier 为空/);
   assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /DECISION PROPOSAL.*DECISION RESOLUTION/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /EXPLORATION → \[RESEARCH\].*DECISION PROPOSAL/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /RESEARCH BASIS/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /EXPLORATION → RESEARCH.*DECISION PROPOSAL/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /Research/);
   assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /自动决策强度/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /Agent 自主答案或空问题树.*完成标准/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /任何决策强度、Agent 自主答案或空问题树都不能降低/);
   assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /拷问标准.*反例/);
   assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /当前 frontier.*同一批次.*下一轮/s);
   assert.match(AGENT_PROFILE_DEFINITIONS['business-design-agent'].prompt, /不是只判断.*所有需要确认/s);
   assert.match(AGENT_PROFILE_DEFINITIONS['requirement-spec-agent'].prompt, /AS IS、TO BE、ACTORS、SCENARIOS/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['spec-review-agent'].prompt, /intent、business_design 或 specification/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['spec-review-agent'].prompt, /intent、business_design 或 specification|唯一职责目标/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /现有实现已经满足承诺/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /AS IS → DECISION TREE · PROPOSE → DECISION TREE · RESOLVE → ANSWER REVIEW → TO BE → IMPACT SCAN → SCOPE → ACCEPTANCE → FINALIZE/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /阶段顺序和当前工作包以生效中的 YAML 命令链及 status 输出为准/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /PROPOSE 与 RESOLVE 必须分开/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /自动决策强度处理 Agent 节点/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /每轮 HUMAN 或 Agent 答案全部关闭后必须进入 ANSWER REVIEW/);
@@ -117,6 +117,7 @@ test('ships rigorous V13 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /不因分支、HEAD、其他 Commit 或无关未提交变化拒绝工作/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /禁止按 node、Node\.js、Vite、Java 等进程名.*批量结束进程/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /不向验证 Agent 传递测试目标、测试步骤或通过结论/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /acceptance assess.*不要把它复制成 development Artifact/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /implementation (?:status|complete)/);
   assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /每次启动先|每完成一个文件|每个真实命令执行后|当前 HEAD|原 request key/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /独立验证负责人/);
@@ -124,7 +125,7 @@ test('ships rigorous V13 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /PLAN 只从冻结契约/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /EXECUTE 按冻结计划逐项执行真实黑盒测试/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /EVIDENCE REVIEW 独立复核证据/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /每项交付单元验收语义至少要有一个从真实前端覆盖的场景/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /每项冻结 Acceptance 至少要有一个从真实前端覆盖的场景.*稳定 acceptance key 关联/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /API 场景.*不能脱离业务期望只验证接口实现细节/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /API 场景.*可以独立形成实现失败、规格问题或环境阻塞的有效反例/);
   assert.match(AGENT_PROFILE_DEFINITIONS['test-agent'].prompt, /浏览器、账号、设备条件或测试数据等执行资源不可获得时.*验证协助/);
@@ -164,7 +165,8 @@ test('ships rigorous V13 seed prompts for every flow Agent', () => {
   assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /不返回 targetStage、targetAgent、rewindTo/);
   assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /currentFeedbackBatch/);
   assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /追加交付单元/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /feedback status/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /feedback triage-complete/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /feedback resolve/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /第一条命令必须是 status/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /Artifact、Decision 与 Phase/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /resolved\/reopened 结论/);
+  assert.doesNotMatch(AGENT_PROFILE_DEFINITIONS['feedback-agent'].prompt, /feedback (?:status|triage-complete|request-clarification|resolve|reopen)/);
 });

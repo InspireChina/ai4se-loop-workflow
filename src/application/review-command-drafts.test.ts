@@ -55,9 +55,25 @@ async function insertRequirementContext(taskId: string) {
   insert.run(draftId, 'impacts', 'status-view', 'yaml', stringify({
     statement: '状态展示必须同步更新', disposition: 'change', rationale: '用户需要判断操作是否完成', source: '业务分析',
   }).trim(), 3);
-  insert.run(draftId, 'acceptance', 'visible-final-state', 'yaml', stringify({
-    content: '用户完成操作后看到准确最终状态', source: '用户验收',
-  }).trim(), 4);
+  db.prepare(`
+    INSERT INTO command_chain_acceptance_items(
+      draft_id, acceptance_key, statement, oracle, source, ordinal
+    ) VALUES(?, 'visible-final-state', '用户完成操作后看到准确最终状态',
+      '从真实用户入口观察到与最终业务状态一致的展示', '用户验收', 4)
+  `).run(draftId);
+  db.prepare(`
+    INSERT INTO acceptances(
+      acceptance_id, task_id, acceptance_key, scope_type, statement, oracle,
+      source_ref, source_command_chain_draft_id
+    ) VALUES(?, ?, 'visible-final-state', 'requirement',
+      '用户完成操作后看到准确最终状态',
+      '从真实用户入口观察到与最终业务状态一致的展示', ?, ?)
+  `).run(
+    `ACCEPTANCE-requirement-${taskId}`,
+    taskId,
+    `REQUIREMENT:${taskId}:acceptance:visible-final-state`,
+    draftId,
+  );
 }
 
 async function reviewFixture(title: string) {
@@ -74,6 +90,21 @@ async function reviewFixture(title: string) {
     ) VALUES(?, 1, '确认状态映射', 'story-001', 'state-mapping',
       '用户', '用户完成状态变更', '页面显示正确的最终状态', '独立黑盒验证最终状态')
   `).run(taskId);
+  db.prepare(`
+    INSERT INTO acceptances(
+      acceptance_id, task_id, acceptance_key, scope_type, story_index,
+      statement, oracle, source_ref
+    ) VALUES(?, ?, 'unit:state-mapping', 'delivery_unit', 1,
+      '独立黑盒验证最终状态', '页面显示正确的最终状态', ?)
+  `).run(
+    `ACCEPTANCE-unit-${taskId}`,
+    taskId,
+    `DELIVERY_UNIT:${taskId}:state-mapping:acceptance`,
+  );
+  db.prepare(`
+    INSERT INTO delivery_unit_acceptances(task_id, story_index, acceptance_id, relation)
+    VALUES(?, 1, ?, 'unit')
+  `).run(taskId, `ACCEPTANCE-unit-${taskId}`);
   const specId = randomUUID();
   db.prepare(`
     INSERT INTO story_specs(spec_id, task_id, story_index, revision, status, spec_json, resolved_at)

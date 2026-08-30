@@ -1,0 +1,53 @@
+version: 1
+id: requirement-spec
+agent: requirement-spec-agent
+
+artifacts:
+  requirement-specification:
+    title: 需求规格说明书
+    blocks:
+      upstream-gaps:
+        title: 上游缺口
+        cardinality: many
+        format: yaml
+        fields:
+          target: { type: enum, required: true, values: [intent, business_design], label: 回流目标 }
+          reason: { type: string, required: true, label: 缺口 }
+          evidence: { type: string, required: true, label: 证据 }
+      draft:
+        title: 需求规格草稿
+        cardinality: one
+        format: markdown
+        render: false
+      verification:
+        title: 规格校验
+        cardinality: one
+        format: markdown
+        render: false
+      final:
+        title: 需求规格
+        cardinality: one
+        format: markdown
+
+phases:
+  # Artifact Phase：把冻结需求意图、业务方案和有效决策路径编译为完整规格；发现上游缺口时结构化登记回流目标。
+  composition:
+    type: artifact
+    artifacts:
+      - requirement-specification.upstream-gaps
+      - requirement-specification.draft
+    instructions: 没有上游缺口时一次编写完整需求规格，覆盖 AS IS、TO BE、ACTORS、SCENARIOS、BUSINESS RULES、SCOPE、OUT OF SCOPE、ACCEPTANCE、DEPENDENCIES 和 ASSUMPTIONS，并保留上游 Research Basis。若意图或业务方案不能唯一成文，登记 upstream-gaps，不自行补答案。
+
+  # Artifact Phase：整体检查来源覆盖、决策继承、章节一致性、主异常场景、范围和验收可验证性。
+  verification:
+    type: artifact
+    artifacts:
+      - requirement-specification.upstream-gaps
+      - requirement-specification.verification
+      - requirement-specification.final
+    instructions: 对完整草稿做整体校验并修正纯表达问题。没有上游缺口时登记验证结论和修正后的最终规格；有上游缺口时只维护同一组稳定 gap key，不得伪造最终规格或把表达问题回流给自己。
+
+  # 内置最终门禁：有上游缺口时回流唯一职责目标；否则校验并提交最终需求规格。
+  finalize:
+    type: builtin
+    builtin: business-analysis-finalize

@@ -54,6 +54,7 @@ async function verificationDelegation(title: string) {
     WHERE agile_status NOT IN ('done', 'cancelled')
   `).run();
   const taskId = await createTask({ title, description: '用户需要验证结果页完成状态。' });
+  const acceptanceId = `ACCEPTANCE-${taskId}`;
   db.transaction(() => {
     db.prepare(`
       UPDATE tasks
@@ -66,12 +67,29 @@ async function verificationDelegation(title: string) {
       INSERT INTO stories(task_id, story_index, title, directory)
       VALUES(?, 1, '用户看到结果页完成状态', 'story-001')
     `).run(taskId);
+    db.prepare(`
+      INSERT INTO acceptances(
+        acceptance_id, task_id, acceptance_key, scope_type, story_index,
+        statement, oracle, source_ref
+      ) VALUES(?, ?, 'unit:fixture-unit', 'delivery_unit', 1,
+        '结果页从触发到完成状态形成可观察闭环',
+        '页面存在可识别的完成状态', 'TEST:acceptance:fixture')
+    `).run(acceptanceId, taskId);
   })();
   await saveDeliverySpec({
     taskId,
     storyIndex: 1,
     status: 'resolved',
     spec: deliverySpecFixture({
+      acceptances: [{
+        id: acceptanceId,
+        key: 'unit:fixture-unit',
+        scope: 'delivery_unit',
+        statement: '结果页从触发到完成状态形成可观察闭环',
+        oracle: '页面存在可识别的完成状态',
+        sourceRef: 'TEST:acceptance:fixture',
+        revision: 1,
+      }],
       handoff: {
         implementationGuidance: '复用现有结果状态组件。',
         guardrails: [{
@@ -111,7 +129,7 @@ async function putScenario(executionId: string, token: string, key = 'result-pag
     'setup: 应用已启动，存在一条完成结果和一条未完成结果',
     'steps: 打开 /results，并分别查看两条结果',
     'expected: 完成结果展示完成状态，未完成结果仍保持可识别',
-    'coverageRefs: [unit-acceptance, focus:AC-status, guardrail:pending-visible]',
+    'coverageRefs: [acceptance:unit:fixture-unit, focus:AC-status, guardrail:pending-visible]',
   ].join('\n'), key);
 }
 
@@ -160,10 +178,10 @@ test('Test Agent uses only the YAML command chain and compiles a passing indepen
   const active = await begin(delegation, `${taskId}-pass`);
 
   assert.match(await command(active.executionId, active.token!, ['help']), /通用命令链/);
-  await assert.rejects(command(active.executionId, active.token!, ['verification', 'status']), /当前草稿使用通用命令链/);
+  await assert.rejects(command(active.executionId, active.token!, ['verification', 'status']), /只允许 YAML 命令链协议/);
   const status = await command(active.executionId, active.token!, ['status']);
   assert.match(status, /Phase: inputs/);
-  assert.match(status, /unit-acceptance.*missing/s);
+  assert.match(status, /acceptance:unit:fixture-unit.*missing/s);
   assert.match(status, /focus:AC-status/);
   assert.match(status, /guardrail:pending-visible/);
   assert.match(await reachExecute(active.executionId, active.token!), /EXECUTE · builtin/);
@@ -176,7 +194,7 @@ test('Test Agent uses only the YAML command chain and compiles a passing indepen
 
   const result = await readAgentCommandSubmission(active.executionId);
   assert.equal(result?.verdict, 'passed');
-  assert.match(result?.artifact?.content || '', /unit-acceptance/);
+  assert.match(result?.artifact?.content || '', /acceptance:unit:fixture-unit/);
   assert.match(result?.artifact?.content || '', /不代表全站视觉回归/);
   await applyAgentResult(`RUN-verification-pass-${taskId}`, delegation, result!, { executionId: active.executionId });
   await completeExecution(active.executionId);
@@ -185,6 +203,13 @@ test('Test Agent uses only the YAML command chain and compiles a passing indepen
   assert.equal(detail?.task.current_subagent, 'review-agent');
 
   const db = await databaseConnection();
+  const assessment = db.prepare(`
+    SELECT kind, result, evidence FROM acceptance_assessments
+    WHERE execution_id = ?
+  `).get(active.executionId) as { kind: string; result: string; evidence: string };
+  assert.equal(assessment.kind, 'verification');
+  assert.equal(assessment.result, 'passed');
+  assert.match(assessment.evidence, /浏览器截图/);
   assert.deepEqual(db.prepare(`
     SELECT name FROM sqlite_master
     WHERE type = 'table' AND name IN ('verification_drafts', 'verification_plan_scenarios', 'verification_results')
@@ -286,6 +311,15 @@ test('a new verification cycle reuses a matching frozen plan but resets when the
   await saveDeliverySpec({
     taskId, storyIndex: 1, status: 'resolved',
     spec: deliverySpecFixture({
+      acceptances: [{
+        id: `ACCEPTANCE-${taskId}`,
+        key: 'unit:fixture-unit',
+        scope: 'delivery_unit',
+        statement: '结果页从触发到完成状态形成可观察闭环',
+        oracle: '页面存在可识别的完成状态',
+        sourceRef: 'TEST:acceptance:fixture',
+        revision: 1,
+      }],
       summary: '修订后的交付契约增加更明确的结果状态 Oracle。',
       handoff: {
         implementationGuidance: '保持业务语义。', guardrails: [],

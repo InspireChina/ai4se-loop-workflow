@@ -1,0 +1,136 @@
+version: 1
+id: idea-context
+agent: idea-context-agent
+
+artifacts:
+  requirement-intent:
+    title: 需求意图简报
+    blocks:
+      discovery:
+        title: 意图调查
+        cardinality: one
+        format: markdown
+        required: true
+        render: false
+      research-sources:
+        title: 调研依据
+        cardinality: many
+        format: yaml
+        fields:
+          claim: { type: string, required: true, label: 调研结论 }
+          sourceTitle: { type: string, required: true, label: 来源 }
+          sourceUrl: { type: string, required: true, label: 链接 }
+          applicability: { type: string, required: true, label: 适用范围 }
+          limitations: { type: string, required: true, label: 局限 }
+          confidence: { type: enum, required: true, values: [high, medium, low], label: 置信度 }
+      answer-review:
+        title: 答案复查
+        cardinality: one
+        format: markdown
+        required: true
+        render: false
+      problem:
+        title: 问题与背景
+        cardinality: one
+        format: markdown
+        required: true
+      actors:
+        title: 目标参与者
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          name: { type: string, required: true, label: 参与者 }
+          role: { type: string, required: true, label: 角色 }
+          need: { type: string, required: true, label: 需求 }
+      goals:
+        title: 业务目标
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          content: { type: string, required: true, label: 目标 }
+          source: { type: string, required: true, label: 来源 }
+      success:
+        title: 成功结果
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          outcome: { type: string, required: true, label: 成功结果 }
+          measure: { type: string, required: true, label: 衡量方式 }
+      constraints:
+        title: 硬性约束
+        cardinality: many
+        format: yaml
+        fields:
+          content: { type: string, required: true, label: 约束 }
+          source: { type: string, required: true, label: 来源 }
+      authorities:
+        title: 权威输入
+        cardinality: many
+        format: yaml
+        fields:
+          content: { type: string, required: true, label: 权威输入 }
+          source: { type: string, required: true, label: 来源 }
+      exclusions:
+        title: 排除项
+        cardinality: many
+        format: yaml
+        fields:
+          content: { type: string, required: true, label: 排除项 }
+      assumptions:
+        title: 已确认假设
+        cardinality: many
+        format: yaml
+        fields:
+          content: { type: string, required: true, label: 假设 }
+          source: { type: string, required: true, label: 来源 }
+
+phases:
+  # Artifact Phase：调查原始想法、参与者、业务情境、目标、约束、术语和事实边界；不设计具体方案。
+  discovery:
+    type: artifact
+    artifacts: [requirement-intent.discovery]
+    instructions: 调查原始想法和全部可获得资料，区分事实、假设与未知项，并找出会改变需求意图的歧义。能够通过现有资料查明的事实不要转交用户，也不要提前选择业务方案。
+
+  # 可选 Artifact Phase：仅在实时 Web Search 可用且外部事实会改变意图理解时登记来源；否则确认无需外部调研后继续。
+  research:
+    type: artifact
+    artifacts: [requirement-intent.research-sources]
+    instructions: 调查领域术语、标准、法规、官方定义和参考资料。只登记真实查阅且会影响需求意图理解的来源、适用性、局限与置信度；外部惯例不能替代用户目标。
+
+  # 决策提出：建立需求意图范围内的完整问题树，只定义分叉、选项、依赖与推荐，不关闭节点。
+  clarification_proposal:
+    type: builtin
+    builtin: decision-proposal
+
+  # 决策解决：按已有承诺、证据、Agent 权限和用户决定权关闭节点；需要用户决定时形成完整批次。
+  clarification_resolution:
+    type: builtin
+    builtin: decision-resolution
+
+  # 答案复查：聚合检查答案、条件分支与组合后果；发现遗漏时回退 clarification_proposal。
+  answer_review:
+    type: builtin
+    builtin: decision-answer-review
+    artifacts: [requirement-intent.answer-review]
+
+  # Artifact Phase：把已确认意图登记为结构化简报；不要写具体产品方案、业务规则或技术实现。
+  synthesis:
+    type: artifact
+    artifacts:
+      - requirement-intent.problem
+      - requirement-intent.actors
+      - requirement-intent.goals
+      - requirement-intent.success
+      - requirement-intent.constraints
+      - requirement-intent.authorities
+      - requirement-intent.exclusions
+      - requirement-intent.assumptions
+    instructions: 只根据原始想法、可靠事实和已关闭决策登记问题、目标参与者、业务目标、成功结果、硬约束、权威输入、排除项与已确认假设。每个稳定条目使用可追溯来源，不要隐藏新的产品决定。
+
+  # 内置最终门禁：校验完整意图、已关闭决策和结构化简报，并编译给业务方案 Agent 的正式产物。
+  finalize:
+    type: builtin
+    builtin: business-analysis-finalize

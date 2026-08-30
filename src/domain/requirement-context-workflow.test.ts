@@ -26,6 +26,7 @@ test('loads the requirement context workflow entirely from YAML', () => {
   assert.equal(REQUIREMENT_CONTEXT_WORKFLOW.decision_proposal.builtin, 'decision-proposal');
   assert.equal(REQUIREMENT_CONTEXT_WORKFLOW.decision_resolution.builtin, 'decision-resolution');
   assert.equal(REQUIREMENT_CONTEXT_WORKFLOW.answer_review.builtin, 'decision-answer-review');
+  assert.equal(REQUIREMENT_CONTEXT_WORKFLOW.acceptance.builtin, 'acceptance-definition');
   assert.equal(REQUIREMENT_CONTEXT_WORKFLOW.finalize.builtin, 'requirement-context-finalize');
   assert.deepEqual(requirementContextNormalCommandPath(), [
     'status',
@@ -33,7 +34,7 @@ test('loads the requirement context workflow entirely from YAML', () => {
   ]);
 });
 
-test('declares requirement context outputs as generic artifact blocks', () => {
+test('keeps human outputs as Artifact blocks and Acceptance as a builtin entity', () => {
   assert.deepEqual(
     Object.keys(REQUIREMENT_CONTEXT_COMMAND_CHAIN.artifacts['requirement-context'].blocks),
     [
@@ -48,5 +49,9 @@ test('declares requirement context outputs as generic artifact blocks', () => {
     ],
   );
   assert.equal(REQUIREMENT_CONTEXT_COMMAND_CHAIN.decisionTrees.decisions.builtin, 'decisions');
-  assert.match(REQUIREMENT_CONTEXT_WORKFLOW.acceptance.instructions, /需求级验收语义/);
+  assert.equal(REQUIREMENT_CONTEXT_COMMAND_CHAIN.artifacts['requirement-context'].blocks.acceptance.writable, false);
+  assert.deepEqual(REQUIREMENT_CONTEXT_WORKFLOW.acceptance.artifactBlocks, [
+    { artifactId: 'requirement-context', blockId: 'acceptance' },
+  ]);
+  assert.match(REQUIREMENT_CONTEXT_WORKFLOW.acceptance.commands.join('\n'), /acceptance put/);
 });

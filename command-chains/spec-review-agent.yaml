@@ -1,0 +1,64 @@
+version: 1
+id: spec-review
+agent: spec-review-agent
+
+artifacts:
+  specification-review:
+    title: 需求规格说明书
+    blocks:
+      findings:
+        title: 审查发现
+        cardinality: many
+        format: yaml
+        required: true
+        render: false
+        fields:
+          subject: { type: string, required: true, label: 审查主题 }
+          verdict: { type: enum, required: true, values: [passed, gap], label: 结论 }
+          evidence: { type: string, required: true, label: 证据 }
+          reason: { type: string, required: true, label: 原因 }
+      gaps:
+        title: 阻断缺口
+        cardinality: many
+        format: yaml
+        fields:
+          target: { type: enum, required: true, values: [intent, business_design, specification], label: 回流目标 }
+          affectedSections: { type: array, required: true, minItems: 1, label: 影响章节 }
+          evidence: { type: string, required: true, label: 证据 }
+          reason: { type: string, required: true, label: 缺口 }
+      verdict-summary:
+        title: 审查结论
+        cardinality: one
+        format: markdown
+        required: true
+        render: false
+      approved-specification:
+        title: 已批准需求规格
+        cardinality: one
+        format: markdown
+
+phases:
+  # Artifact Phase：独立对照全部权威业务输入，逐主题检查目标、决定、场景、规则、范围、验收和来源追踪。
+  inspection:
+    type: artifact
+    artifacts: [specification-review.findings]
+    instructions: 为每个重要审查主题登记有证据的 passed 或 gap 发现。不要直接改写上游决定，不检查代码实现，也不要把无关表达偏好升级为阻断缺口。
+
+  # Artifact Phase：合并重复发现，把每个阻断缺口归属到唯一上游职责；没有缺口时保持 gaps 为空。
+  classification:
+    type: artifact
+    artifacts: [specification-review.gaps]
+    instructions: 只保留会阻止规格成立的缺口，并使用稳定 key 分类为 intent、business_design 或 specification。所有 gap 必须指向同一个回流目标；不得自行回答缺口。
+
+  # Artifact Phase：无缺口时登记完整批准规格；有缺口时只登记审查结论，不同时批准。
+  verdict:
+    type: artifact
+    artifacts:
+      - specification-review.verdict-summary
+      - specification-review.approved-specification
+    instructions: 汇总独立审查结论。gaps 为空时登记忠实继承上游的完整 approved-specification；存在 gap 时不要登记批准规格，结论只说明回流原因和证据边界。
+
+  # 内置最终门禁：根据 gaps 确定性选择批准或唯一职责回流，并编译标准 Agent Result。
+  finalize:
+    type: builtin
+    builtin: business-analysis-finalize

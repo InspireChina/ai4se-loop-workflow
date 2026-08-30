@@ -4,9 +4,10 @@ agent: repro-agent
 
 artifacts:
   reproduction:
+    title: 问题复现证据
     blocks:
       verdict:
-        title: REPRODUCTION VERDICT
+        title: 复现结论
         cardinality: one
         format: yaml
         required: true
@@ -18,7 +19,7 @@ artifacts:
           stability: { type: string, required: true }
           impactScope: { type: string, required: true }
       steps:
-        title: REPRODUCTION STEPS
+        title: 复现步骤
         cardinality: many
         format: yaml
         required: true
@@ -27,7 +28,7 @@ artifacts:
           expected: { type: string, required: true }
           actual: { type: string, required: true }
       evidence:
-        title: REPRODUCTION EVIDENCE
+        title: 复现证据
         cardinality: many
         format: yaml
         required: true
@@ -36,7 +37,7 @@ artifacts:
           content: { type: string, required: true }
           source: { type: string, required: true }
       hypotheses:
-        title: INVESTIGATION DIRECTIONS
+        title: 调查方向
         cardinality: many
         format: yaml
         fields:
@@ -44,7 +45,7 @@ artifacts:
           statement: { type: string, required: true }
           evidence: { type: string, required: true }
       answer-review:
-        title: ALIGNMENT ANSWER REVIEW
+        title: 对齐答案复查
         cardinality: one
         format: markdown
         required: true

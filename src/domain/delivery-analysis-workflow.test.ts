@@ -20,7 +20,7 @@ test('defines the Delivery Analysis phase order and work packets in one catalog'
     { artifactId: 'delivery-analysis', blockId: 'impacts' },
   ]);
   const impactScan = DELIVERY_ANALYSIS_COMMAND_CHAIN.phases.impact_scan;
-  assert.equal(DELIVERY_ANALYSIS_COMMAND_CHAIN.artifacts['delivery-analysis'].blocks.impacts.title, 'AS-IS & IMPACT SCAN');
+  assert.equal(DELIVERY_ANALYSIS_COMMAND_CHAIN.artifacts['delivery-analysis'].blocks.impacts.title, '现状与影响扫描');
   assert.equal(impactScan.type, 'artifact');
   assert.deepEqual(impactScan.artifactBlocks, [{ artifactId: 'delivery-analysis', blockId: 'impacts' }]);
   assert.equal(impactScan.title, 'IMPACT SCAN');

@@ -57,10 +57,26 @@ async function taskReadyForSplit(title: string) {
     ) VALUES
       (?, 'requirement-context', 'intent', '', 'markdown', '管理员取得筛选结果文件', 1),
       (?, 'requirement-context', 'impacts', 'filtered-export', 'yaml',
-       'statement: 管理员可以下载当前筛选命中的结果\ndisposition: change\nrationale: 目标业务结果\nsource: 用户输入', 2),
-      (?, 'requirement-context', 'acceptance', 'download-matches-filter', 'yaml',
-       'content: 下载内容与当前筛选结果一致\nsource: 用户输入', 3)
-  `).run(draftId, draftId, draftId);
+       'statement: 管理员可以下载当前筛选命中的结果\ndisposition: change\nrationale: 目标业务结果\nsource: 用户输入', 2)
+  `).run(draftId, draftId);
+  db.prepare(`
+    INSERT INTO command_chain_acceptance_items(
+      draft_id, acceptance_key, statement, oracle, source, ordinal
+    ) VALUES(?, 'download-matches-filter', '下载内容与当前筛选结果一致',
+      '真实下载记录集合等于筛选结果集合', '用户输入', 3)
+  `).run(draftId);
+  db.prepare(`
+    INSERT INTO acceptances(
+      acceptance_id, task_id, acceptance_key, scope_type, statement, oracle,
+      source_ref, source_command_chain_draft_id
+    ) VALUES(?, ?, 'download-matches-filter', 'requirement',
+      '下载内容与当前筛选结果一致', '真实下载记录集合等于筛选结果集合', ?, ?)
+  `).run(
+    `ACCEPTANCE-${taskId}`,
+    taskId,
+    `REQUIREMENT:${taskId}:acceptance:download-matches-filter`,
+    draftId,
+  );
   await applyAgentResult(`RUN-context-${taskId}`, backlogDelegation(taskId), {
     outcome: 'completed',
     summary: '需求上下文完整，可以进入交付拆分。',
@@ -89,7 +105,7 @@ test('Story Splitter uses only the YAML command chain and compiles delivery unit
   const active = await begin(delegation, taskId);
 
   assert.match(await command(active.executionId, active.token!, ['help']), /通用命令链/);
-  await assert.rejects(command(active.executionId, active.token!, ['delivery-plan', 'status']), /当前草稿使用通用命令链/);
+  await assert.rejects(command(active.executionId, active.token!, ['delivery-plan', 'status']), /只允许 YAML 命令链协议/);
   const status = await command(active.executionId, active.token!, ['status']);
   assert.match(status, /Phase: inputs/);
   assert.match(status, /impact:filtered-export/);
@@ -124,6 +140,17 @@ test('Story Splitter uses only the YAML command chain and compiles delivery unit
   ]);
 
   const db = await databaseConnection();
+  const unitAcceptances = db.prepare(`
+    SELECT acceptance.acceptance_key, link.relation
+    FROM delivery_unit_acceptances link
+    JOIN acceptances acceptance ON acceptance.acceptance_id = link.acceptance_id
+    WHERE link.task_id = ? AND link.story_index = 1
+    ORDER BY link.relation, acceptance.acceptance_key
+  `).all(taskId) as { acceptance_key: string; relation: string }[];
+  assert.deepEqual(unitAcceptances, [
+    { acceptance_key: 'download-matches-filter', relation: 'assigned' },
+    { acceptance_key: 'unit:download-filtered-results', relation: 'unit' },
+  ]);
   assert.deepEqual(db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'delivery_plan_%'`).all(), []);
   const columns = db.prepare('PRAGMA table_info(stories)').all() as { name: string }[];
   assert.equal(columns.some((column) => column.name === 'source_delivery_plan_draft_id'), false);

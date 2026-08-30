@@ -115,10 +115,16 @@ async function reachFinalize(executionId: string, token: string, includeExpected
     'content: 当前筛选结果的文件导出。',
   ].join('\n'), 'filtered-export');
   await command(executionId, token, ['phase', 'complete']);
-  await put(executionId, token, 'acceptance', [
-    'content: 下载文件中的业务记录与发起导出时的筛选结果一致。',
+  await assert.rejects(
+    put(executionId, token, 'acceptance', 'statement: 不允许直接写投影'),
+    /不属于当前 acceptance 工作包|只读/,
+  );
+  await command(executionId, token, [
+    'acceptance', 'put', '--key', 'download-matches-filter', '--content', [
+    'statement: 下载文件中的业务记录与发起导出时的筛选结果一致。',
+    'oracle: 从真实下载入口取得的记录集合与发起导出时的筛选集合一致。',
     'source: target-export 和 filtered-export',
-  ].join('\n'), 'download-matches-filter');
+  ].join('\n')]);
   return command(executionId, token, ['phase', 'complete']);
 }
 
@@ -130,7 +136,7 @@ test('Backlog Agent uses only the YAML command chain and compiles downstream con
   assert.match(await command(active.executionId, active.token!, ['help']), /通用命令链/);
   await assert.rejects(
     command(active.executionId, active.token!, ['requirement-context', 'status']),
-    /当前草稿使用通用命令链/,
+    /只允许 YAML 命令链协议/,
   );
   const status = await command(active.executionId, active.token!, ['status']);
   assert.match(status, /Phase: as_is/);
@@ -146,6 +152,8 @@ test('Backlog Agent uses only the YAML command chain and compiles downstream con
   assert.equal(result?.outcome, 'completed');
   assert.match(result?.artifact?.content || '', /BUSINESS INTENT/);
   assert.match(result?.artifact?.content || '', /下载/);
+  assert.match(result?.artifact?.content || '', /\*\*download-matches-filter\*\*/);
+  assert.match(result?.artifact?.content || '', /Oracle：从真实下载入口/);
 
   const { databaseConnection } = await import('../infrastructure/database');
   const { latestRequirementContextProjection } = await import('./command-chain-drafts');
@@ -153,6 +161,21 @@ test('Backlog Agent uses only the YAML command chain and compiles downstream con
   const projection = latestRequirementContextProjection(db, taskId);
   assert.equal(projection?.impacts[0]?.key, 'filtered-export');
   assert.equal(projection?.acceptance[0]?.key, 'download-matches-filter');
+  const acceptance = db.prepare(`
+    SELECT acceptance_key, scope_type, statement, oracle, revision, lifecycle
+    FROM acceptances WHERE task_id = ?
+  `).get(taskId) as {
+    acceptance_key: string; scope_type: string; statement: string;
+    oracle: string; revision: number; lifecycle: string;
+  };
+  assert.equal(acceptance.acceptance_key, 'download-matches-filter');
+  assert.equal(acceptance.scope_type, 'requirement');
+  assert.equal(acceptance.lifecycle, 'active');
+  assert.match(acceptance.oracle, /真实下载入口/);
+  assert.equal((db.prepare(`
+    SELECT COUNT(*) AS count FROM command_chain_artifact_blocks
+    WHERE draft_id = ? AND block_id = 'acceptance'
+  `).get(projection!.draftId) as { count: number }).count, 0);
   const legacyTables = db.prepare(`
     SELECT name FROM sqlite_master
     WHERE type = 'table' AND name LIKE 'requirement_context_%'
