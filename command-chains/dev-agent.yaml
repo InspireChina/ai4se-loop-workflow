@@ -11,22 +11,22 @@ artifacts:
         cardinality: many
         format: yaml
         fields:
-          summary: { type: string, required: true }
-          evidence: { type: string, required: true }
+          summary: { type: string, required: true, label: 处理摘要 }
+          evidence: { type: string, required: true, label: 证据 }
       code-review:
         title: 代码审查
         cardinality: one
         format: yaml
         required: true
         fields:
-          summary: { type: string, required: true }
-          evidence: { type: string, required: true }
+          summary: { type: string, required: true, label: 审查摘要 }
+          evidence: { type: string, required: true, label: 证据 }
       risks:
         title: 残余风险
         cardinality: many
         format: yaml
         fields:
-          content: { type: string, required: true }
+          content: { type: string, required: true, label: 风险 }
 
 phases:
   # 只读范围门禁：读取冻结 Delivery Spec，确认实现目标、验收语义、保护约束与验证关注点。

@@ -13,40 +13,40 @@ artifacts:
         writable: false
         required: true
         fields:
-          kind: { type: enum, required: true, values: [acceptance, focus, guardrail, recovery] }
-          description: { type: string, required: true }
-          oracle: { type: string, required: true }
-          sourceRef: { type: string, required: true }
+          kind: { type: enum, required: true, values: [acceptance, focus, guardrail, recovery], label: 输入类型 }
+          description: { type: string, required: true, label: 描述 }
+          oracle: { type: string, required: true, label: 验证 Oracle }
+          sourceRef: { type: string, required: true, label: 来源引用 }
       scenarios:
         title: 验证场景
         cardinality: many
         format: yaml
         required: true
         fields:
-          channel: { type: enum, required: true, values: [frontend, api] }
-          title: { type: string, required: true }
-          setup: { type: string, required: true }
-          steps: { type: string, required: true }
-          expected: { type: string, required: true }
-          coverageRefs: { type: array, required: true, minItems: 1 }
+          channel: { type: enum, required: true, values: [frontend, api], label: 验证渠道 }
+          title: { type: string, required: true, label: 场景标题 }
+          setup: { type: string, required: true, label: 前置条件 }
+          steps: { type: string, required: true, label: 验证步骤 }
+          expected: { type: string, required: true, label: 预期结果 }
+          coverageRefs: { type: array, required: true, minItems: 1, label: 覆盖引用 }
       results:
         title: 验证结果
         cardinality: many
         format: yaml
         required: true
         fields:
-          status: { type: enum, required: true, values: [passed, failed, blocked] }
-          failureKind: { type: enum, values: [implementation, specification, environment, inconclusive] }
-          evidence: { type: string, required: true }
-          actualBehavior: { type: string }
+          status: { type: enum, required: true, values: [passed, failed, blocked], label: 验证结果 }
+          failureKind: { type: enum, values: [implementation, specification, environment, inconclusive], label: 失败归因 }
+          evidence: { type: string, required: true, label: 证据 }
+          actualBehavior: { type: string, label: 实际行为 }
       evidence-review:
         title: 证据复核
         cardinality: one
         format: yaml
         required: true
         fields:
-          summary: { type: string, required: true }
-          residualRisk: { type: string }
+          summary: { type: string, required: true, label: 复核摘要 }
+          residualRisk: { type: string, label: 残余风险 }
 
 phases:
   # 内置输入门禁：冻结当前 Delivery Spec 的验收、验证关注点、保护项和活动恢复事项，作为独立测试 Oracle。

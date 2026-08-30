@@ -12,11 +12,11 @@ artifacts:
         format: yaml
         required: true
         fields:
-          area: { type: string, required: true }
-          finding: { type: string, required: true }
-          disposition: { type: enum, required: true, values: [change, preserve, exclude, needs_decision] }
-          evidence: { type: string, required: true }
-          decision: { type: string }
+          area: { type: string, required: true, label: 影响区域 }
+          finding: { type: string, required: true, label: 发现 }
+          disposition: { type: enum, required: true, values: [change, preserve, exclude, needs_decision], label: 处置 }
+          evidence: { type: string, required: true, label: 证据 }
+          decision: { type: string, label: 决策 Key }
       answer-review: { title: 答案复查, cardinality: one, format: markdown, required: true }
       summary: { title: 交付摘要, cardinality: one, format: markdown, required: true }
       contract: { title: 交付契约, cardinality: one, format: markdown, required: true }
@@ -25,15 +25,15 @@ artifacts:
         cardinality: many
         format: yaml
         fields:
-          content: { type: string, required: true }
-          rationale: { type: string, required: true }
+          content: { type: string, required: true, label: 护栏 }
+          rationale: { type: string, required: true, label: 原因 }
       verification-focus:
         title: 验证重点
         cardinality: many
         format: yaml
         fields:
-          expected: { type: string, required: true }
-          oracle: { type: string, required: true }
+          expected: { type: string, required: true, label: 预期结果 }
+          oracle: { type: string, required: true, label: 验证 Oracle }
 
 phases:
   # 所有阶段统一使用 phase complete 完成；任意非初始阶段都可用 phase rewind 回到更早阶段，且必须记录原因。

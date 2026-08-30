@@ -13,7 +13,7 @@ artifacts:
         writable: false
         required: true
         fields:
-          commentId: { type: string, required: true }
+          commentId: { type: string, required: true, label: 评论 ID }
       meta:
         title: 冻结反馈批次
         cardinality: one
@@ -21,8 +21,8 @@ artifacts:
         writable: false
         required: true
         fields:
-          batchId: { type: string, required: true }
-          totalStories: { type: string, required: true }
+          batchId: { type: string, required: true, label: 批次 ID }
+          totalStories: { type: string, required: true, label: 交付单元总数 }
       summary:
         title: 反馈分流摘要
         cardinality: one
@@ -34,13 +34,13 @@ artifacts:
         format: yaml
         required: true
         fields:
-          workType: { type: enum, required: true, values: [reply, historical_correction, report_correction, bug, behavior_change, scope_addition, technical_change, learning_only] }
-          title: { type: string }
-          reason: { type: string, required: true }
-          response: { type: string }
-          commentIds: { type: array, required: true, minItems: 1 }
-          affectedDeliveryUnits: { type: array, required: true }
-          acceptance: { type: array, required: true }
+          workType: { type: enum, required: true, values: [reply, historical_correction, report_correction, bug, behavior_change, scope_addition, technical_change, learning_only], label: 工作类型 }
+          title: { type: string, label: 标题 }
+          reason: { type: string, required: true, label: 原因 }
+          response: { type: string, label: 回复 }
+          commentIds: { type: array, required: true, minItems: 1, label: 评论 ID }
+          affectedDeliveryUnits: { type: array, required: true, label: 受影响交付单元 }
+          acceptance: { type: array, required: true, label: 验收语义 }
       answer-review:
         title: 澄清答案复查
         cardinality: one

@@ -12,38 +12,38 @@ artifacts:
         format: yaml
         required: true
         fields:
-          status: { type: enum, required: true, values: [reproduced, not_reproduced] }
-          expectedBehavior: { type: string, required: true }
-          actualBehavior: { type: string, required: true }
-          environment: { type: string, required: true }
-          stability: { type: string, required: true }
-          impactScope: { type: string, required: true }
+          status: { type: enum, required: true, values: [reproduced, not_reproduced], label: 复现状态 }
+          expectedBehavior: { type: string, required: true, label: 预期行为 }
+          actualBehavior: { type: string, required: true, label: 实际行为 }
+          environment: { type: string, required: true, label: 复现环境 }
+          stability: { type: string, required: true, label: 稳定性 }
+          impactScope: { type: string, required: true, label: 影响范围 }
       steps:
         title: 复现步骤
         cardinality: many
         format: yaml
         required: true
         fields:
-          action: { type: string, required: true }
-          expected: { type: string, required: true }
-          actual: { type: string, required: true }
+          action: { type: string, required: true, label: 操作 }
+          expected: { type: string, required: true, label: 预期结果 }
+          actual: { type: string, required: true, label: 实际结果 }
       evidence:
         title: 复现证据
         cardinality: many
         format: yaml
         required: true
         fields:
-          kind: { type: enum, required: true, values: [log, screenshot, command, observation] }
-          content: { type: string, required: true }
-          source: { type: string, required: true }
+          kind: { type: enum, required: true, values: [log, screenshot, command, observation], label: 证据类型 }
+          content: { type: string, required: true, label: 证据内容 }
+          source: { type: string, required: true, label: 证据来源 }
       hypotheses:
         title: 调查方向
         cardinality: many
         format: yaml
         fields:
-          status: { type: enum, required: true, values: [suspected, excluded] }
-          statement: { type: string, required: true }
-          evidence: { type: string, required: true }
+          status: { type: enum, required: true, values: [suspected, excluded], label: 状态 }
+          statement: { type: string, required: true, label: 假设 }
+          evidence: { type: string, required: true, label: 证据 }
       answer-review:
         title: 对齐答案复查
         cardinality: one

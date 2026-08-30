@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import test from 'node:test';
+import { COMMAND_CHAIN_CATALOG } from './command-chain-catalog';
 import { parseCommandChainDefinition } from './command-chain-definition';
 
 let currentDefinitionYaml = '';
@@ -243,4 +246,22 @@ test('derives an intermediate confirmation as an unchecked phase transition', ()
       },
     },
   });
+});
+
+test('gives every bundled Artifact YAML field a human-readable label', () => {
+  const appRoot = process.env.LOOP_APP_ROOT || process.cwd();
+  for (const item of COMMAND_CHAIN_CATALOG) {
+    const yaml = readFileSync(join(appRoot, 'command-chains', item.fileName), 'utf8');
+    const definition = parseCommandChainDefinition(item.id, yaml);
+    for (const [artifactId, artifact] of Object.entries(definition.artifacts)) {
+      for (const [blockId, block] of Object.entries(artifact.blocks)) {
+        for (const [fieldName, field] of Object.entries(block.fields)) {
+          assert.ok(
+            field.label?.trim(),
+            `${item.fileName}: artifacts.${artifactId}.blocks.${blockId}.fields.${fieldName} 缺少 label`,
+          );
+        }
+      }
+    }
+  }
 });

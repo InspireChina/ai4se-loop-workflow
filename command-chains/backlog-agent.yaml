@@ -17,11 +17,11 @@ artifacts:
         format: yaml
         required: true
         fields:
-          perspective: { type: enum, required: true, values: [actual, expected, target] }
-          statement: { type: string, required: true }
-          evidence: { type: enum, required: true, values: [observed, reported, inferred, decided, conflicted] }
-          source: { type: string, required: true }
-          decision: { type: string }
+          perspective: { type: enum, required: true, values: [actual, expected, target], label: 视角 }
+          statement: { type: string, required: true, label: 陈述 }
+          evidence: { type: enum, required: true, values: [observed, reported, inferred, decided, conflicted], label: 证据性质 }
+          source: { type: string, required: true, label: 来源 }
+          decision: { type: string, label: 决策 Key }
       answer-review:
         title: 答案复查
         cardinality: one
@@ -38,25 +38,25 @@ artifacts:
         format: yaml
         required: true
         fields:
-          statement: { type: string, required: true }
-          disposition: { type: enum, required: true, values: [change, preserve, needs_decision, technical] }
-          rationale: { type: string, required: true }
-          source: { type: string, required: true }
-          decision: { type: string }
+          statement: { type: string, required: true, label: 影响 }
+          disposition: { type: enum, required: true, values: [change, preserve, needs_decision, technical], label: 处置 }
+          rationale: { type: string, required: true, label: 原因 }
+          source: { type: string, required: true, label: 来源 }
+          decision: { type: string, label: 决策 Key }
       scope:
         title: 范围
         cardinality: many
         format: yaml
         required: true
         fields:
-          direction: { type: enum, required: true, values: [included, excluded] }
-          content: { type: string, required: true }
+          direction: { type: enum, required: true, values: [included, excluded], label: 范围方向 }
+          content: { type: string, required: true, label: 内容 }
       constraints:
         title: 约束
         cardinality: many
         format: yaml
         fields:
-          content: { type: string, required: true }
+          content: { type: string, required: true, label: 约束 }
       acceptance:
         title: 验收语义
         cardinality: many

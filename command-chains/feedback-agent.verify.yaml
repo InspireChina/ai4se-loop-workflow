@@ -13,8 +13,8 @@ artifacts:
         writable: false
         required: true
         fields:
-          commentId: { type: string, required: true }
-          groupId: { type: string, required: true }
+          commentId: { type: string, required: true, label: 评论 ID }
+          groupId: { type: string, required: true, label: 工作组 ID }
       summary:
         title: 反馈验证摘要
         cardinality: one
@@ -31,8 +31,8 @@ artifacts:
         format: yaml
         required: true
         fields:
-          verdict: { type: enum, required: true, values: [resolved, reopened] }
-          reason: { type: string, required: true }
+          verdict: { type: enum, required: true, values: [resolved, reopened], label: 验证结论 }
+          reason: { type: string, required: true, label: 原因 }
 
 phases:
   # 内置输入门禁：冻结当前只允许验证的一条反馈评论及其工作组。

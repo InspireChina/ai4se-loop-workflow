@@ -13,9 +13,9 @@ artifacts:
         writable: false
         required: true
         fields:
-          kind: { type: enum, required: true, values: [change, preserve, technical, acceptance] }
-          content: { type: string, required: true }
-          sourceRef: { type: string, required: true }
+          kind: { type: enum, required: true, values: [change, preserve, technical, acceptance], label: 输入类型 }
+          content: { type: string, required: true, label: 内容 }
+          sourceRef: { type: string, required: true, label: 来源引用 }
       rationale:
         title: 拆分依据
         cardinality: one
@@ -27,13 +27,13 @@ artifacts:
         format: yaml
         required: true
         fields:
-          title: { type: string, required: true }
-          actor: { type: string, required: true }
-          trigger: { type: string, required: true }
-          observableOutcome: { type: string, required: true }
-          acceptance: { type: string, required: true }
-          sourceRefs: { type: array, required: true, minItems: 1 }
-          dependsOn: { type: array }
+          title: { type: string, required: true, label: 标题 }
+          actor: { type: string, required: true, label: 参与者 }
+          trigger: { type: string, required: true, label: 触发条件 }
+          observableOutcome: { type: string, required: true, label: 可观察结果 }
+          acceptance: { type: string, required: true, label: 验收语义 }
+          sourceRefs: { type: array, required: true, minItems: 1, label: 来源引用 }
+          dependsOn: { type: array, label: 前置单元 }
       coverage:
         title: 整体覆盖
         cardinality: one
