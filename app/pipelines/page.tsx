@@ -49,7 +49,7 @@ function EntryRoute({ label, summary, stages, tone }: { label: string; summary: 
 
 export default function PipelinesPage() {
   return <>
-    <header><p className="eyebrow">WORKFLOW CATALOG</p><h1>流水线</h1><p className="muted">四类入口共享一张流程地图：End to End 自动贯通 Business Analysis 与 Develop，其他入口也可独立使用。</p></header>
+    <header><p className="eyebrow">WORKFLOW CATALOG</p><h1>流水线</h1><p className="muted">四类入口共享一张流程地图；OpenSpec 文档可以作为公共流程的仓库事实输入。</p></header>
     <section className="card pipeline-board" aria-labelledby="pipeline-board-title">
       <div className="pipeline-board-head">
         <div><span className="eyebrow">END-TO-END MAP</span><h2 id="pipeline-board-title">从想法到可信交付</h2></div>

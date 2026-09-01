@@ -4,6 +4,7 @@ agent: requirement-spec-agent
 
 artifacts:
   requirement-specification:
+    type: builtin
     title: 需求规格说明书
     blocks:
       upstream-gaps:

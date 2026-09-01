@@ -11,10 +11,16 @@ async function command(executionId: string, token: string, args: string[]) {
   return runAgentCommand({ executionId, token, args });
 }
 
-async function developmentDelegation(title: string) {
+async function developmentDelegation(title: string, requirementCardId?: string) {
   const { databaseConnection } = await import('../infrastructure/database');
   const { createTask, saveDeliverySpec } = await import('./tasks');
-  const taskId = await createTask({ title, description: '用户需要在结果页看到明确的完成状态。' });
+  const taskId = await createTask({
+    title,
+    description: '用户需要在结果页看到明确的完成状态。',
+    metadata: requirementCardId
+      ? [{ key: 'tracking.requirement_card_id', value: requirementCardId }]
+      : [],
+  });
   const acceptanceId = `ACCEPTANCE-${taskId}`;
   const db = await databaseConnection();
   db.transaction(() => {
@@ -127,7 +133,7 @@ async function recordCriteria(executionId: string, token: string) {
 }
 
 test('Dev Agent runs only through the YAML command chain and trusted command receipts', async () => {
-  const { taskId, delegation } = await developmentDelegation('通用命令链开发实现');
+  const { taskId, delegation } = await developmentDelegation('通用命令链开发实现', 'CARD-DEV-001');
   const active = await begin(delegation, taskId);
 
   assert.match(await command(active.executionId, active.token!, ['help']), /通用命令链/);
@@ -170,7 +176,10 @@ test('Dev Agent runs only through the YAML command chain and trusted command rec
     '--content', 'content: 尚未覆盖全部旧版浏览器组合。',
   ]);
 
-  assert.match(await command(active.executionId, active.token!, ['phase', 'complete']), /COMMIT · confirmation/);
+  const commit = await command(active.executionId, active.token!, ['phase', 'complete']);
+  assert.match(commit, /COMMIT · confirmation/);
+  assert.match(commit, /PHASE INPUTS/);
+  assert.match(commit, /需求卡号.*CARD-DEV-001/);
   assert.match(await command(active.executionId, active.token!, ['phase', 'complete']), /FINALIZE · confirmation/);
   const submitted = await command(active.executionId, active.token!, ['phase', 'complete']);
   assert.match(submitted, /Outcome: completed/);
@@ -229,6 +238,70 @@ test('Dev runtime input pauses phase complete and resumes the same generic entit
   const status = await command(resumed.executionId, resumed.token!, ['status']);
   assert.match(status, /Phase: implement/);
   assert.match(status, /preview-url.*answered/);
+});
+
+test('Metadata Phase only writes declared Metadata and enforces required inputs', async () => {
+  const {
+    activateAgentConfiguration,
+    createAgentConfiguration,
+    listAgentConfigurations,
+    saveAgentConfigurationDocument,
+  } = await import('./agent-configurations');
+  const original = listAgentConfigurations('dev-agent').find((configuration) => configuration.active)!;
+  const originalDocument = original.documents.find((document) => document.commandChainId === 'development')!;
+  const configurationId = createAgentConfiguration({
+    agentId: 'dev-agent',
+    name: 'Metadata Phase test',
+    fromConfigurationId: original.configurationId,
+  });
+  const yaml = originalDocument.yaml
+    .replace(
+      '    metadata: tracking.requirement_card_id',
+      '    metadata: tracking.requirement_card_id\n    required: true',
+    )
+    .replace(
+      'phases:\n',
+      'phases:\n  metadata_setup:\n    type: metadata\n    inputs: [requirement-card]\n    instructions: 登记提交追溯所需的需求卡号。\n\n',
+    );
+  saveAgentConfigurationDocument({
+    agentId: 'dev-agent',
+    configurationId,
+    commandChainId: 'development',
+    yaml,
+  });
+  activateAgentConfiguration({ agentId: 'dev-agent', configurationId });
+
+  try {
+    const { taskId, delegation } = await developmentDelegation('Metadata Phase 写入');
+    const active = await begin(delegation, `${taskId}-metadata`);
+    const status = await command(active.executionId, active.token!, ['status']);
+    assert.match(status, /Phase: metadata_setup/);
+    assert.match(status, /需求卡号.*未设置/);
+    await assert.rejects(
+      command(active.executionId, active.token!, ['phase', 'complete']),
+      /缺少必需的 Metadata Input：requirement-card/,
+    );
+    await assert.rejects(
+      command(active.executionId, active.token!, [
+        'metadata', 'set', '--key', 'source.reference_url', '--value', 'https://example.test',
+      ]),
+      /不属于当前 metadata_setup Phase/,
+    );
+    await command(active.executionId, active.token!, [
+      'metadata', 'set', '--key', 'tracking.requirement_card_id', '--value', 'CARD-META-001',
+    ]);
+    const { databaseConnection } = await import('../infrastructure/database');
+    const db = await databaseConnection();
+    const stored = db.prepare(`
+      SELECT metadata_value FROM requirement_metadata
+      WHERE task_id = ? AND metadata_key = 'tracking.requirement_card_id'
+    `).get(taskId) as { metadata_value: string };
+    assert.equal(stored.metadata_value, 'CARD-META-001');
+    const next = await command(active.executionId, active.token!, ['phase', 'complete']);
+    assert.match(next, /DELIVERY SPEC · builtin/);
+  } finally {
+    activateAgentConfiguration({ agentId: 'dev-agent', configurationId: original.configurationId });
+  }
 });
 
 test('the command-chain migration removes the old Development draft model', async () => {

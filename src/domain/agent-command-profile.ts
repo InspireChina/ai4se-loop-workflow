@@ -14,7 +14,7 @@ export type AgentCommandProfile = {
 export type AgentCommandChainPhase = {
   id: string;
   title: string;
-  type: 'builtin' | 'artifact' | 'confirmation' | 'direct';
+  type: 'builtin' | 'artifact' | 'confirmation' | 'metadata' | 'direct';
   commands: string[];
 };
 
@@ -156,9 +156,10 @@ const PROFILES: AgentCommandProfile[] = [
 ];
 
 export function agentCommandProfile(agent: string, pipeline: string) {
-  return PROFILES.find((profile) =>
+  const profile = PROFILES.find((profile) =>
     profile.agent === agent
       && (profile.pipelines.includes(pipeline) || (pipeline === 'resume' && profile.supportsResume))) || null;
+  return profile ? { ...profile } : null;
 }
 
 export function agentCommandProfiles() {

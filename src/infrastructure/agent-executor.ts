@@ -344,6 +344,8 @@ function summarizeCommand(command: string) {
     if (normalized.includes('loop-agent.mjs check remove')) return '移除命令检查';
     if (normalized.includes('loop-agent.mjs runtime-input put')) return '登记运行信息请求';
     if (normalized.includes('loop-agent.mjs runtime-input remove')) return '移除运行信息请求';
+    if (normalized.includes('loop-agent.mjs metadata set')) return '设置需求 Metadata';
+    if (normalized.includes('loop-agent.mjs metadata remove')) return '移除需求 Metadata';
     if (normalized.includes('loop-agent.mjs phase rewind')) return '回退命令链阶段';
     if (normalized.includes('loop-agent.mjs phase complete')) return '完成命令链阶段';
     if (normalized.includes(' evolution status')) return '恢复 Prompt 演化草稿';

@@ -1,0 +1,119 @@
+version: 1
+id: review
+agent: review-agent
+
+artifacts:
+  review:
+    type: builtin
+    title: 结卡报告
+    blocks:
+      subjects:
+        title: 冻结结卡主题
+        cardinality: many
+        format: yaml
+        writable: false
+        required: true
+        fields:
+          kind: { type: enum, required: true, values: [intent, target, impact, acceptance, delivery_unit, feedback_acceptance], label: 主题类型 }
+          content: { type: string, required: true, label: 内容 }
+          sourceRef: { type: string, label: 来源引用 }
+          contractRef: { type: string, label: 契约引用 }
+          storyIndex: { type: string, label: 交付单元序号 }
+      evidence-sources:
+        title: 冻结证据来源
+        cardinality: many
+        format: yaml
+        writable: false
+        required: true
+        fields:
+          ref: { type: string, required: true, label: 证据引用 }
+          kind: { type: string, required: true, label: 证据类型 }
+          status: { type: string, required: true, label: 状态 }
+          revision: { type: string, required: true, label: 版本 }
+          fingerprint: { type: string, required: true, label: 指纹 }
+          independentTest: { type: enum, required: true, values: [yes, no], label: 独立测试 }
+      meta:
+        title: 冻结审查元数据
+        cardinality: one
+        format: yaml
+        writable: false
+        required: true
+        fields:
+          mode: { type: enum, required: true, values: [closure, report_correction], label: 审查模式 }
+          totalStories: { type: string, required: true, label: 交付单元总数 }
+          reviewRevision: { type: string, required: true, label: 报告版本 }
+          reviewDocumentId: { type: string, label: 报告文档 ID }
+      reconciliations:
+        title: 最终事实对账
+        cardinality: many
+        format: yaml
+        fields:
+          subjectRef: { type: string, required: true, label: 主题引用 }
+          result: { type: string, required: true, label: 对账结论 }
+          evidenceRefs: { type: array, required: true, minItems: 1, label: 证据引用 }
+      gaps:
+        title: 结卡缺口
+        cardinality: many
+        format: yaml
+        fields:
+          subjectRef: { type: string, required: true, label: 主题引用 }
+          kind: { type: enum, required: true, values: [missing_evidence, fact_conflict, unresolved_obligation], label: 缺口类型 }
+          reason: { type: string, required: true, label: 原因 }
+          boundary: { type: string, required: true, label: 影响边界 }
+      assessment:
+        title: 结卡评估
+        cardinality: one
+        format: yaml
+        required: true
+        fields:
+          summary: { type: string, required: true, label: 评估摘要 }
+          evidenceBoundary: { type: string, required: true, label: 证据边界 }
+          residualRisk: { type: string, label: 残余风险 }
+      report-sections:
+        title: 结卡报告章节
+        cardinality: many
+        format: yaml
+        fields:
+          kind: { type: enum, required: true, values: [outcome, scope, decisions, implementation, verification, deviations, risks, feedback], label: 章节类型 }
+          content: { type: string, required: true, label: 内容 }
+      forward-units:
+        title: 前向交付单元
+        cardinality: many
+        format: yaml
+        fields:
+          title: { type: string, required: true, label: 标题 }
+          actor: { type: string, required: true, label: 参与者 }
+          trigger: { type: string, required: true, label: 触发条件 }
+          observableOutcome: { type: string, required: true, label: 可观察结果 }
+          acceptance: { type: string, required: true, label: 验收语义 }
+          gapKeys: { type: array, required: true, minItems: 1, label: 缺口 Key }
+          dependsOn: { type: array, required: true, label: 前置单元 }
+
+phases:
+  # 内置输入门禁：冻结需求级承诺、全部交付单元、报告更正要求、当前证据快照和 Review 版本边界。
+  inputs:
+    type: builtin
+    builtin: review-inputs
+
+  # 内置事实门禁：每个冻结对象必须恰好登记一项最终对账，或登记一个可前向补齐的结卡缺口；普通结卡的对账必须绑定独立 Test 通过证据。
+  fact_reconciliation:
+    type: builtin
+    builtin: review-reconciliation
+    artifacts: [review.reconciliations, review.gaps]
+
+  # Artifact Phase：在逐项对账之上形成需求级结卡判断，并明确结论覆盖的证据边界与残余风险。
+  closure_assessment:
+    type: artifact
+    artifacts: [review.assessment]
+    instructions: 综合全部最终事实，判断原始需求是否已闭环。说明结论覆盖的冻结证据边界；仍会否定结卡的事项必须回退 fact_reconciliation 登记 gap，不能只写成残余风险。
+
+  # 内置输出门禁：无 gap 时维护核心报告章节；有 gap 时维护完整前向交付单元，每个 gap 必须恰好覆盖一次且依赖无环。
+  closure_output:
+    type: builtin
+    builtin: review-output
+    artifacts: [review.report-sections, review.forward-units]
+
+  # 内置最终门禁：重新校验任务版本、冻结证据、逐项对账和输出分支，并确定性编译 report_ready 或 closure_gap。
+  finalize:
+    type: builtin
+    builtin: review-finalize

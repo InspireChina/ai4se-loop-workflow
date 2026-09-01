@@ -4,6 +4,7 @@ agent: analyst-agent
 
 artifacts:
   delivery-analysis:
+    type: builtin
     title: 交付分析
     blocks:
       impacts:

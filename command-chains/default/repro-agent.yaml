@@ -4,6 +4,7 @@ agent: repro-agent
 
 artifacts:
   reproduction:
+    type: builtin
     title: 问题复现证据
     blocks:
       verdict:

@@ -4,6 +4,7 @@ agent: backlog-agent
 
 artifacts:
   requirement-context:
+    type: builtin
     title: 业务变化上下文
     blocks:
       intent:

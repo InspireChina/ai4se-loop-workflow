@@ -3,7 +3,12 @@ import { parse, stringify } from 'yaml';
 import { agentResultSchema, deliverySpecSchema, type AgentResult, type DeliverySpec } from '../domain/agent-result';
 import { loadCommandChainDefinition, type CommandChainBlockDefinition, type CommandChainDefinition } from '../domain/command-chain-definition';
 import { deliveryUnitContractSchema, type DeliveryUnitContract } from '../domain/delivery-unit';
-import { analysisDecisionMode } from '../domain/requirement-metadata';
+import {
+  analysisDecisionMode,
+  parseRequirementMetadata,
+  requirementMetadataDefinition,
+  requirementMetadataValueLabel,
+} from '../domain/requirement-metadata';
 import { databaseConnection } from '../infrastructure/database';
 
 type Db = Awaited<ReturnType<typeof databaseConnection>>;
@@ -2035,10 +2040,56 @@ function decisionAnswers(db: Db, draft: CommandChainDraftRow) {
 }
 
 function currentAnalysisDecisionMode(db: Db, draft: CommandChainDraftRow) {
-  return analysisDecisionMode(db.prepare(`
+  return analysisDecisionMode(requirementMetadataRows(db, draft.task_id));
+}
+
+function requirementMetadataRows(db: Db, taskId: string) {
+  return db.prepare(`
     SELECT metadata_key, metadata_value
     FROM requirement_metadata WHERE task_id = ?
-  `).all(draft.task_id) as { metadata_key: string; metadata_value: string }[]);
+    ORDER BY metadata_key
+  `).all(taskId) as { metadata_key: string; metadata_value: string }[];
+}
+
+function resolvedPhaseInputs(
+  db: Db,
+  draft: CommandChainDraftRow,
+  definition: CommandChainDefinition,
+  inputIds: string[],
+) {
+  const stored = new Map(requirementMetadataRows(db, draft.task_id)
+    .map((row) => [row.metadata_key, row.metadata_value]));
+  return inputIds.map((inputId) => {
+    const input = definition.inputs[inputId];
+    const storedValue = stored.get(input.metadataKey);
+    const value = storedValue ?? input.defaultValue ?? null;
+    const metadata = requirementMetadataDefinition(input.metadataKey);
+    return {
+      inputId,
+      metadataKey: input.metadataKey,
+      label: metadata?.label || input.metadataKey,
+      required: input.required,
+      value,
+      displayValue: value === null ? null : requirementMetadataValueLabel(input.metadataKey, value),
+      source: storedValue === undefined && input.defaultValue !== undefined ? 'default' : storedValue === undefined ? 'missing' : 'metadata',
+    };
+  });
+}
+
+function renderPhaseInputs(
+  db: Db,
+  draft: CommandChainDraftRow,
+  definition: CommandChainDefinition,
+  inputIds: string[],
+) {
+  if (!inputIds.length) return [];
+  return [
+    '## PHASE INPUTS', '',
+    ...resolvedPhaseInputs(db, draft, definition, inputIds).map((input) => (
+      `- ${input.label} · \`${input.inputId}\` · \`${input.metadataKey}\` · ${input.required ? 'required' : 'optional'}：${input.displayValue ?? '未设置'}${input.source === 'default' ? '（默认值）' : ''}`
+    )),
+    '',
+  ];
 }
 
 function renderBuiltInContexts(db: Db, draft: CommandChainDraftRow, contexts: string[]) {
@@ -2269,6 +2320,11 @@ function validatorErrors(db: Db, draft: CommandChainDraftRow, names: string[]) {
       errors.push(`缺少必需的 Artifact Block：${reference}`);
     }
   }
+  for (const name of names.filter((validator) => validator.startsWith('metadata-required:'))) {
+    const inputId = name.slice('metadata-required:'.length);
+    const [input] = resolvedPhaseInputs(db, draft, definition, [inputId]);
+    if (!input?.value?.trim()) errors.push(`缺少必需的 Metadata Input：${inputId}`);
+  }
   if (names.includes('impact-links')) {
     const impacts = artifacts.filter((row) => row.block_id === 'impacts');
     if (!impacts.length) errors.push('至少需要登记一项实际影响');
@@ -2448,6 +2504,7 @@ function renderWorkPacket(db: Db, draft: CommandChainDraftRow) {
         ]
       : ['- None']),
     '',
+    ...renderPhaseInputs(db, draft, definition, phase.inputs),
     ...renderBuiltInContexts(db, draft, phase.contexts),
     '## WORK COMMANDS', '',
     ...(phase.workCommands.length
@@ -3247,6 +3304,9 @@ export function commandChainHelp() {
     'Runtime Input：',
     '  runtime-input put --key <key> --title <title> --question <question> --why <why> --recommendation <recommendation>',
     '  runtime-input remove --key <key>', '',
+    'Metadata：',
+    '  metadata set --key <key> --value <value>',
+    '  metadata remove --key <key>', '',
     'Workflow：',
     '  phase complete',
     '  phase rewind --to <earlier-phase> --reason <reason>',
@@ -3298,6 +3358,34 @@ export function runCommandChainCommand(input: {
       '## DELIVERY SPEC', '',
       '```yaml', stringify(spec).trim(), '```',
     ].join('\n');
+  }
+  if (command === 'metadata set' || command === 'metadata remove') {
+    const phase = definition.phases[state.workflow_phase];
+    if (phase.type !== 'metadata') throw new Error('只有 Metadata Phase 可以修改需求 Metadata');
+    const key = required(flags, 'key');
+    const allowedInputs = phase.inputs.map((inputId) => ({ inputId, ...definition.inputs[inputId] }));
+    const declared = allowedInputs.find((input) => input.metadataKey === key);
+    if (!declared) throw new Error(`Metadata key ${key} 不属于当前 ${state.workflow_phase} Phase`);
+    if (command === 'metadata set') {
+      const value = required(flags, 'value');
+      const [parsed] = parseRequirementMetadata([{ key, value }]);
+      if (!parsed) throw new Error(`Metadata ${key} 不能为空`);
+      db.prepare(`
+        INSERT INTO requirement_metadata(task_id, metadata_key, metadata_value)
+        VALUES(?, ?, ?)
+        ON CONFLICT(task_id, metadata_key) DO UPDATE SET
+          metadata_value = excluded.metadata_value,
+          updated_at = CURRENT_TIMESTAMP
+      `).run(draft.task_id, parsed.key, parsed.value);
+      touchDraft(db, draft.draft_id);
+      return `# COMMAND RESULT\n\n- Command: metadata set\n- Outcome: accepted\n- Changed: ${key}`;
+    }
+    const result = db.prepare(`
+      DELETE FROM requirement_metadata WHERE task_id = ? AND metadata_key = ?
+    `).run(draft.task_id, key);
+    if (!result.changes) throw new Error(`Metadata 不存在：${key}`);
+    touchDraft(db, draft.draft_id);
+    return `# COMMAND RESULT\n\n- Command: metadata remove\n- Outcome: accepted\n- Changed: ${key}`;
   }
   if (command === 'acceptance put') {
     if (definition.id !== 'requirement-context') throw new Error('只有 Requirement Context 可以定义 Acceptance');

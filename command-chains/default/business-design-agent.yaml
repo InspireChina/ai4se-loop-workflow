@@ -4,6 +4,7 @@ agent: business-design-agent
 
 artifacts:
   business-solution:
+    type: builtin
     title: 业务方案
     blocks:
       exploration:

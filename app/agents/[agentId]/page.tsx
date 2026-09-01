@@ -69,7 +69,7 @@ export default async function AgentDetailPage({ params, searchParams }: { params
     '# Harness Core Contract（只读）',
     '流程调度、权限、状态机和最小结果协议由 Harness 执行，专业语义由对应 Agent 判断，Agent Prompt 无权扩大权限。',
     '',
-    `# Global Agent Prompt · r${detail.candidatePrompt?.revision || detail.currentPrompt.version}${detail.candidatePrompt ? ' Canary' : ''}`,
+    `# 当前配置 Prompt · r${detail.candidatePrompt?.revision || detail.currentPrompt.version}${detail.candidatePrompt ? ' Canary' : ''}`,
     selectedPrompt.content,
     '',
     `# Durable Memory · r${detail.currentMemory.revision}`,
@@ -137,7 +137,7 @@ export default async function AgentDetailPage({ params, searchParams }: { params
       {section === 'prompt' && <div className="agent-section-layout">
         <form action={saveAgentPromptAction} className="card settings agent-editor agent-section-card">
           <input type="hidden" name="agentId" value={agentId}/><input type="hidden" name="section" value="prompt"/>
-          <div className="settings-section-head"><span className="executor-icon"><BrainCircuit size={18}/></span><div><strong>Global Agent Prompt</strong><p className="muted settings-description">属于当前全局 Agent 配置，不随项目切换；切换配置集时 Prompt 和命令链一起切换。</p></div><span className="badge">r{detail.currentPrompt.version}</span></div>
+          <div className="settings-section-head"><span className="executor-icon"><BrainCircuit size={18}/></span><div><strong>当前配置 Prompt</strong><p className="muted settings-description">属于当前 Agent 的生效配置，不随项目切换；切换配置集时 Prompt 和命令链一起切换。</p></div><span className="badge">r{detail.currentPrompt.version}</span></div>
           <textarea className="code-editor" name="content" defaultValue={detail.currentPrompt.content}/>
           <label>修改原因<input name="reason" placeholder="例如：明确浏览器验证前的环境探测顺序"/></label>
           <button className="button" type="submit">保存 Prompt</button>

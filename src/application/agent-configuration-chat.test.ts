@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { buildAgentConfigurationChatPrompt, extractAgentConfigurationYaml, validateAgentConfigurationChatOutput } from './agent-configuration-chat';
 
-const yaml = readFileSync(join(process.env.LOOP_APP_ROOT || process.cwd(), 'command-chains', 'backlog-agent.yaml'), 'utf8');
+const yaml = readFileSync(join(process.env.LOOP_APP_ROOT || process.cwd(), 'command-chains', 'default', 'backlog-agent.yaml'), 'utf8');
 
 test('injects YAML authoring rules and immutable chain identity into configuration Chat', () => {
   const prompt = buildAgentConfigurationChatPrompt({

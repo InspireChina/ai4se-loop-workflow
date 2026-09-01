@@ -1,0 +1,76 @@
+version: 2
+id: delivery-analysis
+agent: analyst-agent
+
+artifacts:
+  delivery-analysis:
+    type: builtin
+    title: 交付分析
+    blocks:
+      impacts:
+        title: 现状与影响扫描
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          area: { type: string, required: true, label: 影响区域 }
+          finding: { type: string, required: true, label: 发现 }
+          disposition: { type: enum, required: true, values: [change, preserve, exclude, needs_decision], label: 处置 }
+          evidence: { type: string, required: true, label: 证据 }
+          decision: { type: string, label: 决策 Key }
+      answer-review: { title: 答案复查, cardinality: one, format: markdown, required: true }
+      summary: { title: 交付摘要, cardinality: one, format: markdown, required: true }
+      contract: { title: 交付契约, cardinality: one, format: markdown, required: true }
+      guardrails:
+        title: 实现护栏
+        cardinality: many
+        format: yaml
+        fields:
+          content: { type: string, required: true, label: 护栏 }
+          rationale: { type: string, required: true, label: 原因 }
+      verification-focus:
+        title: 验证重点
+        cardinality: many
+        format: yaml
+        fields:
+          expected: { type: string, required: true, label: 预期结果 }
+          oracle: { type: string, required: true, label: 验证 Oracle }
+
+phases:
+  # 所有阶段统一使用 phase complete 完成；任意非初始阶段都可用 phase rewind 回到更早阶段，且必须记录原因。
+  # 只读范围门禁：读取并确认当前交付单元、可追溯来源和前置依赖；不创建、修改或复制交付单元及 Artifact。
+  delivery_unit:
+    type: builtin
+    builtin: delivery-unit
+  # Artifact Phase：Agent 调查实际影响；写入命令与 Block Schema 校验由 impacts 声明自动生成。
+  impact_scan:
+    type: artifact
+    artifacts: [delivery-analysis.impacts]
+    instructions: 读取冻结业务契约与实时项目证据，登记真正会改变、保持、排除或需要决策的影响。每项影响必须提供可定位证据；needs_decision 必须关联稳定 decision key。本阶段不要提前编写最终交付契约。
+  # 决策提出：建立完整决策树、选项、依赖与推荐；本阶段只定义问题，不关闭决策或请求用户确认。
+  decision_proposal:
+    type: builtin
+    builtin: decision-proposal
+  # 决策解决：按上游承诺、项目证据、Agent 或用户决定权关闭节点；无法自主关闭时组成 HUMAN 批次。
+  decision_resolution:
+    type: builtin
+    builtin: decision-resolution
+    artifacts: [delivery-analysis.impacts]
+  # 答案复查：聚合检查所有决策答案及组合后果；发现新问题返回提出阶段，否则形成 answer-review 后继续。
+  answer_review:
+    type: builtin
+    builtin: decision-answer-review
+    artifacts: [delivery-analysis.answer-review]
+  # Artifact Phase：把已收敛影响和决策登记为冻结交付契约；写入命令与必填校验由四个 Block 自动生成。
+  delivery_contract:
+    type: artifact
+    artifacts:
+      - delivery-analysis.summary
+      - delivery-analysis.contract
+      - delivery-analysis.guardrails
+      - delivery-analysis.verification-focus
+    instructions: 把已收敛影响和决策登记为 Dev 与 Test 共同依赖的冻结交付契约。summary 和 contract 必须完成；必要时补充 guardrails 与 verification-focus。契约只约束用户可观察结果，不要保存逐文件实现计划或完整测试步骤。
+  # 最终确认：Agent 自行复查影响、决策和交付契约的一致性；Harness 不重复执行领域校验。
+  finalize:
+    type: confirmation
+    instructions: 最终检查影响、决策和交付契约是否一致，确认没有遗漏或冲突。发现问题时不要提交，使用 phase rewind 回到对应阶段修正。

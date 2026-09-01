@@ -33,7 +33,7 @@ function classify(positionals: string[]) {
   if (namespace === 'phase' && resource && !action && ['complete', 'rewind'].includes(resource)) {
     return { kind: 'transition' as const, namespace, resource, action: resource };
   }
-  if (['artifact', 'decision', 'check', 'runtime-input'].includes(namespace) && resource && !action) {
+  if (['artifact', 'decision', 'check', 'runtime-input', 'metadata'].includes(namespace) && resource && !action) {
     return { kind: 'write' as const, namespace, resource, action: resource };
   }
   if (['delivery-unit', 'delivery-spec'].includes(namespace) && resource === 'current' && !action) {

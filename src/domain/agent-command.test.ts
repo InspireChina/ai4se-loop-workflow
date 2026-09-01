@@ -17,6 +17,7 @@ test('parses a status command into the shared command model', () => {
 test('classifies writes, transitions, and terminal actions', () => {
   assert.equal(parseAgentCommand(['artifact', 'put', '--key', 'login']).kind, 'write');
   assert.equal(parseAgentCommand(['check', 'record', '--key', 'test']).kind, 'write');
+  assert.equal(parseAgentCommand(['metadata', 'set', '--key', 'tracking.requirement_card_id', '--value', 'CARD-1']).kind, 'write');
   assert.equal(parseAgentCommand(['phase', 'complete']).kind, 'transition');
   assert.equal(parseAgentCommand(['phase', 'rewind', '--to', 'impact_scan', '--reason', '补充影响']).kind, 'transition');
   assert.equal(parseAgentCommand(['delivery-spec', 'current']).kind, 'status');

@@ -1,12 +1,19 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { commandChainCatalogItem } from '../domain/command-chain-catalog';
 import { appDatabaseConnection, hash, paths } from './database';
 
-export function bundledCommandChainYaml(commandChainId: string) {
+export type BundledCommandChainConfiguration = 'default' | 'openspec';
+
+export function bundledCommandChainYaml(commandChainId: string, configuration: BundledCommandChainConfiguration = 'default') {
   const item = commandChainCatalogItem(commandChainId);
   if (!item) throw new Error(`未知命令链：${commandChainId}`);
-  return readFileSync(join(paths.appRoot, 'command-chains', item.fileName), 'utf8').trimEnd() + '\n';
+  return readFileSync(join(paths.appRoot, 'command-chains', configuration, item.fileName), 'utf8').trimEnd() + '\n';
+}
+
+export function hasBundledCommandChainYaml(commandChainId: string, configuration: BundledCommandChainConfiguration) {
+  const item = commandChainCatalogItem(commandChainId);
+  return Boolean(item && existsSync(join(paths.appRoot, 'command-chains', configuration, item.fileName)));
 }
 
 export function activeCommandChainYaml(commandChainId: string) {
@@ -14,7 +21,7 @@ export function activeCommandChainYaml(commandChainId: string) {
   if (!item) return null;
   const db = appDatabaseConnection();
   const row = db.prepare(`
-    SELECT configuration.configuration_id, configuration.name,
+    SELECT configuration.configuration_id, configuration.name, configuration.builtin_key,
            document.yaml_content, document.content_hash, document.revision,
            document.system_managed
     FROM agent_configuration_sets configuration
@@ -24,13 +31,15 @@ export function activeCommandChainYaml(commandChainId: string) {
   `).get(item.agentId, commandChainId) as {
     configuration_id: string;
     name: string;
+    builtin_key: string | null;
     yaml_content: string;
     content_hash: string;
     revision: number;
     system_managed: number;
   } | undefined;
   if (row?.system_managed) {
-    const bundled = bundledCommandChainYaml(commandChainId);
+    const bundledConfiguration = row.builtin_key === 'openspec' ? 'openspec' : 'default';
+    const bundled = bundledCommandChainYaml(commandChainId, bundledConfiguration);
     const bundledHash = hash(bundled);
     if (row.content_hash !== bundledHash) {
       db.prepare(`

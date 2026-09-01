@@ -1,9 +1,13 @@
 import { createHash } from 'node:crypto';
+import { readFileSync, readdirSync, type Dirent } from 'node:fs';
+import { basename, join, relative, resolve } from 'node:path';
 import { databaseConnection } from '../infrastructure/database';
+import { paths } from '../infrastructure/database';
 import { documentKindLabel } from '../domain/terminology';
 import { recoveryItemForPrompt, type RecoveryItem } from './recovery-items';
 import type { ExecutionRecoveryMode } from './execution-retry-policy';
 import type { DelegationEnvelope, DocumentComment, ExecutionAttemptView, FeedbackGroup, RuntimeInputRequest } from './tasks';
+import { activeAgentConfigurationContextAdapter } from './agent-configurations';
 
 export const agentContextProtocol = 'loop-agent-context/v2';
 
@@ -16,6 +20,7 @@ export type AgentContextResource = {
   revision: number | null;
   status: string;
   authority: 'authoritative' | 'active_obligation' | 'execution_evidence' | 'supporting' | 'historical';
+  storage?: 'builtin' | 'repository';
   updatedAt: string | null;
   summary: string;
   content: unknown;
@@ -101,6 +106,76 @@ function plainText(value: unknown) {
 function compact(value: unknown, limit = 240) {
   const text = plainText(value).replace(/\s+/g, ' ').trim();
   return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
+}
+
+type RepositoryDocument = {
+  relativePath: string;
+  content: string;
+  contentHash: string;
+};
+
+function markdownFiles(root: string): string[] {
+  const files: string[] = [];
+  const visit = (directory: string) => {
+    let entries: Dirent<string>[];
+    try { entries = readdirSync(directory, { withFileTypes: true, encoding: 'utf8' }); }
+    catch { return; }
+    for (const entry of entries) {
+      if (entry.name === '.git' || entry.name === 'node_modules') continue;
+      const path = join(directory, entry.name);
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) visit(path);
+      else if (entry.isFile() && entry.name.toLowerCase().endsWith('.md')) files.push(path);
+    }
+  };
+  visit(root);
+  return files;
+}
+
+function repositoryOpenSpecDocuments(): RepositoryDocument[] {
+  const workspaceRoot = resolve(paths.root);
+  const changesRoot = join(workspaceRoot, 'openspec', 'changes');
+  let roots: string[] = [];
+  try {
+    roots = readdirSync(changesRoot, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name !== 'archive' && !entry.name.startsWith('.'))
+      .map((entry) => join(changesRoot, entry.name))
+      .sort();
+  } catch { return []; }
+  return roots.flatMap((root) => markdownFiles(root).map((path) => {
+    const content = readFileSync(path, 'utf8');
+    return {
+      relativePath: relative(workspaceRoot, path),
+      content,
+      contentHash: createHash('sha256').update(content, 'utf8').digest('hex'),
+    };
+  }));
+}
+
+function repositoryDocumentResource(document: RepositoryDocument, taskId: string): AgentContextResource {
+  const pathLabel = document.relativePath.replaceAll('\\', '/');
+  return {
+    ref: `REPO:OPENSPEC:${pathLabel}`,
+    kind: 'document',
+    storage: 'repository',
+    title: basename(pathLabel),
+    scope: 'task',
+    deliveryUnit: null,
+    revision: null,
+    status: 'active',
+    authority: 'authoritative',
+    updatedAt: null,
+    summary: `OpenSpec 仓库文档 · ${pathLabel} · ${compact(document.content)}`,
+    content: {
+      taskId,
+      source: 'repository',
+      adapter: 'openspec',
+      path: pathLabel,
+      contentHash: document.contentHash,
+      format: 'markdown',
+      content: document.content,
+    },
+  };
 }
 
 function requirementBaseline(content: string | null | undefined) {
@@ -360,6 +435,11 @@ export function buildAgentContextSnapshot(input: {
     || input.activeFeedback.some((active) => active.comment_id === comment.comment_id));
 
   const allResources: AgentContextResource[] = [];
+  if (activeAgentConfigurationContextAdapter(delegation.agent) === 'openspec') {
+    for (const repositoryDocument of repositoryOpenSpecDocuments()) {
+      allResources.push(repositoryDocumentResource(repositoryDocument, delegation.taskId));
+    }
+  }
   for (const document of full.documents) {
     allResources.push({
       ref: `DOC:${document.document_id}`,
@@ -833,7 +913,7 @@ export function renderAgentContextList(snapshot: AgentContextSnapshot, filters: 
   if (!resources.length) return 'No context resources matched.';
   const visible = resources.slice(0, 100);
   const lines = visible.map((resource) =>
-    `- ${resource.ref} | ${resource.kind} | ${resource.scope} | ${resource.status} | r${resource.revision ?? '-'} | ${resource.title} | ${resource.summary}`,
+    `- ${resource.ref} | ${resource.storage || 'builtin'} | ${resource.kind} | ${resource.scope} | ${resource.status} | r${resource.revision ?? '-'} | ${resource.title} | ${resource.summary}`,
   );
   if (resources.length > visible.length) lines.push(`- … ${resources.length - visible.length} more resources; narrow with --kind or --scope.`);
   return lines.join('\n');
@@ -842,9 +922,13 @@ export function renderAgentContextList(snapshot: AgentContextSnapshot, filters: 
 export function renderAgentContextResource(snapshot: AgentContextSnapshot, ref: string) {
   const resource = snapshot.resources.find((item) => item.ref === ref);
   if (!resource) throw new Error(`Context reference not found: ${ref}`);
+  const source = resource.storage === 'repository' && resource.content && typeof resource.content === 'object'
+    ? resource.content as { path?: string; contentHash?: string }
+    : null;
   return [
     `# ${resource.ref} · ${resource.title}`,
-    `kind=${resource.kind} scope=${resource.scope} status=${resource.status} revision=${resource.revision ?? '-'} authority=${resource.authority}`,
+    `kind=${resource.kind} storage=${resource.storage || 'builtin'} scope=${resource.scope} status=${resource.status} revision=${resource.revision ?? '-'} authority=${resource.authority}`,
+    ...(source?.path ? [`path=${source.path}`, `contentHash=${source.contentHash || '-'}`] : []),
     '',
     typeof resource.content === 'string' ? resource.content : JSON.stringify(resource.content, null, 2),
   ].join('\n');

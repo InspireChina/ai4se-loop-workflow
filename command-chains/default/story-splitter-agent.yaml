@@ -4,6 +4,7 @@ agent: story-splitter-agent
 
 artifacts:
   delivery-plan:
+    type: builtin
     title: 交付计划
     blocks:
       sources:

@@ -288,7 +288,7 @@ export async function runAgentCommand(input: {
   }
   const genericCommand = [
     'status', 'delivery-unit', 'delivery-spec', 'artifact', 'decision',
-    'acceptance', 'check', 'runtime-input', 'phase', 'draft',
+    'acceptance', 'check', 'runtime-input', 'metadata', 'phase', 'draft',
   ].includes(positionals[0] || '');
   if (profile.draftType === 'direct') {
     if (!command.startsWith(profile.namespace)) {

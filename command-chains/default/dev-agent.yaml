@@ -2,8 +2,13 @@ version: 1
 id: development
 agent: dev-agent
 
+inputs:
+  requirement-card:
+    metadata: tracking.requirement_card_id
+
 artifacts:
   development:
+    type: builtin
     title: 开发实现结果
     blocks:
       recovery-resolutions:
@@ -55,7 +60,8 @@ phases:
   # 提交确认：有当前交付相关改动时形成边界清晰的 Git 提交；没有改动时不要制造空提交。
   commit:
     type: confirmation
-    instructions: 检查当前交付是否已经形成范围正确的 Git 提交。只提交当前交付相关文件，不混入已有无关改动；没有代码变化时确认无需制造空提交。发现实现或验证问题时使用 phase rewind 回到对应阶段。
+    inputs: [requirement-card]
+    instructions: 检查当前交付是否已经形成范围正确的 Git 提交。只提交当前交付相关文件，不混入已有无关改动；没有代码变化时确认无需制造空提交。Phase Input 提供需求卡号时，按目标仓库已有提交说明规范将其作为本次提交的追溯信息，不要扩散到其他产物。发现实现或验证问题时使用 phase rewind 回到对应阶段。
 
   # 最终确认：Agent 复查实现证据、代码审查、真实命令事实、风险、恢复处理和提交状态的一致性。
   finalize:

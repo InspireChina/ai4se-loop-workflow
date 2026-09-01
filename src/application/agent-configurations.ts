@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { agentCommandChainCatalog, commandChainCatalogItem, COMMAND_CHAIN_CATALOG } from '../domain/command-chain-catalog';
 import { parseCommandChainDefinition } from '../domain/command-chain-definition';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS, isFlowAgentId, type FlowAgentId } from '../domain/agent-profile';
-import { bundledCommandChainYaml } from '../infrastructure/agent-configuration-store';
+import { bundledCommandChainYaml, hasBundledCommandChainYaml, type BundledCommandChainConfiguration } from '../infrastructure/agent-configuration-store';
 import { appDatabaseConnection, hash } from '../infrastructure/database';
 
 export type AgentConfigurationDocument = {
@@ -21,6 +21,8 @@ export type AgentConfigurationSet = {
   agentId: FlowAgentId;
   name: string;
   active: boolean;
+  builtinKey: 'default' | 'openspec' | null;
+  contextAdapter: 'openspec' | null;
   createdAt: string;
   updatedAt: string;
   prompt: string;
@@ -53,6 +55,8 @@ type ConfigurationRow = {
   agent_id: FlowAgentId;
   name: string;
   is_active: number;
+  builtin_key: 'default' | 'openspec' | null;
+  context_adapter: 'openspec' | null;
   created_at: string;
   updated_at: string;
   prompt_content: string;
@@ -75,84 +79,88 @@ const yamlSchema = z.string().trim().min(1, 'YAML 不能为空').max(200_000, 'Y
 
 let seedsEnsured = false;
 
+function ensureBuiltinAgentConfiguration(
+  db: ReturnType<typeof appDatabaseConnection>,
+  agentId: FlowAgentId,
+  builtinKey: BundledCommandChainConfiguration,
+) {
+  const catalog = agentCommandChainCatalog(agentId).filter((item) => (
+    builtinKey === 'default' || hasBundledCommandChainYaml(item.id, builtinKey)
+  ));
+  if (!catalog.length && builtinKey === 'openspec') return null;
+  const name = builtinKey === 'default' ? '默认配置' : 'OpenSpec';
+  let configuration = db.prepare(`
+    SELECT configuration_id FROM agent_configuration_sets
+    WHERE agent_id = ? AND builtin_key = ?
+  `).get(agentId, builtinKey) as { configuration_id: string } | undefined;
+  if (!configuration) {
+    const named = builtinKey === 'default' ? db.prepare(`
+      SELECT configuration_id FROM agent_configuration_sets
+      WHERE agent_id = ? AND name = ? AND builtin_key IS NULL
+    `).get(agentId, name) as { configuration_id: string } | undefined : undefined;
+    const configurationId = named?.configuration_id || randomUUID();
+    if (named) {
+      db.prepare(`UPDATE agent_configuration_sets SET builtin_key = ?, context_adapter = ? WHERE configuration_id = ?`)
+        .run(builtinKey, builtinKey === 'openspec' ? 'openspec' : null, configurationId);
+    } else {
+      const hasActive = db.prepare(`SELECT 1 FROM agent_configuration_sets WHERE agent_id = ? AND is_active = 1`).get(agentId);
+      const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
+      const storedName = builtinKey === 'openspec' && db.prepare(`
+        SELECT 1 FROM agent_configuration_sets WHERE agent_id = ? AND name = ?
+      `).get(agentId, name) ? 'OpenSpec（内置）' : name;
+      db.prepare(`
+        INSERT INTO agent_configuration_sets(
+          configuration_id, agent_id, name, is_active, builtin_key, context_adapter,
+          prompt_content, prompt_hash, prompt_source, prompt_reason, prompt_template_version
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'system', ?, ?)
+      `).run(
+        configurationId, agentId, storedName, builtinKey === 'default' && !hasActive ? 1 : 0,
+        builtinKey, builtinKey === 'openspec' ? 'openspec' : null,
+        prompt, hash(prompt), `系统模板 V${AGENT_PROMPT_SEED_REVISION}`, AGENT_PROMPT_SEED_REVISION,
+      );
+    }
+    configuration = { configuration_id: configurationId };
+  }
+  const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
+  db.prepare(`
+    UPDATE agent_configuration_sets
+    SET prompt_content = ?, prompt_hash = ?, prompt_reason = ?, prompt_template_version = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE configuration_id = ? AND prompt_source = 'system' AND prompt_template_version < ?
+  `).run(
+    prompt, hash(prompt), `系统模板 V${AGENT_PROMPT_SEED_REVISION}`, AGENT_PROMPT_SEED_REVISION,
+    configuration.configuration_id, AGENT_PROMPT_SEED_REVISION,
+  );
+  db.prepare(`
+    UPDATE agent_configuration_sets
+    SET prompt_content = ?, prompt_hash = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE configuration_id = ? AND trim(prompt_content) = ''
+  `).run(prompt, hash(prompt), configuration.configuration_id);
+  for (const item of catalog) {
+    const yaml = bundledCommandChainYaml(item.id, builtinKey);
+    db.prepare(`
+      INSERT OR IGNORE INTO agent_configuration_documents(
+        configuration_id, command_chain_id, yaml_content, content_hash, system_managed
+      ) VALUES(?, ?, ?, ?, 1)
+    `).run(configuration.configuration_id, item.id, yaml, hash(yaml));
+    db.prepare(`
+      UPDATE agent_configuration_documents
+      SET yaml_content = ?, content_hash = ?, revision = revision + 1, updated_at = CURRENT_TIMESTAMP
+      WHERE configuration_id = ? AND command_chain_id = ? AND system_managed = 1 AND content_hash <> ?
+    `).run(yaml, hash(yaml), configuration.configuration_id, item.id, hash(yaml));
+  }
+  return configuration.configuration_id;
+}
+
 export function ensureAgentConfigurationSeeds() {
   if (seedsEnsured) return;
   const db = appDatabaseConnection();
   db.transaction(() => {
     for (const agentId of FLOW_AGENT_IDS) {
-      let active = db.prepare(`
-        SELECT configuration_id FROM agent_configuration_sets
-        WHERE agent_id = ? AND is_active = 1
-      `).get(agentId) as { configuration_id: string } | undefined;
-      if (!active) {
-        const existing = db.prepare(`
-          SELECT configuration_id FROM agent_configuration_sets
-          WHERE agent_id = ? ORDER BY created_at, configuration_id LIMIT 1
-        `).get(agentId) as { configuration_id: string } | undefined;
-        const configurationId = existing?.configuration_id || randomUUID();
-        if (!existing) {
-          const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
-          db.prepare(`
-            INSERT INTO agent_configuration_sets(
-              configuration_id, agent_id, name, is_active, prompt_content, prompt_hash,
-              prompt_source, prompt_reason, prompt_template_version
-            ) VALUES(?, ?, '默认配置', 1, ?, ?, 'system', ?, ?)
-          `).run(configurationId, agentId, prompt, hash(prompt), `系统模板 V${AGENT_PROMPT_SEED_REVISION}`, AGENT_PROMPT_SEED_REVISION);
-        } else {
-          db.prepare(`UPDATE agent_configuration_sets SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE configuration_id = ?`).run(configurationId);
-        }
-        active = { configuration_id: configurationId };
-      }
-      const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
-      db.prepare(`
-        UPDATE agent_configuration_sets
-        SET prompt_content = ?, prompt_hash = ?, prompt_reason = ?,
-            prompt_template_version = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE configuration_id = ? AND prompt_source = 'system'
-          AND prompt_template_version < ?
-      `).run(
-        prompt,
-        hash(prompt),
-        `系统模板 V${AGENT_PROMPT_SEED_REVISION}`,
-        AGENT_PROMPT_SEED_REVISION,
-        active.configuration_id,
-        AGENT_PROMPT_SEED_REVISION,
-      );
-      db.prepare(`
-        UPDATE agent_configuration_sets
-        SET prompt_content = ?, prompt_hash = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE configuration_id = ? AND trim(prompt_content) = ''
-      `).run(prompt, hash(prompt), active.configuration_id);
-      db.prepare(`
-        UPDATE agent_configuration_sets
-        SET prompt_source = 'system', prompt_reason = ?, prompt_template_version = ?
-        WHERE configuration_id = ? AND prompt_content = ? AND prompt_source = 'system'
-      `).run(`系统模板 V${AGENT_PROMPT_SEED_REVISION}`, AGENT_PROMPT_SEED_REVISION, active.configuration_id, prompt);
-      db.prepare(`
-        UPDATE agent_configuration_sets
-        SET prompt_source = 'human', prompt_reason = '既有全局 Agent Prompt'
-        WHERE configuration_id = ? AND prompt_content <> ?
-          AND prompt_source = 'system' AND prompt_template_version = 1
-      `).run(active.configuration_id, prompt);
-      for (const item of agentCommandChainCatalog(agentId)) {
-        const yaml = bundledCommandChainYaml(item.id);
-        db.prepare(`
-          INSERT OR IGNORE INTO agent_configuration_documents(
-            configuration_id, command_chain_id, yaml_content, content_hash, system_managed
-          ) VALUES(?, ?, ?, ?, 1)
-        `).run(active.configuration_id, item.id, yaml, hash(yaml));
-        db.prepare(`
-          UPDATE agent_configuration_documents
-          SET yaml_content = ?, content_hash = ?, revision = revision + 1,
-              updated_at = CURRENT_TIMESTAMP
-          WHERE command_chain_id = ? AND system_managed = 1
-            AND content_hash <> ?
-            AND EXISTS (
-              SELECT 1 FROM agent_configuration_sets configuration
-              WHERE configuration.configuration_id = agent_configuration_documents.configuration_id
-                AND configuration.agent_id = ?
-            )
-        `).run(yaml, hash(yaml), item.id, hash(yaml), agentId);
+      const defaultId = ensureBuiltinAgentConfiguration(db, agentId, 'default');
+      ensureBuiltinAgentConfiguration(db, agentId, 'openspec');
+      const active = db.prepare(`SELECT 1 FROM agent_configuration_sets WHERE agent_id = ? AND is_active = 1`).get(agentId);
+      if (!active && defaultId) {
+        db.prepare(`UPDATE agent_configuration_sets SET is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE configuration_id = ?`).run(defaultId);
       }
     }
   })();
@@ -310,6 +318,8 @@ function configurationSets(agentId: FlowAgentId): AgentConfigurationSet[] {
     agentId: row.agent_id,
     name: row.name,
     active: Boolean(row.is_active),
+    builtinKey: row.builtin_key,
+    contextAdapter: row.context_adapter,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     prompt: row.prompt_content,
@@ -340,6 +350,16 @@ export function listAgentConfigurations(agentIdInput: string) {
   return configurationSets(agentIdInput);
 }
 
+export function activeAgentConfigurationContextAdapter(agentIdInput: string) {
+  if (!isFlowAgentId(agentIdInput)) return null;
+  ensureAgentConfigurationSeeds();
+  const row = appDatabaseConnection().prepare(`
+    SELECT context_adapter FROM agent_configuration_sets
+    WHERE agent_id = ? AND is_active = 1
+  `).get(agentIdInput) as { context_adapter: string | null } | undefined;
+  return row?.context_adapter === 'openspec' ? 'openspec' : null;
+}
+
 export function createAgentConfiguration(input: { agentId: string; name: unknown; fromConfigurationId?: unknown }) {
   if (!isFlowAgentId(input.agentId)) throw new Error(`未知 Agent：${input.agentId}`);
   const catalog = agentCommandChainCatalog(input.agentId);
@@ -350,21 +370,22 @@ export function createAgentConfiguration(input: { agentId: string; name: unknown
   const configurationId = randomUUID();
   db.transaction(() => {
     const sourceConfiguration = sourceId ? db.prepare(`
-      SELECT prompt_content, prompt_revision, prompt_source, prompt_reason, prompt_template_version
+      SELECT prompt_content, prompt_revision, prompt_source, prompt_reason, prompt_template_version, context_adapter
       FROM agent_configuration_sets WHERE configuration_id = ? AND agent_id = ?
     `).get(sourceId, input.agentId) as Pick<ConfigurationRow,
-      'prompt_content' | 'prompt_revision' | 'prompt_source' | 'prompt_reason' | 'prompt_template_version'
+      'prompt_content' | 'prompt_revision' | 'prompt_source' | 'prompt_reason' | 'prompt_template_version' | 'context_adapter'
     > | undefined : undefined;
     const prompt = sourceConfiguration?.prompt_content || AGENT_PROFILE_DEFINITIONS[input.agentId as FlowAgentId].prompt;
     db.prepare(`
       INSERT INTO agent_configuration_sets(
-        configuration_id, agent_id, name, prompt_content, prompt_hash, prompt_revision,
+        configuration_id, agent_id, name, context_adapter, prompt_content, prompt_hash, prompt_revision,
         prompt_source, prompt_reason, prompt_template_version
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       configurationId,
       input.agentId,
       name,
+      sourceConfiguration?.context_adapter || null,
       prompt,
       hash(prompt),
       sourceConfiguration?.prompt_revision || 1,
@@ -456,9 +477,10 @@ export function deleteAgentConfiguration(input: { agentId: string; configuration
   if (!isFlowAgentId(input.agentId)) throw new Error(`未知 Agent：${input.agentId}`);
   const configurationId = String(input.configurationId);
   const db = appDatabaseConnection();
-  const row = db.prepare(`SELECT is_active FROM agent_configuration_sets WHERE configuration_id = ? AND agent_id = ?`).get(configurationId, input.agentId) as { is_active: number } | undefined;
+  const row = db.prepare(`SELECT is_active, builtin_key FROM agent_configuration_sets WHERE configuration_id = ? AND agent_id = ?`).get(configurationId, input.agentId) as { is_active: number; builtin_key: string | null } | undefined;
   if (!row) throw new Error('Agent 配置不存在');
   if (row.is_active) throw new Error('不能删除当前生效配置，请先启用另一套配置');
+  if (row.builtin_key) throw new Error('内置配置不能删除；可以复制后编辑自定义版本');
   db.prepare(`DELETE FROM agent_configuration_sets WHERE configuration_id = ?`).run(configurationId);
   revalidateAgent(input.agentId);
 }

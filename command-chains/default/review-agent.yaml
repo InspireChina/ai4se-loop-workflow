@@ -4,6 +4,7 @@ agent: review-agent
 
 artifacts:
   review:
+    type: builtin
     title: 结卡报告
     blocks:
       subjects:

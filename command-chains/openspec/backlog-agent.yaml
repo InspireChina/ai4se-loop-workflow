@@ -1,0 +1,123 @@
+version: 1
+id: requirement-context
+agent: backlog-agent
+
+artifacts:
+  requirement-context:
+    type: builtin
+    title: 业务变化上下文
+    blocks:
+      intent:
+        title: 业务意图
+        cardinality: one
+        format: markdown
+        required: true
+      assertions:
+        title: 业务断言
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          perspective: { type: enum, required: true, values: [actual, expected, target], label: 视角 }
+          statement: { type: string, required: true, label: 陈述 }
+          evidence: { type: enum, required: true, values: [observed, reported, inferred, decided, conflicted], label: 证据性质 }
+          source: { type: string, required: true, label: 来源 }
+          decision: { type: string, label: 决策 Key }
+      answer-review:
+        title: 答案复查
+        cardinality: one
+        format: markdown
+        required: true
+      change-summary:
+        title: 变化摘要
+        cardinality: one
+        format: markdown
+        required: true
+      impacts:
+        title: 业务影响
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          statement: { type: string, required: true, label: 影响 }
+          disposition: { type: enum, required: true, values: [change, preserve, needs_decision, technical], label: 处置 }
+          rationale: { type: string, required: true, label: 原因 }
+          source: { type: string, required: true, label: 来源 }
+          decision: { type: string, label: 决策 Key }
+      scope:
+        title: 范围
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          direction: { type: enum, required: true, values: [included, excluded], label: 范围方向 }
+          content: { type: string, required: true, label: 内容 }
+      constraints:
+        title: 约束
+        cardinality: many
+        format: yaml
+        fields:
+          content: { type: string, required: true, label: 约束 }
+      acceptance:
+        title: 验收语义
+        cardinality: many
+        format: yaml
+        writable: false
+phases:
+  # Artifact Phase：调查输入规格与实时项目事实，形成业务意图和可追溯的 Actual；Bug 还应记录权威 Existing Expected。
+  as_is:
+    type: artifact
+    artifacts:
+      - requirement-context.intent
+      - requirement-context.assertions
+    instructions: 读取 metadata 指定的 OpenSpec change 文档，建立足以讨论本次变化的 AS-IS 事实基线。业务意图来自冻结输入；Actual 必须来自可定位的项目事实，Existing Expected 只能来自变更前已有的权威规范。不要提前写 TO-BE、范围或验收语义。
+
+  # 决策提出：只登记规格与现状冲突、遗漏影响或业务边界中会形成不同结果的完整分叉，不关闭节点。
+  decision_proposal:
+    type: builtin
+    builtin: decision-proposal
+
+  # 决策解决：继承已有承诺和用户答案，按当前自动决策强度关闭节点；需要用户决定时一次提交完整批次。
+  decision_resolution:
+    type: builtin
+    builtin: decision-resolution
+
+  # 答案复查：聚合检查所有答案、条件分支与组合后果；发现新问题时回退 decision_proposal。
+  answer_review:
+    type: builtin
+    builtin: decision-answer-review
+    artifacts: [requirement-context.answer-review]
+
+  # Artifact Phase：把冻结输入、可靠 AS-IS 与已关闭决定投影成唯一 TO-BE；继续写入 assertions Block。
+  to_be:
+    type: artifact
+    artifacts: [requirement-context.assertions]
+    instructions: >-
+      使用 perspective: target 登记最终 TO-BE。每条 Target 都必须可追溯到冻结输入、可靠项目事实或已关闭决定；不要在陈述中隐藏新的业务选择。
+
+  # Artifact Phase：对比 AS-IS 与 TO-BE，形成变化摘要，并登记 change、preserve 或交付分析义务。
+  impact_scan:
+    type: artifact
+    artifacts:
+      - requirement-context.change-summary
+      - requirement-context.impacts
+    instructions: 对比 AS-IS、适用的 Existing Expected 与 TO-BE，登记必须改变、必须保持和需要交付分析继续收敛的影响。发现新的业务分叉时回退 decision_proposal，不要把技术方案登记为影响。
+
+  # Artifact Phase：由最终 TO-BE、选中分支和影响处置派生本轮业务边界与必须保持的约束。
+  scope:
+    type: artifact
+    artifacts:
+      - requirement-context.scope
+      - requirement-context.constraints
+    instructions: 至少登记一项 included 范围；把相关但未选择、独立扩展或推迟的事项登记为 excluded。范围和约束只能收敛已有语义，不能创造新的业务规则。
+
+  # 内置 Acceptance Phase：形成具有永久身份、可跨 Agent 分配和验证的需求级验收语义；Harness 将实体只读投影到《业务变化上下文》的 ACCEPTANCE Block。
+  acceptance:
+    type: builtin
+    builtin: acceptance-definition
+    artifacts: [requirement-context.acceptance]
+
+  # 内置最终门禁：校验 AS-IS、决策、TO-BE、影响、范围和验收之间的结构与语义完整性，并编译冻结业务变化上下文。
+  finalize:
+    type: builtin
+    builtin: requirement-context-finalize

@@ -512,6 +512,7 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .command-chain-type.artifact{background:#edf4ff;color:#2b61b3}
 .command-chain-type.builtin{background:#f0f2f5;color:#657084}
 .command-chain-type.confirmation{background:#edf8f1;color:#257150}
+.command-chain-type.metadata{background:#fff4df;color:#946018}
 .command-chain-type.direct,.command-chain-type.legacy{background:#f4efff;color:#6b4db3}
 .command-chain-phase-commands{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px;padding-left:34px}
 .command-chain-command{max-width:100%;padding:5px 7px;border:1px solid #e1e6ed;border-radius:6px;background:#f7f9fb;color:#465267;font:10px/1.45 ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;overflow-wrap:anywhere}

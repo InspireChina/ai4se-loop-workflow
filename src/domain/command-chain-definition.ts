@@ -1,6 +1,11 @@
 import { parse } from 'yaml';
 import { activeCommandChainYaml } from '../infrastructure/agent-configuration-store';
 import { COMMAND_CHAIN_FILE_BY_ID, commandChainCatalogItem } from './command-chain-catalog';
+import {
+  parseRequirementMetadata,
+  requirementMetadataDefinition,
+  type RequirementMetadataKey,
+} from './requirement-metadata';
 
 export type CommandChainFieldDefinition = {
   type: 'string' | 'enum' | 'array';
@@ -20,10 +25,20 @@ export type CommandChainBlockDefinition = {
   fields: Record<string, CommandChainFieldDefinition>;
 };
 
+export type CommandChainArtifactStorage = 'builtin' | 'repository';
+
+export type CommandChainArtifactDefinition = {
+  type: CommandChainArtifactStorage;
+  adapter: string | null;
+  title: string;
+  blocks: Record<string, CommandChainBlockDefinition>;
+};
+
 export type CommandChainPhaseDefinition = {
-  type: 'builtin' | 'artifact' | 'confirmation';
+  type: 'builtin' | 'artifact' | 'confirmation' | 'metadata';
   builtin: string | null;
   artifactBlocks: { artifactId: string; blockId: string }[];
+  inputs: string[];
   title: string;
   instructions: string;
   objective: string;
@@ -37,6 +52,12 @@ export type CommandChainPhaseDefinition = {
   reviewBeforeSubmit: string[];
   validators: string[];
   transitions: string[];
+};
+
+export type CommandChainInputDefinition = {
+  metadataKey: RequirementMetadataKey;
+  required: boolean;
+  defaultValue?: string;
 };
 
 type ArtifactBlockReference = {
@@ -56,7 +77,8 @@ export type CommandChainDefinition = {
   version: number;
   id: string;
   agent: string;
-  artifacts: Record<string, { title: string; blocks: Record<string, CommandChainBlockDefinition> }>;
+  artifacts: Record<string, CommandChainArtifactDefinition>;
+  inputs: Record<string, CommandChainInputDefinition>;
   decisionTrees: Record<string, CommandChainDecisionTreeDefinition>;
   phases: Record<string, CommandChainPhaseDefinition>;
 };
@@ -138,18 +160,20 @@ const REQUIRED_BUILT_IN_PHASES: Record<string, string[]> = {
 export function commandChainAuthoringGuide(commandChainId: string) {
   const requiredBuiltins = REQUIRED_BUILT_IN_PHASES[commandChainId] || [];
   return [
-    '根节点只允许 version、id、agent、artifacts、phases；不要声明 decisionTrees。',
+    '根节点只允许 version、id、agent、inputs、artifacts、phases；不要声明 decisionTrees。',
     'version 是正整数；id 与 agent 不得改变。',
-    'artifacts.<artifact> 必须声明文档 title；每个 Block 必须声明 title、cardinality(one|many)、format(markdown|yaml|text)。',
+    'artifacts.<artifact> 可声明 type: builtin 或 repository；默认是 builtin。repository Artifact 必须声明 adapter；每个 Block 必须声明 title、cardinality(one|many)、format(markdown|yaml|text)。',
     'Block 默认进入最终文档；仅工作过程使用的 Block 声明 render: false。Block 还可声明 required、writable。',
     'YAML Block 可声明 fields，field type 只允许 string、enum、array；所有声明字段都会按顺序渲染，label 是面向人的字段名。',
-    'phases 是有序映射，声明顺序就是执行顺序。每个 Phase 必须使用 type: builtin、artifact 或 confirmation。',
-    'artifact Phase 只允许 type、artifacts、instructions；artifacts 引用使用 <artifact>.<block>。',
-    'confirmation Phase 只允许 type、instructions。',
-    'builtin Phase 只允许 type、builtin、artifacts；不得自行配置命令、validator、transition、objective 等 Harness 内部属性。',
+    'inputs 将命令链输入映射到已有需求 Metadata key，可声明 required 与 default；Phase 只会收到自己显式引用的 inputs。',
+    'phases 是有序映射，声明顺序就是执行顺序。每个 Phase 必须使用 type: builtin、artifact、confirmation 或 metadata。',
+    'artifact Phase 只允许 type、artifacts、inputs、instructions；artifacts 引用使用 <artifact>.<block>。',
+    'confirmation Phase 只允许 type、inputs、instructions。',
+    'metadata Phase 只允许 type、inputs、instructions；只能 set/remove 当前 Phase 引用的 Metadata。',
+    'builtin Phase 只允许 type、builtin、artifacts、inputs；不得自行配置命令、validator、transition、objective 等 Harness 内部属性。',
     `当前命令链必须保留并按相对顺序包含这些内置 Phase：${requiredBuiltins.length ? requiredBuiltins.join(' → ') : '无' }。`,
-    '不要手写命令。Artifact 命令由 Block 自动生成，Decision、Acceptance、Phase 和终止门禁由 builtin 自动生成。',
-    '允许新增、删除、重排普通 artifact/confirmation Phase，但不能形成绕过必要 builtin 的完成路径。',
+    '不要手写命令。Artifact 命令由 Block 自动生成；repository Artifact 使用同步命令，不直接写入数据库；Decision、Acceptance、Phase 和终止门禁由 builtin 自动生成。',
+    '允许新增、删除、重排普通 artifact/confirmation/metadata Phase，但不能形成绕过必要 builtin 的完成路径。',
   ].join('\n');
 }
 
@@ -211,7 +235,7 @@ function builtInPhase(
   phaseId: string,
   phaseIds: string[],
   artifacts: ArtifactBlockReference[],
-): CommandChainPhaseDefinition {
+): Omit<CommandChainPhaseDefinition, 'inputs'> {
   const navigation = phaseNavigation(phaseId, phaseIds);
 
   if (id === 'acceptance-definition') {
@@ -883,8 +907,51 @@ export function parseCommandChainDefinition(id: string, yaml: string): CommandCh
   if (root.decisionTrees !== undefined) {
     throw new Error('命令链 YAML 不再支持顶层 decisionTrees；Decision Tree 由内置 Decision Phase 提供');
   }
+  const inputs = Object.fromEntries(Object.entries(
+    root.inputs === undefined ? {} : object(root.inputs, 'inputs'),
+  ).map(([inputId, inputValue]) => {
+    const input = object(inputValue, `inputs.${inputId}`);
+    const allowed = new Set(['metadata', 'required', 'default']);
+    const extra = Object.keys(input).filter((key) => !allowed.has(key));
+    if (extra.length) throw new Error(`命令链 YAML inputs.${inputId} 包含不支持的属性 ${extra.join(', ')}`);
+    const metadataKey = string(input.metadata, `inputs.${inputId}.metadata`);
+    if (!requirementMetadataDefinition(metadataKey)) {
+      throw new Error(`命令链 YAML inputs.${inputId}.metadata 不支持 Metadata key ${metadataKey}`);
+    }
+    const defaultValue = input.default === undefined
+      ? undefined
+      : string(input.default, `inputs.${inputId}.default`);
+    if (defaultValue !== undefined) {
+      parseRequirementMetadata([{ key: metadataKey, value: defaultValue }]);
+    }
+    return [inputId, {
+      metadataKey: metadataKey as RequirementMetadataKey,
+      required: boolean(input.required, `inputs.${inputId}.required`, false),
+      ...(defaultValue === undefined ? {} : { defaultValue }),
+    }];
+  })) as CommandChainDefinition['inputs'];
+  const inputEntries = Object.entries(inputs);
+  const duplicateInputMetadata = inputEntries.find(([, input], index) => (
+    inputEntries.findIndex(([, candidate]) => candidate.metadataKey === input.metadataKey) !== index
+  ));
+  if (duplicateInputMetadata) {
+    throw new Error(`命令链 YAML inputs 不能重复映射 Metadata key ${duplicateInputMetadata[1].metadataKey}`);
+  }
   const artifacts = Object.fromEntries(Object.entries(object(root.artifacts, 'artifacts')).map(([artifactId, input]) => {
     const artifact = object(input, `artifacts.${artifactId}`);
+    const artifactType = string(artifact.type, `artifacts.${artifactId}.type`);
+    if (!['builtin', 'repository'].includes(artifactType)) {
+      throw new Error(`命令链 YAML artifacts.${artifactId}.type 必须是 builtin 或 repository`);
+    }
+    const adapter = artifact.adapter === undefined || artifact.adapter === null
+      ? null
+      : string(artifact.adapter, `artifacts.${artifactId}.adapter`);
+    if (artifactType === 'repository' && !adapter) {
+      throw new Error(`命令链 YAML repository Artifact ${artifactId} 必须声明 adapter`);
+    }
+    if (artifactType === 'builtin' && adapter) {
+      throw new Error(`命令链 YAML builtin Artifact ${artifactId} 不能声明 adapter`);
+    }
     const blocks = Object.fromEntries(Object.entries(object(artifact.blocks, `artifacts.${artifactId}.blocks`)).map(([blockId, blockInput]) => {
       const block = object(blockInput, `artifacts.${artifactId}.blocks.${blockId}`);
       const cardinality = string(block.cardinality, `artifacts.${artifactId}.blocks.${blockId}.cardinality`);
@@ -902,6 +969,8 @@ export function parseCommandChainDefinition(id: string, yaml: string): CommandCh
       }];
     }));
     return [artifactId, {
+      type: artifactType as CommandChainArtifactStorage,
+      adapter,
       title: string(artifact.title, `artifacts.${artifactId}.title`),
       blocks,
     }];
@@ -920,6 +989,15 @@ export function parseCommandChainDefinition(id: string, yaml: string): CommandCh
       return { artifactId, blockId, block };
     });
   };
+  const resolveInputReferences = (value: unknown, path: string) => {
+    if (value === undefined) return [];
+    const references = strings(value, path);
+    if (new Set(references).size !== references.length) throw new Error(`命令链 YAML ${path} 不能重复`);
+    for (const reference of references) {
+      if (!inputs[reference]) throw new Error(`命令链 YAML ${path} 引用了未声明的 Input ${reference}`);
+    }
+    return references;
+  };
   const rawPhases = object(root.phases, 'phases');
   const phaseIds = Object.keys(rawPhases);
   if (!phaseIds.length) throw new Error('命令链 YAML phases 不能为空');
@@ -931,7 +1009,7 @@ export function parseCommandChainDefinition(id: string, yaml: string): CommandCh
     }
     if (phase.type !== 'builtin') continue;
     const builtin = string(phase.builtin, `phases.${phaseId}.builtin`);
-    const allowed = new Set(['type', 'builtin', 'artifacts']);
+    const allowed = new Set(['type', 'builtin', 'artifacts', 'inputs']);
     const extra = Object.keys(phase).filter((key) => !allowed.has(key));
     if (extra.length) throw new Error(`内置 Phase phases.${phaseId} 包含不支持的属性 ${extra.join(', ')}`);
     if (phaseByBuiltin.has(builtin)) throw new Error(`命令链 YAML ${definitionId} 必须且只能声明一次内置 Phase ${builtin}`);
@@ -976,16 +1054,19 @@ export function parseCommandChainDefinition(id: string, yaml: string): CommandCh
       if (builtin === 'decision-resolution' && phaseArtifacts.some(({ block }) => block.cardinality !== 'many')) {
         throw new Error(`内置 Phase phases.${phaseId}.artifacts 只能引用 cardinality: many 的 Block`);
       }
-      return [phaseId, builtInPhase(
-        definitionId,
-        builtin,
-        phaseId,
-        phaseIds,
-        phaseArtifacts,
-      )];
+      return [phaseId, {
+        ...builtInPhase(
+          definitionId,
+          builtin,
+          phaseId,
+          phaseIds,
+          phaseArtifacts,
+        ),
+        inputs: resolveInputReferences(phase.inputs, `phases.${phaseId}.inputs`),
+      }];
     }
     if (phase.type === 'artifact') {
-      const allowed = new Set(['type', 'artifacts', 'instructions']);
+      const allowed = new Set(['type', 'artifacts', 'instructions', 'inputs']);
       const extra = Object.keys(phase).filter((key) => !allowed.has(key));
       if (extra.length) throw new Error(`Artifact Phase phases.${phaseId} 包含不能手工声明的属性 ${extra.join(', ')}`);
       const phaseArtifacts = resolveArtifactReferences(phase.artifacts, `phases.${phaseId}.artifacts`);
@@ -998,6 +1079,7 @@ export function parseCommandChainDefinition(id: string, yaml: string): CommandCh
         type: 'artifact',
         builtin: null,
         artifactBlocks,
+        inputs: resolveInputReferences(phase.inputs, `phases.${phaseId}.inputs`),
         title: phaseTitle(phaseId),
         instructions,
         objective: instructions,
@@ -1019,7 +1101,7 @@ export function parseCommandChainDefinition(id: string, yaml: string): CommandCh
       }];
     }
     if (phase.type === 'confirmation') {
-      const allowed = new Set(['type', 'instructions']);
+      const allowed = new Set(['type', 'instructions', 'inputs']);
       const extra = Object.keys(phase).filter((key) => !allowed.has(key));
       if (extra.length) throw new Error(`Confirmation Phase phases.${phaseId} 包含不能手工声明的属性 ${extra.join(', ')}`);
       const navigation = phaseNavigation(phaseId, phaseIds);
@@ -1028,6 +1110,7 @@ export function parseCommandChainDefinition(id: string, yaml: string): CommandCh
         type: 'confirmation',
         builtin: null,
         artifactBlocks: [],
+        inputs: resolveInputReferences(phase.inputs, `phases.${phaseId}.inputs`),
         title: phaseTitle(phaseId),
         instructions,
         objective: instructions,
@@ -1043,7 +1126,45 @@ export function parseCommandChainDefinition(id: string, yaml: string): CommandCh
         transitions: navigation.transitions,
       }];
     }
-    throw new Error(`命令链 YAML phases.${phaseId} 必须声明 type: builtin、type: artifact 或 type: confirmation`);
+    if (phase.type === 'metadata') {
+      const allowed = new Set(['type', 'inputs', 'instructions']);
+      const extra = Object.keys(phase).filter((key) => !allowed.has(key));
+      if (extra.length) throw new Error(`Metadata Phase phases.${phaseId} 包含不能手工声明的属性 ${extra.join(', ')}`);
+      const phaseInputs = resolveInputReferences(phase.inputs, `phases.${phaseId}.inputs`);
+      if (!phaseInputs.length) throw new Error(`Metadata Phase phases.${phaseId}.inputs 不能为空`);
+      const navigation = phaseNavigation(phaseId, phaseIds);
+      const instructions = string(phase.instructions, `phases.${phaseId}.instructions`);
+      const workCommands = phaseInputs.flatMap((inputId) => {
+        const key = inputs[inputId].metadataKey;
+        return [
+          `metadata set --key ${key} --value <value>`,
+          `metadata remove --key ${key}`,
+        ];
+      });
+      const requiredInputs = phaseInputs.filter((inputId) => inputs[inputId].required);
+      return [phaseId, {
+        type: 'metadata',
+        builtin: null,
+        artifactBlocks: [],
+        inputs: phaseInputs,
+        title: phaseTitle(phaseId),
+        instructions,
+        objective: instructions,
+        required: requiredInputs.length
+          ? `设置本阶段必需的 Metadata Input：${requiredInputs.join('、')}。`
+          : '按当前需求事实设置本阶段声明的 Metadata Input。',
+        prohibited: '不要写入当前阶段未声明的 Metadata，也不要把未知值或猜测登记为需求事实。',
+        contexts: [],
+        workCommands,
+        completeCommand: navigation.completeCommand,
+        rewindCommand: navigation.rewindCommand,
+        commands: phaseCommands(workCommands, navigation),
+        reviewBeforeSubmit: [],
+        validators: requiredInputs.map((inputId) => `metadata-required:${inputId}`),
+        transitions: navigation.transitions,
+      }];
+    }
+    throw new Error(`命令链 YAML phases.${phaseId} 必须声明 type: builtin、type: artifact、type: confirmation 或 type: metadata`);
   })) as CommandChainDefinition['phases'];
   for (const [phaseId, phase] of Object.entries(phases)) {
     const invalid = phase.transitions.filter((target) => !phaseIds.includes(target));
@@ -1076,6 +1197,7 @@ export function parseCommandChainDefinition(id: string, yaml: string): CommandCh
     id: definitionId,
     agent,
     artifacts,
+    inputs,
     decisionTrees,
     phases,
   };

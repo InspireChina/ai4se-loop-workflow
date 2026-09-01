@@ -15,9 +15,11 @@ function withDefinition(
   phases: Record<string, unknown>,
   run: () => void,
   artifacts: Record<string, unknown> = {},
+  inputs: Record<string, unknown> = {},
 ) {
   const rawArtifacts = {
     'delivery-analysis': {
+      type: 'builtin',
       blocks: {
         impacts: {
           title: 'IMPACTS',
@@ -35,12 +37,13 @@ function withDefinition(
   };
   const definitionArtifacts = Object.fromEntries(Object.entries(rawArtifacts).map(([artifactId, artifact]) => [
     artifactId,
-    { title: artifactId, ...(artifact as Record<string, unknown>) },
+    { title: artifactId, type: 'builtin', ...(artifact as Record<string, unknown>) },
   ]));
   currentDefinitionYaml = [
     'version: 2',
     'id: delivery-analysis',
     'agent: analyst-agent',
+    `inputs: ${JSON.stringify(inputs)}`,
     `artifacts: ${JSON.stringify(definitionArtifacts)}`,
     `phases: ${JSON.stringify(phases)}`,
   ].join('\n');
@@ -51,7 +54,7 @@ test('requires the built-in Delivery Unit phase', () => {
   withDefinition({
     decision_proposal: { type: 'builtin', builtin: 'decision-proposal' },
     decision_resolution: { type: 'builtin', builtin: 'decision-resolution', artifacts: ['delivery-analysis.impacts'] },
-    answer_review: { type: 'builtin', builtin: 'decision-answer-review' },
+    answer_review: { type: 'builtin', builtin: 'decision-answer-review', artifacts: ['analysis.review-result'] },
     finalize: { type: 'confirmation', instructions: '最终确认' },
   }, () => {
     assert.throws(
@@ -135,8 +138,87 @@ test('rejects the removed hand-written Phase shape', () => {
   }, () => {
     assert.throws(
       () => loadTestDefinition(),
-      /必须声明 type: builtin、type: artifact 或 type: confirmation/,
+      /必须声明 type: builtin、type: artifact、type: confirmation 或 type: metadata/,
     );
+  });
+});
+
+test('derives phase-scoped Metadata inputs and a writable Metadata phase', () => {
+  withDefinition({
+    metadata: {
+      type: 'metadata',
+      inputs: ['requirement-card'],
+      instructions: '登记需求卡号。',
+    },
+    delivery_unit: { type: 'builtin', builtin: 'delivery-unit' },
+    decision_proposal: { type: 'builtin', builtin: 'decision-proposal' },
+    decision_resolution: { type: 'builtin', builtin: 'decision-resolution', artifacts: ['delivery-analysis.impacts'] },
+    answer_review: { type: 'builtin', builtin: 'decision-answer-review', artifacts: ['analysis.review-result'] },
+    finalize: {
+      type: 'confirmation',
+      inputs: ['requirement-card'],
+      instructions: '最终确认。',
+    },
+  }, () => {
+    const definition = loadTestDefinition();
+    assert.deepEqual(definition.inputs['requirement-card'], {
+      metadataKey: 'tracking.requirement_card_id',
+      required: true,
+    });
+    assert.deepEqual(definition.phases.metadata.inputs, ['requirement-card']);
+    assert.deepEqual(definition.phases.metadata.workCommands, [
+      'metadata set --key tracking.requirement_card_id --value <value>',
+      'metadata remove --key tracking.requirement_card_id',
+    ]);
+    assert.deepEqual(definition.phases.metadata.validators, ['metadata-required:requirement-card']);
+    assert.deepEqual(definition.phases.finalize.inputs, ['requirement-card']);
+  }, {
+    analysis: {
+      blocks: {
+        'review-result': {
+          title: 'REVIEW RESULT',
+          cardinality: 'one',
+          format: 'text',
+          required: true,
+        },
+      },
+    },
+  }, {
+    'requirement-card': {
+      metadata: 'tracking.requirement_card_id',
+      required: true,
+    },
+  });
+});
+
+test('rejects undeclared phase inputs and unsupported Metadata keys', () => {
+  withDefinition({
+    metadata: { type: 'metadata', inputs: ['missing'], instructions: '登记信息。' },
+    delivery_unit: { type: 'builtin', builtin: 'delivery-unit' },
+    decision_proposal: { type: 'builtin', builtin: 'decision-proposal' },
+    decision_resolution: { type: 'builtin', builtin: 'decision-resolution', artifacts: ['delivery-analysis.impacts'] },
+    answer_review: { type: 'builtin', builtin: 'decision-answer-review', artifacts: ['analysis.review-result'] },
+    finalize: { type: 'confirmation', instructions: '最终确认。' },
+  }, () => {
+    assert.throws(() => loadTestDefinition(), /引用了未声明的 Input missing/);
+    assert.throws(
+      () => parseCommandChainDefinition('delivery-analysis', currentDefinitionYaml.replace(
+        'inputs: {}',
+        'inputs: {"custom":{"metadata":"unknown.key"}}',
+      )),
+      /不支持 Metadata key unknown\.key/,
+    );
+  }, {
+    analysis: {
+      blocks: {
+        'review-result': {
+          title: 'REVIEW RESULT',
+          cardinality: 'one',
+          format: 'text',
+          required: true,
+        },
+      },
+    },
   });
 });
 
@@ -248,10 +330,38 @@ test('derives an intermediate confirmation as an unchecked phase transition', ()
   });
 });
 
+test('distinguishes repository-backed Artifacts from builtin database Artifacts', () => {
+  withDefinition({
+    delivery_unit: { type: 'builtin', builtin: 'delivery-unit' },
+    decision_proposal: { type: 'builtin', builtin: 'decision-proposal' },
+    decision_resolution: { type: 'builtin', builtin: 'decision-resolution', artifacts: ['delivery-analysis.impacts'] },
+    answer_review: { type: 'builtin', builtin: 'decision-answer-review', artifacts: ['analysis.review-result'] },
+    finalize: { type: 'confirmation', instructions: '最终确认。' },
+  }, () => {
+    const definition = loadTestDefinition();
+    assert.equal(definition.artifacts['repository-docs'].type, 'repository');
+    assert.equal(definition.artifacts['repository-docs'].adapter, 'openspec');
+    assert.equal(definition.artifacts['delivery-analysis'].type, 'builtin');
+  }, {
+    analysis: {
+      blocks: {
+        'review-result': { title: '复查结果', cardinality: 'one', format: 'markdown', required: true },
+      },
+    },
+    'repository-docs': {
+      type: 'repository',
+      adapter: 'openspec',
+      blocks: {
+        design: { title: '设计', cardinality: 'one', format: 'markdown', required: true },
+      },
+    },
+  });
+});
+
 test('gives every bundled Artifact YAML field a human-readable label', () => {
   const appRoot = process.env.LOOP_APP_ROOT || process.cwd();
   for (const item of COMMAND_CHAIN_CATALOG) {
-    const yaml = readFileSync(join(appRoot, 'command-chains', item.fileName), 'utf8');
+    const yaml = readFileSync(join(appRoot, 'command-chains', 'default', item.fileName), 'utf8');
     const definition = parseCommandChainDefinition(item.id, yaml);
     for (const [artifactId, artifact] of Object.entries(definition.artifacts)) {
       for (const [blockId, block] of Object.entries(artifact.blocks)) {

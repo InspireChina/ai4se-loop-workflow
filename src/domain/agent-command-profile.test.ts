@@ -2,10 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   agentCommandChains,
+  agentCommandProfile,
   agentCommandPrompt,
   agentCommandProfiles,
   agentContextHelpLines,
 } from './agent-command-profile';
+import { loadCommandChainDefinition, parseCommandChainDefinition } from './command-chain-definition';
+import { bundledCommandChainYaml } from '../infrastructure/agent-configuration-store';
+import { COMMAND_CHAIN_CATALOG } from './command-chain-catalog';
 
 test('projects YAML command chains as real phases with their available commands', () => {
   const [chain] = agentCommandChains('backlog-agent');
@@ -29,6 +33,40 @@ test('projects YAML command chains as real phases with their available commands'
   assert.ok(chain.phases[1].commands.some((command) => command.startsWith('decision put --tree decisions')));
   assert.deepEqual(chain.phases.at(-1)?.commands, ['phase complete']);
   assert.deepEqual(chain.terminalActions, ['phase complete']);
+});
+
+test('keeps one Pipeline while predefined configurations provide different YAML', () => {
+  const profile = agentCommandProfile('backlog-agent', 'backlog');
+  assert.equal(profile?.commandChainId, 'requirement-context');
+  const ordinary = parseCommandChainDefinition('requirement-context', bundledCommandChainYaml('requirement-context', 'default'));
+  const openSpec = parseCommandChainDefinition('requirement-context', bundledCommandChainYaml('requirement-context', 'openspec'));
+  assert.deepEqual(
+    Object.keys(ordinary.phases),
+    Object.keys(openSpec.phases),
+  );
+  assert.deepEqual(openSpec.inputs, {});
+});
+
+test('loads the ordinary bundled YAML from the default configuration directory', () => {
+  const yaml = bundledCommandChainYaml('requirement-context');
+  assert.match(yaml, /agent: backlog-agent/);
+  assert.equal(parseCommandChainDefinition('requirement-context', yaml).agent, 'backlog-agent');
+});
+
+test('loads every predefined OpenSpec chain from its sibling directory', () => {
+  const openSpecAgents = new Set([
+    'backlog-agent',
+    'story-splitter-agent',
+    'analyst-agent',
+    'dev-agent',
+    'test-agent',
+    'review-agent',
+  ]);
+  for (const item of COMMAND_CHAIN_CATALOG.filter((entry) => openSpecAgents.has(entry.agentId))) {
+    const definition = parseCommandChainDefinition(item.id, bundledCommandChainYaml(item.id, 'openspec'));
+    assert.equal(definition.agent, item.agentId);
+    assert.equal(definition.inputs['openspec-change'], undefined);
+  }
 });
 
 test('injects the complete read-only context and submission contract before Agent work', () => {

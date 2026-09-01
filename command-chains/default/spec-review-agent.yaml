@@ -4,6 +4,7 @@ agent: spec-review-agent
 
 artifacts:
   specification-review:
+    type: builtin
     title: 需求规格说明书
     blocks:
       findings:

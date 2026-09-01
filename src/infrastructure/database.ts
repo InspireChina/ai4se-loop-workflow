@@ -22,6 +22,7 @@ if (isTestProcess) {
 }
 const appDbPath = join(dataRoot, 'loopwork.db');
 let appDb: Database.Database | undefined;
+let appMigrationLastCheckedAt = 0;
 const workspaceDatabases = new Map<string, Database.Database>();
 const workspaceMigrations = new Map<string, Promise<Database.Database>>();
 
@@ -45,11 +46,18 @@ export function appDatabaseConnection() {
     appDb = new Database(appDbPath);
     appDb.pragma('busy_timeout = 10000');
     migrateAppDatabase(appDb);
+    appMigrationLastCheckedAt = Date.now();
     const existing = appDb.prepare("SELECT setting_value FROM app_settings WHERE setting_key = 'workspace_root'").get();
     if (!existing) {
       const initialRoot = resolve(process.env.LOOP_WORKSPACE_ROOT || appRoot);
       appDb.prepare("INSERT INTO app_settings(setting_key, setting_value) VALUES('workspace_root', ?)").run(initialRoot);
     }
+  } else if (process.env.NODE_ENV === 'development' && Date.now() - appMigrationLastCheckedAt >= 1_000) {
+    // Turbopack can hot-reload callers while retaining this open SQLite connection.
+    // Re-scan migrations in development so newly added app migrations do not require
+    // business code to query a stale schema before the developer restarts the server.
+    migrateAppDatabase(appDb);
+    appMigrationLastCheckedAt = Date.now();
   }
   return appDb;
 }

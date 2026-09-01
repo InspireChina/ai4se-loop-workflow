@@ -4,6 +4,7 @@ agent: feedback-agent
 
 artifacts:
   feedback:
+    type: builtin
     title: 反馈分流
     blocks:
       inputs:

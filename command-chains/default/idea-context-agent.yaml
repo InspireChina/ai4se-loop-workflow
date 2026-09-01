@@ -4,6 +4,7 @@ agent: idea-context-agent
 
 artifacts:
   requirement-intent:
+    type: builtin
     title: 需求意图简报
     blocks:
       discovery:

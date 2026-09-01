@@ -1,0 +1,78 @@
+version: 1
+id: delivery-plan
+agent: story-splitter-agent
+
+artifacts:
+  delivery-plan:
+    type: builtin
+    title: 交付计划
+    blocks:
+      sources:
+        title: 冻结规划输入
+        cardinality: many
+        format: yaml
+        writable: false
+        required: true
+        fields:
+          kind: { type: enum, required: true, values: [change, preserve, technical, acceptance], label: 输入类型 }
+          content: { type: string, required: true, label: 内容 }
+          sourceRef: { type: string, required: true, label: 来源引用 }
+      rationale:
+        title: 拆分依据
+        cardinality: one
+        format: markdown
+        required: true
+      units:
+        title: 交付单元
+        cardinality: many
+        format: yaml
+        required: true
+        fields:
+          title: { type: string, required: true, label: 标题 }
+          actor: { type: string, required: true, label: 参与者 }
+          trigger: { type: string, required: true, label: 触发条件 }
+          observableOutcome: { type: string, required: true, label: 可观察结果 }
+          acceptance: { type: string, required: true, label: 验收语义 }
+          sourceRefs: { type: array, required: true, minItems: 1, label: 来源引用 }
+          dependsOn: { type: array, label: 前置单元 }
+      coverage:
+        title: 整体覆盖
+        cardinality: one
+        format: markdown
+        required: true
+      ordering:
+        title: 顺序与依赖
+        cardinality: one
+        format: markdown
+
+phases:
+  # 内置输入门禁：冻结本轮业务变化、保持项、分析义务和需求级验收语义，作为不可修改的拆分边界。
+  inputs:
+    type: builtin
+    builtin: delivery-plan-inputs
+
+  # Artifact Phase：说明为什么这些规划输入应按当前业务闭环拆分；不创建实现步骤或技术任务。
+  planning_basis:
+    type: artifact
+    artifacts: [delivery-plan.rationale]
+    instructions: 基于冻结规划输入和实时项目事实说明拆分依据。依据必须围绕参与者、触发条件、状态边界和可独立验收的业务结果，不要按文件、模块、技术层或工作量拆分。
+
+  # Artifact Phase：用稳定 key 建立完整交付单元集合，并在每个单元内直接声明来源覆盖和前置单元。
+  delivery_units:
+    type: artifact
+    artifacts: [delivery-plan.units]
+    instructions: 一次登记当前已知的完整交付单元集合。每个单元必须形成参与者、触发条件、用户可观察结果和验收语义闭环，并通过 sourceRefs 承接真实规划输入；dependsOn 只登记业务上必须先完成的稳定 unit key。
+
+  # Artifact Phase：复核全部冻结输入的覆盖和推荐顺序；需要修正单元时可继续更新 units 或回退。
+  coverage_order:
+    type: artifact
+    artifacts:
+      - delivery-plan.units
+      - delivery-plan.coverage
+      - delivery-plan.ordering
+    instructions: 说明全部有效单元组合后如何覆盖本轮目标，并复核每项冻结输入都由真实承接它的单元引用。多个单元时必须说明推荐顺序与依赖依据；无法证明可以独立时合并为较大的业务闭环。
+
+  # 内置最终门禁：校验交付单元结构、完整来源覆盖、依赖无环和顺序一致，并编译 Harness 可落库的交付计划。
+  finalize:
+    type: builtin
+    builtin: delivery-plan-finalize

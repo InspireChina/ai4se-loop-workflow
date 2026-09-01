@@ -4,6 +4,7 @@ agent: test-agent
 
 artifacts:
   verification:
+    type: builtin
     title: 独立验证报告
     blocks:
       sources:
