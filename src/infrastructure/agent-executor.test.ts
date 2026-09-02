@@ -146,6 +146,21 @@ test('labels command-driven draft updates as Agent domain commands', () => {
   assert.match(parsed || '', /恢复命令链草稿/);
 });
 
+test('labels packaged Windows schema discovery as an Agent domain command', () => {
+  const line = JSON.stringify({
+    type: 'item.started',
+    item: {
+      type: 'command_execution',
+      command: 'node "C:\\Program Files\\LoopWork\\resources\\app-server\\desktop-runners\\loop-agent.cjs" schema show --artifact verification --block results',
+    },
+  });
+  const parsed = getAgentExecutor('codex').parseStdout(line, {
+    agent: 'test-agent', taskId: 'REQ-WIN', storyIndex: 1, pipeline: 'test',
+  });
+  assert.match(parsed || '', /tool=agent-command/);
+  assert.match(parsed || '', /读取交付物 Schema/);
+});
+
 test('labels Business Analysis Artifact writes as generic Agent domain commands', () => {
   const line = JSON.stringify({
     type: 'item.started',

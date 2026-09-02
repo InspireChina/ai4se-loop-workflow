@@ -116,6 +116,9 @@ test('keeps every Agent domain command as one lifecycle record in execution audi
   }));
   insertReceipt.run(randomUUID(), executionId, '00000004', JSON.stringify({
     phase: 'completed', toolCallId: 'call-2', commandHash: 'hash-2', success: false,
+    summary: '# COMMAND RESULT\n\n- Outcome: rejected\n- Error-Code: schema_enum\n- Error-Path: verification/results/smoke.status\n- Occurrence: 2',
+    commandOutcome: 'rejected', commandErrorCode: 'schema_enum',
+    commandErrorPath: 'verification/results/smoke.status', commandRejectionOccurrence: 2,
     input: { command: domainCommand('artifact put') },
   }));
   insertReceipt.run(randomUUID(), executionId, '00000005', JSON.stringify({
@@ -135,7 +138,8 @@ test('keeps every Agent domain command as one lifecycle record in execution audi
     finished: Boolean(record.finishedAt),
   })), [
     { executionId, label: '恢复命令链草稿', status: 'success', finished: true },
-    { executionId, label: '登记交付物', status: 'error', finished: true },
+    { executionId, label: '登记交付物', status: 'rejected', finished: true },
     { executionId, label: '完成命令链阶段', status: 'running', finished: false },
   ]);
+  assert.equal(records[1].detail, '命令校验未通过（第 2 次）：verification/results/smoke.status');
 });

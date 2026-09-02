@@ -196,7 +196,7 @@ test('rejects undeclared fields before an Artifact Block can enter the rendered 
       confidence: 'high',
       debugOnly: '不能进入产物',
     }), 'source')),
-    /包含未声明字段：debugOnly/,
+    /research-sources\/source\.debugOnly: 字段未在当前命令链 Schema 中声明/,
   );
   for (const command of [
     ['phase', 'complete'],

@@ -112,20 +112,64 @@ test('analyst drafts have only the YAML command-chain protocol', async () => {
 
   const impactPacket = await command(active.executionId, active.token!, ['phase', 'complete']);
   assert.match(impactPacket, /IMPACT SCAN · artifact/);
+  assert.match(impactPacket, /`disposition`: enum\(change \| preserve \| exclude \| needs_decision\) · required/);
+  assert.match(impactPacket, /schema show --artifact delivery-analysis --block impacts/);
+  const impactSchema = await command(active.executionId, active.token!, [
+    'schema', 'show', '--artifact', 'delivery-analysis', '--block', 'impacts',
+  ]);
+  assert.match(impactSchema, /ARTIFACT SCHEMA · delivery-analysis\.impacts/);
+  assert.match(impactSchema, /`evidence`: string · required/);
+  const impactTemplate = await command(active.executionId, active.token!, [
+    'artifact', 'template', '--artifact', 'delivery-analysis', '--block', 'impacts',
+  ]);
+  assert.match(impactTemplate, /disposition: change/);
+  assert.match(impactTemplate, /evidence: REPLACE_ME/);
   await assert.rejects(
     command(active.executionId, active.token!, ['phase', 'complete']),
     /缺少必需的 Artifact Block：delivery-analysis\.impacts/,
   );
+  const invalidImpact = [
+    'artifact', 'put', '--artifact', 'delivery-analysis', '--block', 'impacts', '--key', 'invalid-impact',
+    '--content', ['area: ""', 'disposition: unchanged', 'debugOnly: true'].join('\n'),
+  ];
+  for (const expectedOccurrence of [1, 2]) {
+    await assert.rejects(command(active.executionId, active.token!, invalidImpact), (error: unknown) => {
+      const rejection = (error as { commandRejection?: { occurrence?: number; issues?: { path: string }[] } }).commandRejection;
+      assert.equal(rejection?.occurrence, expectedOccurrence);
+      assert.deepEqual(rejection?.issues?.map((issue) => issue.path), [
+        'delivery-analysis/impacts/invalid-impact.debugOnly',
+        'delivery-analysis/impacts/invalid-impact.area',
+        'delivery-analysis/impacts/invalid-impact.finding',
+        'delivery-analysis/impacts/invalid-impact.disposition',
+        'delivery-analysis/impacts/invalid-impact.evidence',
+      ]);
+      return true;
+    });
+  }
+  await assert.rejects(
+    command(active.executionId, active.token!, invalidImpact),
+    /必须先执行 status/,
+  );
+  const refreshedImpactPacket = await command(active.executionId, active.token!, ['status']);
+  assert.match(refreshedImpactPacket, /schema show --artifact delivery-analysis --block impacts/);
   await command(active.executionId, active.token!, [
     'artifact', 'put', '--artifact', 'delivery-analysis', '--block', 'impacts', '--key', 'export-engine',
     '--content', [
       'area: 导出计算与调度',
       'finding: 结果交付不需要改变现有计算和任务状态机',
-      'disposition: preserve',
+      'disposition: Preserve',
       'evidence: 现有状态模型已覆盖计算、完成和失败',
     ].join('\n'),
   ]);
-  await command(active.executionId, active.token!, ['phase', 'complete']);
+  const decisionPacket = await command(active.executionId, active.token!, ['phase', 'complete']);
+  assert.match(decisionPacket, /## DECISION SCHEMA/);
+  assert.match(decisionPacket, /authority`: enum\(upstream \| user \| project_evidence \| agent_authority\)/);
+  const decisionSchema = await command(active.executionId, active.token!, ['schema', 'decision', '--tree', 'decisions']);
+  assert.match(decisionSchema, /DECISION SCHEMA · decisions/);
+  assert.match(decisionSchema, /options.*minItems=2/);
+  const decisionTemplate = await command(active.executionId, active.token!, ['decision', 'template', '--tree', 'decisions']);
+  assert.match(decisionTemplate, /recommendation:/);
+  assert.match(decisionTemplate, /authority: REPLACE_ME/);
   await command(active.executionId, active.token!, ['phase', 'complete']);
   await command(active.executionId, active.token!, ['phase', 'complete']);
   await command(active.executionId, active.token!, [
@@ -150,9 +194,19 @@ test('analyst drafts have only the YAML command-chain protocol', async () => {
   assert.equal(result?.outcome, 'completed');
   assert.equal(result?.spec?.unit.key, 'export-result');
   assert.equal(result?.spec?.impacts[0]?.key, 'export-engine');
+  assert.equal(result?.spec?.impacts[0]?.disposition, 'preserve');
 
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
+  const rejectionRows = db.prepare(`
+    SELECT occurrence, error_code, error_path FROM agent_command_rejections
+    WHERE execution_id = ? AND command LIKE 'artifact put%' AND error_code = 'schema_undeclared_field'
+    ORDER BY rejection_id
+  `).all(active.executionId) as { occurrence: number; error_code: string; error_path: string }[];
+  assert.deepEqual(rejectionRows, [
+    { occurrence: 1, error_code: 'schema_undeclared_field', error_path: 'delivery-analysis/impacts/invalid-impact.debugOnly' },
+    { occurrence: 2, error_code: 'schema_undeclared_field', error_path: 'delivery-analysis/impacts/invalid-impact.debugOnly' },
+  ]);
   const draft = db.prepare(`
     SELECT draft_id, command_chain_id FROM agent_work_drafts
     WHERE terminal_execution_id = ?

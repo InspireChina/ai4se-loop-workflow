@@ -39,6 +39,7 @@ export function AgentCommandProgress({ chains }: { chains: AgentCommandProgressM
           <div>
             <small>最近命令</small>
             <strong>{chain.latestCommand?.label || '等待 Agent 执行第一个领域命令'}</strong>
+            {chain.latestCommand?.detail && <small>{chain.latestCommand.detail}</small>}
           </div>
           <time>{formatEventTime(chain.latestCommand?.createdAt || chain.updatedAt)}</time>
         </div>

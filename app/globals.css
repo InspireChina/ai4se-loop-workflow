@@ -395,12 +395,14 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .execution-command-state{display:grid;place-items:center;color:#8a95a5}
 .execution-command-row.success .execution-command-state{color:#218054}
 .execution-command-row.error .execution-command-state{color:#b34a40}
+.execution-command-row.rejected .execution-command-state{color:#a76a10}
 .execution-command-row.running .execution-command-state{color:#356db8}
 .execution-command-copy{min-width:0;display:flex;align-items:baseline;gap:9px}
 .execution-command-copy strong{overflow:hidden;color:#334258;font-size:12px;font-weight:700;text-overflow:ellipsis;white-space:nowrap}
 .execution-command-copy small{flex:none;margin:0;font-size:9px}
 .execution-command-row.success .execution-command-copy small{color:#218054}
 .execution-command-row.error .execution-command-copy small{color:#b34a40}
+.execution-command-row.rejected .execution-command-copy small{color:#8e641f}
 .execution-command-row.running .execution-command-copy small{color:#356db8}
 .execution-command-row time{color:#8993a3;font-size:9px;white-space:nowrap}
 .execution-command-empty{padding:14px 12px;color:var(--muted);font-size:11px}
@@ -813,6 +815,7 @@ main{padding:28px 20px}
 .agent-command-latest-dot.running{background:#3478e5;box-shadow:0 0 0 3px rgba(52,120,229,.1)}
 .agent-command-latest-dot.success{background:#2f9461}
 .agent-command-latest-dot.error{background:#c65347}
+.agent-command-latest-dot.rejected{background:#d08a23}
 .agent-command-latest>div{display:grid;gap:1px;min-width:0}
 .agent-command-latest small{margin:0;font-size:9px}
 .agent-command-latest strong{overflow:hidden;font-size:11px;text-overflow:ellipsis;white-space:nowrap}

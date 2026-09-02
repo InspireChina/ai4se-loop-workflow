@@ -3,6 +3,7 @@ import { relative, resolve } from 'node:path';
 import { runAgentCommand } from '../../src/application/agent-command-drafts';
 import { runInternalAgentCommand } from '../../src/application/internal-agent-command-drafts';
 import { runVerificationAssistanceCommand } from '../../src/application/verification-assistance';
+import { rejectionFromError, renderAgentCommandRejection } from '../../src/domain/agent-command-rejection';
 
 function fail(message: string): never {
   process.stderr.write(`loop-agent: ${message}\n`);
@@ -64,23 +65,16 @@ try {
     : await runAgentCommand({ executionId: executionId!, token: token!, args });
   process.stdout.write(`${output}\n`);
 } catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  if ([
-    'requirement-context', 'delivery-plan', 'delivery-analysis', 'implementation',
-    'verification', 'review', 'idea-context', 'business-design',
-    'requirement-spec', 'spec-review', 'direct', 'verification-assistance',
-  ].includes(rawArgs[0])) {
-    const namespace = rawArgs[0];
+  if (hasFlowContext || hasInternalContext || hasAssistanceContext) {
     const firstFlag = rawArgs.findIndex((argument) => argument.startsWith('--'));
     const command = rawArgs.slice(0, firstFlag < 0 ? rawArgs.length : firstFlag).join(' ');
-    process.stderr.write([
-      '# COMMAND RESULT', '', `- Command: \`${command}\``, '- Outcome: rejected', '',
-      '# NEXT', '', '- Action: correct_and_retry', `- Refresh If Needed: \`${namespace} status\``, '',
-      '# GUIDANCE', '', message, '',
-    ].join('\n'));
+    const rejection = rejectionFromError(error);
+    if (rawArgs[0] === 'direct') rejection.refreshCommand = 'direct run';
+    else if (hasInternalContext || hasAssistanceContext) rejection.refreshCommand = `${rawArgs[0] || 'verification-assistance'} status`;
+    process.stderr.write(renderAgentCommandRejection(command, rejection));
     process.exit(1);
   }
-  fail(message);
+  fail(error instanceof Error ? error.message : String(error));
 }
 }
 

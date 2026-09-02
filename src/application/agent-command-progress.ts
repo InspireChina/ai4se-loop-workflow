@@ -20,7 +20,8 @@ export type AgentCommandProgress = {
   stages: AgentCommandProgressStage[];
   latestCommand: {
     label: string;
-    status: 'running' | 'success' | 'error';
+    status: 'running' | 'success' | 'rejected' | 'error';
+    detail?: string;
     createdAt: string;
   } | null;
   updatedAt: string;
@@ -30,7 +31,8 @@ export type AgentCommandAuditRecord = {
   executionId: string;
   id: string;
   label: string;
-  status: 'running' | 'success' | 'error';
+  status: 'running' | 'success' | 'rejected' | 'error';
+  detail: string | null;
   startedAt: string;
   finishedAt: string | null;
 };
@@ -75,6 +77,10 @@ type DomainCommandEvent = {
   phase: string;
   summary: string;
   success: boolean | null;
+  commandOutcome: string;
+  commandErrorCode: string;
+  commandErrorPath: string;
+  commandRejectionOccurrence: number | null;
   createdAt: string;
 };
 
@@ -167,14 +173,23 @@ function domainCommandEvents(rows: ToolReceiptRow[], fallbackExecutionId = '') {
       const input = payload.input as Record<string, unknown> | undefined;
       const command = typeof input?.command === 'string' ? input.command : '';
       if (!/loop-agent\.(?:mjs|cjs)/i.test(command)) return [];
+      const summary = typeof payload.summary === 'string' ? payload.summary : '';
+      const summaryValue = (label: string) => summary.match(new RegExp(`(?:^|\\n)- ${label}:\\s*([^\\n\\r]+)`, 'i'))?.[1]?.trim() || '';
+      const occurrence = Number(summaryValue('Occurrence'));
       return [{
         executionId: row.execution_id || fallbackExecutionId,
         receiptKey: row.receipt_key,
         toolCallId: typeof payload.toolCallId === 'string' ? payload.toolCallId : '',
         commandHash: typeof payload.commandHash === 'string' ? payload.commandHash : '',
         phase: typeof payload.phase === 'string' ? payload.phase : '',
-        summary: typeof payload.summary === 'string' ? payload.summary : '',
+        summary,
         success: typeof payload.success === 'boolean' ? payload.success : null,
+        commandOutcome: typeof payload.commandOutcome === 'string' ? payload.commandOutcome : summaryValue('Outcome'),
+        commandErrorCode: typeof payload.commandErrorCode === 'string' ? payload.commandErrorCode : summaryValue('Error-Code'),
+        commandErrorPath: typeof payload.commandErrorPath === 'string' ? payload.commandErrorPath : summaryValue('Error-Path'),
+        commandRejectionOccurrence: typeof payload.commandRejectionOccurrence === 'number'
+          ? payload.commandRejectionOccurrence
+          : Number.isFinite(occurrence) && occurrence > 0 ? occurrence : null,
         createdAt: row.created_at,
       }];
     } catch {
@@ -185,6 +200,13 @@ function domainCommandEvents(rows: ToolReceiptRow[], fallbackExecutionId = '') {
 
 function commandIdentity(event: DomainCommandEvent) {
   return event.toolCallId || event.commandHash;
+}
+
+function rejectionDetail(event: DomainCommandEvent) {
+  if (event.commandOutcome !== 'rejected') return null;
+  const identity = event.commandErrorPath || event.commandErrorCode || '命令参数';
+  const occurrence = event.commandRejectionOccurrence ? `（第 ${event.commandRejectionOccurrence} 次）` : '';
+  return `命令校验未通过${occurrence}：${identity}`;
 }
 
 function domainCommandAuditRecords(rows: ToolReceiptRow[], fallbackExecutionId = '') {
@@ -201,6 +223,7 @@ function domainCommandAuditRecords(rows: ToolReceiptRow[], fallbackExecutionId =
         id: identity ? `${activeKey}:${event.receiptKey}` : `${event.executionId}:${event.receiptKey}`,
         label: event.summary || '执行 Agent 领域命令',
         status: 'running',
+        detail: null,
         startedAt: event.createdAt,
         finishedAt: null,
       };
@@ -212,7 +235,8 @@ function domainCommandAuditRecords(rows: ToolReceiptRow[], fallbackExecutionId =
     if (event.phase !== 'completed') continue;
     const record = identity ? activeRecords.get(activeKey) : undefined;
     if (record) {
-      record.status = event.success === true ? 'success' : 'error';
+      record.status = event.success === true ? 'success' : event.commandOutcome === 'rejected' ? 'rejected' : 'error';
+      record.detail = rejectionDetail(event) || (event.success === false ? event.summary || 'Agent 命令执行失败' : null);
       record.finishedAt = event.createdAt;
       activeRecords.delete(activeKey);
       continue;
@@ -222,7 +246,8 @@ function domainCommandAuditRecords(rows: ToolReceiptRow[], fallbackExecutionId =
       executionId: event.executionId,
       id: identity ? `${activeKey}:${event.receiptKey}` : `${event.executionId}:${event.receiptKey}`,
       label: '执行 Agent 领域命令',
-      status: event.success === true ? 'success' : 'error',
+      status: event.success === true ? 'success' : event.commandOutcome === 'rejected' ? 'rejected' : 'error',
+      detail: rejectionDetail(event) || (event.success === false ? event.summary || 'Agent 命令执行失败' : null),
       startedAt: event.createdAt,
       finishedAt: event.createdAt,
     });
@@ -246,7 +271,14 @@ function latestDomainCommand(db: Database.Database, executionId: string | null) 
     && (!identity || commandIdentity(event) === identity));
   return {
     label: started?.summary || (latest.phase === 'started' ? latest.summary : '') || '执行 Agent 领域命令',
-    status: latest.phase === 'started' ? 'running' as const : latest.success === true ? 'success' as const : 'error' as const,
+    status: latest.phase === 'started'
+      ? 'running' as const
+      : latest.success === true
+        ? 'success' as const
+        : latest.commandOutcome === 'rejected' ? 'rejected' as const : 'error' as const,
+    detail: latest.phase === 'completed'
+      ? rejectionDetail(latest) || (latest.success === false ? latest.summary || 'Agent 命令执行失败' : undefined)
+      : undefined,
     createdAt: latest.createdAt,
   };
 }
@@ -264,7 +296,10 @@ function buildDraftProgress(db: Database.Database, row: DraftProgressRow): Agent
     label: definition.labels[phase] || phase,
     status: submitted || index < currentIndex ? 'completed' : index === currentIndex ? 'current' : 'pending',
   }));
-  const state = progressState(row.execution_status, row.status);
+  const latestCommand = latestDomainCommand(db, row.last_execution_id);
+  const state = latestCommand?.detail?.startsWith('命令校验未通过')
+    ? { state: 'running' as const, stateLabel: latestCommand.detail.split('：')[0] }
+    : progressState(row.execution_status, row.status);
   return {
     executionId: row.last_execution_id,
     agent: row.agent,
@@ -273,7 +308,7 @@ function buildDraftProgress(db: Database.Database, row: DraftProgressRow): Agent
     ...state,
     currentPhase,
     stages,
-    latestCommand: latestDomainCommand(db, row.last_execution_id),
+    latestCommand,
     updatedAt: row.updated_at,
   };
 }

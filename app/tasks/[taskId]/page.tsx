@@ -818,12 +818,13 @@ export default async function TaskDetail({
                   ? <div className="execution-command-empty">本次执行没有产生 Agent 领域命令。</div>
                   : <div className="execution-command-list">{commands.map((command, index) => <div className={`execution-command-row ${command.status}`} key={command.id}>
                     <span className="execution-command-index">{index + 1}</span>
-                    <span className="execution-command-state" aria-label={command.status === 'success' ? '成功' : command.status === 'error' ? '失败' : '执行中'}>
-                      {command.status === 'success' ? <CheckCircle2 size={15}/> : command.status === 'error' ? <AlertTriangle size={15}/> : <Clock3 size={15}/>}
+                    <span className="execution-command-state" aria-label={command.status === 'success' ? '成功' : command.status === 'rejected' ? '校验未通过' : command.status === 'error' ? '失败' : '执行中'}>
+                      {command.status === 'success' ? <CheckCircle2 size={15}/> : command.status === 'error' || command.status === 'rejected' ? <AlertTriangle size={15}/> : <Clock3 size={15}/>}
                     </span>
                     <div className="execution-command-copy">
                       <strong>{command.label}</strong>
-                      <small>{command.status === 'success' ? '执行成功' : command.status === 'error' ? '执行失败' : '正在执行'}</small>
+                      <small>{command.status === 'success' ? '执行成功' : command.status === 'rejected' ? '命令校验未通过，Agent 可继续修正' : command.status === 'error' ? '执行失败' : '正在执行'}</small>
+                      {command.detail && <small className="execution-command-error-detail">{terminologyText(command.detail)}</small>}
                     </div>
                     <time>{formatEventTime(command.finishedAt || command.startedAt)}</time>
                   </div>)}</div>}

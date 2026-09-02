@@ -98,32 +98,15 @@ try {
   }
   process.stdout.write(`${output}\n`);
 } catch (error) {
-  const message = error instanceof Error ? error.message : String(error);
-  if ([
-    'requirement-context', 'delivery-plan', 'delivery-analysis', 'implementation',
-    'verification', 'review', 'idea-context', 'business-design',
-    'requirement-spec', 'spec-review', 'direct', 'verification-assistance',
-  ].includes(rawArgs[0])) {
-    const namespace = rawArgs[0];
+  if (hasFlowContext || hasInternalContext || hasAssistanceContext) {
     const firstFlag = rawArgs.findIndex((argument) => argument.startsWith('--'));
     const command = rawArgs.slice(0, firstFlag < 0 ? rawArgs.length : firstFlag).join(' ');
-    process.stderr.write([
-      '# COMMAND RESULT',
-      '',
-      `- Command: \`${command}\``,
-      '- Outcome: rejected',
-      '',
-      '# NEXT',
-      '',
-      '- Action: correct_and_retry',
-      `- Refresh If Needed: \`${namespace} status\``,
-      '',
-      '# GUIDANCE',
-      '',
-      message,
-      '',
-    ].join('\n'));
+    const { rejectionFromError, renderAgentCommandRejection } = await import('../../src/domain/agent-command-rejection.ts');
+    const rejection = rejectionFromError(error);
+    if (rawArgs[0] === 'direct') rejection.refreshCommand = 'direct run';
+    else if (hasInternalContext || hasAssistanceContext) rejection.refreshCommand = `${rawArgs[0] || 'verification-assistance'} status`;
+    process.stderr.write(renderAgentCommandRejection(command, rejection));
     process.exit(1);
   }
-  fail(message);
+  fail(error instanceof Error ? error.message : String(error));
 }

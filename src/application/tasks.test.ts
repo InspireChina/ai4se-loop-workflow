@@ -2035,9 +2035,9 @@ test('uses one global Agent Prompt while keeping Memory and legacy Prompt rows p
   const runtimeRoot = await ensureAgentRuntimeWorkspace();
   assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
   const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 14);
+  assert.equal(original.profile.prompt_seed_revision, 15);
   assert.equal(original.currentPrompt.version, 1);
-  assert.equal(original.currentPrompt.template_version, 14);
+  assert.equal(original.currentPrompt.template_version, 15);
   assert.equal(original.currentPrompt.source, 'system');
   assert.equal(original.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
   assert.equal('promptHistory' in original, false);
@@ -2060,9 +2060,9 @@ test('uses one global Agent Prompt while keeping Memory and legacy Prompt rows p
   `).run();
   await ensureAgentRuntimeWorkspace();
   const upgradedSystemSeed = await getAgentProfile('review-agent');
-  assert.equal(upgradedSystemSeed.profile.prompt_seed_revision, 14);
+  assert.equal(upgradedSystemSeed.profile.prompt_seed_revision, 15);
   assert.equal(upgradedSystemSeed.currentPrompt.version, 1);
-  assert.equal(upgradedSystemSeed.currentPrompt.template_version, 14);
+  assert.equal(upgradedSystemSeed.currentPrompt.template_version, 15);
   assert.equal(upgradedSystemSeed.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['review-agent'].prompt);
 
   const legacyPrompt = '判断需求类型并整理上下文，完成时提供分类、流程方向和需求文档。';
@@ -2089,7 +2089,7 @@ test('uses one global Agent Prompt while keeping Memory and legacy Prompt rows p
   await ensureAgentRuntimeWorkspace();
   const resetBaseline = await getAgentProfile('backlog-agent');
   assert.equal(resetBaseline.currentPrompt.version, 1);
-  assert.equal(resetBaseline.currentPrompt.template_version, 14);
+  assert.equal(resetBaseline.currentPrompt.template_version, 15);
   assert.match(resetBaseline.currentPrompt.content, /# 工作原则/);
   assert.doesNotMatch(resetBaseline.currentPrompt.content, /完成时提供分类、流程方向/);
   assert.match(
@@ -2148,7 +2148,7 @@ test('uses one global Agent Prompt while keeping Memory and legacy Prompt rows p
   );
   const runtime = await loadAgentRuntime('dev-agent', 'plan');
   assert.equal(runtime.promptVersion, reconciled.currentPrompt.version);
-  assert.equal(runtime.promptTemplateVersion, 14);
+  assert.equal(runtime.promptTemplateVersion, 15);
   assert.equal(runtime.promptHash, hash(projectPrompt));
   assert.equal(runtime.promptStatus, 'active');
   assert.equal(runtime.evolutionCandidateId, null);
@@ -2160,9 +2160,9 @@ test('uses one global Agent Prompt while keeping Memory and legacy Prompt rows p
   const reset = await getAgentProfile('dev-agent');
   assert.equal(resetRevision, promptRevision + 1);
   assert.equal(reset.currentPrompt.version, resetRevision);
-  assert.equal(reset.currentPrompt.template_version, 14);
+  assert.equal(reset.currentPrompt.template_version, 15);
   assert.equal(reset.currentPrompt.source, 'system');
-  assert.equal(reset.currentPrompt.reason, '用户重置为系统模板 V14');
+  assert.equal(reset.currentPrompt.reason, '用户重置为系统模板 V15');
   assert.equal(reset.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
   assert.equal(reset.currentMemory.revision, memoryRevision);
   assert.equal(reset.candidatePrompt, null);

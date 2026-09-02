@@ -1,0 +1,4 @@
+interface:
+  display_name: "LoopWork 运维分析"
+  short_description: "分析生产日志、失败重试与 Agent 命令协议问题"
+  default_prompt: "使用 $loopwork-operations-analyzer 分析当前 LoopWork 生产数据库，并给出有证据的产品优化建议。"

@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { parse, stringify } from 'yaml';
 import { agentResultSchema, deliverySpecSchema, type AgentResult, type DeliverySpec } from '../domain/agent-result';
+import { AgentCommandValidationError, type AgentCommandValidationIssue } from '../domain/agent-command-rejection';
 import { loadCommandChainDefinition, type CommandChainBlockDefinition, type CommandChainDefinition } from '../domain/command-chain-definition';
 import { deliveryUnitContractSchema, type DeliveryUnitContract } from '../domain/delivery-unit';
 import {
@@ -1159,76 +1160,196 @@ function parseObject(content: string, label: string) {
   return value as Record<string, unknown>;
 }
 
-function validateBlockContent(definition: CommandChainBlockDefinition, content: string, label: string) {
+function displayValue(value: unknown) {
+  if (value === undefined) return '(missing)';
+  if (value === null) return 'null';
+  const rendered = typeof value === 'string' ? value : stringify(value).trim();
+  return rendered.length > 240 ? `${rendered.slice(0, 240)}…` : rendered;
+}
+
+function validationFailure(
+  label: string,
+  issues: AgentCommandValidationIssue[],
+  options: { schemaCommand?: string; templateCommand?: string } = {},
+): never {
+  throw new AgentCommandValidationError(
+    [
+      `${label} 校验未通过，共 ${issues.length} 项；请一次性修正后重试`,
+      ...issues.map((issue) => `- ${issue.path}: ${issue.message}${issue.expected ? `（允许/期望：${issue.expected}）` : ''}`),
+    ].join('\n'),
+    issues,
+    options,
+  );
+}
+
+function validateBlockContent(
+  definition: CommandChainBlockDefinition,
+  content: string,
+  label: string,
+  identity?: { artifactId: string; blockId: string },
+) {
   if (definition.format !== 'yaml') return bounded(content, label);
-  const value = parseObject(content, label);
-  const undeclared = Object.keys(value).filter((name) => !definition.fields[name]);
-  if (undeclared.length) throw new Error(`${label} 包含未声明字段：${undeclared.join('、')}`);
+  const schemaCommand = identity ? `schema show --artifact ${identity.artifactId} --block ${identity.blockId}` : undefined;
+  const templateCommand = identity ? `artifact template --artifact ${identity.artifactId} --block ${identity.blockId}` : undefined;
+  let value: Record<string, unknown>;
+  try { value = parseObject(content, label); }
+  catch (error) {
+    validationFailure(label, [{
+      code: 'invalid_yaml', path: label,
+      message: error instanceof Error ? error.message : String(error),
+      expected: 'YAML object', received: content.slice(0, 240),
+    }], { schemaCommand, templateCommand });
+  }
+  const issues: AgentCommandValidationIssue[] = [];
+  for (const name of Object.keys(value).filter((candidate) => !definition.fields[candidate])) {
+    issues.push({
+      code: 'schema_undeclared_field', path: `${label}.${name}`,
+      message: '字段未在当前命令链 Schema 中声明',
+      expected: Object.keys(definition.fields).join(', ') || '(no fields)', received: displayValue(value[name]),
+    });
+  }
   for (const [name, field] of Object.entries(definition.fields)) {
     const input = value[name];
     if (field.required && (input === undefined || input === null || input === '')) {
-      throw new Error(`${label}.${name} 必填`);
+      issues.push({
+        code: 'schema_required', path: `${label}.${name}`, message: '必填字段缺失或为空',
+        expected: field.type === 'enum' ? `enum(${field.values?.join(' | ')})` : field.type,
+        received: displayValue(input),
+      });
+      continue;
     }
     if (input === undefined || input === null) continue;
     if (field.type === 'string' && (typeof input !== 'string' || !input.trim())) {
-      throw new Error(`${label}.${name} 必须是非空字符串`);
+      issues.push({ code: 'schema_type', path: `${label}.${name}`, message: '必须是非空字符串', expected: 'non-empty string', received: displayValue(input) });
     }
-    if (field.type === 'enum' && (typeof input !== 'string' || !field.values?.includes(input))) {
-      throw new Error(`${label}.${name} 必须是 ${field.values?.join('、')}`);
+    if (field.type === 'enum') {
+      const normalized = typeof input === 'string' ? input.trim().toLowerCase().replaceAll('-', '_') : '';
+      if (normalized && field.values?.includes(normalized)) value[name] = normalized;
+      else issues.push({ code: 'schema_enum', path: `${label}.${name}`, message: '枚举值无效', expected: field.values?.join(' | '), received: displayValue(input) });
     }
     if (field.type === 'array' && (!Array.isArray(input) || input.length < (field.minItems || 0))) {
-      throw new Error(`${label}.${name} 必须是至少包含 ${field.minItems || 0} 项的数组`);
+      issues.push({
+        code: 'schema_array', path: `${label}.${name}`, message: `必须是至少包含 ${field.minItems || 0} 项的数组`,
+        expected: `array(minItems=${field.minItems || 0})`, received: displayValue(input),
+      });
     }
   }
+  if (issues.length) validationFailure(label, issues, { schemaCommand, templateCommand });
   return stringify(value).trim();
 }
 
 function parseDecision(content: string, definition: CommandChainDefinition, treeId: string, key: string): DecisionContent {
-  const value = parseObject(content, `decision/${key}`);
-  const stringField = (name: string) => bounded(String(value[name] || ''), `decision/${key}.${name}`, 4000);
-  const type = stringField('type');
-  if (!['business', 'technical'].includes(type)) throw new Error(`decision/${key}.type 必须是 business 或 technical`);
-  if (!Array.isArray(value.options)) throw new Error(`decision/${key}.options 必须是数组`);
-  const options = value.options.map((input, index) => {
-    if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error(`decision/${key}.options[${index}] 必须是对象`);
+  const label = `decision/${key}`;
+  const schemaCommand = `schema decision --tree ${treeId}`;
+  const templateCommand = `decision template --tree ${treeId}`;
+  let value: Record<string, unknown>;
+  try { value = parseObject(content, label); }
+  catch (error) {
+    validationFailure(label, [{
+      code: 'invalid_yaml', path: label,
+      message: error instanceof Error ? error.message : String(error),
+      expected: 'YAML object', received: content.slice(0, 240),
+    }], { schemaCommand, templateCommand });
+  }
+  const issues: AgentCommandValidationIssue[] = [];
+  const readString = (source: Record<string, unknown>, name: string, path: string, max: number) => {
+    const input = source[name];
+    if (typeof input !== 'string' || !input.trim()) {
+      issues.push({ code: 'schema_required', path, message: '必须是非空字符串', expected: 'non-empty string', received: displayValue(input) });
+      return '';
+    }
+    if (input.length > max) {
+      issues.push({ code: 'schema_length', path, message: `不能超过 ${max} 字符`, expected: `string(max=${max})`, received: `${input.length} chars` });
+    }
+    return input.slice(0, max);
+  };
+  const allowedRootFields = ['type', 'title', 'question', 'impact', 'options', 'recommendation', 'dependencies'];
+  for (const name of Object.keys(value).filter((candidate) => !allowedRootFields.includes(candidate))) {
+    issues.push({ code: 'schema_undeclared_field', path: `${label}.${name}`, message: '字段未声明', expected: allowedRootFields.join(', '), received: displayValue(value[name]) });
+  }
+  const type = typeof value.type === 'string' ? value.type.trim().toLowerCase().replaceAll('-', '_') : '';
+  if (!['business', 'technical'].includes(type)) {
+    issues.push({ code: 'schema_enum', path: `${label}.type`, message: '枚举值无效', expected: 'business | technical', received: displayValue(value.type) });
+  }
+  const title = readString(value, 'title', `${label}.title`, 4000);
+  const question = readString(value, 'question', `${label}.question`, 4000);
+  const impact = readString(value, 'impact', `${label}.impact`, 4000);
+  const optionsValue = Array.isArray(value.options) ? value.options : [];
+  if (!Array.isArray(value.options)) {
+    issues.push({ code: 'schema_type', path: `${label}.options`, message: '必须是数组', expected: `array(minItems=${definition.decisionTrees[treeId].minOptions})`, received: displayValue(value.options) });
+  } else if (optionsValue.length < definition.decisionTrees[treeId].minOptions) {
+    issues.push({ code: 'schema_array', path: `${label}.options`, message: `至少需要 ${definition.decisionTrees[treeId].minOptions} 个选项`, expected: `array(minItems=${definition.decisionTrees[treeId].minOptions})`, received: `${optionsValue.length} items` });
+  }
+  const options = optionsValue.map((input, index) => {
+    const path = `${label}.options[${index}]`;
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      issues.push({ code: 'schema_type', path, message: '必须是对象', expected: '{ id, label, consequence }', received: displayValue(input) });
+      return { id: '', label: '', consequence: '' };
+    }
     const option = input as Record<string, unknown>;
+    const allowed = ['id', 'label', 'consequence'];
+    for (const name of Object.keys(option).filter((candidate) => !allowed.includes(candidate))) {
+      issues.push({ code: 'schema_undeclared_field', path: `${path}.${name}`, message: '字段未声明', expected: allowed.join(', '), received: displayValue(option[name]) });
+    }
     return {
-      id: bounded(String(option.id || ''), `decision/${key}.options[${index}].id`, 100),
-      label: bounded(String(option.label || ''), `decision/${key}.options[${index}].label`, 240),
-      consequence: bounded(String(option.consequence || ''), `decision/${key}.options[${index}].consequence`, 1000),
+      id: readString(option, 'id', `${path}.id`, 100),
+      label: readString(option, 'label', `${path}.label`, 240),
+      consequence: readString(option, 'consequence', `${path}.consequence`, 1000),
     };
   });
-  if (new Set(options.map((option) => option.id)).size !== options.length) throw new Error(`decision/${key} 的 option id 不能重复`);
-  const recommendationValue = value.recommendation;
-  if (!recommendationValue || typeof recommendationValue !== 'object' || Array.isArray(recommendationValue)) {
-    throw new Error(`decision/${key}.recommendation 必须是对象`);
+  const populatedOptionIds = options.map((option) => option.id).filter(Boolean);
+  if (new Set(populatedOptionIds).size !== populatedOptionIds.length) {
+    issues.push({ code: 'schema_unique', path: `${label}.options[].id`, message: 'option id 不能重复', expected: 'unique ids', received: populatedOptionIds.join(', ') });
   }
-  const recommendation = recommendationValue as Record<string, unknown>;
-  const authority = bounded(String(recommendation.authority || ''), `decision/${key}.recommendation.authority`, 100);
-  if (!definition.decisionTrees[treeId].recommendationAuthorities.includes(authority)) {
-    throw new Error(`decision/${key} 的建议决定权无效`);
+  const recommendationValue = value.recommendation;
+  const recommendation = recommendationValue && typeof recommendationValue === 'object' && !Array.isArray(recommendationValue)
+    ? recommendationValue as Record<string, unknown>
+    : {};
+  if (recommendation !== recommendationValue) {
+    issues.push({ code: 'schema_type', path: `${label}.recommendation`, message: '必须是对象', expected: '{ option, reason, authority }', received: displayValue(recommendationValue) });
+  }
+  const allowedRecommendationFields = ['option', 'reason', 'authority'];
+  for (const name of Object.keys(recommendation).filter((candidate) => !allowedRecommendationFields.includes(candidate))) {
+    issues.push({ code: 'schema_undeclared_field', path: `${label}.recommendation.${name}`, message: '字段未声明', expected: allowedRecommendationFields.join(', '), received: displayValue(recommendation[name]) });
+  }
+  const recommendationOption = readString(recommendation, 'option', `${label}.recommendation.option`, 100);
+  const recommendationReason = readString(recommendation, 'reason', `${label}.recommendation.reason`, 4000);
+  const authority = readString(recommendation, 'authority', `${label}.recommendation.authority`, 100)
+    .trim().toLowerCase().replaceAll('-', '_');
+  if (authority && !definition.decisionTrees[treeId].recommendationAuthorities.includes(authority)) {
+    issues.push({
+      code: 'decision_authority_invalid', path: `${label}.recommendation.authority`, message: '建议决定权无效',
+      expected: definition.decisionTrees[treeId].recommendationAuthorities.join(' | '), received: authority,
+    });
   }
   const dependenciesValue = value.dependencies ?? [];
-  if (!Array.isArray(dependenciesValue)) throw new Error(`decision/${key}.dependencies 必须是数组`);
+  if (!Array.isArray(dependenciesValue)) {
+    issues.push({ code: 'schema_type', path: `${label}.dependencies`, message: '必须是数组', expected: 'array', received: displayValue(dependenciesValue) });
+  }
+  const dependencies = (Array.isArray(dependenciesValue) ? dependenciesValue : []).map((input, index) => {
+    const path = `${label}.dependencies[${index}]`;
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      issues.push({ code: 'schema_type', path, message: '必须是对象', expected: '{ decision, option }', received: displayValue(input) });
+      return { decision: '', option: '' };
+    }
+    const dependency = input as Record<string, unknown>;
+    const allowed = ['decision', 'option'];
+    for (const name of Object.keys(dependency).filter((candidate) => !allowed.includes(candidate))) {
+      issues.push({ code: 'schema_undeclared_field', path: `${path}.${name}`, message: '字段未声明', expected: allowed.join(', '), received: displayValue(dependency[name]) });
+    }
+    return {
+      decision: readString(dependency, 'decision', `${path}.decision`, 240),
+      option: readString(dependency, 'option', `${path}.option`, 100),
+    };
+  });
+  if (recommendationOption && populatedOptionIds.length && !populatedOptionIds.includes(recommendationOption)) {
+    issues.push({ code: 'decision_option_missing', path: `${label}.recommendation.option`, message: '推荐选项必须引用 options 中存在的 id', expected: populatedOptionIds.join(' | '), received: recommendationOption });
+  }
+  if (issues.length) validationFailure(label, issues, { schemaCommand, templateCommand });
   return {
-    type: type as DecisionContent['type'],
-    title: stringField('title'),
-    question: stringField('question'),
-    impact: stringField('impact'),
-    options,
-    recommendation: {
-      option: bounded(String(recommendation.option || ''), `decision/${key}.recommendation.option`, 100),
-      reason: bounded(String(recommendation.reason || ''), `decision/${key}.recommendation.reason`, 4000),
-      authority,
-    },
-    dependencies: dependenciesValue.map((input, index) => {
-      if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error(`decision/${key}.dependencies[${index}] 必须是对象`);
-      const dependency = input as Record<string, unknown>;
-      return {
-        decision: bounded(String(dependency.decision || ''), `decision/${key}.dependencies[${index}].decision`, 240),
-        option: bounded(String(dependency.option || ''), `decision/${key}.dependencies[${index}].option`, 100),
-      };
-    }),
+    type: type as DecisionContent['type'], title, question, impact, options,
+    recommendation: { option: recommendationOption, reason: recommendationReason, authority },
+    dependencies,
   };
 }
 
@@ -1249,7 +1370,7 @@ function commandAllowed(definition: CommandChainDefinition, phase: string, comma
 }
 
 function assertViewed(draft: CommandChainDraftRow, executionId: string) {
-  if (draft.status_viewed_execution_id !== executionId) throw new Error('本次启动尚未查看草稿状态。请先执行 status');
+  if (draft.status_viewed_execution_id !== executionId) throw new Error('本次启动尚未查看草稿状态。必须先执行 status');
   if (draft.status !== 'editing') throw new Error(`当前草稿状态为 ${draft.status}，不能继续编辑`);
 }
 
@@ -2476,6 +2597,73 @@ function validatorErrors(db: Db, draft: CommandChainDraftRow, names: string[]) {
   return [...new Set(errors)];
 }
 
+function fieldContract(field: CommandChainBlockDefinition['fields'][string]) {
+  const type = field.type === 'enum'
+    ? `enum(${field.values?.join(' | ')})`
+    : field.type === 'array'
+      ? `array(minItems=${field.minItems || 0})`
+      : 'string';
+  return `${type} · ${field.required ? 'required' : 'optional'}${field.label ? ` · ${field.label}` : ''}`;
+}
+
+function artifactSchemaLines(artifactId: string, blockId: string, block: CommandChainBlockDefinition) {
+  if (block.format !== 'yaml') {
+    return [`- Schema: ${block.format} content`, `- Constraint: ${block.required ? 'required' : 'optional'} · ${block.cardinality}`];
+  }
+  const fields = Object.entries(block.fields);
+  return [
+    `- Schema: \`schema show --artifact ${artifactId} --block ${blockId}\``,
+    `- Template: \`artifact template --artifact ${artifactId} --block ${blockId}\``,
+    ...(fields.length
+      ? fields.map(([name, field]) => `  - \`${name}\`: ${fieldContract(field)}`)
+      : ['  - YAML object without declared fields']),
+  ];
+}
+
+function artifactTemplate(block: CommandChainBlockDefinition) {
+  if (block.format !== 'yaml') return block.format === 'markdown' ? '# REPLACE_ME\n\nREPLACE_ME' : 'REPLACE_ME';
+  return stringify(Object.fromEntries(Object.entries(block.fields).map(([name, field]) => {
+    if (field.type === 'enum') return [name, field.values?.[0] || 'REPLACE_ME'];
+    if (field.type === 'array') return [name, (field.minItems || 0) > 0 ? ['REPLACE_ME'] : []];
+    return [name, field.required ? 'REPLACE_ME' : ''];
+  }))).trim();
+}
+
+function decisionSchemaLines(definition: CommandChainDefinition, treeId: string) {
+  const tree = definition.decisionTrees[treeId];
+  if (!tree) throw new Error(`未声明 Decision Tree：${treeId}`);
+  return [
+    '- `type`: enum(business | technical) · required',
+    '- `title`: string · required',
+    '- `question`: string · required',
+    '- `impact`: string · required',
+    `- \`options\`: array(minItems=${tree.minOptions}) · required`,
+    '  - `id`: string · required · unique',
+    '  - `label`: string · required',
+    '  - `consequence`: string · required',
+    '- `recommendation`: object · required',
+    '  - `option`: string · required · must reference options[].id',
+    '  - `reason`: string · required',
+    `  - \`authority\`: enum(${tree.recommendationAuthorities.join(' | ')}) · required`,
+    '- `dependencies`: array · optional',
+    '  - `decision`: string · required',
+    '  - `option`: string · required',
+  ];
+}
+
+function decisionTemplate(definition: CommandChainDefinition, treeId: string) {
+  const tree = definition.decisionTrees[treeId];
+  if (!tree) throw new Error(`未声明 Decision Tree：${treeId}`);
+  const options = Array.from({ length: Math.max(2, tree.minOptions) }, (_, index) => ({
+    id: `option-${index + 1}`, label: 'REPLACE_ME', consequence: 'REPLACE_ME',
+  }));
+  return stringify({
+    type: 'business', title: 'REPLACE_ME', question: 'REPLACE_ME', impact: 'REPLACE_ME', options,
+    recommendation: { option: options[0].id, reason: 'REPLACE_ME', authority: 'REPLACE_ME' },
+    dependencies: [],
+  }).trim();
+}
+
 function renderWorkPacket(db: Db, draft: CommandChainDraftRow) {
   const definition = definitionForDraft(draft);
   const state = chainState(db, draft.draft_id);
@@ -2491,18 +2679,42 @@ function renderWorkPacket(db: Db, draft: CommandChainDraftRow) {
   const blockCounts = new Map<string, number>();
   for (const artifact of artifacts) blockCounts.set(artifact.block_id, (blockCounts.get(artifact.block_id) || 0) + 1);
   return [
-    '# NEXT WORK PACKET', '', `- Draft: v${draft.draft_version}`, `- Phase: ${state.workflow_phase}`, '',
+    '# NEXT WORK PACKET', '', `- Draft: v${draft.draft_version}`, `- Command Chain: ${definition.id}@${definition.version}`, `- Phase: ${state.workflow_phase}`,
+    `- Agent Temp Directory: ${process.env.LOOP_AGENT_TMP_DIR || '$LOOP_AGENT_TMP_DIR'}`, '',
     '## PHASE', '', `${phase.title} · ${phase.type}`, '',
     '## INSTRUCTIONS', '', phase.instructions, '',
     '## ARTIFACTS', '',
     ...(phaseBlocks.length
       ? [
           '以下 Artifact 必须通过本阶段的 WORK COMMANDS 写入，不能在 phase complete 中直接返回：', '',
-          ...phaseBlocks.map(({ artifactId, blockId, block }) => (
-            `- ${block.title} · \`${artifactId}.${blockId}\` · ${block.cardinality} · ${block.format} · ${block.required ? 'required' : 'optional'}`
-          )),
+          ...phaseBlocks.flatMap(({ artifactId, blockId, block }) => [
+            `### ${block.title} · \`${artifactId}.${blockId}\``, '',
+            `- Shape: ${block.cardinality} · ${block.format} · ${block.required ? 'required' : 'optional'}`,
+            ...artifactSchemaLines(artifactId, blockId, block),
+            '',
+          ]),
         ]
       : ['- None']),
+    ...(phase.workCommands.some((command) => command.startsWith('decision put'))
+      ? [
+          '', '## DECISION SCHEMA', '',
+          ...Object.keys(definition.decisionTrees).flatMap((treeId) => [
+            `### \`${treeId}\``, '',
+            `- Schema: \`schema decision --tree ${treeId}\``,
+            `- Template: \`decision template --tree ${treeId}\``,
+            ...decisionSchemaLines(definition, treeId),
+            '',
+          ]),
+        ]
+      : []),
+    ...(phase.workCommands.some((command) => command.startsWith('acceptance put'))
+      ? [
+          '', '## ACCEPTANCE SCHEMA', '',
+          '- `statement`: string · required',
+          '- `oracle`: string · required',
+          '- `source`: string · required',
+        ]
+      : []),
     '',
     ...renderPhaseInputs(db, draft, definition, phase.inputs),
     ...renderBuiltInContexts(db, draft, phase.contexts),
@@ -3293,9 +3505,14 @@ export function commandChainHelp() {
     '  acceptance assess --key <key> --result <claimed|passed|failed|blocked> --evidence-file <text>', '',
     'Artifact：',
     '  artifact put --artifact <id> --block <id> [--key <key>] --content-file <yaml|markdown>',
+    '  artifact template --artifact <id> --block <id>',
     '  artifact remove --artifact <id> --block <id> [--key <key>]', '',
+    'Schema：',
+    '  schema show --artifact <id> --block <id>',
+    '  schema decision --tree <id>', '',
     'Decision：',
     '  decision put --tree <id> --key <key> --content-file <yaml>',
+    '  decision template --tree <id>',
     '  decision resolve --tree <id> --key <key> --option <id> --authority <authority> --decision-file <text> --rationale-file <text> --evidence-file <text>',
     '  decision ask|reopen|remove --tree <id> --key <key>', '',
     'Command Check：',
@@ -3336,6 +3553,47 @@ export function runCommandChainCommand(input: {
   }
   assertViewed(draft, execution.execution_id);
   const state = chainState(db, draft.draft_id);
+  const phase = definition.phases[state.workflow_phase];
+  if (command === 'schema show' || command === 'artifact template') {
+    const artifactId = required(flags, 'artifact');
+    const blockId = required(flags, 'block');
+    if (!phase.artifactBlocks.some((item) => item.artifactId === artifactId && item.blockId === blockId)) {
+      throw new Error(`Artifact Block ${artifactId}/${blockId} 不属于当前 ${state.workflow_phase} Phase`);
+    }
+    const block = definition.artifacts[artifactId]?.blocks[blockId];
+    if (!block) throw new Error(`未声明 Artifact Block：${artifactId}/${blockId}`);
+    if (command === 'schema show') {
+      return [
+        '# COMMAND RESULT', '', '- Command: schema show', '- Outcome: found', '',
+        `## ARTIFACT SCHEMA · ${artifactId}.${blockId}`, '',
+        `- Title: ${block.title}`,
+        `- Shape: ${block.cardinality} · ${block.format} · ${block.required ? 'required' : 'optional'}`,
+        ...artifactSchemaLines(artifactId, blockId, block),
+      ].join('\n');
+    }
+    return [
+      '# COMMAND RESULT', '', '- Command: artifact template', '- Outcome: found', '',
+      `## ARTIFACT TEMPLATE · ${artifactId}.${blockId}`, '',
+      `Copy this ${block.format} template into a file under $LOOP_AGENT_TMP_DIR and replace every REPLACE_ME value.`, '',
+      `\`\`\`${block.format === 'text' ? '' : block.format}`, artifactTemplate(block), '\`\`\`',
+    ].join('\n');
+  }
+  if (command === 'schema decision' || command === 'decision template') {
+    const treeId = required(flags, 'tree');
+    if (!definition.decisionTrees[treeId]) throw new Error(`未声明 Decision Tree：${treeId}`);
+    if (command === 'schema decision') {
+      return [
+        '# COMMAND RESULT', '', '- Command: schema decision', '- Outcome: found', '',
+        `## DECISION SCHEMA · ${treeId}`, '', ...decisionSchemaLines(definition, treeId),
+      ].join('\n');
+    }
+    return [
+      '# COMMAND RESULT', '', '- Command: decision template', '- Outcome: found', '',
+      `## DECISION TEMPLATE · ${treeId}`, '',
+      'Copy this YAML template into a file under $LOOP_AGENT_TMP_DIR and replace every REPLACE_ME value.', '',
+      '```yaml', decisionTemplate(definition, treeId), '```',
+    ].join('\n');
+  }
   if (!commandAllowed(definition, state.workflow_phase, command)) {
     throw new Error(`命令 ${command} 不属于当前 ${state.workflow_phase} 工作包；请执行 status 查看可用命令`);
   }
@@ -3469,7 +3727,12 @@ export function runCommandChainCommand(input: {
       `).get(draft.draft_id, artifactId, blockId, itemKey);
       if (existing) throw new Error(`验证计划已经冻结，不能覆盖既有场景 ${itemKey}；新风险请使用新的稳定 key`);
     }
-    const content = validateBlockContent(block, required(flags, 'content'), `${artifactId}/${blockId}/${itemKey || 'singleton'}`);
+    const content = validateBlockContent(
+      block,
+      required(flags, 'content'),
+      `${artifactId}/${blockId}/${itemKey || 'singleton'}`,
+      { artifactId, blockId },
+    );
     if (definition.id === 'review' && ['reconciliations', 'gaps'].includes(blockId)) {
       const nextSubject = String(parseObject(content, `${blockId}/${itemKey}`).subjectRef || '');
       const existing = db.prepare(`

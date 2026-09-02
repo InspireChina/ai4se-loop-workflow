@@ -12,6 +12,7 @@ import {
   directHelp, runDirectCommand,
 } from './direct-command';
 import { parseAgentCommand } from '../domain/agent-command';
+import { AgentCommandRejectedError, rejectionFromError } from '../domain/agent-command-rejection';
 import {
   cloneCommandChainDraft,
   commandChainHelp,
@@ -189,6 +190,56 @@ function ensureDraft(
   return createDraft(db, execution, profile, workKey, latest);
 }
 
+function rejectedCommandError(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  execution: ExecutionRow,
+  draft: DraftRow,
+  command: string,
+  error: unknown,
+) {
+  const initial = rejectionFromError(error);
+  const signature = hash([command, initial.code, initial.path || ''].join('\0'));
+  let occurrence = 1;
+  try {
+    const previous = db.prepare(`
+      SELECT COUNT(*) AS count FROM agent_command_rejections
+      WHERE execution_id = ? AND signature = ?
+    `).get(execution.execution_id, signature) as { count: number };
+    occurrence = previous.count + 1;
+    const chain = db.prepare(`
+      SELECT definition_version FROM command_chain_drafts WHERE draft_id = ?
+    `).get(draft.draft_id) as { definition_version: number } | undefined;
+    db.prepare(`
+      INSERT INTO agent_command_rejections(
+        execution_id, draft_id, command_chain_id, definition_version,
+        command, error_code, error_path, signature, occurrence, message, issues_json
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      execution.execution_id,
+      draft.draft_id,
+      draft.command_chain_id,
+      chain?.definition_version || null,
+      command,
+      initial.code,
+      initial.path || null,
+      signature,
+      occurrence,
+      initial.message,
+      JSON.stringify(initial.issues),
+    );
+    if (occurrence >= 2 && (initial.schemaCommand || initial.templateCommand)) {
+      db.prepare(`
+        UPDATE agent_work_drafts
+        SET status_viewed_execution_id = NULL, updated_at = CURRENT_TIMESTAMP
+        WHERE draft_id = ? AND status = 'editing'
+      `).run(draft.draft_id);
+    }
+  } catch {
+    // Rejection telemetry must never replace the command validation error itself.
+  }
+  return new AgentCommandRejectedError({ ...initial, occurrence });
+}
+
 function helpText(execution: ExecutionRow, profile: AgentCommandProfile, topic?: string | null) {
   const appRoot = process.env.LOOP_APP_ROOT?.trim() || '<Harness Command Root>';
   const command = loopAgentCommandPrefix(appRoot);
@@ -288,7 +339,7 @@ export async function runAgentCommand(input: {
   }
   const genericCommand = [
     'status', 'delivery-unit', 'delivery-spec', 'artifact', 'decision',
-    'acceptance', 'check', 'runtime-input', 'metadata', 'phase', 'draft',
+    'acceptance', 'check', 'runtime-input', 'metadata', 'phase', 'draft', 'schema',
   ].includes(positionals[0] || '');
   if (profile.draftType === 'direct') {
     if (!command.startsWith(profile.namespace)) {
@@ -304,7 +355,11 @@ export async function runAgentCommand(input: {
     throw new Error(`${profile.agent}/${execution.pipeline} 未绑定 YAML 命令链`);
   }
   const draft = ensureDraft(db, execution, profile, workKey);
-  return runCommandChainCommand({ db, execution, draft, command, positionals, flags });
+  try {
+    return runCommandChainCommand({ db, execution, draft, command, positionals, flags });
+  } catch (error) {
+    throw rejectedCommandError(db, execution, draft, command, error);
+  }
 }
 
 export const agentCommandDraftInternals = {

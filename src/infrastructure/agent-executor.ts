@@ -320,16 +320,20 @@ function toolNameFromCursor(event: Record<string, unknown>) {
 
 function isAgentDomainCommand(command: string) {
   const normalized = command.replace(/\\(["'])/g, '$1');
-  return /(?:^|[/\\])loop-agent\.mjs(?:["']|\s)/.test(normalized);
+  return /(?:^|[/\\])loop-agent\.(?:mjs|cjs)(?:["']|\s)/.test(normalized);
 }
 
 function summarizeCommand(command: string) {
   if (!command) return '';
-  const normalized = command.replace(/\\(["'])/g, '$1').replace(/["']/g, '');
+  const normalized = command.replace(/\\(["'])/g, '$1').replace(/["']/g, '').replace('loop-agent.cjs ', 'loop-agent.mjs ');
   if (isAgentDomainCommand(command)) {
     if (normalized.includes('loop-agent.mjs status')) return '恢复命令链草稿';
     if (normalized.includes('loop-agent.mjs delivery-unit current')) return '读取当前交付单元';
     if (normalized.includes('loop-agent.mjs delivery-spec current')) return '读取冻结交付规格';
+    if (normalized.includes('loop-agent.mjs schema show')) return '读取交付物 Schema';
+    if (normalized.includes('loop-agent.mjs schema decision')) return '读取决策 Schema';
+    if (normalized.includes('loop-agent.mjs artifact template')) return '读取交付物模板';
+    if (normalized.includes('loop-agent.mjs decision template')) return '读取决策模板';
     if (normalized.includes('loop-agent.mjs acceptance put')) return '定义验收契约';
     if (normalized.includes('loop-agent.mjs acceptance remove')) return '移除验收契约';
     if (normalized.includes('loop-agent.mjs acceptance assess')) return '登记验收实现声明';

@@ -389,6 +389,29 @@ function commandMetadata(command: string | undefined) {
   };
 }
 
+function commandResultMetadata(output: unknown, summary: string | undefined): {
+  commandOutcome?: string;
+  commandErrorCode?: string;
+  commandErrorPath?: string;
+  commandRejectionOccurrence?: number;
+} {
+  const text = [
+    typeof output === 'string' ? output : '',
+    output && typeof output === 'object' ? JSON.stringify(output) : '',
+    summary || '',
+  ].filter(Boolean).join('\n');
+  const value = (label: string) => text.match(new RegExp(`(?:^|\\n|\\\\n)- ${label}:\\s*([^\\n\\r"}]+)`, 'i'))?.[1]?.trim();
+  const outcome = value('Outcome');
+  if (!outcome) return {};
+  const occurrence = Number(value('Occurrence'));
+  return {
+    commandOutcome: outcome,
+    ...(value('Error-Code') ? { commandErrorCode: value('Error-Code') } : {}),
+    ...(value('Error-Path') ? { commandErrorPath: value('Error-Path') } : {}),
+    ...(Number.isFinite(occurrence) && occurrence > 0 ? { commandRejectionOccurrence: occurrence } : {}),
+  };
+}
+
 function createDurableToolEventNormalizer() {
   type StartedTool = {
     toolClass: AgentToolClass;
@@ -407,6 +430,7 @@ function createDurableToolEventNormalizer() {
     sequence: number;
     summary?: string;
     input?: unknown;
+    output?: unknown;
     success?: boolean;
     exitCode?: number | null;
     level?: string;
@@ -431,6 +455,8 @@ function createDurableToolEventNormalizer() {
     const command = eventCommand ?? started?.command;
     const isCompleted = event.phase === 'completed';
     const acceptedCheck = isCompleted && event.success === true;
+    const resultMetadata = isCompleted ? commandResultMetadata(event.output, event.summary) : {};
+    const rejected = resultMetadata.commandOutcome === 'rejected';
     return sanitizeLangfuseValue({
       name: event.name,
       phase: event.phase,
@@ -440,12 +466,13 @@ function createDurableToolEventNormalizer() {
       toolCallId: event.toolCallId,
       sequence: event.sequence,
       summary: event.summary,
-      level: isCompleted ? (acceptedCheck ? 'DEFAULT' : 'ERROR') : event.level,
+      level: isCompleted ? (acceptedCheck ? 'DEFAULT' : rejected ? 'WARNING' : 'ERROR') : event.level,
       ...(isCompleted ? {
         success: event.success === true,
         exitCode: event.exitCode ?? null,
       } : {}),
       ...commandMetadata(command),
+      ...resultMetadata,
       ...(command !== undefined ? { input: { command } } : {}),
     });
   };
