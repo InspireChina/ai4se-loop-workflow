@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { parse, stringify } from 'yaml';
 import { agentResultSchema, deliverySpecSchema, type AgentResult, type DeliverySpec } from '../domain/agent-result';
 import { AgentCommandValidationError, type AgentCommandValidationIssue } from '../domain/agent-command-rejection';
+import { loopAgentCommandPrefix } from '../domain/agent-command-profile';
 import { loadCommandChainDefinition, type CommandChainBlockDefinition, type CommandChainDefinition } from '../domain/command-chain-definition';
 import { deliveryUnitContractSchema, type DeliveryUnitContract } from '../domain/delivery-unit';
 import {
@@ -2659,9 +2660,75 @@ function decisionTemplate(definition: CommandChainDefinition, treeId: string) {
   }));
   return stringify({
     type: 'business', title: 'REPLACE_ME', question: 'REPLACE_ME', impact: 'REPLACE_ME', options,
-    recommendation: { option: options[0].id, reason: 'REPLACE_ME', authority: 'REPLACE_ME' },
+    recommendation: {
+      option: options[0].id,
+      reason: 'REPLACE_ME',
+      authority: tree.recommendationAuthorities[0] || 'agent_authority',
+    },
     dependencies: [],
   }).trim();
+}
+
+function commandInvocation(command: string) {
+  const appRoot = process.env.LOOP_APP_ROOT?.trim() || '<Harness Command Root>';
+  return `${loopAgentCommandPrefix(appRoot)} ${command}`;
+}
+
+function sampleFilePath(name: string, format: CommandChainBlockDefinition['format'] | 'yaml') {
+  const directory = (process.env.LOOP_AGENT_TMP_DIR?.trim() || '$LOOP_AGENT_TMP_DIR')
+    .replaceAll('\\', '/')
+    .replace(/\/+$/, '');
+  const extension = format === 'markdown' ? 'md' : format === 'text' ? 'txt' : 'yaml';
+  return `${directory}/${name.replace(/[^a-z0-9._-]+/gi, '-')}.${extension}`;
+}
+
+function artifactUsageSample(
+  artifactId: string,
+  blockId: string,
+  block: CommandChainBlockDefinition,
+) {
+  const file = sampleFilePath(`${artifactId}-${blockId}`, block.format);
+  const key = block.cardinality === 'many' ? ' --key <stable-key>' : '';
+  const language = block.format === 'text' ? 'text' : block.format;
+  return [
+    '#### Ready-to-use sample', '',
+    'Replace the sample values, save the content to the execution temp file, then run the complete command below.', '',
+    `- File: \`${file}\``, '',
+    `\`\`\`${language}`, artifactTemplate(block), '\`\`\`', '',
+    '\`\`\`bash',
+    commandInvocation(`artifact put --artifact ${artifactId} --block ${blockId}${key} --content-file ${JSON.stringify(file)}`),
+    '\`\`\`',
+  ];
+}
+
+function decisionUsageSample(definition: CommandChainDefinition, treeId: string) {
+  const file = sampleFilePath(`${treeId}-decision`, 'yaml');
+  return [
+    '#### Ready-to-use sample', '',
+    'Replace the sample values and choose authority according to the actual responsibility before submission.', '',
+    `- File: \`${file}\``, '',
+    '\`\`\`yaml', decisionTemplate(definition, treeId), '\`\`\`', '',
+    '\`\`\`bash',
+    commandInvocation(`decision put --tree ${treeId} --key <stable-key> --content-file ${JSON.stringify(file)}`),
+    '\`\`\`',
+  ];
+}
+
+function acceptanceUsageSample() {
+  const file = sampleFilePath('acceptance', 'yaml');
+  return [
+    '### Ready-to-use sample', '',
+    'Replace the sample values before submission.', '',
+    `- File: \`${file}\``, '',
+    '\`\`\`yaml', stringify({
+      statement: 'REPLACE_ME',
+      oracle: 'REPLACE_ME',
+      source: 'REPLACE_ME',
+    }).trim(), '\`\`\`', '',
+    '\`\`\`bash',
+    commandInvocation(`acceptance put --key <stable-key> --content-file ${JSON.stringify(file)}`),
+    '\`\`\`',
+  ];
 }
 
 function renderWorkPacket(db: Db, draft: CommandChainDraftRow) {
@@ -2692,6 +2759,8 @@ function renderWorkPacket(db: Db, draft: CommandChainDraftRow) {
             `- Shape: ${block.cardinality} · ${block.format} · ${block.required ? 'required' : 'optional'}`,
             ...artifactSchemaLines(artifactId, blockId, block),
             '',
+            ...artifactUsageSample(artifactId, blockId, block),
+            '',
           ]),
         ]
       : ['- None']),
@@ -2704,6 +2773,8 @@ function renderWorkPacket(db: Db, draft: CommandChainDraftRow) {
             `- Template: \`decision template --tree ${treeId}\``,
             ...decisionSchemaLines(definition, treeId),
             '',
+            ...decisionUsageSample(definition, treeId),
+            '',
           ]),
         ]
       : []),
@@ -2713,6 +2784,8 @@ function renderWorkPacket(db: Db, draft: CommandChainDraftRow) {
           '- `statement`: string · required',
           '- `oracle`: string · required',
           '- `source`: string · required',
+          '',
+          ...acceptanceUsageSample(),
         ]
       : []),
     '',
@@ -2720,11 +2793,11 @@ function renderWorkPacket(db: Db, draft: CommandChainDraftRow) {
     ...renderBuiltInContexts(db, draft, phase.contexts),
     '## WORK COMMANDS', '',
     ...(phase.workCommands.length
-      ? phase.workCommands.map((command) => `- \`${command}\``)
+      ? phase.workCommands.map((command) => `- \`${commandInvocation(command)}\``)
       : ['- None']),
     '',
-    '## COMPLETE', '', `- \`${phase.completeCommand}\``, '',
-    '## REWIND', '', phase.rewindCommand ? `- \`${phase.rewindCommand}\`` : '- Not available from the initial phase', '',
+    '## COMPLETE', '', `- \`${commandInvocation(phase.completeCommand)}\``, '',
+    '## REWIND', '', phase.rewindCommand ? `- \`${commandInvocation(phase.rewindCommand)}\`` : '- Not available from the initial phase', '',
     '## CURRENT DRAFT', '',
     `- Artifact Blocks: ${artifacts.length}`,
     `- Acceptances: ${acceptanceDraftItems(db, draft.draft_id).length}`,

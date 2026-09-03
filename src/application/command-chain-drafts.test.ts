@@ -114,6 +114,9 @@ test('analyst drafts have only the YAML command-chain protocol', async () => {
   assert.match(impactPacket, /IMPACT SCAN · artifact/);
   assert.match(impactPacket, /`disposition`: enum\(change \| preserve \| exclude \| needs_decision\) · required/);
   assert.match(impactPacket, /schema show --artifact delivery-analysis --block impacts/);
+  assert.match(impactPacket, /#### Ready-to-use sample/);
+  assert.match(impactPacket, /delivery-analysis-impacts\.yaml/);
+  assert.match(impactPacket, /loop-agent\.mjs.*artifact put --artifact delivery-analysis --block impacts --key <stable-key> --content-file/);
   const impactSchema = await command(active.executionId, active.token!, [
     'schema', 'show', '--artifact', 'delivery-analysis', '--block', 'impacts',
   ]);
@@ -164,12 +167,14 @@ test('analyst drafts have only the YAML command-chain protocol', async () => {
   const decisionPacket = await command(active.executionId, active.token!, ['phase', 'complete']);
   assert.match(decisionPacket, /## DECISION SCHEMA/);
   assert.match(decisionPacket, /authority`: enum\(upstream \| user \| project_evidence \| agent_authority\)/);
+  assert.match(decisionPacket, /decisions-decision\.yaml/);
+  assert.match(decisionPacket, /loop-agent\.mjs.*decision put --tree decisions --key <stable-key> --content-file/);
   const decisionSchema = await command(active.executionId, active.token!, ['schema', 'decision', '--tree', 'decisions']);
   assert.match(decisionSchema, /DECISION SCHEMA · decisions/);
   assert.match(decisionSchema, /options.*minItems=2/);
   const decisionTemplate = await command(active.executionId, active.token!, ['decision', 'template', '--tree', 'decisions']);
   assert.match(decisionTemplate, /recommendation:/);
-  assert.match(decisionTemplate, /authority: REPLACE_ME/);
+  assert.match(decisionTemplate, /authority: upstream/);
   await command(active.executionId, active.token!, ['phase', 'complete']);
   await command(active.executionId, active.token!, ['phase', 'complete']);
   await command(active.executionId, active.token!, [

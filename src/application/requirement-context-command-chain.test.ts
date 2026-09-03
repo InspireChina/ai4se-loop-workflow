@@ -114,7 +114,11 @@ async function reachFinalize(executionId: string, token: string, includeExpected
     'direction: included',
     'content: 当前筛选结果的文件导出。',
   ].join('\n'), 'filtered-export');
-  await command(executionId, token, ['phase', 'complete']);
+  const acceptancePacket = await command(executionId, token, ['phase', 'complete']);
+  assert.match(acceptancePacket, /## ACCEPTANCE SCHEMA/);
+  assert.match(acceptancePacket, /### Ready-to-use sample/);
+  assert.match(acceptancePacket, /acceptance\.yaml/);
+  assert.match(acceptancePacket, /loop-agent\.mjs.*acceptance put --key <stable-key> --content-file/);
   await assert.rejects(
     put(executionId, token, 'acceptance', 'statement: 不允许直接写投影'),
     /不属于当前 acceptance 工作包|只读/,
