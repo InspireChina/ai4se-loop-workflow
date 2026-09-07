@@ -26,6 +26,27 @@ test('retries structured failure results four times before applying the final ne
   assert.equal(shouldRetryReportedFailure({ outcome: 'completed', verdict: 'passed' }, 1), false);
 });
 
+test('applies classified Test failures immediately without retrying the unchanged implementation', () => {
+  for (const failureKind of ['implementation', 'specification']) {
+    for (const outcome of ['completed', 'failed']) {
+      const result = { outcome, verdict: 'failed', failureKind };
+      for (const attempt of [1, 2, 4, 5]) {
+        assert.equal(shouldRetryReportedFailure(result, attempt, 'test-agent'), false);
+      }
+      assert.equal(shouldRetryReportedFailure(result, 1, 'dev-agent'), true);
+    }
+  }
+  for (const rewindTo of ['dev', 'analysis']) {
+    assert.equal(shouldRetryReportedFailure({ outcome: 'failed', verdict: 'failed', rewindTo }, 1, 'test-agent'), false);
+  }
+  for (const failureKind of [undefined, 'environment', 'inconclusive']) {
+    assert.equal(shouldRetryReportedFailure({ outcome: 'failed', verdict: 'failed', failureKind }, 1, 'test-agent'), true);
+  }
+  assert.equal(shouldRetryReportedFailure({ outcome: 'failed' }, 1, 'test-agent'), true);
+  // Explicit responsibility takes priority over a contradictory legacy rewind hint.
+  assert.equal(shouldRetryReportedFailure({ outcome: 'failed', verdict: 'failed', failureKind: 'environment', rewindTo: 'dev' }, 1, 'test-agent'), true);
+});
+
 test('reports remaining retries after the current execution attempt', () => {
   assert.equal(remainingExecutionRetries(1), 4);
   assert.equal(remainingExecutionRetries(2), 3);

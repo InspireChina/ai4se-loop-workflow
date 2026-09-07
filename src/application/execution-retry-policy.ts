@@ -55,9 +55,19 @@ export function remainingExecutionRetries(attempt: number) {
 }
 
 export function shouldRetryReportedFailure(
-  result: { outcome?: string; verdict?: string },
+  result: { outcome?: string; verdict?: string; failureKind?: string; rewindTo?: string },
   attempt: number,
+  agent?: string,
 ) {
+  // A classified Test verdict is a workflow result: apply its rewind immediately.
+  // Provider/CLI failures still use the universal execution recovery ladder.
+  const failureKind = result.failureKind
+    || (result.rewindTo === 'analysis' ? 'specification' : result.rewindTo === 'dev' ? 'implementation' : 'inconclusive');
+  if (agent === 'test-agent' && result.verdict === 'failed'
+    && (result.outcome === 'completed' || result.outcome === 'failed')
+    && (failureKind === 'implementation' || failureKind === 'specification')) {
+    return false;
+  }
   return (result.outcome === 'failed' || result.verdict === 'failed')
     && attempt <= EXECUTION_FAILURE_MAX_RETRIES;
 }

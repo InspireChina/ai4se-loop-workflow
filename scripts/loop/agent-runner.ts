@@ -896,7 +896,7 @@ async function executeDelegationStep(
       await handleExecutionFailure(attempt, delegation, reason, 'agent-missing-terminal-command');
       return;
     }
-    if (shouldRetryReportedFailure(result, attempt.attempt)) {
+    if (shouldRetryReportedFailure(result, attempt.attempt, delegation.agent)) {
       const reason = `Agent 提交失败结果，将按统一策略重试：${result.summary || result.outcome || result.verdict || '未提供摘要'}`;
       await handleExecutionFailure(attempt, delegation, reason, 'agent-reported-failure');
       return;

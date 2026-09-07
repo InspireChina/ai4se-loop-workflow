@@ -237,6 +237,46 @@ test('Test final gate derives specification and implementation rewinds from fail
   assert.equal(result?.rewindDeliveryUnit, 1);
 });
 
+for (const failureKind of ['implementation', 'specification'] as const) {
+  test(`first submitted ${failureKind} failure makes the repair Agent dispatchable immediately`, async () => {
+    const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+    const { shouldRetryReportedFailure } = await import('./execution-retry-policy');
+    const { applyAgentResult } = await import('./agent-results');
+    const { completeExecution } = await import('./executions');
+    const { getTask } = await import('./tasks');
+    const { databaseConnection } = await import('../infrastructure/database');
+    const { taskId, delegation } = await verificationDelegation(`立即回退 ${failureKind}`);
+    const active = await begin(delegation, `${taskId}-immediate-rewind`);
+    await command(active.executionId, active.token!, ['status']);
+    await reachExecute(active.executionId, active.token!);
+    await putResult(active.executionId, active.token!, {
+      status: 'failed', failureKind, evidence: '独立浏览器验证：预期完成状态可见，实际完成状态缺失',
+      actualBehavior: '页面没有展示完成状态',
+    });
+    await finish(active.executionId, active.token!);
+    const result = await readAgentCommandSubmission(active.executionId);
+    assert.ok(result);
+    assert.equal(shouldRetryReportedFailure(result, 1, delegation.agent), false);
+    assert.equal(await applyAgentResult(`RUN-immediate-${taskId}`, delegation, result, { executionId: active.executionId }), 'rewound');
+    await completeExecution(active.executionId);
+
+    const expectedAgent = failureKind === 'implementation' ? 'dev-agent' : 'analyst-agent';
+    const detail = await getTask(taskId);
+    assert.equal(detail?.task.current_subagent, expectedAgent);
+    assert.equal(detail?.task.dev_index, 0);
+    assert.equal(detail?.task.test_index, 0);
+    assert.equal(detail?.task.analysis_index, failureKind === 'implementation' ? 1 : 0);
+    assert.match(detail?.recoveryItems[0]?.details_json || '', /独立浏览器验证/);
+    const dispatch = await inspectTaskDispatch(taskId);
+    assert.ok(dispatch.some((item) => item.agent === expectedAgent && item.storyIndex === 1));
+    assert.ok(!dispatch.some((item) => item.agent === 'test-agent'));
+    const db = await databaseConnection();
+    const execution = db.prepare('SELECT attempt, status, failure_kind FROM execution_attempts WHERE execution_id = ?')
+      .get(active.executionId) as { attempt: number; status: string; failure_kind: string | null };
+    assert.deepEqual(execution, { attempt: 1, status: 'applied', failure_kind: null });
+  });
+}
+
 test('blocked verification pauses through generic runtime input and resumes the same frozen scenario', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');

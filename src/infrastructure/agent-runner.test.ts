@@ -147,7 +147,7 @@ test('retries every Agent execution failure four times with progressively reduce
   assert.match(source, /EXECUTION_FAILURE_MAX_RETRIES/);
   assert.match(source, /failExecutionWithRetryPolicy\(attempt\.execution_id, reason/);
   assert.match(source, /execution\.terminationReason \? 'agent-timeout' : 'agent-cli-exit'/);
-  assert.match(source, /shouldRetryReportedFailure\(result, attempt\.attempt\)/);
+  assert.match(source, /shouldRetryReportedFailure\(result, attempt\.attempt, delegation\.agent\)/);
   assert.match(source, /executionRecoveryModeForAttempt\(attemptNumber\)/);
   assert.match(source, /retryRecoveryPlanForFailure\(retry\.failureAttempt\)/);
   assert.match(source, /Error Recovery · retry/);
