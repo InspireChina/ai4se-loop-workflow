@@ -251,7 +251,10 @@ test('Review generic chain rejects changed frozen evidence', async () => {
 });
 
 test('Review generic chain compiles closure gaps into forward delivery units', async () => {
+  const { applyNextQueuedAgentResult } = await import('./agent-results');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { getTask } = await import('./tasks');
   const fixture = await reviewFixture('结卡缺口前向补齐');
   const started = await begin(fixture.delegation, `${fixture.taskId}-gap`, fixture.resources);
   await command(started.executionId, started.token, ['status']);
@@ -277,6 +280,64 @@ test('Review generic chain compiles closure gaps into forward delivery units', a
   assert.equal(result?.artifact, undefined);
   assert.equal(result?.closureGaps?.[0]?.key, 'missing-end-to-end-proof');
   assert.equal(result?.closureGapUnits?.[0]?.key, 'prove-end-to-end-result');
+
+  const db = await databaseConnection();
+  const resultId = randomUUID();
+  db.prepare(`
+    INSERT INTO agent_results(
+      result_id, run_id, task_id, story_index, agent, pipeline,
+      outcome, result_json, application_status, application_error, execution_id
+    ) VALUES(?, ?, ?, NULL, 'review-agent', 'review',
+      'completed', ?, 'failed', 'SqliteError: no such table: review_gaps', ?)
+  `).run(
+    resultId,
+    `RUN-review-gap-${fixture.taskId}`,
+    fixture.taskId,
+    JSON.stringify(result),
+    started.executionId,
+  );
+  db.prepare(`
+    UPDATE execution_attempts
+    SET status = 'retryable_failed', last_error = 'no such table: review_gaps',
+        finished_at = CURRENT_TIMESTAMP
+    WHERE execution_id = ?
+  `).run(started.executionId);
+  db.prepare(`
+    UPDATE tasks
+    SET agile_status = 'blocked', current_subagent = 'review-agent',
+        run_state = 'system_blocked', blocked_reason = 'no such table: review_gaps'
+    WHERE task_id = ?
+  `).run(fixture.taskId);
+
+  const replayed = await applyNextQueuedAgentResult();
+  assert.equal(replayed.status, 'applied');
+  if (replayed.status === 'applied') {
+    assert.equal(replayed.resultId, resultId);
+    assert.equal(replayed.outcome, 'advanced');
+  }
+
+  const detail = await getTask(fixture.taskId);
+  assert.equal(detail?.task.agile_status, 'ready for dev');
+  assert.equal(detail?.task.current_subagent, 'analyst-agent');
+  assert.equal(detail?.task.total_stories, 2);
+  assert.deepEqual(
+    [detail?.task.analysis_index, detail?.task.dev_index, detail?.task.test_index],
+    [1, 1, 1],
+  );
+
+  assert.equal(
+    (db.prepare(`
+      SELECT COUNT(*) AS count
+      FROM review_gap_delivery_unit_links
+      WHERE task_id = ? AND story_index = 2
+    `).get(fixture.taskId) as { count: number }).count,
+    1,
+  );
+  const next = await inspectTaskDispatch(fixture.taskId);
+  assert.equal(next.length, 1);
+  assert.equal(next[0].agent, 'analyst-agent');
+  assert.equal(next[0].pipeline, 'analysis');
+  assert.equal(next[0].storyIndex, 2);
 });
 
 test('feedback report correction inherits generic report sections and remains version-bound', async () => {

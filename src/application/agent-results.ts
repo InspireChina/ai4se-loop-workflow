@@ -849,6 +849,7 @@ export type QueuedApplicationResult =
   | { status: 'failed'; resultId: string; taskId: string; storyIndex: number | null; agent: string; reason: string; willRetry: boolean };
 
 const LEGACY_FEEDBACK_PLAN_REJECTION = '反馈新增范围当前不能追加交付单元';
+const REMOVED_REVIEW_GAPS_TABLE_ERROR = 'no such table: review_gaps';
 
 function requeueLegacyFeedbackPlanResultsInDb(
   db: Awaited<ReturnType<typeof databaseConnection>>,
@@ -913,9 +914,78 @@ function requeueLegacyFeedbackPlanResultsInDb(
   return rows.length;
 }
 
+function requeueRemovedReviewGapsTableFailuresInDb(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+) {
+  const rows = db.prepare(`
+    SELECT result.result_id, result.execution_id, result.task_id
+    FROM agent_results result
+    JOIN tasks task ON task.task_id = result.task_id
+    JOIN execution_attempts execution ON execution.execution_id = result.execution_id
+    WHERE result.agent = 'review-agent'
+      AND result.pipeline = 'review'
+      AND result.application_status = 'failed'
+      AND instr(lower(COALESCE(result.application_error, '')), ?) > 0
+      AND task.agile_status NOT IN ('done', 'cancelled')
+      AND NOT EXISTS (
+        SELECT 1
+        FROM execution_attempts newer
+        WHERE newer.task_id = execution.task_id
+          AND newer.agent = execution.agent
+          AND newer.pipeline = execution.pipeline
+          AND newer.rowid > execution.rowid
+      )
+  `).all(REMOVED_REVIEW_GAPS_TABLE_ERROR) as {
+    result_id: string;
+    execution_id: string;
+    task_id: string;
+  }[];
+  if (!rows.length) return 0;
+
+  db.transaction(() => {
+    const updateResult = db.prepare(`
+      UPDATE agent_results
+      SET application_status = 'pending', application_error = NULL,
+          applied_at = NULL, effect_outcome = NULL
+      WHERE result_id = ?
+        AND application_status = 'failed'
+        AND instr(lower(COALESCE(application_error, '')), ?) > 0
+    `);
+    const updateExecution = db.prepare(`
+      UPDATE execution_attempts
+      SET status = 'output_received', last_error = NULL, finished_at = NULL,
+          heartbeat_at = CURRENT_TIMESTAMP
+      WHERE execution_id = ?
+    `);
+    const unblockTask = db.prepare(`
+      UPDATE tasks
+      SET agile_status = 'in review', current_subagent = 'review-agent',
+          run_state = 'runnable', blocked_reason = NULL,
+          resume_status = NULL, resume_pending = 0,
+          next_step = '恢复旧版 Review 结卡缺口结果，等待重新应用',
+          last_actor = 'system', updated_at = CURRENT_TIMESTAMP
+      WHERE task_id = ? AND agile_status = 'blocked'
+    `);
+    const addRecoveryEvent = db.prepare(`
+      INSERT INTO task_events(event_id, task_id, actor, event_type, summary)
+      VALUES(?, ?, 'system', 'RemovedReviewGapsTableResultRequeued',
+        '恢复旧版 review_gaps 表移除后误拒绝的 Review 结果，继续转为前向交付单元')
+    `);
+    for (const row of rows) {
+      const updated = updateResult.run(row.result_id, REMOVED_REVIEW_GAPS_TABLE_ERROR).changes;
+      if (!updated) continue;
+      updateExecution.run(row.execution_id);
+      unblockTask.run(row.task_id);
+      addRecoveryEvent.run(randomUUID(), row.task_id);
+    }
+  })();
+  return rows.length;
+}
+
 export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationResult> {
   const db = await databaseConnection();
   requeueLegacyFeedbackPlanResultsInDb(db);
+  requeueRemovedReviewGapsTableFailuresInDb(db);
   const row = db.prepare(`
     SELECT ar.result_id, ar.run_id, ar.task_id, ar.story_index, ar.agent, ar.pipeline, ar.outcome, ar.result_json, ar.execution_id
     FROM agent_results ar
