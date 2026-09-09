@@ -7,6 +7,7 @@ import test from 'node:test';
 import {
   discoverLegacyProjectDatabases,
   importLegacyProjectDatabase,
+  inspectLegacyProjectDatabase,
   legacyProjectDatabasePath,
   mergeLegacyProjectDatabase,
 } from './legacy-database-import';
@@ -63,11 +64,29 @@ test('merges a migrated single-project database into an existing global database
         work_dir TEXT NOT NULL DEFAULT '',
         project_id TEXT REFERENCES projects(project_id) ON DELETE RESTRICT
       );
+      CREATE TABLE agent_profiles (agent_id TEXT PRIMARY KEY);
+      CREATE TABLE project_agent_overlays (
+        project_id TEXT NOT NULL REFERENCES projects(project_id),
+        agent_id TEXT NOT NULL REFERENCES agent_profiles(agent_id),
+        revision INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        PRIMARY KEY(project_id, agent_id)
+      );
+      CREATE TABLE project_agent_memory_versions (
+        project_id TEXT NOT NULL REFERENCES projects(project_id),
+        agent_id TEXT NOT NULL REFERENCES agent_profiles(agent_id),
+        revision INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        PRIMARY KEY(project_id, agent_id, revision)
+      );
     `;
     const source = new Database(sourcePath);
     source.exec(schema);
     source.prepare(`INSERT INTO projects(project_id, name, workspace_root, is_default) VALUES('PRJ-default', 'old', '/old/path', 1)`).run();
     source.prepare(`INSERT INTO tasks(task_id, title, work_dir, project_id) VALUES('REQ-old', 'historical', '/old/path', 'PRJ-default')`).run();
+    source.prepare(`INSERT INTO agent_profiles(agent_id) VALUES('dev-agent')`).run();
+    source.prepare(`INSERT INTO project_agent_overlays(project_id, agent_id, revision, content) VALUES('PRJ-default', 'dev-agent', 3, '历史 Overlay')`).run();
+    source.prepare(`INSERT INTO project_agent_memory_versions(project_id, agent_id, revision, content) VALUES('PRJ-default', 'dev-agent', 4, '历史 Memory')`).run();
     source.close();
 
     const target = new Database(targetPath);
@@ -91,6 +110,16 @@ test('merges a migrated single-project database into an existing global database
       work_dir: workspaceRoot,
       project_id: merged.projectId,
     });
+    assert.deepEqual(target.prepare(`SELECT project_id, revision, content FROM project_agent_overlays WHERE agent_id = 'dev-agent'`).get(), {
+      project_id: merged.projectId,
+      revision: 3,
+      content: '历史 Overlay',
+    });
+    assert.deepEqual(target.prepare(`SELECT project_id, revision, content FROM project_agent_memory_versions WHERE agent_id = 'dev-agent'`).get(), {
+      project_id: merged.projectId,
+      revision: 4,
+      content: '历史 Memory',
+    });
     assert.equal(mergeLegacyProjectDatabase({ target, sourcePath, workspaceRoot }).status, 'already-imported');
     assert.equal((target.prepare('SELECT COUNT(*) AS count FROM tasks').get() as { count: number }).count, 1);
     target.close();
@@ -104,4 +133,65 @@ test('merges a migrated single-project database into an existing global database
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('recovers the workspace identity from a migrated projects table', () => {
+  const root = mkdtempSync(join(tmpdir(), 'loopwork-legacy-db-project-identity-'));
+  try {
+    const sourcePath = join(root, 'loop-ui.db');
+    const source = new Database(sourcePath);
+    source.exec(`
+      CREATE TABLE projects (
+        project_id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        workspace_root TEXT NOT NULL,
+        is_default INTEGER NOT NULL DEFAULT 0
+      );
+    `);
+    source.prepare('INSERT INTO projects(project_id, name, workspace_root, is_default) VALUES(?, ?, ?, 1)')
+      .run('PRJ-default', '历史项目', join(root, 'workspace'));
+    source.close();
+
+    assert.deepEqual(inspectLegacyProjectDatabase(sourcePath), {
+      workspaceRoot: join(root, 'workspace'),
+      projectName: '历史项目',
+      evidence: 'projects',
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('recovers the workspace identity from historical run logs when task work dirs are empty', () => {
+  const root = mkdtempSync(join(tmpdir(), 'loopwork-legacy-db-log-identity-'));
+  try {
+    const sourcePath = join(root, 'loop-ui.db');
+    const workspaceRoot = join(root, 'workspace');
+    const source = new Database(sourcePath);
+    source.exec(`
+      CREATE TABLE tasks (task_id TEXT PRIMARY KEY, work_dir TEXT NOT NULL DEFAULT '');
+      CREATE TABLE run_logs (log_id INTEGER PRIMARY KEY AUTOINCREMENT, line TEXT NOT NULL);
+      INSERT INTO tasks(task_id, work_dir) VALUES('REQ-old', '');
+    `);
+    source.prepare('INSERT INTO run_logs(line) VALUES(?)').run(`[运行] 工作区=${workspaceRoot}\n[运行] 开始执行`);
+    source.close();
+
+    assert.deepEqual(inspectLegacyProjectDatabase(sourcePath), {
+      workspaceRoot,
+      projectName: 'workspace',
+      evidence: 'run-logs',
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects cross-origin requests before starting a local database migration', async () => {
+  const { POST } = await import('../../app/api/data-migration/route');
+  const response = await POST(new Request('http://localhost/api/data-migration', {
+    method: 'POST',
+    headers: { origin: 'https://example.test' },
+  }));
+  assert.equal(response.status, 403);
+  assert.deepEqual(await response.json(), { error: 'Origin 不匹配' });
 });

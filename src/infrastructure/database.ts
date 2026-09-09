@@ -1,11 +1,14 @@
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { isAbsolute, basename, dirname, join, relative, resolve } from 'node:path';
 import { Umzug } from 'umzug';
 import {
   backupLegacyDatabase,
+  discoverLegacyProjectDatabases,
   importLegacyProjectDatabase,
+  inspectLegacyProjectDatabase,
   legacyProjectDatabasePath,
   mergeLegacyProjectDatabase,
 } from './legacy-database-import';
@@ -32,6 +35,27 @@ let appDb: Database.Database | undefined;
 let appMigrationLastCheckedAt = 0;
 const businessDatabases = new Map<string, Database.Database>();
 const businessMigrations = new Map<string, Promise<Database.Database>>();
+let legacyDatabaseScan: Promise<LegacyDatabaseMigrationReport> | undefined;
+
+export type LegacyDatabaseMigrationItem = {
+  status: 'imported' | 'already-imported' | 'skipped' | 'failed';
+  sourcePath: string;
+  workspaceRoot: string;
+  projectName: string;
+  projectId: string;
+  copiedRows: number;
+  message: string;
+};
+
+export type LegacyDatabaseMigrationReport = {
+  globalDatabase: string;
+  discovered: number;
+  imported: number;
+  alreadyImported: number;
+  skipped: number;
+  failed: number;
+  items: LegacyDatabaseMigrationItem[];
+};
 
 function migrateAppDatabase(database: Database.Database) {
   database.pragma('busy_timeout = 15000');
@@ -247,6 +271,15 @@ function ensureDefaultProject(database: Database.Database, workspaceRoot: string
   })();
 }
 
+function isTemporaryWorkspaceRoot(workspaceRoot: string) {
+  const candidate = resolve(workspaceRoot);
+  const temporaryRoots = [tmpdir(), ...(process.platform === 'win32' ? [] : ['/tmp', '/private/tmp'])];
+  return temporaryRoots.some((temporaryRoot) => {
+    const relation = relative(resolve(temporaryRoot), candidate);
+    return !relation || (!relation.startsWith('..') && !isAbsolute(relation));
+  });
+}
+
 export async function migrateDatabase() {
   const cached = businessMigrations.get(globalDbPath);
   if (cached) return cached;
@@ -310,6 +343,126 @@ export async function migrateDatabase() {
 }
 
 export async function databaseConnection() { return migrateDatabase(); }
+
+/**
+ * Discover every historical hash-scoped database under this installation's data directory,
+ * migrate a temporary snapshot to the current schema, then merge it into the global DB.
+ * Sources remain read-only and the import ledger makes repeated scans idempotent.
+ */
+export async function scanAndImportLegacyProjectDatabases(): Promise<LegacyDatabaseMigrationReport> {
+  if (legacyDatabaseScan) return legacyDatabaseScan;
+  legacyDatabaseScan = (async () => {
+    const target = await migrateDatabase();
+    const discovered = discoverLegacyProjectDatabases(dataRoot);
+    const importedRows = target.prepare(`
+      SELECT source_db_path, workspace_root, project_id
+      FROM legacy_project_database_imports
+    `).all() as { source_db_path: string; workspace_root: string; project_id: string }[];
+    const importedByPath = new Map(importedRows.map((row) => [resolve(row.source_db_path), row]));
+    const items: LegacyDatabaseMigrationItem[] = [];
+
+    for (const sourcePathInput of discovered) {
+      const sourcePath = resolve(sourcePathInput);
+      const recorded = importedByPath.get(sourcePath);
+      if (recorded) {
+        const project = target.prepare('SELECT name FROM projects WHERE project_id = ?').get(recorded.project_id) as { name: string } | undefined;
+        items.push({
+          status: 'already-imported',
+          sourcePath,
+          workspaceRoot: recorded.workspace_root,
+          projectName: project?.name || basename(recorded.workspace_root),
+          projectId: recorded.project_id,
+          copiedRows: 0,
+          message: '此前已经迁移，未重复写入',
+        });
+        continue;
+      }
+
+      let workspaceRoot = '';
+      let projectName = '';
+      try {
+        const identity = inspectLegacyProjectDatabase(sourcePath);
+        if (!identity) {
+          items.push({ status: 'skipped', sourcePath, workspaceRoot, projectName, projectId: '', copiedRows: 0, message: '无法从历史库恢复原工作目录' });
+          continue;
+        }
+        workspaceRoot = identity.workspaceRoot;
+        projectName = identity.projectName;
+        if (legacyProjectDatabasePath(dataRoot, workspaceRoot) !== sourcePath) {
+          items.push({ status: 'skipped', sourcePath, workspaceRoot, projectName, projectId: '', copiedRows: 0, message: '工作目录与历史库身份校验不一致' });
+          continue;
+        }
+        if (isTemporaryWorkspaceRoot(workspaceRoot)) {
+          items.push({ status: 'skipped', sourcePath, workspaceRoot, projectName, projectId: '', copiedRows: 0, message: '原工作目录位于系统临时目录，判定为测试或临时数据' });
+          continue;
+        }
+        if (!existsSync(workspaceRoot)) {
+          items.push({ status: 'skipped', sourcePath, workspaceRoot, projectName, projectId: '', copiedRows: 0, message: '原工作目录当前不存在，未自动导入' });
+          continue;
+        }
+
+        const sourceKey = createHash('sha1').update(sourcePath).digest('hex').slice(0, 12);
+        const temporaryPath = `${globalDbPath}.legacy-merge-${process.pid}-${sourceKey}.tmp`;
+        try {
+          await backupLegacyDatabase(sourcePath, temporaryPath);
+          const snapshot = new Database(temporaryPath);
+          try {
+            snapshot.pragma('foreign_keys = ON');
+            snapshot.pragma('busy_timeout = 15000');
+            await migrateBusinessSchema(snapshot, workspaceRoot);
+          } finally {
+            snapshot.close();
+          }
+          const result = mergeLegacyProjectDatabase({
+            target,
+            sourcePath,
+            databasePath: temporaryPath,
+            workspaceRoot,
+            projectName,
+          });
+          items.push({
+            status: result.status,
+            sourcePath,
+            workspaceRoot,
+            projectName,
+            projectId: result.projectId,
+            copiedRows: result.copiedRows,
+            message: result.status === 'imported' ? `迁移 ${result.copiedRows} 条数据` : '此前已经迁移，未重复写入',
+          });
+        } finally {
+          rmSync(temporaryPath, { force: true });
+          rmSync(`${temporaryPath}-wal`, { force: true });
+          rmSync(`${temporaryPath}-shm`, { force: true });
+        }
+      } catch (error) {
+        items.push({
+          status: 'failed',
+          sourcePath,
+          workspaceRoot,
+          projectName,
+          projectId: '',
+          copiedRows: 0,
+          message: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    return {
+      globalDatabase: globalDbPath,
+      discovered: discovered.length,
+      imported: items.filter((item) => item.status === 'imported').length,
+      alreadyImported: items.filter((item) => item.status === 'already-imported').length,
+      skipped: items.filter((item) => item.status === 'skipped').length,
+      failed: items.filter((item) => item.status === 'failed').length,
+      items,
+    };
+  })();
+  try {
+    return await legacyDatabaseScan;
+  } finally {
+    legacyDatabaseScan = undefined;
+  }
+}
 
 export const paths = {
   appRoot,

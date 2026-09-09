@@ -253,6 +253,29 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .update-warning{display:flex;align-items:flex-start;gap:9px;border:1px solid #f2d9a2;border-radius:8px;background:#fff8e8;color:#785518;padding:11px 12px;line-height:1.45}
 .update-warning svg{flex:none;margin-top:1px}
 .update-actions{display:flex;align-items:center;gap:12px;min-height:36px}
+.migration-card{padding:20px;display:grid;gap:14px}
+.migration-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:12px}
+.migration-head .button{white-space:nowrap}
+.migration-note{margin:0;padding:10px 12px;border-radius:7px;background:#f7f9fc;color:#647086;font-size:12px;line-height:1.5}
+.migration-result{display:grid;gap:12px}
+.migration-summary{display:flex;flex-wrap:wrap;gap:8px}
+.migration-summary span{padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:#fff;color:#647086;font-size:12px}
+.migration-summary span.success{border-color:#cce4d5;background:#f0faf4;color:var(--green)}
+.migration-summary span.error{border-color:#efc6bf;background:#fff3f0;color:#9c352b}
+.migration-summary b{color:inherit}
+.migration-empty{display:flex;align-items:center;gap:7px;margin:0;color:var(--green);font-size:12px}
+.migration-details{border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.migration-details summary{padding:10px 12px;background:#f7f9fc;cursor:pointer;font-size:12px;font-weight:650}
+.migration-items{display:grid}
+.migration-item{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:start;gap:10px;padding:11px 12px;border-top:1px solid var(--line)}
+.migration-item:first-child{border-top:0}
+.migration-item .badge{margin-top:1px}
+.migration-item.imported .badge{background:#e6f5ec;color:var(--green)}
+.migration-item.failed .badge{background:#fff0ed;color:#a53e32}
+.migration-item.skipped .badge{background:#fff7e6;color:#8a5a10}
+.migration-item strong,.migration-item small{display:block}
+.migration-item small{margin-top:3px;color:#7a8497;overflow-wrap:anywhere}
+.migration-item p{margin:4px 0 0;color:#526075;font-size:12px}
 .update-ok{display:flex;align-items:center;gap:6px;color:var(--green);font-weight:650}
 .update-signing-note{margin:0;padding-top:13px;border-top:1px solid var(--line);line-height:1.5}
 .spin{animation:spin .9s linear infinite}
@@ -715,6 +738,8 @@ main{padding:28px 20px}
 .pipeline-entry-route .pipeline-route-label{width:170px}
 .pipeline-stage{width:132px}
 .settings-panel-toolbar{align-items:flex-start;flex-direction:column}
+.migration-head{grid-template-columns:auto minmax(0,1fr)}
+.migration-head .button{grid-column:1/-1;justify-self:start}
 }
 
 .task-header{margin-bottom:18px}

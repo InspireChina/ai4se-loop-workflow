@@ -1,12 +1,18 @@
 import Database from 'better-sqlite3';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, opendirSync, renameSync, rmSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 
 export type LegacyDatabaseImportResult = {
   status: 'imported' | 'global-exists' | 'legacy-not-found';
   sourcePath: string;
   targetPath: string;
+};
+
+export type LegacyProjectDatabaseIdentity = {
+  workspaceRoot: string;
+  projectName: string;
+  evidence: 'projects' | 'tasks' | 'run-logs';
 };
 
 export function legacyProjectDatabasePath(dataRoot: string, workspaceRoot: string) {
@@ -16,13 +22,89 @@ export function legacyProjectDatabasePath(dataRoot: string, workspaceRoot: strin
 }
 
 export function discoverLegacyProjectDatabases(dataRoot: string) {
-  const root = resolve(dataRoot);
-  if (!existsSync(root)) return [];
-  return readdirSync(root, { withFileTypes: true })
+  const root = resolve(/* turbopackIgnore: true */ dataRoot);
+  if (!existsSync(/* turbopackIgnore: true */ root)) return [];
+  const directory = opendirSync(root);
+  const entries = [];
+  try {
+    for (let entry = directory.readSync(); entry; entry = directory.readSync()) entries.push(entry);
+  } finally {
+    directory.closeSync();
+  }
+  return entries
     .filter((entry) => entry.isDirectory() && /^[a-f0-9]{12}$/i.test(entry.name))
-    .map((entry) => join(root, entry.name, 'loop-ui.db'))
-    .filter((path) => existsSync(path))
+    .map((entry) => join(/* turbopackIgnore: true */ root, entry.name, 'loop-ui.db'))
+    .filter((path) => existsSync(/* turbopackIgnore: true */ path))
     .sort();
+}
+
+function hasTable(database: Database.Database, table: string) {
+  return Boolean(database.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
+}
+
+function hasColumn(database: Database.Database, table: string, column: string) {
+  if (!hasTable(database, table)) return false;
+  return (database.prepare(`PRAGMA table_info(${identifier(table)})`).all() as TableColumn[])
+    .some((item) => item.name === column);
+}
+
+function normalizedIdentity(workspaceRoot: string, projectName: string, evidence: LegacyProjectDatabaseIdentity['evidence']) {
+  const trimmedRoot = workspaceRoot.trim();
+  if (!trimmedRoot || !isAbsolute(trimmedRoot)) return null;
+  const root = resolve(trimmedRoot);
+  return {
+    workspaceRoot: root,
+    projectName: projectName.trim() || basename(root) || '历史项目',
+    evidence,
+  } satisfies LegacyProjectDatabaseIdentity;
+}
+
+/** Read the historical database without mutating it and recover its original work directory. */
+export function inspectLegacyProjectDatabase(sourcePath: string): LegacyProjectDatabaseIdentity | null {
+  const database = new Database(resolve(/* turbopackIgnore: true */ sourcePath), { readonly: true, fileMustExist: true });
+  try {
+    if (hasColumn(database, 'projects', 'workspace_root')) {
+      const hasName = hasColumn(database, 'projects', 'name');
+      const hasDefault = hasColumn(database, 'projects', 'is_default');
+      const row = database.prepare(`
+        SELECT ${hasName ? 'name' : "'' AS name"}, workspace_root
+        FROM projects
+        WHERE trim(workspace_root) != ''
+        ORDER BY ${hasDefault ? 'is_default DESC,' : ''} rowid
+        LIMIT 1
+      `).get() as { name: string; workspace_root: string } | undefined;
+      const identity = row && normalizedIdentity(row.workspace_root, row.name, 'projects');
+      if (identity) return identity;
+    }
+    if (hasColumn(database, 'tasks', 'work_dir')) {
+      const row = database.prepare(`
+        SELECT work_dir, COUNT(*) AS usage_count
+        FROM tasks
+        WHERE trim(work_dir) != ''
+        GROUP BY work_dir
+        ORDER BY usage_count DESC, work_dir
+        LIMIT 1
+      `).get() as { work_dir: string } | undefined;
+      const identity = row && normalizedIdentity(row.work_dir, '', 'tasks');
+      if (identity) return identity;
+    }
+    if (hasColumn(database, 'run_logs', 'line')) {
+      const rows = database.prepare(`
+        SELECT line FROM run_logs
+        WHERE line LIKE '%[运行] 工作区=%'
+        ORDER BY rowid DESC
+        LIMIT 50
+      `).all() as { line: string }[];
+      for (const row of rows) {
+        const workspaceRoot = row.line.match(/\[运行\]\s+工作区=([^\r\n]+)/u)?.[1] || '';
+        const identity = normalizedIdentity(workspaceRoot, '', 'run-logs');
+        if (identity) return identity;
+      }
+    }
+    return null;
+  } finally {
+    database.close();
+  }
 }
 
 export async function backupLegacyDatabase(sourcePath: string, temporaryPath: string) {
