@@ -186,7 +186,7 @@ export async function reconcileInterruptedExecutions(
       resourceAcquisitions?: Record<ResourceKey, 'acquired' | 'inherited'>;
     };
     for (const [resourceKey, acquisition] of Object.entries(reservation.resourceAcquisitions || {}) as [ResourceKey, 'acquired' | 'inherited'][]) {
-      const current = resourceClaimInDb(db, resourceKey);
+      const current = resourceClaimInDb(db, resourceKey, orphan.task_id);
       if (acquisition === 'acquired' && current?.owner_execution_id === orphan.execution_id) {
         releaseResourceClaimInDb(db, resourceKey, orphan.task_id);
       }

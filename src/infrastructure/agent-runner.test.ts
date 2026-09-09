@@ -105,7 +105,7 @@ test('runner records the current HEAD without inferring a Dev commit from base_c
   const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
 
   assert.match(source, /shouldRecordDevCodeCommit\(delegation\.agent,\s*result\)/);
-  assert.match(source, /const currentHead = gitHead\(paths\.root\)/);
+  assert.match(source, /const currentHead = gitHead\(current\?\.task\.work_dir \|\| paths\.root\)/);
   assert.doesNotMatch(source, /currentHead\s*!==\s*attempt\.base_commit/);
 });
 
@@ -124,7 +124,7 @@ test('continuously refills completed lanes and cleans each execution temporary d
   assert.match(source, /new InFlightWork<ReservedExecution>\(\)/);
   assert.match(source, /inFlightExecutions\.waitForNextCompletion\(completionRevision\)/);
   assert.doesNotMatch(source, /Promise\.allSettled\(cycleExecutions\.values\(\)\)/);
-  assert.match(source, /createAgentExecutionTempDirectory\(paths\.root, executionId\)/);
+  assert.match(source, /createAgentExecutionTempDirectory\(workspaceRoot, executionId\)/);
   assert.match(source, /LOOP_AGENT_TMP_DIR:\s*temporary\.directory/);
   assert.match(source, /removeAgentExecutionTempDirectory\(temporary\)/);
   assert.match(source, /Lane execution 已结束，立即重新计算可执行步骤/);

@@ -50,8 +50,12 @@ import {
   type RequirementDependency,
 } from './task-dependencies';
 import { queueVerificationAssistanceInDb } from './verification-assistance';
+import { defaultProjectInDb, projectInDb } from './projects';
 
 export type Task = TaskState & {
+  project_id: string;
+  project_name: string;
+  work_dir: string;
   title: string;
   description: string | null;
   item_type: string;
@@ -311,18 +315,21 @@ export type DelegationEnvelope = Delegation & {
 };
 
 const taskSelect = `
-  SELECT task_id, title, description, link, external_id, external_status, item_type, priority,
-         agile_status, current_subagent, analysis_index, dev_index, test_index,
-         total_stories, spec_resolved_index, resume_status,
-         resume_pending, next_step, blocked_reason, run_state, closure_status,
-         review_revision, review_document_id, closure_acknowledged_at,
-         last_actor, owner, evidence, risk, is_paused, paused_reason, paused_at,
-         created_at, updated_at, completed_at, retry_cycle
+  SELECT tasks.task_id, tasks.project_id, COALESCE(projects.name, '未分配项目') AS project_name,
+         COALESCE(projects.workspace_root, NULLIF(tasks.work_dir, ''), '') AS work_dir,
+         tasks.title, tasks.description, tasks.link, tasks.external_id, tasks.external_status, tasks.item_type, tasks.priority,
+         tasks.agile_status, tasks.current_subagent, tasks.analysis_index, tasks.dev_index, tasks.test_index,
+         tasks.total_stories, tasks.spec_resolved_index, tasks.resume_status,
+         tasks.resume_pending, tasks.next_step, tasks.blocked_reason, tasks.run_state, tasks.closure_status,
+         tasks.review_revision, tasks.review_document_id, tasks.closure_acknowledged_at,
+         tasks.last_actor, tasks.owner, tasks.evidence, tasks.risk, tasks.is_paused, tasks.paused_reason, tasks.paused_at,
+         tasks.created_at, tasks.updated_at, tasks.completed_at, tasks.retry_cycle
   FROM tasks
+  LEFT JOIN projects ON projects.project_id = tasks.project_id
 `;
 
 function fetchTask(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: string) {
-  return db.prepare(`${taskSelect} WHERE task_id = ?`).get(taskId) as Task | undefined;
+  return db.prepare(`${taskSelect} WHERE tasks.task_id = ? AND projects.deleted_at IS NULL`).get(taskId) as Task | undefined;
 }
 
 function addEvent(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: string, actor: Actor | 'system', eventType: string, summary: string) {
@@ -399,13 +406,16 @@ async function syncTaskFiles(_db: Awaited<ReturnType<typeof databaseConnection>>
   // DB-first product mode: target repo files are no longer generated or synchronized.
 }
 
-export async function listTasks(options: { includeTerminal?: boolean } = {}): Promise<TaskWithLanes[]> {
+export async function listTasks(options: { includeTerminal?: boolean; projectId?: string } = {}): Promise<TaskWithLanes[]> {
   const db = await databaseConnection();
-  const where = options.includeTerminal ? '' : "WHERE agile_status NOT IN ('done', 'cancelled')";
+  const filters = ['projects.deleted_at IS NULL'];
+  if (!options.includeTerminal) filters.push("tasks.agile_status NOT IN ('done', 'cancelled')");
+  if (options.projectId) filters.push('tasks.project_id = ?');
+  const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   const tasks = db.prepare(`
     ${taskSelect}
     ${where}
-  `).all() as Task[];
+  `).all(...(options.projectId ? [options.projectId] : [])) as Task[];
   tasks.sort((left, right) => Number(right.agile_status === 'blocked') - Number(left.agile_status === 'blocked')
     || requirementPriorityRank(right.priority) - requirementPriorityRank(left.priority)
     || right.updated_at.localeCompare(left.updated_at));
@@ -450,24 +460,45 @@ export async function listRequirementDependencyCandidates() {
  * Returns completed Tasks only. Cancelled Tasks are a separate terminal state
  * and deliberately do not appear in this result.
  */
-export async function listCompletedTasks(): Promise<Task[]> {
+export async function listCompletedTasks(options: { projectId?: string } = {}): Promise<Task[]> {
   const db = await databaseConnection();
   return db.prepare(`
     ${taskSelect}
-    WHERE agile_status = 'done'
-    ORDER BY COALESCE(completed_at, updated_at) DESC
-  `).all() as Task[];
+    WHERE projects.deleted_at IS NULL AND tasks.agile_status = 'done'${options.projectId ? ' AND tasks.project_id = ?' : ''}
+    ORDER BY COALESCE(tasks.completed_at, tasks.updated_at) DESC
+  `).all(...(options.projectId ? [options.projectId] : [])) as Task[];
 }
 
-export async function listRecentEvents(limit = 20): Promise<(Event & { task_id: string; title: string })[]> {
+export async function listDeletedTasks(options: { projectId?: string } = {}): Promise<Task[]> {
+  const db = await databaseConnection();
+  return db.prepare(`
+    ${taskSelect}
+    WHERE projects.deleted_at IS NULL AND tasks.agile_status = 'cancelled'${options.projectId ? ' AND tasks.project_id = ?' : ''}
+    ORDER BY COALESCE(tasks.completed_at, tasks.updated_at) DESC
+  `).all(...(options.projectId ? [options.projectId] : [])) as Task[];
+}
+
+export async function countRecentEvents(): Promise<number> {
+  const db = await databaseConnection();
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count
+    FROM task_events e
+    JOIN tasks t ON t.task_id = e.task_id
+    JOIN projects p ON p.project_id = t.project_id AND p.deleted_at IS NULL
+  `).get() as { count: number };
+  return row.count;
+}
+
+export async function listRecentEvents(limit = 20, offset = 0): Promise<(Event & { task_id: string; title: string })[]> {
   const db = await databaseConnection();
   return db.prepare(`
     SELECT e.event_id, e.task_id, t.title, e.actor, e.event_type, e.summary, e.created_at
     FROM task_events e
     JOIN tasks t ON t.task_id = e.task_id
+    JOIN projects p ON p.project_id = t.project_id AND p.deleted_at IS NULL
     ORDER BY e.created_at DESC, e.rowid DESC
-    LIMIT ?
-  `).all(limit) as (Event & { task_id: string; title: string })[];
+    LIMIT ? OFFSET ?
+  `).all(limit, offset) as (Event & { task_id: string; title: string })[];
 }
 
 export async function getTask(taskId: string) {
@@ -826,6 +857,7 @@ export const createTaskSchema = z.object({
   actor: z.enum(['human', 'system']).default('human'),
   status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'in feedback', 'ready_to_close', 'done', 'cancelled', 'blocked']).default('backlog'),
   currentSubagent: z.string().trim().optional().nullable(),
+  projectId: z.string().trim().optional().nullable(),
 });
 
 export type ParsedCreateTaskInput = z.infer<typeof createTaskSchema>;
@@ -840,6 +872,8 @@ export function createTaskInDb(
   const description = value.description?.trim() || null;
   const link = value.link || null;
   const requestedSubagent = value.currentSubagent || null;
+  const project = value.projectId ? projectInDb(db, value.projectId) : defaultProjectInDb(db);
+  if (!project) throw new Error('指定项目不存在');
   assertActorCanCreate(value.actor, value.status, requestedSubagent);
   const currentSubagent = requestedSubagent
     || (value.itemType === 'direct'
@@ -867,12 +901,12 @@ export function createTaskInDb(
   assertState(state);
   db.prepare(`
     INSERT INTO tasks(
-      task_id, title, description, link, external_id, external_status, item_type, priority,
+      task_id, project_id, title, description, link, external_id, external_status, item_type, priority,
       agile_status, current_subagent, analysis_index, dev_index, test_index,
       total_stories, spec_resolved_index, next_step,
       work_dir, blocked_reason, last_actor
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, '', ?, ?)
-  `).run(taskId, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, priority, value.status, currentSubagent, value.itemType === 'direct' ? '新建需求，等待直接执行' : '新建需求，等待 Loop 梳理', state.blocked_reason, value.actor);
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, ?, ?, ?)
+  `).run(taskId, project.project_id, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, priority, value.status, currentSubagent, value.itemType === 'direct' ? '新建需求，等待直接执行' : '新建需求，等待 Loop 梳理', project.workspace_root, state.blocked_reason, value.actor);
   const insertMetadata = db.prepare(`
     INSERT INTO requirement_metadata(task_id, metadata_key, metadata_value)
     VALUES (?, ?, ?)

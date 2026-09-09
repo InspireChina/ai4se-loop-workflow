@@ -1,14 +1,29 @@
 import assert from 'node:assert/strict';
 import Database from 'better-sqlite3';
+import { spawn } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { isAbsolute, relative, resolve } from 'node:path';
 import test from 'node:test';
-import { databaseConnection, isDatabaseTestProcess, paths } from './database';
+import { databaseConnection, isDatabaseTestProcess, paths, splitSqlMigrationStatements } from './database';
 
 test('does not treat a domain command argument ending in .test.js as a test process', () => {
   assert.equal(isDatabaseTestProcess({}), false);
   assert.equal(isDatabaseTestProcess({ LOOP_TEST: '1' }), true);
   assert.equal(isDatabaseTestProcess({ NODE_TEST_CONTEXT: 'child-v8' }), true);
+});
+
+test('keeps SQLite trigger bodies intact when splitting resumable migrations', () => {
+  const statements = splitSqlMigrationStatements(`
+    ALTER TABLE plans ADD COLUMN project_id TEXT;
+    CREATE TRIGGER project_required AFTER INSERT ON plans
+    BEGIN
+      UPDATE plans SET project_id = 'default' WHERE id = NEW.id;
+    END;
+    CREATE INDEX idx_plans_project ON plans(project_id);
+  `);
+  assert.equal(statements.length, 3);
+  assert.match(statements[1], /UPDATE plans SET project_id/);
+  assert.match(statements[1], /END;$/);
 });
 
 test('database tests use a process-local root outside the repository', () => {
@@ -22,6 +37,50 @@ test('database tests use a process-local root outside the repository', () => {
   assert.ok(relation === '..' || relation.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || isAbsolute(relation), `test data root escaped isolation: ${dataRoot}`);
   assert.notEqual(paths.dataRoot, resolve(repository, 'data'));
   assert.match(paths.dbPath, /loop-ui\.db$/);
+  assert.equal(paths.dbPath, resolve(paths.dataRoot, 'loop-ui.db'));
+});
+
+test('uses WAL and enforces project integrity for the shared business database', async () => {
+  const db = await databaseConnection();
+  assert.equal(db.pragma('journal_mode', { simple: true }), 'wal');
+  assert.equal(db.pragma('busy_timeout', { simple: true }), 15000);
+  const taskId = 'REQ-project-default-trigger';
+  db.prepare(`
+    INSERT INTO tasks(task_id, title, item_type, agile_status, work_dir)
+    VALUES(?, 'legacy insert', 'feature', 'backlog', '')
+  `).run(taskId);
+  const defaultProject = db.prepare('SELECT project_id FROM projects WHERE is_default = 1').get() as { project_id: string };
+  assert.equal((db.prepare('SELECT project_id FROM tasks WHERE task_id = ?').get(taskId) as { project_id: string }).project_id, defaultProject.project_id);
+});
+
+test('lets another process wait for and complete a global database write', async () => {
+  await databaseConnection();
+  const parent = new Database(paths.dbPath);
+  parent.pragma('journal_mode = WAL');
+  parent.pragma('busy_timeout = 15000');
+  parent.exec('CREATE TABLE IF NOT EXISTS concurrency_probe (writer TEXT PRIMARY KEY)');
+  parent.prepare("DELETE FROM concurrency_probe WHERE writer IN ('parent', 'child')").run();
+  parent.exec('BEGIN IMMEDIATE');
+  parent.prepare("INSERT INTO concurrency_probe(writer) VALUES('parent')").run();
+  const child = spawn(process.execPath, ['--input-type=module', '-e', `
+    import Database from 'better-sqlite3';
+    const db = new Database(process.env.LOOP_STRESS_DB_PATH);
+    db.pragma('busy_timeout = 15000');
+    db.prepare("INSERT INTO concurrency_probe(writer) VALUES('child')").run();
+    db.close();
+  `], {
+    cwd: process.cwd(),
+    env: { ...process.env, LOOP_STRESS_DB_PATH: paths.dbPath },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const stderr: Buffer[] = [];
+  child.stderr.on('data', (chunk) => stderr.push(chunk));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  parent.exec('COMMIT');
+  const exitCode = await new Promise<number | null>((resolveExit) => child.once('exit', resolveExit));
+  assert.equal(exitCode, 0, Buffer.concat(stderr).toString('utf8'));
+  assert.equal((parent.prepare(`SELECT COUNT(*) AS count FROM concurrency_probe WHERE writer IN ('parent', 'child')`).get() as { count: number }).count, 2);
+  parent.close();
 });
 
 test('materializes persistent task lanes and execution lane correlation', async () => {

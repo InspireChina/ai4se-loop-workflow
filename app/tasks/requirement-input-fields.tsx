@@ -6,6 +6,7 @@ import type { RequirementDependencyCandidate } from '../../src/application/task-
 import { REQUIREMENT_METADATA_DEFINITIONS, type RequirementMetadataKey } from '../../src/domain/requirement-metadata';
 import { REQUIREMENT_PIPELINES, type RequirementPipelineId } from '../../src/domain/pipeline-catalog';
 import { DEFAULT_REQUIREMENT_PRIORITY, REQUIREMENT_PRIORITY_OPTIONS } from '../../src/domain/requirement-priority';
+import type { Project } from '../../src/application/projects';
 
 type MetadataEntry = {
   id: string;
@@ -15,6 +16,7 @@ type MetadataEntry = {
 
 type RequirementInputFieldsProps = {
   dependencyCandidates: RequirementDependencyCandidate[];
+  projects?: Project[];
   excludedTaskId?: string;
   initial?: {
     title?: string;
@@ -23,6 +25,7 @@ type RequirementInputFieldsProps = {
     priority?: string;
     metadata?: { key: RequirementMetadataKey; value: string }[];
     dependencyIds?: string[];
+    projectId?: string;
   };
   autoFocus?: boolean;
 };
@@ -32,7 +35,7 @@ function defaultMetadataValue(key: RequirementMetadataKey) {
   return definition.inputType === 'select' ? 'balanced' : '';
 }
 
-export function RequirementInputFields({ dependencyCandidates, excludedTaskId, initial, autoFocus = false }: RequirementInputFieldsProps) {
+export function RequirementInputFields({ dependencyCandidates, projects, excludedTaskId, initial, autoFocus = false }: RequirementInputFieldsProps) {
   const nextMetadataId = useRef(initial?.metadata?.length || 0);
   const [metadata, setMetadata] = useState<MetadataEntry[]>(() => (initial?.metadata || []).map((item, index) => ({
     id: `initial-${index}`,
@@ -41,7 +44,9 @@ export function RequirementInputFields({ dependencyCandidates, excludedTaskId, i
   })));
   const [dependencyQuery, setDependencyQuery] = useState('');
   const [selectedDependencyIds, setSelectedDependencyIds] = useState<string[]>(initial?.dependencyIds || []);
-  const candidates = dependencyCandidates.filter((candidate) => candidate.task_id !== excludedTaskId);
+  const [projectId, setProjectId] = useState(initial?.projectId || projects?.[0]?.project_id || '');
+  const candidates = dependencyCandidates.filter((candidate) => candidate.task_id !== excludedTaskId
+    && (!projects || candidate.project_id === projectId));
   const visibleDependencyCandidates = candidates.filter((candidate) => {
     const query = dependencyQuery.trim().toLocaleLowerCase();
     return !query || candidate.title.toLocaleLowerCase().includes(query) || candidate.task_id.toLocaleLowerCase().includes(query);
@@ -67,6 +72,10 @@ export function RequirementInputFields({ dependencyCandidates, excludedTaskId, i
   }
 
   return <>
+    {projects && <label>项目<select name="projectId" required value={projectId} onChange={(event) => {
+      setProjectId(event.target.value);
+      setSelectedDependencyIds([]);
+    }}>{projects.map((project) => <option value={project.project_id} key={project.project_id}>{project.name}</option>)}</select></label>}
     <label>标题<input name="title" required autoFocus={autoFocus} defaultValue={initial?.title} placeholder="例如：项目列表支持按 PIC 筛选"/></label>
     <label>描述（可选）<textarea name="description" rows={4} defaultValue={initial?.description} placeholder="补充背景、目标或验收要求"/></label>
     <div className="fields">

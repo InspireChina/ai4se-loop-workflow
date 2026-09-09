@@ -6,6 +6,7 @@ import { REQUIREMENT_PIPELINES } from '../../src/domain/pipeline-catalog';
 import { DEFAULT_REQUIREMENT_PRIORITY, REQUIREMENT_PRIORITY_OPTIONS } from '../../src/domain/requirement-priority';
 import { REQUIREMENT_METADATA_DEFINITIONS, type RequirementMetadataKey } from '../../src/domain/requirement-metadata';
 import type { ScheduledRequirementPlan } from '../../src/application/scheduled-requirements';
+import type { Project } from '../../src/application/projects';
 import { saveScheduledRequirementAction } from '../actions';
 
 function localDateTimeValue(value: string | null | undefined, timezone: string) {
@@ -25,10 +26,12 @@ function localDateTimeValue(value: string | null | undefined, timezone: string) 
 export function ScheduleForm({
   plan,
   timezones,
+  projects,
   onCancel,
 }: {
   plan?: ScheduledRequirementPlan;
   timezones: string[];
+  projects: Project[];
   onCancel?: () => void;
 }) {
   const initialMetadata = useMemo(() => {
@@ -57,6 +60,11 @@ export function ScheduleForm({
   return <form action={saveScheduledRequirementAction} className="form-panel schedule-form">
     {plan && <input type="hidden" name="planId" value={plan.plan_id}/>}
     <div className="fields schedule-fields">
+      <label>所属项目
+        <select name="projectId" required defaultValue={plan?.project_id || projects[0]?.project_id}>
+          {projects.map((project) => <option value={project.project_id} key={project.project_id}>{project.name}{project.is_default ? '（默认）' : ''}</option>)}
+        </select>
+      </label>
       <label>计划类型
         <select name="recurrenceKind" value={recurrence} onChange={(event) => setRecurrence(event.target.value as typeof recurrence)}>
           <option value="once">单次</option>

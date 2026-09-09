@@ -4,7 +4,7 @@ import type { AgentContextSnapshot } from '../application/agent-context';
 import type { ExecutionAttempt } from '../application/executions';
 import { laneForAgent } from '../application/task-lanes';
 import type { DelegationEnvelope } from '../application/tasks';
-import { isActiveAgentConfigurationPromptCandidate } from '../application/agent-configurations';
+import { isActiveProjectOverlayCandidateInDb } from '../application/agent-profiles';
 
 export class PromptCanaryDeferredError extends Error {
   constructor(message: string) {
@@ -140,7 +140,8 @@ export async function beginTestExecutionAttempt(input: {
     if (previous?.status === 'applied') return { attempt: previous, recovered: true };
 
     if (input.evolutionCandidateId) {
-      if (!isActiveAgentConfigurationPromptCandidate(input.delegation.agent, input.evolutionCandidateId)) {
+      const task = db.prepare('SELECT project_id FROM tasks WHERE task_id = ?').get(input.delegation.taskId) as { project_id: string | null } | undefined;
+      if (!task?.project_id || !isActiveProjectOverlayCandidateInDb(db, task.project_id, input.delegation.agent, input.evolutionCandidateId)) {
         throw new PromptCanaryDeferredError('Prompt Canary 已结束，等待使用当前 Prompt 重新派发');
       }
       const active = db.prepare(`

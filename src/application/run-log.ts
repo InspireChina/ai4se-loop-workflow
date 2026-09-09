@@ -45,6 +45,16 @@ function friendlyCursorDiagnostic(text: string) {
   return text;
 }
 
+function parseExecutorEvent(body: string) {
+  const detail = stripLogPrefix(body).trim();
+  if (!detail.startsWith('{')) return null;
+  try {
+    return JSON.parse(detail) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
 function toolNameLabel(tool: string) {
   const lower = tool.toLowerCase();
   if (lower === 'agent-command') return 'Agent 领域命令';
@@ -219,7 +229,55 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
     return { ...base, kind: 'executor', status: 'info', title: 'Agent 思考', detail };
   }
   if (parsed.label === '执行器事件' || parsed.label === 'Cursor事件') {
-    if (parsed.body.includes('"type":"system"') || parsed.body.includes('"subtype":"completed"')) return null;
+    const event = parseExecutorEvent(parsed.body);
+    const type = String(event?.type || '');
+    const subtype = String(event?.subtype || '');
+    if (type === 'system' || subtype === 'completed') return null;
+    if (type === 'retry') return null;
+    if (type === 'connection') {
+      const attempt = Number(event?.attempt || 0);
+      const sessionId = String(event?.session_id || '');
+      const connectionMeta = {
+        ...meta,
+        cursorConnection: 'true',
+        cursorConnectionSubtype: subtype,
+        cursorConnectionSession: sessionId,
+        cursorConnectionAttempt: attempt ? String(attempt) : '',
+        cursorConnectionStartedAt: subtype === 'reconnecting' ? parsed.timestamp : '',
+      };
+      if (subtype === 'reconnecting') {
+        return {
+          ...base,
+          kind: 'executor',
+          status: 'running',
+          title: 'Cursor 连接重试',
+          detail: attempt ? `正在重新连接（第 ${attempt} 次）` : '正在重新连接',
+          meta: connectionMeta,
+        };
+      }
+      if (subtype === 'reconnected') {
+        return {
+          ...base,
+          kind: 'executor',
+          status: 'success',
+          title: 'Cursor 连接已恢复',
+          detail: '连接已恢复',
+          meta: connectionMeta,
+        };
+      }
+      if (subtype === 'failed' || subtype === 'disconnected') {
+        return {
+          ...base,
+          kind: 'error',
+          status: 'error',
+          title: 'Cursor 连接失败',
+          detail: '无法恢复与 Cursor 服务的连接',
+          meta: connectionMeta,
+        };
+      }
+    }
+    const executor = meta.executor ? `${meta.executor[0].toUpperCase()}${meta.executor.slice(1)}` : 'Agent';
+    return { ...base, kind: 'executor', status: 'info', title: `${executor} 事件`, detail: stripLogPrefix(parsed.body) };
   }
   if (parsed.label === '执行器警告'
     && /codex_core_plugins::manifest: ignoring interface\.defaultPrompt: maximum of \d+ prompts is supported/.test(parsed.body)) return null;

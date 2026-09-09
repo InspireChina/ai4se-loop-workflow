@@ -104,14 +104,12 @@ test('a paused task cannot retain a legacy resource claim', async () => {
   assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE), undefined);
 });
 
-test('browser claims are execution-scoped and multi-resource acquisition is atomic', async () => {
+test('ignores the retired browser mutex while preserving code workspace claims', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const {
     BROWSER_EXCLUSIVE_RESOURCE,
     CODE_WORKSPACE_RESOURCE,
-    ResourceBusyError,
     acquireResourceClaimsInDb,
-    releaseExecutionResourceClaimsInDb,
     releaseResourceClaimInDb,
     resourceClaimInDb,
     tryAcquireResourceClaimInDb,
@@ -145,6 +143,7 @@ test('browser claims are execution-scoped and multi-resource acquisition is atom
     storyIndex: 1,
     executionId: 'EXEC-browser-a-1',
   }), true);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   assert.equal(tryAcquireResourceClaimInDb(db, {
     resourceKey: BROWSER_EXCLUSIVE_RESOURCE,
     taskId: 'TASK-browser-owner-a',
@@ -158,9 +157,7 @@ test('browser claims are execution-scoped and multi-resource acquisition is atom
     lane: 'delivery',
     storyIndex: 1,
     executionId: 'EXEC-browser-a-2',
-  }), false);
-
-  releaseExecutionResourceClaimsInDb(db, 'EXEC-browser-a-1');
+  }), true);
   assert.equal(tryAcquireResourceClaimInDb(db, {
     resourceKey: BROWSER_EXCLUSIVE_RESOURCE,
     taskId: 'TASK-browser-owner-b',
@@ -168,25 +165,14 @@ test('browser claims are execution-scoped and multi-resource acquisition is atom
     storyIndex: 1,
     executionId: 'EXEC-browser-b-1',
   }), true);
-  assert.throws(() => acquireResourceClaimsInDb(db, {
-    resourceKeys: [CODE_WORKSPACE_RESOURCE, BROWSER_EXCLUSIVE_RESOURCE],
-    taskId: 'TASK-browser-owner-a',
-    lane: 'delivery',
-    storyIndex: 1,
-    executionId: 'EXEC-browser-a-2',
-  }), ResourceBusyError);
-  assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE), undefined);
-  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_task_id, 'TASK-browser-owner-b');
-
-  releaseExecutionResourceClaimsInDb(db, 'EXEC-browser-b-1');
-  acquireResourceClaimsInDb(db, {
+  const claims = acquireResourceClaimsInDb(db, {
     resourceKeys: [CODE_WORKSPACE_RESOURCE, BROWSER_EXCLUSIVE_RESOURCE],
     taskId: 'TASK-browser-owner-a',
     lane: 'delivery',
     storyIndex: 1,
     executionId: 'EXEC-browser-a-2',
   });
-  releaseExecutionResourceClaimsInDb(db, 'EXEC-browser-a-2');
+  assert.deepEqual(claims.map((claim) => claim.resource_key), [CODE_WORKSPACE_RESOURCE]);
   assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, 'TASK-browser-owner-a');
   releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, 'TASK-browser-owner-a');

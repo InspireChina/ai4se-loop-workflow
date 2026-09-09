@@ -111,11 +111,13 @@ export async function claimNextVerificationAssistance(input: {
       FROM verification_assistance_jobs job
       JOIN runtime_input_requests request ON request.request_id = job.request_id
       JOIN tasks task ON task.task_id = job.task_id
+      JOIN projects project ON project.project_id = task.project_id
       WHERE job.status = 'pending'
         AND job.attempt_count < job.max_attempts
         AND request.status = 'pending'
         AND task.is_paused = 0
         AND task.agile_status NOT IN ('done', 'cancelled')
+        AND project.deleted_at IS NULL
         AND NOT EXISTS (
           SELECT 1 FROM verification_assistance_jobs active
           WHERE active.task_id = job.task_id AND active.status = 'running'

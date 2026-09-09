@@ -1,10 +1,11 @@
 import Link from 'next/link';
-import { AlertTriangle, ArrowRight, CircleDot } from 'lucide-react';
+import { AlertTriangle, ArrowRight, CircleDot, FileCheck2 } from 'lucide-react';
 import { listTasks } from '../src/application/tasks';
 import { progressDispatchInspector } from '../src/application/progress-dispatch';
 import { requirementDependencySatisfied } from '../src/application/task-dependencies';
 import { agentLabel, statusLabel, terminologyText } from '../src/domain/terminology';
 import { requirementPriorityLabel } from '../src/domain/requirement-priority';
+import { listProjects } from '../src/application/projects';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,8 +17,16 @@ const phase = (task: { item_type: string; current_subagent: string | null; analy
   ? task.current_subagent ? agentLabel(task.current_subagent) : '等待阅读需求规格'
   : `${task.analysis_index}/${task.total_stories} 交付分析 · ${task.dev_index}/${task.total_stories} 实现 · ${task.test_index}/${task.total_stories} 验证`;
 
-export default async function Home() {
-  const [tasks, pipeline] = await Promise.all([listTasks(), progressDispatchInspector.inspectAll()]);
+export default async function Home({ searchParams }: { searchParams: Promise<{ project?: string | string[] }> }) {
+  const params = await searchParams;
+  const projectId = typeof params.project === 'string' ? params.project : '';
+  const [tasks, pipeline, projects] = await Promise.all([
+    listTasks({ projectId: projectId || undefined }),
+    progressDispatchInspector.inspectAll(),
+    listProjects(),
+  ]);
+  const visibleTaskIds = new Set(tasks.map((task) => task.task_id));
+  const visiblePipeline = projectId ? pipeline.filter((item) => visibleTaskIds.has(item.requirementId)) : pipeline;
   const activeTasks = tasks.filter((task) => !task.is_paused);
   const laneWaitingForAnswers = activeTasks.flatMap((task) => task.lanes.filter((lane) => lane.status === 'waiting_for_answers').map((lane) => ({ task, lane })));
   const requirementWaitingForAnswers = tasks
@@ -38,8 +47,8 @@ export default async function Home() {
     ...readyToClose.map((task) => ({ task, lane: null, kind: 'closure' as const })),
   ];
   return <><header><div><p className="eyebrow">LOOP WORKBENCH</p><h1>工作台</h1><p className="muted">AI 自主推进；需要时补充设计决策、运行信息或验证协助，并阅读最终结卡报告。</p></div></header>
-    <section className="metrics"><div><b>{waitingForAnswers.length + waitingForRuntimeInput.length}</b><span>待处理信息</span></div><div><b>{readyToClose.length}</b><span>待阅读产物</span></div><div><b>{pipeline.length}</b><span>可执行步骤</span></div></section>
-    <section><h2>需要我处理</h2>{needsHuman.length === 0 ? <div className="empty">当前没有需要你处理的信息或最终产物。</div> : needsHuman.map(({ task, lane, kind }) => <article className="attention" key={`${task.task_id}-${lane?.lane || kind}`}><AlertTriangle size={20}/><div><p className="eyebrow">{kind === 'closure' ? task.item_type === 'business-analysis' ? '待阅读需求规格说明书' : '待阅读结卡报告' : kind === 'runtime' ? `${lane!.current_agent === 'test-agent' ? '待验证协助' : '待补充运行信息'} · ${lane!.lane === 'analysis' ? '交付分析' : '开发验证'} · ${agentLabel(lane!.current_agent)}` : lane ? `待回答关键决策 · 交付分析 · ${agentLabel(lane.current_agent)}` : `待回答需求澄清 · 需求级 · ${agentLabel(task.current_subagent)}`}</p><h3>{task.title}</h3><p>{terminologyText(lane?.blocked_reason || task.blocked_reason)}</p><small>{terminologyText(task.next_step)}</small></div><Link href={`/tasks/${task.task_id}`} className="button secondary">去处理 <ArrowRight size={14}/></Link></article>)}</section>
+    <section className="metrics"><div><b>{waitingForAnswers.length + waitingForRuntimeInput.length}</b><span>待处理信息</span></div><div><b>{readyToClose.length}</b><span>待阅读产物</span></div><div><b>{visiblePipeline.length}</b><span>可执行步骤</span></div></section>
+    <section className="attention-section"><div className="section-title-with-tags"><h2>需要我处理</h2><nav className="project-filter-tags" aria-label="按项目筛选工作台"><Link href="/" aria-current={!projectId ? 'page' : undefined}>全部</Link>{projects.map((project) => <Link href={`/?project=${encodeURIComponent(project.project_id)}`} aria-current={projectId === project.project_id ? 'page' : undefined} key={project.project_id}>{project.name}</Link>)}</nav></div>{needsHuman.length === 0 ? <div className="empty">当前没有需要你处理的信息或最终产物。</div> : <div className="card attention-list">{needsHuman.map(({ task, lane, kind }) => <article className={`attention ${kind}`} key={`${task.task_id}-${lane?.lane || kind}`}><span className="attention-icon">{kind === 'closure' ? <FileCheck2 size={18}/> : <AlertTriangle size={18}/>}</span><div className="attention-body"><div className="attention-meta"><span className="attention-kind">{kind === 'closure' ? task.item_type === 'business-analysis' ? '待阅读需求规格说明书' : '待阅读结卡报告' : kind === 'runtime' ? `${lane!.current_agent === 'test-agent' ? '待验证协助' : '待补充运行信息'} · ${lane!.lane === 'analysis' ? '交付分析' : '开发验证'} · ${agentLabel(lane!.current_agent)}` : lane ? `待回答关键决策 · 交付分析 · ${agentLabel(lane.current_agent)}` : `待回答需求澄清 · 需求级 · ${agentLabel(task.current_subagent)}`}</span><span className="attention-project">{task.project_name}</span></div><h3>{task.title}</h3><p className="attention-reason">{terminologyText(lane?.blocked_reason || task.blocked_reason)}</p><small className="attention-next">{terminologyText(task.next_step)}</small></div><Link href={`/tasks/${task.task_id}`} className="button secondary">去处理 <ArrowRight size={14}/></Link></article>)}</div>}</section>
     <section><h2>正在推进</h2><div className="card table"><div className="row heading"><span>需求</span><span>状态</span><span>交付进度</span><span>下一步</span></div>{tasks.map((task) => {
       const runtimeLane = task.lanes.find((lane) => lane.status === 'waiting_for_runtime_input');
       const systemAssisting = runtimeLane?.current_agent === 'test-agent'
@@ -75,6 +84,6 @@ export default async function Home() {
         : waitingForDependencies
           ? `前置需求进入等待阅读后自动调度 · ${pendingDependencies.map((dependency) => dependency.title).join('、')}`
           : terminologyText(task.next_step);
-      return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}><span><strong>{task.title}</strong><small>{task.task_id} · 优先级 {requirementPriorityLabel(task.priority)}</small></span><span className={`badge ${task.is_paused || waitingForDependencies || task.agile_status === 'blocked' || needsAttention ? 'amber' : 'blue'}`}><CircleDot size={13}/>{label}</span><span>{progress}</span><span>{nextStep}</span></Link>;
+      return <Link href={`/tasks/${task.task_id}`} className="row" key={task.task_id}><span><strong>{task.title}</strong><small>{task.project_name} · {task.task_id} · 优先级 {requirementPriorityLabel(task.priority)}</small></span><span className={`badge ${task.is_paused || waitingForDependencies || task.agile_status === 'blocked' || needsAttention ? 'amber' : 'blue'}`}><CircleDot size={13}/>{label}</span><span>{progress}</span><span>{nextStep}</span></Link>;
     })}</div></section></>;
 }

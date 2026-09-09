@@ -67,3 +67,22 @@ test('rejects invalid prerequisite configuration atomically and prevents depende
     /需求依赖不能形成环/,
   );
 });
+
+test('rejects cross-project dependencies in both the service and database boundary', async () => {
+  const db = await databaseConnection();
+  const otherProjectId = 'PRJ-dependency-isolation';
+  db.prepare(`
+    INSERT OR IGNORE INTO projects(project_id, name, workspace_root, is_default)
+    VALUES(?, '依赖隔离项目', ?, 0)
+  `).run(otherProjectId, `${process.env.LOOP_WORKSPACE_ROOT_OVERRIDE}-dependency`);
+  const localTaskId = await createTask({ title: 'Local dependency endpoint' });
+  const remoteTaskId = await createTask({ projectId: otherProjectId, title: 'Remote dependency endpoint' });
+  assert.throws(
+    () => configureRequirementDependenciesInDb(db, localTaskId, [remoteTaskId]),
+    /前置需求必须属于同一项目/,
+  );
+  assert.throws(
+    () => db.prepare('INSERT INTO task_dependencies(task_id, depends_on_task_id) VALUES(?, ?)').run(localTaskId, remoteTaskId),
+    /前置需求必须属于同一项目/,
+  );
+});

@@ -291,7 +291,7 @@ function requireArtifact(result: AgentResult, agent: string) {
 async function ensureCodeSlotForDelegation(delegation: DelegationEnvelope, result: AgentResult) {
   if (result.outcome !== 'completed' || delegation.agent !== 'dev-agent') return;
   const db = await databaseConnection();
-  const claim = activeResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE);
+  const claim = activeResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, delegation.taskId);
   if (claim && claim.owner_task_id !== delegation.taskId) throw new CodeSlotBusyError(claim.owner_task_id);
   if (!claim) {
     acquireResourceClaimInDb(db, {

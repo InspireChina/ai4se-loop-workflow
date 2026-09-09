@@ -1,9 +1,10 @@
 import Link from 'next/link';
 import { Activity, ScrollText } from 'lucide-react';
 import { formatEventTime } from '../../src/application/event-time';
-import { getRunStatus, listRecentEvents } from '../../src/application/tasks';
+import { countRecentEvents, getRunStatus, listRecentEvents } from '../../src/application/tasks';
 import { agentLabel, terminologyText } from '../../src/domain/terminology';
 import LoopLogStream from '../loop-log-stream';
+import { RecentEventsPagination } from './recent-events-pagination';
 import { RunLifecycleControls } from './run-lifecycle-controls';
 
 export const dynamic = 'force-dynamic';
@@ -18,8 +19,26 @@ function runDetail(run: NonNullable<Awaited<ReturnType<typeof getRunStatus>>>) {
   return `${processKind} · pid ${run.pid ?? '启动中'}${supervisor ? ` · 由 ${supervisor} 管理` : ''}`;
 }
 
-export default async function RunsPage() {
-  const [run, events] = await Promise.all([getRunStatus(), listRecentEvents(30)]);
+const defaultEventsPerPage = 10;
+const allowedEventsPerPage = [10, 20, 50, 100];
+
+function requestedPage(value: string | string[] | undefined) {
+  const parsed = typeof value === 'string' ? Number(value) : 1;
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 1;
+}
+
+function requestedPageSize(value: string | string[] | undefined) {
+  const parsed = typeof value === 'string' ? Number(value) : defaultEventsPerPage;
+  return allowedEventsPerPage.includes(parsed) ? parsed : defaultEventsPerPage;
+}
+
+export default async function RunsPage({ searchParams }: { searchParams: Promise<{ page?: string | string[]; pageSize?: string | string[] }> }) {
+  const { page, pageSize } = await searchParams;
+  const eventsPerPage = requestedPageSize(pageSize);
+  const [run, eventCount] = await Promise.all([getRunStatus(), countRecentEvents()]);
+  const totalPages = Math.max(1, Math.ceil(eventCount / eventsPerPage));
+  const currentPage = Math.min(requestedPage(page), totalPages);
+  const events = await listRecentEvents(eventsPerPage, (currentPage - 1) * eventsPerPage);
 
   return <>
     <header>
@@ -47,8 +66,8 @@ export default async function RunsPage() {
       </div>
     </section>
 
-    <section className="task-section">
-      <div className="section-head"><h2>最近事件</h2><small>{events.length} 条</small></div>
+    <section className="task-section" id="recent-events">
+      <div className="section-head"><h2>最近事件</h2><small>{eventCount} 条</small></div>
       <div className="card run-event-list">
         {events.length === 0 ? <div className="empty">暂无事件。</div> : events.map((event) => <Link href={`/tasks/${event.task_id}`} className="run-event-row" key={event.event_id}>
           <Activity size={14}/>
@@ -57,6 +76,7 @@ export default async function RunsPage() {
           <small>{formatEventTime(event.created_at)}</small>
         </Link>)}
       </div>
+      <RecentEventsPagination currentPage={currentPage} pageSize={eventsPerPage} totalPages={totalPages}/>
     </section>
   </>;
 }

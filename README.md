@@ -110,6 +110,14 @@ npm run loopctl -- status
 npm run loopctl -- paths
 ```
 
+从旧版“每项目一个数据库”迁移时，先运行不带参数的命令查看 `pendingLegacyDatabases`，再为每个历史库显式指定对应项目目录：
+
+```bash
+npm run db:migrate -- --legacy-db /path/to/data/<hash>/loop-ui.db --workspace-root /path/to/project
+```
+
+迁移器会先对源库做 SQLite backup，只在备份上升级 schema，然后将数据合并到全局库。源库不会被修改，导入记录保证重复执行不会重复写入。
+
 ## 桌面应用
 
 桌面版使用 Electron 承载 Next.js standalone 服务，并把 SQLite 数据保存到操作系统的用户数据目录。Agent CLI 和 Git 仍从本机环境中发现，因此使用前需要安装并登录至少一种受支持的 Agent CLI。
@@ -161,6 +169,6 @@ src/domain/          领域模型与协议
 src/application/     Workflow 用例与状态推进
 src/infrastructure/  数据库、Agent、验证与运行适配器
 scripts/loop/         Runner、Agent 命令入口与 loopctl
-migrations/          项目数据库迁移
+migrations/          全局业务数据库迁移
 docs/                工作手册与技术文档
 ```

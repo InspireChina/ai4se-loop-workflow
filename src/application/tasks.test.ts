@@ -153,7 +153,7 @@ test('anchors verified file feedback to document revisions and supplies it to Ag
   detail = await getTask(taskId);
   assert.equal(detail?.documentComments[0].status, 'resolved');
   assert.equal(detail?.documentComments[0].evolution_status, 'analyzed');
-  assert.equal((db.prepare('SELECT COUNT(*) AS count FROM agent_observation_comment_evidence WHERE comment_id = ?').get(commentId) as { count: number }).count, 1);
+  assert.equal((db.prepare('SELECT COUNT(*) AS count FROM project_agent_observation_comment_evidence WHERE comment_id = ?').get(commentId) as { count: number }).count, 1);
 });
 
 test('creates title-only and described Tasks without blocking delegation and serializes description into agent context', async () => {
@@ -186,8 +186,7 @@ test('creates title-only and described Tasks without blocking delegation and ser
   assert.equal((await inspectTaskDispatch(titleOnlyTaskId))[0]?.agent, 'backlog-agent');
   assert.equal((await inspectTaskDispatch(describedTaskId))[0]?.agent, 'backlog-agent');
 
-  // A backlog delegation consumes the browser resource, so isolate each path
-  // when inspecting its serialized Agent input.
+  // Isolate each path when inspecting its serialized Agent input.
   db.prepare("UPDATE tasks SET agile_status = 'done' WHERE task_id NOT IN (?, ?, ?)").run(titleOnlyTaskId, blankDescriptionTaskId, describedTaskId);
   db.prepare("UPDATE tasks SET agile_status = 'done' WHERE task_id = ?").run(blankDescriptionTaskId);
   db.prepare("UPDATE tasks SET agile_status = 'done' WHERE task_id = ?").run(describedTaskId);
@@ -934,7 +933,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
 
   addExecution('execution-runtime-dev-request', 'dev-agent', 'dev');
   await markTestDelegationRunning(envelope('dev-agent', 'dev'), 'execution-runtime-dev-request');
-  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, 'execution-runtime-dev-request');
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   await applyAgentResult('run-runtime-input', envelope('dev-agent', 'dev'), parseAgentResult(JSON.stringify({
     outcome: 'needs_input',
     summary: 'Commit hook requires a delivery card number.',
@@ -979,7 +978,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
   await submitRuntimeInputs(taskId);
   assert.equal((await getTask(taskId))?.task.resume_pending, 0);
   assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, competingTaskId);
-  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, competingExecutionId);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   assert.deepEqual(await inspectTaskDispatch(taskId), []);
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle' WHERE task_id = ?").run(competingTaskId);
   db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE execution_id = ?").run(competingExecutionId);
@@ -993,13 +992,13 @@ test('lets Dev and Test request runtime information and resume the same delivery
     pipeline: 'resume',
     agent: 'dev-agent',
     storyIndex: 1,
-    resources: ['code:workspace', 'browser:exclusive'],
+    resources: ['code:workspace'],
     description: '读取人工输入，并恢复开发验证通道',
   });
   addExecution('execution-runtime-dev-resume', 'dev-agent', 'resume');
   await markTestDelegationRunning(envelope('dev-agent', 'resume'), 'execution-runtime-dev-resume');
   assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, taskId);
-  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, 'execution-runtime-dev-resume');
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   await applyAgentResult('run-runtime-input', envelope('dev-agent', 'resume'), parseAgentResult(JSON.stringify({
     outcome: 'completed',
     summary: 'Implementation completed using the supplied repository metadata.',
@@ -1028,7 +1027,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
 
   addExecution('execution-runtime-test-request', 'test-agent', 'test');
   await markTestDelegationRunning(envelope('test-agent', 'test'), 'execution-runtime-test-request');
-  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, 'execution-runtime-test-request');
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   await applyAgentResult('run-runtime-input', envelope('test-agent', 'test'), parseAgentResult(JSON.stringify({
     outcome: 'needs_input',
     summary: 'A target test environment is required.',
@@ -1047,7 +1046,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
 
   addExecution('execution-runtime-test-resume', 'test-agent', 'resume');
   await markTestDelegationRunning(envelope('test-agent', 'resume'), 'execution-runtime-test-resume');
-  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, 'execution-runtime-test-resume');
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   await applyAgentResult('run-runtime-input', envelope('test-agent', 'resume'), parseAgentResult(JSON.stringify({
     outcome: 'completed',
     summary: 'Black-box verification passed.',
@@ -1323,7 +1322,7 @@ test('records a late Agent result after cancellation without reopening task lane
   assert.deepEqual(recorded, { application_status: 'applied', effect_outcome: 'discarded' });
 });
 
-test('cancels an active Dev requirement and automatically releases both of its resources', async () => {
+test('cancels an active Dev requirement and automatically releases its code resource', async () => {
   const {
     cancelExecution,
     executionCancellationRequested,
@@ -1395,7 +1394,7 @@ test('cancels an active Dev requirement and automatically releases both of its r
     executionId: execution.attempt.execution_id,
   });
   assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, taskId);
-  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_execution_id, execution.attempt.execution_id);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   db.prepare(`
     INSERT INTO agent_results(
       result_id, run_id, task_id, story_index, agent, pipeline, outcome,
@@ -1457,7 +1456,7 @@ test('pauses one requirement without changing its workflow state and resumes it 
     executionId: execution.attempt.execution_id,
   });
   assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, taskId);
-  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE)?.owner_task_id, taskId);
+  assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
 
   await pauseTask({ taskId, reason: '等待下周排期' });
 
@@ -1473,7 +1472,7 @@ test('pauses one requirement without changing its workflow state and resumes it 
   assert.deepEqual(pausedExecution, { status: 'cancelled', last_error: '需求已暂停' });
   assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE), undefined);
   assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
-  assert.match(detail?.events[0]?.summary || '', /已立即释放资源：browser:exclusive、code:workspace/);
+  assert.match(detail?.events[0]?.summary || '', /已立即释放资源：code:workspace/);
 
   await resumeTask({ taskId });
 
@@ -1646,13 +1645,11 @@ test('does not infer code-slot ownership from an Analysis task status', async ()
   assert.equal(competingDev?.agent, 'dev-agent');
 });
 
-test('blocks browser-dependent Dev and Backlog while Idea Context continues without browser', async () => {
+test('does not allocate an exclusive browser resource to browser-using Agents', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const {
     BROWSER_EXCLUSIVE_RESOURCE,
     CODE_WORKSPACE_RESOURCE,
-    acquireResourceClaimInDb,
-    releaseExecutionResourceClaimsInDb,
   } = await import('./resource-claims');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
@@ -1660,14 +1657,9 @@ test('blocks browser-dependent Dev and Backlog while Idea Context continues with
   db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
   db.prepare('DELETE FROM resource_claims').run();
 
-  const ownerTaskId = 'TASK-browser-claim-owner';
   const waitingBrowserTaskId = 'TASK-browser-claim-waiter';
   const devTaskId = 'TASK-browser-independent-dev';
   const ideaTaskId = 'TASK-browser-independent-idea-context';
-  db.prepare(`
-    INSERT INTO tasks(task_id, title, item_type, agile_status, current_subagent, work_dir)
-    VALUES(?, 'Browser owner', 'feature', 'backlog', 'backlog-agent', '')
-  `).run(ownerTaskId);
   db.prepare(`
     INSERT INTO tasks(task_id, title, item_type, agile_status, current_subagent, work_dir)
     VALUES(?, 'Browser waiter', 'feature', 'backlog', 'backlog-agent', '')
@@ -1683,35 +1675,15 @@ test('blocks browser-dependent Dev and Backlog while Idea Context continues with
     INSERT INTO tasks(task_id, title, item_type, agile_status, current_subagent, work_dir)
     VALUES(?, 'Idea context without browser', 'business-analysis', 'backlog', 'idea-context-agent', '')
   `).run(ideaTaskId);
-  db.prepare(`
-    INSERT INTO execution_attempts(
-      execution_id, run_id, task_id, agent, pipeline, lane, delegation_key,
-      attempt, status, input_hash, input_json
-    ) VALUES('EXEC-browser-claim-owner', 'RUN-browser-claim', ?, 'backlog-agent', 'backlog', 'control',
-      'key-browser-claim-owner', 1, 'running', 'hash-browser-claim-owner', '{}')
-  `).run(ownerTaskId);
-  acquireResourceClaimInDb(db, {
-    resourceKey: BROWSER_EXCLUSIVE_RESOURCE,
-    taskId: ownerTaskId,
-    lane: 'control',
-    executionId: 'EXEC-browser-claim-owner',
-  });
-
-  const whileClaimed = await inspectAllDispatch();
-  assert.equal(whileClaimed.some((item) => item.resources.includes(BROWSER_EXCLUSIVE_RESOURCE)), false);
-  assert.equal(whileClaimed.some((item) => item.taskId === devTaskId && item.agent === 'dev-agent'), false);
-  assert.equal(whileClaimed.some((item) => item.taskId === waitingBrowserTaskId && item.agent === 'backlog-agent'), false);
-  const ideaContext = whileClaimed.find((item) => item.taskId === ideaTaskId);
+  const dispatchable = await inspectAllDispatch();
+  assert.equal(dispatchable.some((item) => item.resources.includes(BROWSER_EXCLUSIVE_RESOURCE)), false);
+  assert.equal(dispatchable.some((item) => item.taskId === devTaskId && item.agent === 'dev-agent'), true);
+  assert.equal(dispatchable.some((item) => item.taskId === waitingBrowserTaskId && item.agent === 'backlog-agent'), true);
+  const ideaContext = dispatchable.find((item) => item.taskId === ideaTaskId);
   assert.equal(ideaContext?.agent, 'idea-context-agent');
   assert.deepEqual(ideaContext?.resources, []);
-
-  releaseExecutionResourceClaimsInDb(db, 'EXEC-browser-claim-owner');
-  const afterRelease = await inspectAllDispatch();
-  assert.equal(afterRelease.filter((item) => item.resources.includes(BROWSER_EXCLUSIVE_RESOURCE)).length, 1);
-  assert.equal(afterRelease.some((item) => item.taskId === waitingBrowserTaskId && item.agent === 'backlog-agent'), true);
   assert.deepEqual((await inspectTaskDispatch(devTaskId))[0]?.resources, [
     CODE_WORKSPACE_RESOURCE,
-    BROWSER_EXCLUSIVE_RESOURCE,
   ]);
 });
 
@@ -1720,7 +1692,6 @@ test('persists resource and lane reservations before returning work to the runne
   const { beginRun, endRun } = await import('./tasks');
   const { progressDispatcher } = await import('./progress-dispatch');
   const {
-    BROWSER_EXCLUSIVE_RESOURCE,
     CODE_WORKSPACE_RESOURCE,
   } = await import('./resource-claims');
   const db = await databaseConnection();
@@ -1746,7 +1717,7 @@ test('persists resource and lane reservations before returning work to the runne
   db.prepare("UPDATE tasks SET priority = '1' WHERE task_id = ?").run(backlogTaskId);
 
   const dev = (await inspectTaskDispatch(devTaskId))[0];
-  assert.deepEqual(dev.resources, [CODE_WORKSPACE_RESOURCE, BROWSER_EXCLUSIVE_RESOURCE]);
+  assert.deepEqual(dev.resources, [CODE_WORKSPACE_RESOURCE]);
   assert.equal((db.prepare('SELECT COUNT(*) AS count FROM resource_claims').get() as { count: number }).count, 0);
 
   const runId = await beginRun('dispatch-reservation-test');
@@ -1755,8 +1726,8 @@ test('persists resource and lane reservations before returning work to the runne
     assert.equal(reserved.kind, 'reserved');
     const devReservation = reserved.reservations.find((item) => item.work.taskId === devTaskId);
     assert.ok(devReservation);
-    assert.deepEqual(devReservation.claimedResources, [CODE_WORKSPACE_RESOURCE, BROWSER_EXCLUSIVE_RESOURCE]);
-    assert.equal((db.prepare('SELECT COUNT(*) AS count FROM resource_claims').get() as { count: number }).count, 2);
+    assert.deepEqual(devReservation.claimedResources, [CODE_WORKSPACE_RESOURCE]);
+    assert.equal((db.prepare('SELECT COUNT(*) AS count FROM resource_claims').get() as { count: number }).count, 1);
 
     const refill = await progressDispatcher.reserveNext({ runId });
     assert.equal(refill.kind, 'wait');
@@ -1765,7 +1736,7 @@ test('persists resource and lane reservations before returning work to the runne
   }
 });
 
-test('dispatches the highest numeric priority first when requirements compete for one resource', async () => {
+test('orders concurrently dispatchable requirements by numeric priority', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { createTask } = await import('./tasks');
   const db = await databaseConnection();
@@ -1779,7 +1750,7 @@ test('dispatches the highest numeric priority first when requirements compete fo
   const contenders = (await inspectAllDispatch()).filter((item) =>
     item.taskId === lowPriorityTaskId || item.taskId === highPriorityTaskId);
 
-  assert.equal(contenders.length, 1);
+  assert.equal(contenders.length, 2);
   assert.equal(contenders[0].taskId, highPriorityTaskId);
   assert.equal(contenders[0].priority, '9');
 });
@@ -1834,7 +1805,7 @@ test('applies the configured global Agent concurrency to Analysis and preserves 
   }
 });
 
-test('shares the global Agent concurrency limit between locked and unlocked Agents', async () => {
+test('shares the global Agent concurrency limit between browser and non-browser Agents', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { createTask } = await import('./tasks');
   const { getAgentConcurrency, setAgentConcurrency } = await import('./project-settings');
@@ -1849,7 +1820,7 @@ test('shares the global Agent concurrency limit between locked and unlocked Agen
     await setAgentConcurrency(2);
     const lockedTaskId = await createTask({ title: 'Locked active Agent' });
     const lockedDelegation = (await inspectTaskDispatch(lockedTaskId))[0];
-    assert.deepEqual(lockedDelegation.resources, ['browser:exclusive']);
+    assert.deepEqual(lockedDelegation.resources, []);
     await beginTestExecutionAttempt({
       runId: 'run-global-agent-concurrency-locked',
       delegation: lockedDelegation,
@@ -2019,167 +1990,84 @@ test('does not consume an Agent slot after Analysis has exited and its result is
   assert.equal(dispatched.length, 4);
 });
 
-test('uses one global Agent Prompt while keeping Memory and legacy Prompt rows project-scoped', async () => {
+test('keeps one hidden global role Prompt while isolating Overlay and Memory by project', async () => {
   const {
     ensureAgentRuntimeWorkspace,
-    agentProfileInternals,
     getAgentProfile,
     loadAgentRuntime,
     resetAgentPromptToSystemTemplate,
     saveAgentMemory,
     saveAgentPrompt,
   } = await import('./agent-profiles');
-  const { appDatabaseConnection, databaseConnection, hash } = await import('../infrastructure/database');
+  const { databaseConnection, hash, paths } = await import('../infrastructure/database');
   const { AGENT_PROFILE_DEFINITIONS } = await import('../domain/agent-profile');
-
-  const runtimeRoot = await ensureAgentRuntimeWorkspace();
-  assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
-  const original = await getAgentProfile('dev-agent');
-  assert.equal(original.profile.prompt_seed_revision, 14);
-  assert.equal(original.currentPrompt.version, 1);
-  assert.equal(original.currentPrompt.template_version, 14);
-  assert.equal(original.currentPrompt.source, 'system');
-  assert.equal(original.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
-  assert.equal('promptHistory' in original, false);
-  assert.equal(existsSync(join(original.runtimeDirectory, 'history')), false);
-  assert.equal(existsSync(join(original.runtimeDirectory, 'candidates')), false);
-  assert.ok(original.currentPrompt.content.length > 800);
-  assert.match(original.currentPrompt.content, /# 角色目标/);
-  assert.match(original.currentPrompt.content, /# 完成条件/);
-
   const db = await databaseConnection();
+  const runtimeRoot = await ensureAgentRuntimeWorkspace();
+  const defaultProject = await getAgentProfile('dev-agent');
+  const secondProjectId = 'PRJ-agent-knowledge-isolation';
   db.prepare(`
-    UPDATE agent_prompts
-    SET version = 1, template_version = 1, content = '旧系统模板', content_hash = ?, source = 'system'
-    WHERE agent_id = 'review-agent'
-  `).run(hash('旧系统模板'));
-  db.prepare(`
-    UPDATE agent_profiles
-    SET current_prompt_version = 1, prompt_seed_revision = 1, candidate_prompt_version = NULL
-    WHERE agent_id = 'review-agent'
-  `).run();
+    INSERT INTO projects(project_id, name, workspace_root, description)
+    VALUES(?, 'Second project', ?, 'Agent knowledge isolation test')
+  `).run(secondProjectId, `${paths.root}-second`);
   await ensureAgentRuntimeWorkspace();
-  const upgradedSystemSeed = await getAgentProfile('review-agent');
-  assert.equal(upgradedSystemSeed.profile.prompt_seed_revision, 14);
-  assert.equal(upgradedSystemSeed.currentPrompt.version, 1);
-  assert.equal(upgradedSystemSeed.currentPrompt.template_version, 14);
-  assert.equal(upgradedSystemSeed.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['review-agent'].prompt);
 
-  const legacyPrompt = '判断需求类型并整理上下文，完成时提供分类、流程方向和需求文档。';
-  db.prepare(`
-    UPDATE agent_prompts SET content = ?, content_hash = ?
-    WHERE agent_id = 'backlog-agent'
-  `).run(legacyPrompt, hash(legacyPrompt));
-  db.prepare(`
-    UPDATE agent_profiles SET current_prompt_version = 1, candidate_prompt_version = NULL, prompt_seed_revision = 0
-    WHERE agent_id = 'backlog-agent'
-  `).run();
-  agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
+  assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
+  assert.equal(defaultProject.currentPrompt.version, 14);
+  assert.equal(defaultProject.currentPrompt.template_version, 14);
+  assert.equal(defaultProject.currentPrompt.source, 'system');
+  assert.equal(defaultProject.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
+  assert.equal('promptHistory' in defaultProject, false);
+  assert.equal(existsSync(join(defaultProject.runtimeDirectory, 'history')), false);
+  assert.equal(existsSync(join(defaultProject.runtimeDirectory, 'candidates')), false);
+
+  const overlayA = `${defaultProject.currentPrompt.content}\n\n# 默认项目约定\n\n- 使用 npm test。`;
+  const overlayB = `${defaultProject.currentPrompt.content}\n\n# 第二项目约定\n\n- 使用 pnpm test。`;
+  const overlayRevisionA = await saveAgentPrompt({ projectId: defaultProject.project.project_id, agentId: 'dev-agent', content: overlayA });
+  const overlayRevisionB = await saveAgentPrompt({ projectId: secondProjectId, agentId: 'dev-agent', content: overlayB });
+  const memoryRevisionA = await saveAgentMemory({ projectId: defaultProject.project.project_id, agentId: 'dev-agent', content: '# Durable Memory\n\n- 默认项目经验。' });
+  const memoryRevisionB = await saveAgentMemory({ projectId: secondProjectId, agentId: 'dev-agent', content: '# Durable Memory\n\n- 第二项目经验。' });
+
+  const detailA = await getAgentProfile('dev-agent', true, defaultProject.project.project_id);
+  const detailB = await getAgentProfile('dev-agent', true, secondProjectId);
+  assert.equal(detailA.currentPrompt.content, detailB.currentPrompt.content);
+  assert.equal(detailA.projectOverlay.content, overlayA);
+  assert.equal(detailB.projectOverlay.content, overlayB);
+  assert.equal(detailA.projectOverlay.revision, overlayRevisionA);
+  assert.equal(detailB.projectOverlay.revision, overlayRevisionB);
+  assert.equal(detailA.currentMemory.revision, memoryRevisionA);
+  assert.equal(detailB.currentMemory.revision, memoryRevisionB);
+  assert.match(detailA.currentMemory.content, /默认项目经验/);
+  assert.match(detailB.currentMemory.content, /第二项目经验/);
+  assert.notEqual(detailA.runtimeDirectory, detailB.runtimeDirectory);
+
+  const runtimeA = await loadAgentRuntime('dev-agent', 'plan', defaultProject.project.project_id);
+  const runtimeB = await loadAgentRuntime('dev-agent', 'plan', secondProjectId);
+  assert.match(runtimeA.prompt, /# 角色目标/);
+  assert.match(runtimeA.prompt, /默认项目约定/);
+  assert.doesNotMatch(runtimeA.prompt, /第二项目约定/);
+  assert.match(runtimeB.prompt, /# 角色目标/);
+  assert.match(runtimeB.prompt, /第二项目约定/);
+  assert.doesNotMatch(runtimeB.prompt, /默认项目约定/);
+  assert.equal(runtimeA.promptHash, hash(runtimeA.prompt));
+  assert.equal(runtimeB.promptHash, hash(runtimeB.prompt));
+
+  writeFileSync(join(detailA.runtimeDirectory, 'PROMPT.md'), `${runtimeA.prompt}\n- 不应反向导入。`);
   await ensureAgentRuntimeWorkspace();
-  const upgradedSeed = await getAgentProfile('backlog-agent');
-  assert.equal(upgradedSeed.currentPrompt.version, 1);
-  assert.equal(upgradedSeed.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt);
-  assert.equal(upgradedSeed.currentPrompt.source, 'system');
-  assert.equal(
-    (db.prepare("SELECT COUNT(*) AS count FROM agent_prompts WHERE agent_id = 'backlog-agent'").get() as { count: number }).count,
-    1,
-  );
-  agentProfileInternals.atomicWrite(join(agentProfileInternals.agentDirectory('backlog-agent'), 'PROMPT.md'), legacyPrompt);
-  db.prepare("DELETE FROM agent_prompts WHERE agent_id = 'backlog-agent'").run();
-  await ensureAgentRuntimeWorkspace();
-  const resetBaseline = await getAgentProfile('backlog-agent');
-  assert.equal(resetBaseline.currentPrompt.version, 1);
-  assert.equal(resetBaseline.currentPrompt.template_version, 14);
-  assert.match(resetBaseline.currentPrompt.content, /# 工作原则/);
-  assert.doesNotMatch(resetBaseline.currentPrompt.content, /完成时提供分类、流程方向/);
-  assert.match(
-    readFileSync(join(resetBaseline.runtimeDirectory, 'PROMPT.md'), 'utf8'),
-    /# 工作原则/,
-  );
-  assert.equal(
-    (appDatabaseConnection().prepare("SELECT COUNT(*) AS count FROM agent_configuration_sets WHERE agent_id = 'backlog-agent' AND is_active = 1").get() as { count: number }).count,
-    1,
-  );
-  const resumedBacklog = await loadAgentRuntime('backlog-agent', 'resume');
-  assert.match(resumedBacklog.prompt, /已有用户决定必须按原 key 继承/);
-  const resumedAnalyst = await loadAgentRuntime('analyst-agent', 'resume');
-  assert.match(resumedAnalyst.prompt, /decision key 是跨轮次不可变的系统标识/);
-  assert.match(resumedAnalyst.prompt, /逐字复用/);
+  assert.doesNotMatch(readFileSync(join(detailA.runtimeDirectory, 'PROMPT.md'), 'utf8'), /不应反向导入/);
 
-  const projectPrompt = `${original.currentPrompt.content}\n\n# 全局 Agent 约定\n\n- 在修改前先读取相关交付规格。`;
-  const promptRevision = await saveAgentPrompt({ agentId: 'dev-agent', content: projectPrompt, reason: 'test global prompt' });
-  const memoryRevision = await saveAgentMemory({
-    agentId: 'dev-agent',
-    content: '# Durable Memory\n\n- 项目使用 npm test 运行确定性测试。',
-    reason: 'test memory revision',
-  });
-  const edited = await getAgentProfile('dev-agent');
-  assert.equal(edited.currentPrompt.version, promptRevision);
-  assert.equal(edited.currentPrompt.source, 'human');
-  assert.equal(edited.currentPrompt.content, projectPrompt);
-  assert.equal(edited.currentPrompt.content_hash, hash(projectPrompt));
-  assert.equal(edited.currentMemory.revision, memoryRevision);
-  assert.equal(edited.memoryHistory.length, original.memoryHistory.length + 1);
-  assert.equal(
-    (db.prepare("SELECT COUNT(*) AS count FROM agent_prompts WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
-    1,
-  );
-  assert.equal(
-    readFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), 'utf8').trim(),
-    projectPrompt,
-  );
-  assert.match(readFileSync(join(edited.runtimeDirectory, 'MEMORY.md'), 'utf8'), /npm test/);
-
-  await ensureAgentRuntimeWorkspace();
-  const preserved = await getAgentProfile('dev-agent');
-  assert.equal(preserved.currentPrompt.content, projectPrompt);
-  assert.equal(preserved.currentPrompt.version, promptRevision);
-
-  const localPrompt = `${projectPrompt}\n- 这条旧本地内容不得反向导入数据库。`;
-  writeFileSync(join(edited.runtimeDirectory, 'PROMPT.md'), localPrompt);
-  await ensureAgentRuntimeWorkspace();
-  const reconciled = await getAgentProfile('dev-agent');
-  assert.equal(reconciled.currentPrompt.version, promptRevision);
-  assert.equal(reconciled.currentPrompt.content, projectPrompt);
-  assert.doesNotMatch(readFileSync(join(reconciled.runtimeDirectory, 'PROMPT.md'), 'utf8'), /旧本地内容/);
-  assert.equal(
-    (db.prepare("SELECT COUNT(*) AS count FROM agent_prompts WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
-    1,
-  );
-  const runtime = await loadAgentRuntime('dev-agent', 'plan');
-  assert.equal(runtime.promptVersion, reconciled.currentPrompt.version);
-  assert.equal(runtime.promptTemplateVersion, 14);
-  assert.equal(runtime.promptHash, hash(projectPrompt));
-  assert.equal(runtime.promptStatus, 'active');
-  assert.equal(runtime.evolutionCandidateId, null);
-  assert.equal(runtime.prompt, projectPrompt);
-  assert.match(runtime.prompt, /在修改前先读取相关交付规格/);
-  assert.match(runtime.memory, /npm test/);
-
-  const resetRevision = await resetAgentPromptToSystemTemplate({ agentId: 'dev-agent' });
-  const reset = await getAgentProfile('dev-agent');
-  assert.equal(resetRevision, promptRevision + 1);
-  assert.equal(reset.currentPrompt.version, resetRevision);
-  assert.equal(reset.currentPrompt.template_version, 14);
-  assert.equal(reset.currentPrompt.source, 'system');
-  assert.equal(reset.currentPrompt.reason, '用户重置为系统模板 V14');
-  assert.equal(reset.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
-  assert.equal(reset.currentMemory.revision, memoryRevision);
-  assert.equal(reset.candidatePrompt, null);
-  assert.equal(
-    readFileSync(join(reset.runtimeDirectory, 'PROMPT.md'), 'utf8').trim(),
-    AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt,
-  );
-  assert.match(readFileSync(join(reset.runtimeDirectory, 'MEMORY.md'), 'utf8'), /npm test/);
-  assert.equal(
-    await resetAgentPromptToSystemTemplate({ agentId: 'dev-agent' }),
-    resetRevision,
-  );
+  const resetRevision = await resetAgentPromptToSystemTemplate({ projectId: defaultProject.project.project_id, agentId: 'dev-agent' });
+  const resetA = await getAgentProfile('dev-agent', false, defaultProject.project.project_id);
+  const preservedB = await getAgentProfile('dev-agent', false, secondProjectId);
+  assert.equal(resetRevision, overlayRevisionA + 1);
+  assert.equal(resetA.projectOverlay.content, resetA.currentPrompt.content);
+  assert.equal(resetA.currentMemory.revision, memoryRevisionA);
+  assert.equal(preservedB.projectOverlay.content, overlayB);
+  assert.equal(await resetAgentPromptToSystemTemplate({ projectId: defaultProject.project.project_id, agentId: 'dev-agent' }), resetRevision);
 });
 
-test('promotes repeated project evidence into a global Prompt through deterministic Canary runs', async () => {
+test('promotes repeated project evidence into only that project Overlay through deterministic Canary runs', async () => {
   const { createTask } = await import('./tasks');
-  const { appDatabaseConnection, databaseConnection, hash } = await import('../infrastructure/database');
+  const { databaseConnection, hash } = await import('../infrastructure/database');
   const { applyEvolutionResult, beginEvolutionRun, updatePromptCanary } = await import('./agent-evolution');
   const { ensureAgentRuntimeWorkspace, getAgentProfile, loadAgentRuntime } = await import('./agent-profiles');
   const { cancelExecution } = await import('./executions');
@@ -2242,24 +2130,22 @@ test('promotes repeated project evidence into a global Prompt through determinis
   assert.equal(detail.profile.canary_remaining, 3);
   assert.equal(hash(detail.candidatePrompt!.content), detail.candidatePrompt!.content_hash);
   assert.match(detail.candidatePrompt!.content, /# 角色目标/);
-  assert.equal(detail.candidatePrompt!.base_prompt_revision, detail.currentPrompt.version);
-  assert.ok(
-    detail.candidatePrompt!.content.indexOf(detail.currentPrompt.content)
-    < detail.candidatePrompt!.content.indexOf('EVOLUTION:verify-before-completion'),
-  );
+  assert.equal(detail.candidatePrompt!.base_overlay_revision, detail.projectOverlay.revision);
+  assert.match(detail.candidatePrompt!.content, /EVOLUTION:verify-before-completion/);
   const candidateId = detail.candidatePrompt!.candidate_id;
-  const candidateRuntime = await loadAgentRuntime('dev-agent');
+  const projectId = detail.project.project_id;
+  const candidateRuntime = await loadAgentRuntime('dev-agent', undefined, projectId);
   assert.equal(candidateRuntime.evolutionCandidateId, candidateId);
   assert.equal(candidateRuntime.promptVersion, detail.candidatePrompt!.revision);
   assert.equal(candidateRuntime.promptTemplateVersion, detail.currentPrompt.template_version);
   assert.match(candidateRuntime.prompt, /# 角色目标/);
   assert.match(candidateRuntime.prompt, /EVOLUTION:verify-before-completion/);
   assert.equal(
-    (db.prepare("SELECT COUNT(*) AS count FROM agent_prompts WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
+    (db.prepare("SELECT COUNT(*) AS count FROM project_agent_overlays WHERE project_id = ? AND agent_id = 'dev-agent'").get(projectId) as { count: number }).count,
     1,
   );
   assert.equal(
-    (appDatabaseConnection().prepare("SELECT COUNT(*) AS count FROM agent_configuration_prompt_candidates WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
+    (db.prepare("SELECT COUNT(*) AS count FROM project_agent_overlay_candidates WHERE project_id = ? AND agent_id = 'dev-agent'").get(projectId) as { count: number }).count,
     1,
   );
 
@@ -2330,23 +2216,24 @@ test('promotes repeated project evidence into a global Prompt through determinis
   }
   detail = await getAgentProfile('dev-agent');
   assert.equal(detail.candidatePrompt, null);
-  assert.match(detail.currentPrompt.content, /EVOLUTION:verify-before-completion/);
-  assert.equal(hash(detail.currentPrompt.content), detail.currentPrompt.content_hash);
+  assert.match(detail.projectOverlay.content, /EVOLUTION:verify-before-completion/);
+  assert.equal(hash(detail.projectOverlay.content), detail.projectOverlay.content_hash);
+  assert.doesNotMatch(detail.currentPrompt.content, /EVOLUTION:verify-before-completion/);
   assert.equal(detail.observations.find((item) => item.fingerprint === 'verify-before-completion')?.status, 'promoted_prompt');
   assert.equal(
-    (db.prepare("SELECT COUNT(*) AS count FROM agent_prompts WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
+    (db.prepare("SELECT COUNT(*) AS count FROM project_agent_overlays WHERE project_id = ? AND agent_id = 'dev-agent'").get(projectId) as { count: number }).count,
     1,
   );
   assert.equal(
-    (appDatabaseConnection().prepare("SELECT COUNT(*) AS count FROM agent_configuration_prompt_candidates WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
+    (db.prepare("SELECT COUNT(*) AS count FROM project_agent_overlay_candidates WHERE project_id = ? AND agent_id = 'dev-agent'").get(projectId) as { count: number }).count,
     0,
   );
-  const promotedPrompt = detail.currentPrompt;
+  const promotedOverlay = detail.projectOverlay;
   await ensureAgentRuntimeWorkspace();
   detail = await getAgentProfile('dev-agent');
-  assert.equal(detail.currentPrompt.version, promotedPrompt.version);
-  assert.equal(detail.currentPrompt.content_hash, promotedPrompt.content_hash);
-  const upgradedRuntime = await loadAgentRuntime('dev-agent');
+  assert.equal(detail.projectOverlay.revision, promotedOverlay.revision);
+  assert.equal(detail.projectOverlay.content_hash, promotedOverlay.content_hash);
+  const upgradedRuntime = await loadAgentRuntime('dev-agent', undefined, projectId);
   assert.match(upgradedRuntime.prompt, /# 角色目标/);
   assert.match(upgradedRuntime.prompt, /EVOLUTION:verify-before-completion/);
 
@@ -2354,7 +2241,7 @@ test('promotes repeated project evidence into a global Prompt through determinis
   await evaluate('evo-rollback-2', taskB, 'avoid-ambiguous-tool-order', 'prompt');
   await evaluate('evo-rollback-3', taskB, 'avoid-ambiguous-tool-order', 'prompt');
   detail = await getAgentProfile('dev-agent');
-  const currentPromptBeforeRejectedCanary = detail.currentPrompt;
+  const currentOverlayBeforeRejectedCanary = detail.projectOverlay;
   const rejectedCandidateId = detail.candidatePrompt!.candidate_id;
   for (const index of [1, 2, 3]) addExecution(`late-canary-success-${index}`, taskA, rejectedCandidateId);
   addExecution('late-canary-failure', taskB, rejectedCandidateId);
@@ -2362,15 +2249,15 @@ test('promotes repeated project evidence into a global Prompt through determinis
   await ensureAgentRuntimeWorkspace();
   detail = await getAgentProfile('dev-agent');
   assert.ok(detail.candidatePrompt);
-  assert.equal(detail.currentPrompt.content_hash, currentPromptBeforeRejectedCanary.content_hash);
+  assert.equal(detail.projectOverlay.content_hash, currentOverlayBeforeRejectedCanary.content_hash);
   db.prepare("UPDATE execution_attempts SET status = 'retryable_failed' WHERE execution_id = 'late-canary-failure'").run();
   await ensureAgentRuntimeWorkspace();
   detail = await getAgentProfile('dev-agent');
   assert.equal(detail.candidatePrompt, null);
-  assert.equal(detail.currentPrompt.version, currentPromptBeforeRejectedCanary.version);
-  assert.equal(detail.currentPrompt.content_hash, currentPromptBeforeRejectedCanary.content_hash);
+  assert.equal(detail.projectOverlay.revision, currentOverlayBeforeRejectedCanary.revision);
+  assert.equal(detail.projectOverlay.content_hash, currentOverlayBeforeRejectedCanary.content_hash);
   assert.equal(
-    (appDatabaseConnection().prepare("SELECT COUNT(*) AS count FROM agent_configuration_prompt_candidates WHERE agent_id = 'dev-agent'").get() as { count: number }).count,
+    (db.prepare("SELECT COUNT(*) AS count FROM project_agent_overlay_candidates WHERE project_id = ? AND agent_id = 'dev-agent'").get(projectId) as { count: number }).count,
     0,
   );
   assert.equal(detail.observations.find((item) => item.fingerprint === 'avoid-ambiguous-tool-order')?.status, 'rejected');

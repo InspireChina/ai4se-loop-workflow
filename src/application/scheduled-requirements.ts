@@ -18,9 +18,11 @@ import {
   publishRuntimeInvalidation,
 } from './runtime-events';
 import { createTaskInDb, createTaskSchema } from './tasks';
+import { defaultProjectInDb, projectInDb } from './projects';
 
 export type ScheduledRequirementPlan = {
   plan_id: string;
+  project_id: string;
   recurrence_kind: ScheduleRecurrenceKind;
   timezone: string;
   local_time: string | null;
@@ -58,6 +60,7 @@ export type ScheduledRequirementOccurrence = {
 
 const scheduleInputSchema = z.object({
   planId: z.string().uuid().optional(),
+  projectId: z.string().trim().min(1).optional().nullable(),
   recurrenceKind: z.enum(SCHEDULE_RECURRENCE_KINDS),
   timezone: z.string().trim().min(1).default(systemTimeZone()),
   localTime: z.string().trim().optional().nullable(),
@@ -126,11 +129,12 @@ function normalizeInput(input: unknown, now = new Date()) {
 
 export async function listScheduledRequirements(options: { includeDeleted?: boolean } = {}) {
   const db = await databaseConnection();
-  const where = options.includeDeleted ? '' : 'WHERE deleted_at IS NULL';
+  const planFilter = options.includeDeleted ? '1 = 1' : 'plan.deleted_at IS NULL';
   return db.prepare(`
-    SELECT * FROM scheduled_requirement_plans
-    ${where}
-    ORDER BY enabled DESC, COALESCE(next_trigger_at, '9999-12-31'), created_at DESC
+    SELECT plan.* FROM scheduled_requirement_plans plan
+    JOIN projects project ON project.project_id = plan.project_id
+    WHERE ${planFilter} AND project.deleted_at IS NULL
+    ORDER BY plan.enabled DESC, COALESCE(plan.next_trigger_at, '9999-12-31'), plan.created_at DESC
   `).all() as ScheduledRequirementPlan[];
 }
 
@@ -148,15 +152,18 @@ export async function createScheduledRequirement(input: unknown) {
   const normalized = normalizeInput(input);
   const planId = randomUUID();
   const db = await databaseConnection();
+  const project = normalized.value.projectId ? projectInDb(db, normalized.value.projectId) : defaultProjectInDb(db);
+  if (!project) throw new Error('指定项目不存在');
   const scheduleRevision = db.transaction(() => {
     db.prepare(`
       INSERT INTO scheduled_requirement_plans(
-        plan_id, recurrence_kind, timezone, local_time, weekday, day_of_month, once_at,
+        plan_id, project_id, recurrence_kind, timezone, local_time, weekday, day_of_month, once_at,
         template_title, template_description, template_pipeline, template_priority,
         template_metadata_json, next_trigger_at
-      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       planId,
+      project.project_id,
       normalized.schedule.recurrenceKind,
       normalized.schedule.timezone,
       normalized.schedule.localTime,
@@ -181,15 +188,39 @@ export async function updateScheduledRequirement(input: unknown) {
   const value = scheduleInputSchema.extend({ planId: z.string().uuid() }).parse(input);
   const normalized = normalizeInput(value);
   const db = await databaseConnection();
+  const current = db.prepare('SELECT project_id FROM scheduled_requirement_plans WHERE plan_id = ? AND deleted_at IS NULL')
+    .get(value.planId) as { project_id: string } | undefined;
+  if (!current) throw new Error('定时计划不存在');
+  const project = projectInDb(db, normalized.value.projectId || current.project_id);
+  if (!project) throw new Error('指定项目不存在');
+  if (project.project_id !== current.project_id) {
+    const materialized = db.prepare(`
+      SELECT 1
+      FROM scheduled_requirement_plans plan
+      WHERE plan.plan_id = ?
+        AND (
+          plan.last_task_id IS NOT NULL
+          OR EXISTS (
+            SELECT 1 FROM scheduled_requirement_occurrences occurrence
+            WHERE occurrence.plan_id = plan.plan_id AND occurrence.task_id IS NOT NULL
+          )
+        )
+      LIMIT 1
+    `).get(value.planId);
+    if (materialized) {
+      throw new Error('定时计划已经生成过需求，不能切换项目；请为目标项目新建计划');
+    }
+  }
   const scheduleRevision = db.transaction(() => {
     const updated = db.prepare(`
       UPDATE scheduled_requirement_plans
-      SET recurrence_kind = ?, timezone = ?, local_time = ?, weekday = ?, day_of_month = ?, once_at = ?,
+      SET project_id = ?, recurrence_kind = ?, timezone = ?, local_time = ?, weekday = ?, day_of_month = ?, once_at = ?,
           template_title = ?, template_description = ?, template_pipeline = ?, template_priority = ?,
           template_metadata_json = ?, enabled = 1, schedule_revision = schedule_revision + 1,
           next_trigger_at = ?, last_error = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE plan_id = ? AND deleted_at IS NULL
     `).run(
+      project.project_id,
       normalized.schedule.recurrenceKind,
       normalized.schedule.timezone,
       normalized.schedule.localTime,
@@ -264,9 +295,11 @@ type MaterializedSchedule = { planId: string; taskId: string; scheduledFor: stri
 export async function materializeDueScheduledRequirements(now = new Date()) {
   const db = await databaseConnection();
   const due = db.prepare(`
-    SELECT * FROM scheduled_requirement_plans
-    WHERE enabled = 1 AND deleted_at IS NULL AND next_trigger_at IS NOT NULL AND next_trigger_at <= ?
-    ORDER BY next_trigger_at, plan_id
+    SELECT plan.* FROM scheduled_requirement_plans plan
+    JOIN projects project ON project.project_id = plan.project_id
+    WHERE plan.enabled = 1 AND plan.deleted_at IS NULL AND project.deleted_at IS NULL
+      AND plan.next_trigger_at IS NOT NULL AND plan.next_trigger_at <= ?
+    ORDER BY plan.next_trigger_at, plan.plan_id
   `).all(now.toISOString()) as ScheduledRequirementPlan[];
   const created: MaterializedSchedule[] = [];
   const failed: Array<{ planId: string; error: string; retryAt: string }> = [];
@@ -279,7 +312,11 @@ export async function materializeDueScheduledRequirements(now = new Date()) {
       let materialized: MaterializedSchedule | null = null;
       db.exec('BEGIN IMMEDIATE');
       try {
-        const plan = db.prepare('SELECT * FROM scheduled_requirement_plans WHERE plan_id = ?').get(candidate.plan_id) as ScheduledRequirementPlan | undefined;
+        const plan = db.prepare(`
+          SELECT plan.* FROM scheduled_requirement_plans plan
+          JOIN projects project ON project.project_id = plan.project_id
+          WHERE plan.plan_id = ? AND project.deleted_at IS NULL
+        `).get(candidate.plan_id) as ScheduledRequirementPlan | undefined;
         if (!plan?.enabled || plan.deleted_at || !plan.next_trigger_at || new Date(plan.next_trigger_at).getTime() > now.getTime()) {
           db.exec('ROLLBACK');
           continue;
@@ -318,6 +355,7 @@ export async function materializeDueScheduledRequirements(now = new Date()) {
           continue;
         }
         const parsedTask = createTaskSchema.parse({
+          projectId: plan.project_id,
           title: plan.template_title,
           description: plan.template_description,
           itemType: plan.template_pipeline,

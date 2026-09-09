@@ -5,6 +5,7 @@ import { EXECUTION_FAILURE_MAX_RETRIES } from '../../../../../src/application/ex
 import { waitForExecutionRetryBackoff, type ExecutionRecoveryMode } from '../../../../../src/application/execution-retry-policy';
 import { sanitizeDiagnosticText } from '../../../../../src/infrastructure/diagnostic-text';
 import { runTaskContextChatTurn } from '../../../../../src/infrastructure/task-context-chat-executor';
+import { taskWorkspaceRoot } from '../../../../../src/application/projects';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -36,6 +37,7 @@ export async function POST(request: Request, context: { params: Promise<{ taskId
           const body = await request.json() as { message?: unknown };
           const settings = await getAgentExecutorSettings();
           claimed = await beginTaskContextChatTurn(taskId, body.message, settings.executorId);
+          const workspaceRoot = await taskWorkspaceRoot(taskId);
           const claimedMessageId = claimed.messageId;
           send({ type: 'accepted', executor: claimed.session.executor });
           let providerSessionId = claimed.session.providerSessionId;
@@ -52,6 +54,7 @@ export async function POST(request: Request, context: { params: Promise<{ taskId
                 providerSessionId,
                 message: claimed.message,
                 commandToken: claimed.commandToken,
+                workspaceRoot,
                 executionOptions: agentExecutionOptions({ ...settings, executorId: claimed.session.executor }),
                 recoveryMode,
                 retryNumber,

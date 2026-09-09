@@ -20,7 +20,7 @@ description: 拉取并分析单个 LoopWork Langfuse trace，定位 Agent 执行
 python3 .ai/skills/langfuse-trace-analyzer/scripts/fetch_trace.py <trace_id>
 ```
 
-   - 脚本会按应用相同的优先级读取当前 shell、项目 `.env` / `.env.local`，以及当前工作区数据库 `project_settings` 中的：
+   - 脚本会按应用相同的优先级读取当前 shell、项目 `.env` / `.env.local`，以及全局业务数据库 `project_settings` 中的：
      - `LANGFUSE_BASE_URL`
      - `LANGFUSE_PUBLIC_KEY`
      - `LANGFUSE_SECRET_KEY`

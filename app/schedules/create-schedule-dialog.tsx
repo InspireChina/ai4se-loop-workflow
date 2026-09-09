@@ -3,8 +3,9 @@
 import { useRef } from 'react';
 import { CalendarClock, Plus, X } from 'lucide-react';
 import { ScheduleForm } from './schedule-form';
+import type { Project } from '../../src/application/projects';
 
-export function CreateScheduleDialog({ timezones }: { timezones: string[] }) {
+export function CreateScheduleDialog({ timezones, projects }: { timezones: string[]; projects: Project[] }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const close = () => dialogRef.current?.close();
 
@@ -19,7 +20,7 @@ export function CreateScheduleDialog({ timezones }: { timezones: string[] }) {
         <div><p className="eyebrow">NEW SCHEDULE</p><h2><CalendarClock size={19}/>新建定时计划</h2></div>
         <button className="icon-button" type="button" aria-label="关闭" onClick={close}><X size={18}/></button>
       </div>
-      <ScheduleForm timezones={timezones} onCancel={close}/>
+      <ScheduleForm timezones={timezones} projects={projects} onCancel={close}/>
     </dialog>
   </>;
 }

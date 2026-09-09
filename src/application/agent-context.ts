@@ -132,8 +132,8 @@ function markdownFiles(root: string): string[] {
   return files;
 }
 
-function repositoryOpenSpecDocuments(): RepositoryDocument[] {
-  const workspaceRoot = resolve(paths.root);
+function repositoryOpenSpecDocuments(workspaceRootInput: string): RepositoryDocument[] {
+  const workspaceRoot = resolve(workspaceRootInput);
   const changesRoot = join(workspaceRoot, 'openspec', 'changes');
   let roots: string[] = [];
   try {
@@ -358,6 +358,7 @@ export function buildAgentContextSnapshot(input: {
   activeFeedback: DocumentComment[];
   activeRecovery: RecoveryItem[];
   repositoryBaseCommit?: string | null;
+  workspaceRoot?: string;
 }) {
   const { delegation, full } = input;
   const currentStory = delegation.storyIndex
@@ -436,7 +437,7 @@ export function buildAgentContextSnapshot(input: {
 
   const allResources: AgentContextResource[] = [];
   if (activeAgentConfigurationContextAdapter(delegation.agent) === 'openspec') {
-    for (const repositoryDocument of repositoryOpenSpecDocuments()) {
+    for (const repositoryDocument of repositoryOpenSpecDocuments(input.workspaceRoot || paths.root)) {
       allResources.push(repositoryDocumentResource(repositoryDocument, delegation.taskId));
     }
   }

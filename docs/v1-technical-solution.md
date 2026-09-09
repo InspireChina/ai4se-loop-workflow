@@ -11,7 +11,7 @@ V1 聚焦现有流程 UI 化、业务事实入库和执行过程可观察，不�
 - SQLite 本地持久化和多代码库数据隔离。
 - Cursor、Codex、Claude、Oh My Pi 四种可插拔 Agent 执行器。
 - 本地主干代码工作区、Agent 自主且可选的 Git 提交。
-- 设计澄清、自动恢复、回退、取消、代码槽和浏览器资源约束。
+- 设计澄清、自动恢复、回退、取消和代码工作区资源约束。
 - CLI 流式日志解析和用户友好的运行面板。
 
 明确不做：
@@ -32,7 +32,7 @@ flowchart LR
   Lifecycle --> App["Application / Domain"]
   Lifecycle --> Runner["受管 Runner"]
   Lifecycle --> ProcessFacts[("租约 / 进程身份")]
-  App --> DB[("SQLite\n按工作区隔离")]
+  App --> DB[("全局 SQLite\n按 project_id 隔离")]
   App --> Profiles["Agent Runtime\nPrompt / Memory"]
   Runner --> Attempt["Execution Attempt / Lease"]
   Attempt --> Flow["推进流程计算"]
@@ -71,10 +71,10 @@ app/                    Next.js 页面、Route Handler 与 Server Actions
 src/domain/             领域规则、协议和统一术语映射
 src/application/        用例、查询、推进流程和日志解释
 src/infrastructure/     SQLite、迁移、执行器、Runner、Git
-migrations/             项目数据库顺序迁移
+migrations/             全局业务数据库顺序迁移
 app-migrations/         应用配置数据库顺序迁移
 scripts/loop/           Runner、Agent 命令入口与辅助 CLI
-data/                   本地运行数据，按工作区短 hash 分目录
+data/                   全局业务数据库与按 project_id 隔离的 Runtime 文件
 prototype/              历史资料，不参与运行
 ```
 
@@ -82,12 +82,13 @@ prototype/              历史资料，不参与运行
 
 ### 4.1 多代码库隔离
 
-用户只设置工作区根目录：
+用户通过项目管理维护工作目录：
 
-- `data/loopwork.db` 保存当前工作区根目录。
-- `data/<repo-root-short-hash>/loop-ui.db` 保存该工作区的需求和运行数据。
-- 切换根目录后，应用自动选择对应数据库。
-- 短 hash、数据库路径和应用数据目录不出现在普通设置界面。
+- `data/loopwork.db` 保存应用级配置和默认项目工作目录。
+- `data/loop-ui.db` 是所有项目共用的全局业务数据库。
+- 需求通过 `project_id` 关联项目，Agent 执行时使用该项目的 `workspace_root` 作为 work dir。
+- 切换默认项目不会切换数据库连接。
+- 规范化后的 `workspace_root` 是项目的稳定业务身份；删除只隐藏项目，再次添加同一路径会恢复原项目及其完整历史。
 
 ### 4.2 事实来源
 
@@ -100,8 +101,8 @@ prototype/              历史资料，不参与运行
 | Test 失败与恢复证据 | SQLite `documents` / `recovery_items` |
 | Agent 执行尝试与副作用收据 | SQLite `execution_attempts` / `execution_receipts` |
 | Agent 长文本命令临时文件 | 工作区 `.tmp/agent-<execution-id>`；通过 `LOOP_AGENT_TMP_DIR` 注入并在 execution 结束时独立清理 |
-| 项目 Agent Prompt、临时 Prompt candidate 与 Memory revision 历史 | SQLite `agent_profiles` / `agent_prompts` / `agent_prompt_candidates` / `agent_memory_versions` |
-| 当前实际 Agent 文件 | `data/<repo-hash>/agent-runtime/agents/<agent>/PROMPT.md` / `MEMORY.md` |
+| 项目 Agent Prompt、临时 Prompt candidate 与 Memory revision 历史 | 全局 SQLite 中的 `project_agent_overlays` / `project_agent_overlay_candidates` / `project_agent_memory_versions` |
+| 当前实际 Agent 文件 | `data/agent-runtime/projects/<project-id>/agents/<agent>/PROMPT.md` / `MEMORY.md` |
 | 演化观察与评估 | SQLite `agent_observations` / `agent_evolution_runs` 与 Runtime daily memory |
 | 机器可分析运行事件 | SQLite `runtime_events` |
 | 结卡报告阅读记录 | SQLite `closure_acknowledgements` |
@@ -168,7 +169,7 @@ Application 负责校验最小结果协议、写入数据库和推进状态。�
 
 ## 7. Agent Runtime 与演化
 
-应用启动 Loop 前初始化 `data/<repo-hash>/agent-runtime`。它位于应用数据目录、被 Git 忽略且按目标 repo 隔离。系统代码只提供版本化 Prompt Template：某个项目第一次初始化 Agent 时，把当时模板复制为该项目数据库中的完整 Current Prompt；此后用户直接编辑这一份 Prompt，应用升级不会覆盖。新项目使用最新模板，旧项目新增此前不存在的 Agent 时只初始化该 Agent。Agent 配置页提供显式“重置为最新系统模板”动作：它只替换当前项目、当前 Agent 的 Prompt，保留 Memory，并清除尚未完成的 Prompt Canary；系统不会在用户未确认时自动覆盖。Core Contract、实际工具和状态机权限位于可编辑 Prompt 之外，不能通过 Prompt 扩大。自动演化基于当前 Prompt revision 产生一份完整 candidate；用户保存 Prompt 会立即丢弃 candidate，只有原 Prompt 未变化且三次 Canary 全部成功时 candidate 才能替换当前 Prompt。配置域不保留 Prompt 历史或恢复入口。本地 `PROMPT.md` 是项目 Current Prompt 的单向物化结果，文件修改不会反向导入。Memory 独立保留 revision 历史。
+应用启动 Loop 前初始化 `data/agent-runtime/projects/<project-id>`。它位于全局应用数据目录、被 Git 忽略，并在目录内按项目隔离。系统代码只提供版本化 Prompt Template：某个项目第一次初始化 Agent 时，把当时模板复制为全局数据库中该项目的完整 Current Prompt；此后用户直接编辑这一份 Prompt，应用升级不会覆盖。新项目使用最新模板，旧项目新增此前不存在的 Agent 时只初始化该 Agent。Agent 配置页提供显式“重置为最新系统模板”动作：它只替换当前项目、当前 Agent 的 Prompt，保留 Memory，并清除尚未完成的 Prompt Canary；系统不会在用户未确认时自动覆盖。Core Contract、实际工具和状态机权限位于可编辑 Prompt 之外，不能通过 Prompt 扩大。自动演化基于当前 Prompt revision 产生一份完整 candidate；用户保存 Prompt 会立即丢弃 candidate，只有原 Prompt 未变化且三次 Canary 全部成功时 candidate 才能替换当前 Prompt。配置域不保留 Prompt 历史或恢复入口。本地 `PROMPT.md` 是项目 Current Prompt 的单向物化结果，文件修改不会反向导入。Memory 独立保留 revision 历史。
 
 Runner 按 `Core Contract → Agent Tool Contract → Project Current Prompt → Durable Memory → recent daily memory → Working Context Pack → Context Index / Required Refs` 组装最终输入，并把实际发送给模型的完整 Prompt snapshot、execution input hash、项目 Prompt revision、初始模板 version、Prompt hash、Memory revision/hash 和完整 Context Snapshot 写入 execution attempt。配置域后续更新 Prompt 或丢弃 candidate 都不能改写这份 execution 审计，也不能把审计快照恢复为当前配置。Agent Tool Contract 在角色说明之前列出 execution 绑定的草稿命令、全部只读 `agent-context` 命令、实时仓库调查工具的用途及选择顺序；`loop-agent help` 复用同一只读工具清单，并提供当前角色的命令语义与主题帮助。启动 Prompt 只内联当前工作的高信号事实；完整资料保存在快照中，通过 `LOOP_EXECUTION_ID` 绑定的只读命令按需展开。运行期间产生的新评论或状态变化不改变本次快照，由下一次 execution 获取。Core Contract、工具权限、最小结果协议和提交通道不开放编辑，避免自定义 Prompt 改写权限或状态机。
 
@@ -197,7 +198,7 @@ claude --print --output-format stream-json [--model <model>] <prompt>
 omp --mode json --no-session --approval-mode yolo # 完整 prompt 通过 stdin，进程 cwd 为工作区根目录
 ```
 
-每个流程 Agent 独立选择执行器和模型参数：选择 Codex 时显示模型和思考强度设置；选择 Claude 时显示可选模型输入，支持 CLI 别名或完整模型 ID，留空跟随 Claude 默认值；选择 Oh My Pi 时显示模型和思考强度设置，留空或选择默认值时跟随 OMP 自身配置；选择 Cursor 时不显示模型参数。Runner 在每次派发时按 Agent 解析 Runtime，同一轮中的不同 Lane 可以使用不同 CLI。上下文对话等没有独立 Profile 的系统辅助 Agent 使用项目级系统 Runtime。Runner 直接解析各 CLI 的 stdout、stderr、工具事件和子过程，统一写入 `run_logs`，运行面板按层级显示：
+每个流程 Agent 独立选择执行器和模型参数：选择 Codex 时显示模型和思考强度设置；选择 Claude 时显示可选模型输入，支持 CLI 别名或完整模型 ID，留空跟随 Claude 默认值；选择 Oh My Pi 时显示模型和思考强度设置，留空或选择默认值时跟随 OMP 自身配置；选择 Cursor 时不显示模型参数。Runner 在每次派发时按 Agent 解析 Runtime，同一轮中的不同 Lane 可以使用不同 CLI。上下文对话等没有独立 Profile 的系统辅助 Agent 使用全局系统 Runtime。Runner 直接解析各 CLI 的 stdout、stderr、工具事件和子过程，统一写入 `run_logs`，运行面板按层级显示：
 
 ```text
 Agent
@@ -223,7 +224,7 @@ Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。A
 
 单代码槽用于避免两个需要稳定工作区的 Dev/Test 步骤并发修改或验证同一工作区。它是 `resource_claims` 中的 `code:workspace` 资源，占用者是任务、交付单元与 execution，不由 Agile 状态、Agent 或游标组合反推。它是本地串行队列，不是需要用户解除的业务阻塞。
 
-独占浏览器是同一表中的 `browser:exclusive` execution 级资源。Delegation 通过 `resources[]` 显式声明所需资源；Dev 与 Test 同时申请代码工作区和浏览器，Backlog 与 Repro 只申请浏览器，Idea Context 不申请浏览器。任一资源不可用时整笔申请回滚并自动排队。浏览器在 Agent 进程退出、失败、取消或 Runner 崩溃恢复时按 execution 幂等释放，调度器不再通过 Agent 名称或活跃 execution 推断占用。
+浏览器不参与调度互斥。多个 Agent 共享同一 Chrome 实例，并分别在独立标签页中操作；Backlog、Repro 等浏览器使用者无需申请资源 Claim。`browser:exclusive` 仅作为历史 execution 快照的兼容键保留，运行时会忽略该键，迁移会清理遗留 Claim。Delegation 仍通过 `resources[]` 显式声明真正需要互斥的资源：Dev、Test 与 Direct 申请项目级 `code:workspace`，其他 Agent 不申请独占资源。
 
 ## 11. 页面能力
 
@@ -244,7 +245,7 @@ Git hook 或提交命令失败属于开发实现 Agent 的工具执行结果。A
 
 ## 12. 验收标准
 
-- 工作区切换后读写独立数据库，目标代码库不产生 Loop 数据目录。
+- 所有项目统一读写全局业务数据库，并通过 `project_id` 隔离；目标代码库不产生 Loop 数据目录。
 - 新建需求后能进入持续 Loop；没有工作时不启动 Agent。
 - 交付规划以端到端业务闭环生成交付单元，不按技术层拆分；每个单元完整保留业务边界、上游覆盖和自然依赖，并由后续交付分析 Agent 直接继承。
 - 交付分析、开发实现、验证按交付单元顺序推进，整体验收只执行一次。
