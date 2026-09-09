@@ -15,7 +15,7 @@ test('reserves runnable work atomically and exposes the active reservation to in
     assert.equal(first.reservations[0].work.taskId, taskId);
     assert.equal(first.reservations[0].work.lane, 'control');
     assert.equal(first.reservations[0].work.agent, 'backlog-agent');
-    assert.deepEqual(first.reservations[0].claimedResources, ['browser:exclusive']);
+    assert.deepEqual(first.reservations[0].claimedResources, []);
 
     const second = await progressDispatcher.reserveNext({ runId });
     assert.deepEqual(second, {
@@ -74,10 +74,10 @@ test('reserves runnable work atomically and exposes the active reservation to in
       reservationId: first.reservations[0].reservationId,
     }), {
       kind: 'released',
-      resources: ['browser:exclusive'],
+      resources: [],
     });
     const audited = await getTask(taskId);
-    assert.equal(audited?.executionAttempts[0].claimed_resources, 'browser:exclusive');
+    assert.equal(audited?.executionAttempts[0].claimed_resources, null);
     assert.deepEqual(await progressDispatcher.settle({
       reservationId: first.reservations[0].reservationId,
     }), { kind: 'settled' });

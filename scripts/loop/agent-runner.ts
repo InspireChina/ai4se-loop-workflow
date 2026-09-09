@@ -121,14 +121,16 @@ async function runVerificationAssistanceAttempt(job: ClaimedVerificationAssistan
   const executor = getAgentExecutor(settings.executorId);
   const executionOptions = agentExecutionOptions(settings);
   const limits = resolveAgentExecutionLimits(process.env);
-  const temporary = createAgentExecutionTempDirectory(paths.root, job.executionId);
+  const task = await getTask(job.taskId);
+  const workspaceRoot = task?.task.work_dir || paths.root;
+  const temporary = createAgentExecutionTempDirectory(workspaceRoot, job.executionId);
   activeExecutionTemporaries.set(job.executionId, temporary);
   try {
     const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
     const execution = await executeDelegation({
       runId,
       prompt: buildVerificationAssistancePrompt(job),
-      workspaceRoot: paths.root,
+      workspaceRoot,
       executor,
       executionOptions,
       context: {
@@ -259,8 +261,10 @@ async function buildPrompt(
   delegation: DelegationEnvelope,
   repositoryBaseCommit: string | null,
   attemptNumber = 1,
+  workspaceRoot = paths.root,
+  projectId?: string,
 ) {
-  const runtime = await loadAgentRuntime(delegation.agent, delegation.pipeline);
+  const runtime = await loadAgentRuntime(delegation.agent, delegation.pipeline, projectId);
   const full = await getTaskContext(delegation.taskId);
   const delegatedFeedbackIds = new Set([delegation.feedbackId, ...(delegation.feedbackIds || [])].filter(Boolean));
   const activeFeedback = full.documentComments.filter((comment) => delegatedFeedbackIds.has(comment.comment_id));
@@ -274,6 +278,7 @@ async function buildPrompt(
     activeFeedback,
     activeRecovery,
     repositoryBaseCommit,
+    workspaceRoot,
   });
   const commandPrompt = agentCommandPrompt(paths.appRoot, delegation.agent, delegation.pipeline);
   if (!commandPrompt) {
@@ -326,13 +331,13 @@ async function buildPrompt(
     '',
     commandPrompt,
     '',
-    `# Project Agent Prompt · r${runtime.promptVersion} · template v${runtime.promptTemplateVersion} · ${runtime.promptStatus}`,
+    `# Role Prompt + Project Overlay · overlay r${runtime.promptVersion} · role v${runtime.promptTemplateVersion} · ${runtime.promptStatus}`,
     projectPrompt,
     ...(durableMemory ? ['', `# Durable Memory · r${runtime.memoryRevision}`, durableMemory] : []),
     ...(recoveryMode === 'initial' && runtime.recentMemory ? ['', '# Recent Retrieved Memory', runtime.recentMemory] : []),
     '',
     `Run ID: ${runId}`,
-    `Workspace Root: ${paths.root}`,
+    `Workspace Root: ${workspaceRoot}`,
     '',
     `Context Snapshot: ${contextSnapshot.snapshotId}`,
     '',
@@ -486,6 +491,7 @@ async function runDelegation(
   executor: AgentExecutor,
   executionOptions: AgentExecutionOptions,
   cancellationSignal: AbortSignal,
+  workspaceRoot: string,
   limitOverrides?: Partial<ReturnType<typeof resolveAgentExecutionLimits>>,
 ) {
   const limits = { ...resolveAgentExecutionLimits(process.env), ...limitOverrides };
@@ -493,13 +499,13 @@ async function runDelegation(
   const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
   const durableToolEvent = createDurableToolEventNormalizer();
   const diagnostics: string[] = [];
-  const temporary = createAgentExecutionTempDirectory(paths.root, executionId);
+  const temporary = createAgentExecutionTempDirectory(workspaceRoot, executionId);
   activeExecutionTemporaries.set(executionId, temporary);
   try {
     const execution = await executeDelegation({
       runId,
       prompt,
-      workspaceRoot: paths.root,
+      workspaceRoot,
       executor,
       executionOptions,
       context: {
@@ -563,7 +569,7 @@ async function processDurableResult(attempt: ExecutionAttempt, delegation: Deleg
     return { outcome };
   }
   if (shouldRecordDevCodeCommit(delegation.agent, result) && !codeCommit) {
-    const currentHead = gitHead(paths.root);
+    const currentHead = gitHead(current?.task.work_dir || paths.root);
     if (currentHead) {
       codeCommit = currentHead;
       await recordExecutionReceipt(attempt.execution_id, 'code_commit', codeCommit, {
@@ -723,8 +729,9 @@ async function executeDelegationStep(
     const executor = getAgentExecutor(runtimeSettings.executorId);
     const executionOptions = agentExecutionOptions(runtimeSettings);
     await appendLoopRunLog(runId, `[Runtime] requirement=${delegation.taskId} agent=${delegation.agent} executor=${executor.id} model=${executionOptions.model || 'default'} reasoning=${executionOptions.reasoningEffort || 'default'} web_search=${executionOptions.webSearch ? 'enabled' : 'disabled'}`);
-    const headBefore = gitHead(paths.root);
-    const builtPrompt = await buildPrompt(delegation, headBefore || null, reservation.attempt);
+    const workspaceRoot = task.task.work_dir;
+    const headBefore = gitHead(workspaceRoot);
+    const builtPrompt = await buildPrompt(delegation, headBefore || null, reservation.attempt, workspaceRoot, task.task.project_id);
     const activated = await progressDispatcher.activate({
       reservationId: reservation.reservationId,
       prepared: {
@@ -790,6 +797,7 @@ async function executeDelegationStep(
             executor,
             executionOptions,
             cancellation.signal,
+            workspaceRoot,
           );
         } catch (error) {
           if (continuationCount > 0) {
@@ -909,6 +917,7 @@ async function executeDelegationStep(
       scheduleEvolution(runEvolutionEvaluator({
         executionId: attempt.execution_id,
         taskId: delegation.taskId,
+        projectId: task.task.project_id,
         storyIndex: delegation.storyIndex,
         agentId: delegation.agent,
         attempt: attempt.attempt,
@@ -1023,6 +1032,7 @@ async function main() {
       scheduleEvolution(runEvolutionEvaluator({
         executionId: recoverable.execution_id,
         taskId: recoverable.task_id,
+        projectId: (await getTask(recoverable.task_id))?.task.project_id,
         storyIndex: recoverable.story_index,
         agentId: recoverable.agent,
         attempt: recoverable.attempt,

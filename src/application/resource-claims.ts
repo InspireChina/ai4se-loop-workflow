@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3';
 import {
   RESOURCE_DEFINITIONS,
+  resourcesRequiringClaims,
   type ResourceKey,
 } from '../domain/resource';
 
@@ -8,6 +9,7 @@ export { BROWSER_EXCLUSIVE_RESOURCE, CODE_WORKSPACE_RESOURCE } from '../domain/r
 
 export type ResourceClaim = {
   resource_key: ResourceKey;
+  resource_scope: string;
   owner_task_id: string;
   owner_lane: string;
   owner_story_index: number | null;
@@ -29,13 +31,30 @@ export class ResourceBusyError extends Error {
   }
 }
 
-export function resourceClaimInDb(db: Db, resourceKey: ResourceKey) {
-  return db.prepare('SELECT * FROM resource_claims WHERE resource_key = ?')
-    .get(resourceKey) as ResourceClaim | undefined;
+export function resourceScopeInDb(db: Db, resourceKey: ResourceKey, taskId?: string) {
+  if (resourceKey !== 'code:workspace') return 'global';
+  if (!taskId) return undefined;
+  const task = db.prepare('SELECT project_id FROM tasks WHERE task_id = ?').get(taskId) as { project_id: string | null } | undefined;
+  return `project:${task?.project_id || 'legacy'}`;
 }
 
-export function activeResourceClaimInDb(db: Db, resourceKey: ResourceKey) {
-  const claim = resourceClaimInDb(db, resourceKey);
+export function resourceIdentityInDb(db: Db, resourceKey: ResourceKey, taskId: string) {
+  return `${resourceKey}@${resourceScopeInDb(db, resourceKey, taskId)}`;
+}
+
+export function resourceClaimInDb(db: Db, resourceKey: ResourceKey, taskId?: string) {
+  const scope = resourceScopeInDb(db, resourceKey, taskId);
+  return (scope
+    ? db.prepare(`
+        SELECT * FROM resource_claims
+        WHERE resource_key = ? AND resource_scope IN (?, 'global')
+        ORDER BY resource_scope = ? DESC LIMIT 1
+      `).get(resourceKey, scope, scope)
+    : db.prepare('SELECT * FROM resource_claims WHERE resource_key = ? ORDER BY acquired_at, resource_scope LIMIT 1').get(resourceKey)) as ResourceClaim | undefined;
+}
+
+export function activeResourceClaimInDb(db: Db, resourceKey: ResourceKey, taskId?: string) {
+  const claim = resourceClaimInDb(db, resourceKey, taskId);
   if (!claim) return undefined;
   const owner = db.prepare('SELECT agile_status, is_paused FROM tasks WHERE task_id = ?')
     .get(claim.owner_task_id) as { agile_status: string; is_paused: number } | undefined;
@@ -62,19 +81,21 @@ export function tryAcquireResourceClaimInDb(db: Db, input: {
   storyIndex?: number | null;
   executionId?: string | null;
 }) {
-  const definition = RESOURCE_DEFINITIONS[input.resourceKey];
+  const definition: { ownerScope: 'task' | 'execution'; requiresClaim: boolean } = RESOURCE_DEFINITIONS[input.resourceKey];
+  if (!definition.requiresClaim) return true;
   if (definition.ownerScope === 'execution' && !input.executionId) {
     throw new Error(`资源 ${input.resourceKey} 必须绑定 execution`);
   }
-  activeResourceClaimInDb(db, input.resourceKey);
+  const resourceScope = resourceScopeInDb(db, input.resourceKey, input.taskId)!;
+  activeResourceClaimInDb(db, input.resourceKey, input.taskId);
   const sameOwner = definition.ownerScope === 'task'
     ? 'resource_claims.owner_task_id = excluded.owner_task_id'
     : 'resource_claims.owner_execution_id = excluded.owner_execution_id AND excluded.owner_execution_id IS NOT NULL';
   const result = db.prepare(`
     INSERT INTO resource_claims(
-      resource_key, owner_task_id, owner_lane, owner_story_index, owner_execution_id
-    ) VALUES(?, ?, ?, ?, ?)
-    ON CONFLICT(resource_key) DO UPDATE SET
+      resource_key, resource_scope, owner_task_id, owner_lane, owner_story_index, owner_execution_id
+    ) VALUES(?, ?, ?, ?, ?, ?)
+    ON CONFLICT(resource_key, resource_scope) DO UPDATE SET
       owner_lane = excluded.owner_lane,
       owner_story_index = excluded.owner_story_index,
       owner_execution_id = excluded.owner_execution_id,
@@ -82,6 +103,7 @@ export function tryAcquireResourceClaimInDb(db: Db, input: {
     WHERE ${sameOwner}
   `).run(
     input.resourceKey,
+    resourceScope,
     input.taskId,
     input.lane,
     input.storyIndex ?? null,
@@ -97,8 +119,9 @@ export function acquireResourceClaimInDb(db: Db, input: {
   storyIndex?: number | null;
   executionId?: string | null;
 }) {
-  if (tryAcquireResourceClaimInDb(db, input)) return resourceClaimInDb(db, input.resourceKey)!;
-  const owner = resourceClaimInDb(db, input.resourceKey);
+  if (!RESOURCE_DEFINITIONS[input.resourceKey].requiresClaim) return undefined;
+  if (tryAcquireResourceClaimInDb(db, input)) return resourceClaimInDb(db, input.resourceKey, input.taskId)!;
+  const owner = resourceClaimInDb(db, input.resourceKey, input.taskId);
   throw new ResourceBusyError(input.resourceKey, owner?.owner_task_id || 'unknown', owner?.owner_execution_id || null);
 }
 
@@ -109,14 +132,18 @@ export function acquireResourceClaimsInDb(db: Db, input: {
   storyIndex?: number | null;
   executionId?: string | null;
 }) {
-  const resourceKeys = [...new Set(input.resourceKeys)].sort();
-  return db.transaction(() => resourceKeys.map((resourceKey) => acquireResourceClaimInDb(db, {
-    resourceKey,
-    taskId: input.taskId,
-    lane: input.lane,
-    storyIndex: input.storyIndex,
-    executionId: input.executionId,
-  })))();
+  const resourceKeys = [...new Set(resourcesRequiringClaims(input.resourceKeys))].sort();
+  return db.transaction(() => resourceKeys.map((resourceKey) => {
+    const claim = acquireResourceClaimInDb(db, {
+      resourceKey,
+      taskId: input.taskId,
+      lane: input.lane,
+      storyIndex: input.storyIndex,
+      executionId: input.executionId,
+    });
+    if (!claim) throw new Error(`资源 ${resourceKey} 未建立 Claim`);
+    return claim;
+  }))();
 }
 
 export function releaseResourceClaimInDb(db: Db, resourceKey: ResourceKey, ownerTaskId?: string) {

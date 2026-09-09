@@ -6,7 +6,7 @@ import { z } from 'zod';
 import { AGENT_EXECUTORS, type AgentExecutorId } from '../domain/agent-executor';
 import { FLOW_AGENT_IDS, isFlowAgentId, type FlowAgentId } from '../domain/agent-profile';
 import type { AgentExecutionOptions } from '../infrastructure/agent-executor';
-import { appDatabaseConnection, databaseConnection, setConfiguredWorkspaceRoot } from '../infrastructure/database';
+import { appDatabaseConnection, databaseConnection } from '../infrastructure/database';
 import { advanceRuntimeEventRevisionInDb, publishRuntimeInvalidation } from './runtime-events';
 
 export const AGENT_EXECUTOR_OPTIONS: ReadonlyArray<{
@@ -184,13 +184,6 @@ export function normalizeWorkspaceRoot(input: unknown) {
   try { root = realpathSync(requested); }
   catch { throw new Error(`工作区根目录不存在：${requested}`); }
   if (!statSync(root).isDirectory()) throw new Error(`工作区根目录不是文件夹：${root}`);
-  return root;
-}
-
-export function setWorkspaceRoot(input: unknown) {
-  const root = normalizeWorkspaceRoot(input);
-  setConfiguredWorkspaceRoot(root);
-  try { revalidatePath('/', 'layout'); } catch { /* CLI usage has no request context. */ }
   return root;
 }
 

@@ -6,13 +6,18 @@ import { Plus, X } from 'lucide-react';
 import { createTaskAction } from '../actions';
 import type { RequirementDependencyCandidate } from '../../src/application/task-dependencies';
 import { RequirementInputFields } from './requirement-input-fields';
+import type { Project } from '../../src/application/projects';
 
 function CreateTaskButton() {
   const { pending } = useFormStatus();
   return <button className="button" type="submit" disabled={pending}>{pending ? '创建中…' : '创建需求'}</button>;
 }
 
-export default function CreateTaskDialog({ dependencyCandidates }: { dependencyCandidates: RequirementDependencyCandidate[] }) {
+export default function CreateTaskDialog({ dependencyCandidates, projects, initialProjectId }: {
+  dependencyCandidates: RequirementDependencyCandidate[];
+  projects: Project[];
+  initialProjectId?: string;
+}) {
   const dialogRef = useRef<HTMLDialogElement>(null);
 
   async function createAndOpenTask(formData: FormData) {
@@ -32,7 +37,7 @@ export default function CreateTaskDialog({ dependencyCandidates }: { dependencyC
         <button className="icon-button" type="button" aria-label="关闭" onClick={() => dialogRef.current?.close()}><X size={18}/></button>
       </div>
       <form action={createAndOpenTask} className="form-panel dialog-form">
-        <RequirementInputFields dependencyCandidates={dependencyCandidates} autoFocus/>
+        <RequirementInputFields dependencyCandidates={dependencyCandidates} projects={projects} initial={{ projectId: initialProjectId }} autoFocus/>
         <div className="dialog-actions">
           <button className="button secondary" type="button" onClick={() => dialogRef.current?.close()}>取消</button>
           <CreateTaskButton/>

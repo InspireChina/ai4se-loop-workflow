@@ -26,7 +26,7 @@ test('Direct Pipeline runs and submits one result before completing the requirem
   assert.ok(delegation);
   assert.equal(delegation.agent, 'direct-agent');
   assert.equal(delegation.pipeline, 'direct');
-  assert.deepEqual(delegation.resources, ['code:workspace', 'browser:exclusive']);
+  assert.deepEqual(delegation.resources, ['code:workspace']);
 
   const runId = `RUN-direct-${taskId}`;
   const started = await beginTestExecutionAttempt({

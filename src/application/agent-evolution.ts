@@ -11,12 +11,14 @@ import {
   agentRuntimeRoot,
   ensureAgentRuntimeWorkspace,
   getAgentProfile,
+  createProjectOverlayCandidate,
 } from './agent-profiles';
-import { createAgentConfigurationPromptCandidate } from './agent-configurations';
+import { defaultProjectInDb } from './projects';
 
 export type EvolutionEvidence = {
   executionId: string;
   taskId: string;
+  projectId?: string;
   storyIndex: number | null;
   agentId: string;
   attempt: number;
@@ -49,6 +51,14 @@ export type EvolutionRuntimeInputEvidence = {
 
 const forbiddenEvolution = /(?:ignore\s+(?:all\s+)?previous|bypass|disable\s+(?:safety|validation|harness)|secret|password|api[_ -]?key|不要验证|绕过|取消限制|扩大权限)/i;
 
+function projectIdForEvidence(db: Awaited<ReturnType<typeof databaseConnection>>, evidence: EvolutionEvidence) {
+  if (evidence.projectId) return evidence.projectId;
+  const task = db.prepare('SELECT project_id FROM tasks WHERE task_id = ?').get(evidence.taskId) as { project_id: string | null } | undefined;
+  if (task?.project_id) return task.project_id;
+  if (task) return defaultProjectInDb(db).project_id;
+  throw new Error(`演化证据对应的需求不存在：${evidence.taskId}`);
+}
+
 export function buildEvolutionPrompt(evidence: EvolutionEvidence) {
   const command = loopAgentCommand();
   return [
@@ -76,8 +86,10 @@ export async function beginEvolutionRun(evidence: EvolutionEvidence) {
   if (!isFlowAgentId(evidence.agentId)) return null;
   await ensureAgentRuntimeWorkspace();
   const db = await databaseConnection();
-  const profile = db.prepare('SELECT auto_evolve FROM agent_profiles WHERE agent_id = ?').get(evidence.agentId) as { auto_evolve: number } | undefined;
-  if (!profile?.auto_evolve) return null;
+  const projectId = projectIdForEvidence(db, evidence);
+  const state = db.prepare('SELECT auto_evolve FROM project_agent_states WHERE project_id = ? AND agent_id = ?')
+    .get(projectId, evidence.agentId) as { auto_evolve: number } | undefined;
+  if (!state?.auto_evolve) return null;
   const existing = db.prepare('SELECT evolution_id, status FROM agent_evolution_runs WHERE execution_id = ?').get(evidence.executionId) as { evolution_id: string; status: string } | undefined;
   if (existing) return { evolutionId: existing.evolution_id, prompt: null };
   const comments = db.prepare(`
@@ -86,11 +98,12 @@ export async function beginEvolutionRun(evidence: EvolutionEvidence) {
            comment.content, comment.status
     FROM document_comments comment
     JOIN documents document ON document.document_id = comment.document_id
+    JOIN tasks task ON task.task_id = comment.task_id
     WHERE comment.agent_id = ? AND comment.evolution_status = 'pending'
-      AND comment.feedback_status = 'resolved'
+      AND comment.feedback_status = 'resolved' AND task.project_id = ?
     ORDER BY comment.created_at
     LIMIT 20
-  `).all(evidence.agentId) as {
+  `).all(evidence.agentId, projectId) as {
     comment_id: string;
     task_id: string;
     document_id: string;
@@ -114,6 +127,7 @@ export async function beginEvolutionRun(evidence: EvolutionEvidence) {
   }[];
   const enrichedEvidence: EvolutionEvidence = {
     ...evidence,
+    projectId,
     comments: comments.map((comment) => ({
       commentId: comment.comment_id,
       taskId: comment.task_id,
@@ -134,17 +148,17 @@ export async function beginEvolutionRun(evidence: EvolutionEvidence) {
   };
   const evolutionId = randomUUID();
   db.prepare(`
-    INSERT INTO agent_evolution_runs(evolution_id, execution_id, agent_id, status, evidence_json)
-    VALUES(?, ?, ?, 'running', ?)
-  `).run(evolutionId, evidence.executionId, evidence.agentId, JSON.stringify(enrichedEvidence));
-  const evaluatorDirectory = join(agentRuntimeRoot(), 'evolution', 'evaluator');
+    INSERT INTO agent_evolution_runs(evolution_id, execution_id, agent_id, project_id, status, evidence_json)
+    VALUES(?, ?, ?, ?, 'running', ?)
+  `).run(evolutionId, evidence.executionId, evidence.agentId, projectId, JSON.stringify(enrichedEvidence));
+  const evaluatorDirectory = join(agentRuntimeRoot(), 'projects', projectId, 'evolution', 'evaluator');
   mkdirSync(evaluatorDirectory, { recursive: true, mode: 0o700 });
   return { evolutionId, prompt: buildEvolutionPrompt(enrichedEvidence), evaluatorDirectory };
 }
 
-function appendDailyObservation(agentId: FlowAgentId, executionId: string, observation: EvolutionResult['observations'][number]) {
+function appendDailyObservation(projectId: string, agentId: FlowAgentId, executionId: string, observation: EvolutionResult['observations'][number]) {
   const date = new Date().toISOString().slice(0, 10);
-  const path = join(agentProfileInternals.agentDirectory(agentId), 'memory', `${date}.md`);
+  const path = join(agentProfileInternals.agentDirectory(projectId, agentId), 'memory', `${date}.md`);
   let existing = '';
   try { existing = readFileSync(path, 'utf8'); } catch { existing = `# ${date}\n`; }
   const marker = `<!-- execution:${executionId} fingerprint:${observation.fingerprint} -->`;
@@ -168,8 +182,8 @@ function safeEvolutionGuidance(value: string) {
   return value.length <= 1000 && !forbiddenEvolution.test(value);
 }
 
-async function promoteMemory(agentId: FlowAgentId, observation: EvolutionResult['observations'][number], evidence: EvolutionEvidence) {
-  const detail = await getAgentProfile(agentId, false);
+async function promoteMemory(projectId: string, agentId: FlowAgentId, observation: EvolutionResult['observations'][number], evidence: EvolutionEvidence) {
+  const detail = await getAgentProfile(agentId, false, projectId);
   const marker = `<!-- EVOLUTION:${observation.fingerprint} -->`;
   if (detail.currentMemory.content.includes(marker)) return;
   const content = [
@@ -183,19 +197,20 @@ async function promoteMemory(agentId: FlowAgentId, observation: EvolutionResult[
     `适用范围：${observation.category}。证据：至少 3 次执行、2 个需求；最近 execution ${evidence.executionId}。`,
     '',
   ].join('\n');
-  await agentProfileInternals.createMemoryVersion(agentId, content, 'evolution', `提升经验 ${observation.fingerprint}`, { executionId: evidence.executionId, fingerprint: observation.fingerprint });
+  await agentProfileInternals.createMemoryVersion(projectId, agentId, content, 'evolution', `提升经验 ${observation.fingerprint}`, { executionId: evidence.executionId, fingerprint: observation.fingerprint });
 }
 
-async function createPromptCandidate(agentId: FlowAgentId, observation: EvolutionResult['observations'][number], evidence: EvolutionEvidence) {
+async function createPromptCandidate(projectId: string, agentId: FlowAgentId, observation: EvolutionResult['observations'][number], evidence: EvolutionEvidence) {
   const db = await databaseConnection();
-  const detail = await getAgentProfile(agentId, false);
+  const detail = await getAgentProfile(agentId, false, projectId);
   if (detail.candidatePrompt) return;
   const marker = `<!-- EVOLUTION:${observation.fingerprint} -->`;
-  if (detail.currentPrompt.content.includes(marker)) return;
+  if (detail.projectOverlay.content.includes(marker)) return;
   const addition = [marker, `- ${observation.guidance}`].join('\n');
-  const content = `${detail.currentPrompt.content.trim()}\n\n## 自动演化建议\n\n${addition}`;
+  const content = [detail.projectOverlay.content.trim(), '## 自动演化建议', '', addition].filter(Boolean).join('\n\n');
   if (content.length > 100_000 || addition.length > 1_200 || !safeEvolutionGuidance(addition)) return;
-  const candidate = createAgentConfigurationPromptCandidate({
+  const candidate = await createProjectOverlayCandidate({
+    projectId,
     agentId,
     content,
     reason: `自动演化：${observation.fingerprint}`,
@@ -206,12 +221,9 @@ async function createPromptCandidate(agentId: FlowAgentId, observation: Evolutio
   });
   if (!candidate) return;
   db.transaction(() => {
-    db.prepare(`
-      UPDATE agent_profiles
-      SET candidate_prompt_version = ?, canary_remaining = 3, last_evolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
-      WHERE agent_id = ?
-    `).run(candidate.revision, agentId);
-    db.prepare("UPDATE agent_observations SET status = 'prompt_candidate' WHERE agent_id = ? AND fingerprint = ?").run(agentId, observation.fingerprint);
+    db.prepare("UPDATE project_agent_observations SET status = 'prompt_candidate' WHERE project_id = ? AND agent_id = ? AND fingerprint = ?")
+      .run(projectId, agentId, observation.fingerprint);
+    db.prepare('UPDATE agent_profiles SET last_evolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE agent_id = ?').run(agentId);
   }).immediate();
   await ensureAgentRuntimeWorkspace();
 }
@@ -220,28 +232,30 @@ async function storeObservation(evidence: EvolutionEvidence, observationInput: u
   if (!isFlowAgentId(evidence.agentId)) return;
   const observation = evolutionObservationSchema.parse(observationInput);
   if (!safeEvolutionGuidance(observation.guidance) || forbiddenEvolution.test(observation.summary)) return;
-  appendDailyObservation(evidence.agentId, evidence.executionId, observation);
   const db = await databaseConnection();
+  const projectId = projectIdForEvidence(db, evidence);
+  appendDailyObservation(projectId, evidence.agentId, evidence.executionId, observation);
   const allowedCommentIds = new Set((evidence.comments || []).map((comment) => comment.commentId));
   const evidenceCommentIds = observation.evidenceCommentIds.filter((commentId) => allowedCommentIds.has(commentId));
-  let row = db.prepare('SELECT * FROM agent_observations WHERE agent_id = ? AND fingerprint = ?').get(evidence.agentId, observation.fingerprint) as { observation_id: string; occurrence_count: number } | undefined;
+  let row = db.prepare('SELECT * FROM project_agent_observations WHERE project_id = ? AND agent_id = ? AND fingerprint = ?')
+    .get(projectId, evidence.agentId, observation.fingerprint) as { observation_id: string; occurrence_count: number } | undefined;
   db.transaction(() => {
     if (!row) {
       row = { observation_id: randomUUID(), occurrence_count: 0 };
       db.prepare(`
-        INSERT INTO agent_observations(
-          observation_id, agent_id, fingerprint, category, summary, guidance,
+        INSERT INTO project_agent_observations(
+          observation_id, project_id, agent_id, fingerprint, category, summary, guidance,
           target, confidence, status, occurrence_count
-        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, 'observed', 0)
-      `).run(row.observation_id, evidence.agentId, observation.fingerprint, observation.category, observation.summary, observation.guidance, observation.target, observation.confidence);
+        ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 'observed', 0)
+      `).run(row.observation_id, projectId, evidence.agentId, observation.fingerprint, observation.category, observation.summary, observation.guidance, observation.target, observation.confidence);
     }
     const occurrence = db.prepare(`
-      INSERT OR IGNORE INTO agent_observation_occurrences(observation_id, execution_id, task_id, evidence_json)
+      INSERT OR IGNORE INTO project_agent_observation_occurrences(observation_id, execution_id, task_id, evidence_json)
       VALUES(?, ?, ?, ?)
     `).run(row.observation_id, evidence.executionId, evidence.taskId, JSON.stringify(evidence));
     if (occurrence.changes) {
       db.prepare(`
-        UPDATE agent_observations
+        UPDATE project_agent_observations
         SET occurrence_count = occurrence_count + 1, last_seen_at = CURRENT_TIMESTAMP,
             summary = ?, guidance = ?, confidence = MAX(confidence, ?), target = ?
         WHERE observation_id = ?
@@ -250,37 +264,37 @@ async function storeObservation(evidence: EvolutionEvidence, observationInput: u
     let linkedComments = 0;
     for (const commentId of evidenceCommentIds) {
       linkedComments += db.prepare(`
-        INSERT OR IGNORE INTO agent_observation_comment_evidence(observation_id, comment_id)
+        INSERT OR IGNORE INTO project_agent_observation_comment_evidence(observation_id, comment_id)
         VALUES(?, ?)
       `).run(row.observation_id, commentId).changes;
     }
     if (linkedComments) {
       db.prepare(`
-        UPDATE agent_observations
+        UPDATE project_agent_observations
         SET occurrence_count = occurrence_count + ?, last_seen_at = CURRENT_TIMESTAMP
         WHERE observation_id = ?
       `).run(linkedComments, row.observation_id);
     }
   })();
-  const promotion = db.prepare('SELECT occurrence_count, confidence FROM agent_observations WHERE observation_id = ?').get(row!.observation_id) as { occurrence_count: number; confidence: number };
+  const promotion = db.prepare('SELECT occurrence_count, confidence FROM project_agent_observations WHERE observation_id = ?').get(row!.observation_id) as { occurrence_count: number; confidence: number };
   const taskEvidence = db.prepare(`
     SELECT COUNT(DISTINCT task_id) AS task_count FROM (
       SELECT occurrence.task_id AS task_id
-      FROM agent_observation_occurrences occurrence
+      FROM project_agent_observation_occurrences occurrence
       WHERE occurrence.observation_id = ?
       UNION
       SELECT comment.task_id AS task_id
-      FROM agent_observation_comment_evidence evidence
+      FROM project_agent_observation_comment_evidence evidence
       JOIN document_comments comment ON comment.comment_id = evidence.comment_id
       WHERE evidence.observation_id = ?
     )
   `).get(row!.observation_id, row!.observation_id) as { task_count: number };
   if (!observation.reusable || promotion.occurrence_count < 3 || taskEvidence.task_count < 2 || promotion.confidence < 0.75) return;
   if (observation.target === 'memory') {
-    await promoteMemory(evidence.agentId, observation, evidence);
-    db.prepare("UPDATE agent_observations SET status = 'promoted_memory' WHERE observation_id = ?").run(row!.observation_id);
+    await promoteMemory(projectId, evidence.agentId, observation, evidence);
+    db.prepare("UPDATE project_agent_observations SET status = 'promoted_memory' WHERE observation_id = ?").run(row!.observation_id);
   } else if (observation.target === 'prompt') {
-    await createPromptCandidate(evidence.agentId, observation, evidence);
+    await createPromptCandidate(projectId, evidence.agentId, observation, evidence);
   }
 }
 
@@ -355,12 +369,25 @@ export async function recordExecutionFailureObservation(input: { executionId: st
   if (!isFlowAgentId(input.agentId)) return;
   await ensureAgentRuntimeWorkspace();
   const db = await databaseConnection();
-  const profile = db.prepare('SELECT auto_evolve FROM agent_profiles WHERE agent_id = ?').get(input.agentId) as { auto_evolve: number } | undefined;
-  if (!profile?.auto_evolve) return;
+  const projectId = projectIdForEvidence(db, {
+    executionId: input.executionId,
+    taskId: input.taskId,
+    agentId: input.agentId,
+    storyIndex: null,
+    attempt: 1,
+    promptVersion: null,
+    result: { outcome: 'failed', summary: input.reason },
+    applicationOutcome: 'execution_failed',
+    diagnostics: [input.reason],
+  });
+  const state = db.prepare('SELECT auto_evolve FROM project_agent_states WHERE project_id = ? AND agent_id = ?')
+    .get(projectId, input.agentId) as { auto_evolve: number } | undefined;
+  if (!state?.auto_evolve) return;
   const fingerprint = `executor-${hash(input.reason.replace(/\d+/g, '#').slice(0, 300)).slice(0, 16)}`;
   await storeObservation({
     executionId: input.executionId,
     taskId: input.taskId,
+    projectId,
     storyIndex: null,
     agentId: input.agentId,
     attempt: 1,

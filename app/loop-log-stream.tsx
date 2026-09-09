@@ -15,6 +15,56 @@ type LogTreeNode = {
   children: LogTreeNode[];
 };
 
+export const defaultVisibleRunLogLimit = 500;
+
+function cursorConnectionKey(event: ParsedRunLog) {
+  if (event.meta.cursorConnection !== 'true') return '';
+  return [
+    event.meta.cursorConnectionSession,
+    event.meta.agent,
+    event.meta.requirement,
+    event.meta.flow,
+  ].join(':');
+}
+
+function elapsedLabel(start: string, end: string) {
+  const elapsedMs = Date.parse(end) - Date.parse(start);
+  if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return '';
+  const elapsedSeconds = Math.round(elapsedMs / 1000);
+  if (elapsedSeconds < 60) return `${elapsedSeconds} 秒`;
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+  return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`;
+}
+
+function mergeCursorConnection(previous: ParsedRunLog, next: ParsedRunLog) {
+  const previousKey = cursorConnectionKey(previous);
+  if (!previousKey || previousKey !== cursorConnectionKey(next)) return null;
+  const startedAt = previous.meta.cursorConnectionStartedAt || previous.timestamp;
+  const attempts = Math.max(
+    Number(previous.meta.cursorConnectionAttempt || 0),
+    Number(next.meta.cursorConnectionAttempt || 0),
+  );
+  const restored = next.meta.cursorConnectionSubtype === 'reconnected';
+  const failed = next.status === 'error';
+  const duration = (restored || failed) ? elapsedLabel(startedAt, next.timestamp) : '';
+  const summary = [
+    attempts ? `重试 ${attempts} 次` : '',
+    duration ? `耗时 ${duration}` : '',
+  ].filter(Boolean).join('，');
+  return {
+    ...next,
+    title: restored ? 'Cursor 连接已恢复' : failed ? 'Cursor 连接失败' : 'Cursor 连接重试',
+    detail: restored ? summary || '连接已恢复' : failed ? summary || next.detail : `正在重新连接（第 ${attempts} 次）`,
+    meta: {
+      ...next.meta,
+      cursorConnectionStartedAt: startedAt,
+      cursorConnectionAttempt: attempts ? String(attempts) : '',
+    },
+    raw: `${previous.raw}\n${next.raw}`,
+  } satisfies ParsedRunLog;
+}
+
 function shouldMergeEvent(previous: ParsedRunLog, next: ParsedRunLog) {
   if (previous.kind !== 'executor' || next.kind !== 'executor') return false;
   if (previous.status !== 'info' || next.status !== 'info') return false;
@@ -36,11 +86,14 @@ function joinDetail(previous: string, next: string) {
   return `${left} ${right}`;
 }
 
-function appendMergedEvents(current: ParsedRunLog[], incoming: ParsedRunLog[]) {
+export function appendMergedEvents(current: ParsedRunLog[], incoming: ParsedRunLog[]) {
   const next = [...current];
   for (const event of incoming) {
     const previous = next[next.length - 1];
-    if (previous && shouldMergeEvent(previous, event)) {
+    const mergedConnection = previous ? mergeCursorConnection(previous, event) : null;
+    if (mergedConnection) {
+      next[next.length - 1] = mergedConnection;
+    } else if (previous && shouldMergeEvent(previous, event)) {
       next[next.length - 1] = {
         ...previous,
         timestamp: event.timestamp || previous.timestamp,
@@ -51,7 +104,7 @@ function appendMergedEvents(current: ParsedRunLog[], incoming: ParsedRunLog[]) {
       next.push(event);
     }
   }
-  return next.slice(-200);
+  return next.slice(-defaultVisibleRunLogLimit);
 }
 
 function makeNode(event: ParsedRunLog, index: number): LogTreeNode {

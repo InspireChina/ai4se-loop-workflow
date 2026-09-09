@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
+import { databaseConnection, paths } from '../infrastructure/database';
 
 test('promotes one Daily Memory observation into Durable Memory idempotently', async () => {
   const {
@@ -11,6 +13,8 @@ test('promotes one Daily Memory observation into Durable Memory idempotently', a
   } = await import('./agent-profiles');
   await ensureAgentRuntimeWorkspace();
   const agentId = 'repro-agent';
+  const initial = await getAgentProfile(agentId, false);
+  const projectId = initial.project.project_id;
   const memoryName = '2099-12-31.md';
   const dailyContent = [
     '# 2099-12-31',
@@ -37,7 +41,7 @@ test('promotes one Daily Memory observation into Durable Memory idempotently', a
     '',
   ].join('\n');
   agentProfileInternals.atomicWrite(
-    join(agentProfileInternals.agentDirectory(agentId), 'memory', memoryName),
+    join(agentProfileInternals.agentDirectory(projectId, agentId), 'memory', memoryName),
     dailyContent,
   );
 
@@ -78,6 +82,7 @@ test('promotes one Daily Memory observation into Durable Memory idempotently', a
 
   const { POST } = await import('../../app/agents/[agentId]/memory/promote/route');
   const formData = new FormData();
+  formData.set('projectId', projectId);
   formData.set('memoryName', memoryName);
   formData.set('executionId', 'EXEC-daily-promote-2');
   formData.set('fingerprint', 'preserve-failure-evidence');
@@ -96,4 +101,24 @@ test('promotes one Daily Memory observation into Durable Memory idempotently', a
     body: formData,
   }), { params: Promise.resolve({ agentId }) });
   assert.equal(crossOriginResponse.status, 403);
+});
+
+test('copies Daily Memory files from the imported project database directory', async () => {
+  const { agentProfileInternals, ensureAgentRuntimeWorkspace, getAgentProfile } = await import('./agent-profiles');
+  await ensureAgentRuntimeWorkspace();
+  const profile = await getAgentProfile('dev-agent', false);
+  const projectId = profile.project.project_id;
+  const sourceDbPath = join(paths.dataRoot, 'abcdef123456', 'loop-ui.db');
+  const sourceMemory = join(paths.dataRoot, 'abcdef123456', 'agent-runtime', 'agents', 'dev-agent', 'memory');
+  mkdirSync(sourceMemory, { recursive: true });
+  writeFileSync(join(sourceMemory, '2098-01-02.md'), '# imported daily memory\n', 'utf8');
+  const db = await databaseConnection();
+  db.prepare(`
+    INSERT OR REPLACE INTO legacy_project_database_imports(source_db_path, workspace_root, project_id)
+    VALUES(?, ?, ?)
+  `).run(sourceDbPath, profile.project.workspace_root, projectId);
+
+  await ensureAgentRuntimeWorkspace();
+  const destination = join(agentProfileInternals.agentDirectory(projectId, 'dev-agent'), 'memory', '2098-01-02.md');
+  assert.equal(readFileSync(destination, 'utf8'), '# imported daily memory\n');
 });

@@ -1,17 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-  BROWSER_EXCLUSIVE_RESOURCE,
   CODE_WORKSPACE_RESOURCE,
   resourcesForAgent,
 } from './resource';
 import { assertState, assertUpdate, nextDelegation, type TaskState } from './task';
 
-test('declares browser and code requirements independently for each Agent', () => {
-  assert.deepEqual(resourcesForAgent('dev-agent'), [CODE_WORKSPACE_RESOURCE, BROWSER_EXCLUSIVE_RESOURCE]);
-  assert.deepEqual(resourcesForAgent('test-agent'), [CODE_WORKSPACE_RESOURCE, BROWSER_EXCLUSIVE_RESOURCE]);
-  assert.deepEqual(resourcesForAgent('backlog-agent'), [BROWSER_EXCLUSIVE_RESOURCE]);
-  assert.deepEqual(resourcesForAgent('repro-agent'), [BROWSER_EXCLUSIVE_RESOURCE]);
+test('declares only the project code workspace as an exclusive Agent resource', () => {
+  assert.deepEqual(resourcesForAgent('dev-agent'), [CODE_WORKSPACE_RESOURCE]);
+  assert.deepEqual(resourcesForAgent('test-agent'), [CODE_WORKSPACE_RESOURCE]);
+  assert.deepEqual(resourcesForAgent('backlog-agent'), []);
+  assert.deepEqual(resourcesForAgent('repro-agent'), []);
   assert.deepEqual(resourcesForAgent('idea-context-agent'), []);
 });
 

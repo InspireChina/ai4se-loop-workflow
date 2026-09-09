@@ -10,6 +10,7 @@ export type RequirementDependency = {
 
 export type RequirementDependencyCandidate = {
   task_id: string;
+  project_id: string;
   title: string;
   agile_status: string;
   updated_at: string;
@@ -63,10 +64,14 @@ export function configureRequirementDependenciesInDb(
   `);
   for (const dependencyTaskId of uniqueIds) {
     if (dependencyTaskId === taskId) throw new Error('需求不能依赖自身');
+    const task = db.prepare('SELECT project_id FROM tasks WHERE task_id = ?')
+      .get(taskId) as { project_id: string | null } | undefined;
+    if (!task?.project_id) throw new Error(`需求没有绑定项目：${taskId}`);
     const upstream = db.prepare(`
-      SELECT task_id, agile_status FROM tasks WHERE task_id = ?
-    `).get(dependencyTaskId) as { task_id: string; agile_status: string } | undefined;
+      SELECT task_id, project_id, agile_status FROM tasks WHERE task_id = ?
+    `).get(dependencyTaskId) as { task_id: string; project_id: string | null; agile_status: string } | undefined;
     if (!upstream) throw new Error(`前置需求不存在：${dependencyTaskId}`);
+    if (upstream.project_id !== task.project_id) throw new Error(`前置需求必须属于同一项目：${dependencyTaskId}`);
     if (upstream.agile_status === 'cancelled') throw new Error(`不能依赖已取消的需求：${dependencyTaskId}`);
     const createsCycle = db.prepare(`
       WITH RECURSIVE ancestors(task_id) AS (
@@ -86,9 +91,11 @@ export function configureRequirementDependenciesInDb(
 
 export function requirementDependencyCandidatesInDb(db: Database.Database) {
   return db.prepare(`
-    SELECT task_id, title, agile_status, updated_at
+    SELECT tasks.task_id, tasks.project_id, tasks.title, tasks.agile_status, tasks.updated_at
     FROM tasks
-    WHERE agile_status NOT IN ('ready_to_close', 'done', 'cancelled')
-    ORDER BY updated_at DESC, task_id DESC
+    JOIN projects ON projects.project_id = tasks.project_id
+    WHERE projects.deleted_at IS NULL
+      AND tasks.agile_status NOT IN ('ready_to_close', 'done', 'cancelled')
+    ORDER BY tasks.updated_at DESC, tasks.task_id DESC
   `).all() as RequirementDependencyCandidate[];
 }

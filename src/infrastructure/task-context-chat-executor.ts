@@ -23,6 +23,7 @@ type ContextChatRun = {
   providerSessionId: string | null;
   message: string;
   commandToken: string;
+  workspaceRoot?: string;
   executionOptions: AgentExecutionOptions;
   recoveryMode?: ExecutionRecoveryMode;
   retryNumber?: number;
@@ -56,10 +57,11 @@ function runProcess(
   startupTimeoutMs = 20 * 60 * 1000,
   idleTimeoutMs = 30 * 60 * 1000,
   onStdoutLine?: (line: string) => void,
+  workspaceRoot = paths.root,
 ) {
   return new Promise<ProcessResult>((resolve, reject) => {
     const child = spawn(command, args, {
-      cwd: paths.root,
+      cwd: workspaceRoot,
       env: { ...process.env, ...envOverrides },
       stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'],
       windowsHide: true,
@@ -204,6 +206,7 @@ export function buildTaskContextChatPrompt(
     maxRetries?: number;
     messages?: readonly TaskContextChatRecoveryMessage[];
   } = {},
+  workspaceRoot = paths.root,
 ) {
   const freshness = [
     '在回答涉及当前状态、文档、活动、规格、问题或验证证据的问题前，必须重新运行只读命令获取最新事实；不要依赖会话中较早的事实。',
@@ -218,7 +221,7 @@ export function buildTaskContextChatPrompt(
   const changeCommand = `npm --prefix ${commandPath(paths.appRoot)} run loopctl -- context-chat-change --key <稳定请求-key> --title <标题> --request <完整变更意图> [--acceptance <验收关注>]`;
   const commonContract = [
     '你是 LoopWork 中当前需求唯一会话的上下文 Agent。你的职责是帮助用户理解当前事实，并在用户要求修改时严格选择“轻微调整直达”或“业务变化进入 Feedback”其中一条路径。',
-    `当前需求固定为 ${taskId}。LoopWork 应用根目录为 ${paths.appRoot}，目标仓库根目录为 ${paths.root}。`,
+    `当前需求固定为 ${taskId}。LoopWork 应用根目录为 ${paths.appRoot}，目标仓库根目录为 ${workspaceRoot}。`,
     '每轮都必须重新读取最新需求事实；不要把较早轮次中的需求、状态或代码结论当作当前事实。',
     '始终禁止直接修改 Loop 数据库、需求状态、既有交付单元、交付文档、问题、Agent 配置、权限、密钥、Loop 环境配置或调度状态，禁止发布和部署。',
     '禁止调用 task-update、story-add、task-context-init、task-rewind、task-cancel、system-unblock、document-upsert、question-add 或任何其他 Loop 写命令。唯一允许的 Loop 写操作是下方当前会话绑定的 context-chat-change 领域命令；直接修改代码不等于修改 Loop 状态。',
@@ -322,6 +325,7 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
     publishProgress
       ? (line) => taskContextChatProgressEvents(input.executor, line).forEach((event) => input.onProgress?.(event))
       : undefined,
+    input.workspaceRoot || paths.root,
   );
   const newProviderSession = !input.providerSessionId;
   const logicalFirstTurn = newProviderSession && !(input.recoveryMessages?.length);
@@ -330,7 +334,7 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
     retryNumber: input.retryNumber,
     maxRetries: input.maxRetries,
     messages: input.recoveryMessages,
-  });
+  }, input.workspaceRoot || paths.root);
   const chatCommandEnv = {
     LOOP_CONTEXT_CHAT_SESSION_ID: input.sessionId,
     LOOP_CONTEXT_CHAT_MESSAGE_ID: input.messageId,
@@ -381,7 +385,7 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
     ];
     const search = input.executionOptions.webSearch ? ['--search'] : [];
     result = newProviderSession
-      ? await runChatProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', ...common, '-C', paths.root, '-'], prompt, chatCommandEnv, true)
+      ? await runChatProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', ...common, '-C', input.workspaceRoot || paths.root, '-'], prompt, chatCommandEnv, true)
       : await runChatProcess(process.env.CODEX_CLI || 'codex', [...search, 'exec', 'resume', ...common, providerSessionId, '-'], prompt, chatCommandEnv, true);
     if (newProviderSession) providerSessionId = codexSessionId(result.stdout);
   }

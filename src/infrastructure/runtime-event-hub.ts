@@ -43,7 +43,7 @@ export function runtimeEventHubDescriptorPath() {
 }
 
 function runtimeEventEndpoint(fencingToken: number, secret: string) {
-  const name = `loopwork-${paths.repoHash}-${fencingToken}-${secret.slice(0, 8)}`;
+  const name = `loopwork-global-${fencingToken}-${secret.slice(0, 8)}`;
   return process.platform === 'win32'
     ? `\\\\.\\pipe\\${name}`
     : join(tmpdir(), `${name}.sock`);

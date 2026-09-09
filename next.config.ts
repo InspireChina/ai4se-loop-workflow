@@ -10,6 +10,12 @@ const nextConfig: NextConfig = {
       './tmp/**/*',
     ],
   },
+  outputFileTracingIncludes: {
+    '/*': [
+      './app-migrations/**/*.sql',
+      './migrations/**/*.sql',
+    ],
+  },
   experimental: { serverActions: { bodySizeLimit: '2mb' } },
 };
 

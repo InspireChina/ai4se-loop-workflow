@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import hashlib
 import json
 import os
 import sqlite3
@@ -22,7 +21,7 @@ DEFAULT_FIELDS = "core,basic,time,io,metadata,model,usage,metrics,trace_context"
 
 
 def load_local_config(project_root: Path) -> None:
-    """Mirror LoopWork's env + active-workspace project_settings resolution."""
+    """Mirror LoopWork's env + global database settings resolution."""
     explicit_env = set(os.environ)
     for name in (".env", ".env.local"):
         env_path = project_root / name
@@ -38,24 +37,12 @@ def load_local_config(project_root: Path) -> None:
                 continue
             os.environ[key] = value.strip().strip('"').strip("'")
 
-    workspace_root = os.getenv("LOOP_WORKSPACE_ROOT_OVERRIDE")
-    app_db = project_root / "data" / "loopwork.db"
-    if not workspace_root and app_db.exists():
-        try:
-            with sqlite3.connect(app_db) as connection:
-                row = connection.execute(
-                    "SELECT setting_value FROM app_settings WHERE setting_key = 'workspace_root'"
-                ).fetchone()
-            workspace_root = row[0] if row else None
-        except sqlite3.Error:
-            workspace_root = None
-    resolved_workspace = str(Path(workspace_root or os.getenv("LOOP_WORKSPACE_ROOT") or project_root).resolve())
-    repo_hash = hashlib.sha1(resolved_workspace.encode("utf-8")).hexdigest()[:12]
-    workspace_db = project_root / "data" / repo_hash / "loop-ui.db"
-    if not workspace_db.exists():
+    data_root = Path(os.getenv("LOOP_DATA_ROOT") or project_root / "data").resolve()
+    global_db = Path(os.getenv("LOOP_GLOBAL_DB_PATH") or data_root / "loop-ui.db").resolve()
+    if not global_db.exists():
         return
     try:
-        with sqlite3.connect(workspace_db) as connection:
+        with sqlite3.connect(global_db) as connection:
             rows = dict(connection.execute(
                 "SELECT setting_key, setting_value FROM project_settings WHERE setting_key LIKE 'langfuse_%'"
             ).fetchall())

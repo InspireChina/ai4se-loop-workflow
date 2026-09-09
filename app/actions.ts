@@ -1,7 +1,7 @@
 'use server';
 
 import { redirect } from 'next/navigation';
-import { normalizeWorkspaceRoot, setAgentConcurrency, setAgentExecutorSettings, setFlowAgentDefaultRuntimeSettings, setLangfuseSettings, setWorkspaceRoot } from '../src/application/project-settings';
+import { setAgentConcurrency, setAgentExecutorSettings, setFlowAgentDefaultRuntimeSettings, setLangfuseSettings } from '../src/application/project-settings';
 import { resetAgentPromptToSystemTemplate, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
 import {
   addDocumentComment,
@@ -24,7 +24,6 @@ import {
   transitionTask,
   updateUnstartedTaskInput,
 } from '../src/application/tasks';
-import { paths } from '../src/infrastructure/database';
 import { requirementPipeline } from '../src/domain/pipeline-catalog';
 import { DEFAULT_REQUIREMENT_PRIORITY, requirementPriority } from '../src/domain/requirement-priority';
 import { parseRequirementMetadata } from '../src/domain/requirement-metadata';
@@ -35,6 +34,7 @@ import {
   resumeScheduledRequirement,
   updateScheduledRequirement,
 } from '../src/application/scheduled-requirements';
+import { createProject, deleteProject, setDefaultProject, updateProject } from '../src/application/projects';
 
 export async function createTaskAction(formData: FormData) {
   const pipeline = requirementPipeline(formData.get('pipeline') || 'feature');
@@ -46,6 +46,7 @@ export async function createTaskAction(formData: FormData) {
     value: metadataValues[index],
   })));
   const taskId = await createTask({
+    projectId: formData.get('projectId'),
     title: formData.get('title'),
     description: formData.get('description') || undefined,
     itemType: pipeline,
@@ -54,6 +55,35 @@ export async function createTaskAction(formData: FormData) {
     dependsOnTaskIds: formData.getAll('dependsOnTaskId'),
   });
   return taskId;
+}
+
+export async function createProjectAction(formData: FormData) {
+  await createProject({
+    name: formData.get('name'),
+    workspaceRoot: formData.get('workspaceRoot'),
+    description: formData.get('description'),
+  });
+  redirect('/settings');
+}
+
+export async function updateProjectAction(formData: FormData) {
+  await updateProject({
+    projectId: formData.get('projectId'),
+    name: formData.get('name'),
+    workspaceRoot: formData.get('workspaceRoot'),
+    description: formData.get('description'),
+  });
+  redirect('/settings');
+}
+
+export async function deleteProjectAction(formData: FormData) {
+  await deleteProject(formData.get('projectId'));
+  redirect('/settings');
+}
+
+export async function setDefaultProjectAction(formData: FormData) {
+  await setDefaultProject(formData.get('projectId'));
+  redirect('/settings');
 }
 
 export async function updateUnstartedTaskInputAction(formData: FormData) {
@@ -87,6 +117,7 @@ function scheduledRequirementInput(formData: FormData) {
   })));
   const recurrenceKind = String(formData.get('recurrenceKind') || 'daily');
   return {
+    projectId: formData.get('projectId'),
     recurrenceKind,
     timezone: formData.get('timezone'),
     localTime: recurrenceKind === 'once' ? undefined : formData.get('localTime'),
@@ -221,10 +252,14 @@ export async function saveAgentConcurrencyAction(formData: FormData) {
   redirect('/settings');
 }
 
-function redirectToAgentSection(agentId: string, sectionInput: FormDataEntryValue | null): never {
+function redirectToAgentSection(agentId: string, sectionInput: FormDataEntryValue | null, projectInput?: FormDataEntryValue | null): never {
   const section = String(sectionInput || '');
+  const projectId = String(projectInput || '');
   const allowedSections = new Set(['runtime', 'prompt', 'memory', 'evolution', 'diagnostics']);
-  redirect(`/agents/${agentId}${allowedSections.has(section) ? `?section=${section}` : ''}`);
+  const query = new URLSearchParams();
+  if (allowedSections.has(section)) query.set('section', section);
+  if (projectId) query.set('project', projectId);
+  redirect(`/agents/${agentId}${query.size ? `?${query}` : ''}`);
 }
 
 export async function saveLangfuseSettingsAction(formData: FormData) {
@@ -236,14 +271,6 @@ export async function saveLangfuseSettingsAction(formData: FormData) {
     sampleRate: formData.get('langfuseSampleRate'),
     capturePrompts: formData.get('langfuseCapturePrompts'),
   });
-  redirect('/settings');
-}
-
-export async function changeWorkspaceRootAction(formData: FormData) {
-  const nextRoot = normalizeWorkspaceRoot(formData.get('workspaceRoot'));
-  const currentRoot = paths.root;
-  if (nextRoot !== currentRoot && (await getRunStatus())?.active) throw new Error('请先结束当前运行，再切换工作区');
-  setWorkspaceRoot(nextRoot);
   redirect('/settings');
 }
 
@@ -335,25 +362,25 @@ export async function acknowledgeClosureAction(formData: FormData) {
 
 export async function saveAgentPromptAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
-  await saveAgentPrompt({ agentId, content: formData.get('content'), reason: formData.get('reason') });
-  redirectToAgentSection(agentId, formData.get('section'));
+  await saveAgentPrompt({ projectId: String(formData.get('projectId') || ''), agentId, content: formData.get('content'), reason: formData.get('reason') });
+  redirectToAgentSection(agentId, formData.get('section'), formData.get('projectId'));
 }
 
 export async function resetAgentPromptAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
-  if (formData.get('confirm') !== 'on') throw new Error('请先确认重置当前项目 Prompt');
-  await resetAgentPromptToSystemTemplate({ agentId });
-  redirectToAgentSection(agentId, formData.get('section'));
+  if (formData.get('confirm') !== 'on') throw new Error('请先确认恢复当前项目 Prompt');
+  await resetAgentPromptToSystemTemplate({ projectId: String(formData.get('projectId') || ''), agentId });
+  redirectToAgentSection(agentId, formData.get('section'), formData.get('projectId'));
 }
 
 export async function saveAgentMemoryAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
-  await saveAgentMemory({ agentId, content: formData.get('content'), reason: formData.get('reason') });
-  redirectToAgentSection(agentId, formData.get('section'));
+  await saveAgentMemory({ projectId: String(formData.get('projectId') || ''), agentId, content: formData.get('content'), reason: formData.get('reason') });
+  redirectToAgentSection(agentId, formData.get('section'), formData.get('projectId'));
 }
 
 export async function setAgentAutoEvolutionAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
-  await setAgentAutoEvolution({ agentId, enabled: formData.get('enabled') });
-  redirectToAgentSection(agentId, formData.get('section'));
+  await setAgentAutoEvolution({ projectId: String(formData.get('projectId') || ''), agentId, enabled: formData.get('enabled') });
+  redirectToAgentSection(agentId, formData.get('section'), formData.get('projectId'));
 }

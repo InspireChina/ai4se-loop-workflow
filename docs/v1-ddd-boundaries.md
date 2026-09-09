@@ -99,9 +99,9 @@ Application 从 Agent 的结构化结果写入文档，UI 直接读取数据库�
 负责解释并校验本地运行约束。
 
 - 模型：`ResourceClaim`
-- 关键规则：同一时间一个代码槽、一个浏览器独占步骤和最多四个 Analysis Agent
+- 关键规则：同一项目同一时间一个代码槽；浏览器由 Agent 在同一 Chrome 实例的独立标签页中共享
 
-代码槽和浏览器分别是 `resource_claims` 中的 `code:workspace` 与 `browser:exclusive` Claim，不从 Task 状态、进度、Agent 名称或活跃 execution 反推。代码槽繁忙不是设计澄清；需要资源的步骤在应用内排队，释放后自动继续。开发实现 Agent 直接使用当前工作区：每次执行都以仓库当下状态重新检查功能完整性；本轮有代码改动时由 Agent 按仓库规范提交相关文件，走查确认现有实现已满足规格时不制造 Commit。Application 不比较 execution Commit 与当前 HEAD，不推断本轮文件归属，也不因换分支、改写历史、其他 Commit 或未提交变化阻塞开发完成。Runner 不创建 checkpoint，也不代理提交。
+代码工作区是 `resource_claims` 中的 `code:workspace` Claim，不从 Task 状态、进度、Agent 名称或活跃 execution 反推。代码槽繁忙不是设计澄清；需要资源的步骤在应用内排队，释放后自动继续。浏览器不再形成调度 Claim：多个 Agent 共享同一 Chrome 实例，并分别在独立标签页操作。开发实现 Agent 直接使用当前工作区：每次执行都以仓库当下状态重新检查功能完整性；本轮有代码改动时由 Agent 按仓库规范提交相关文件，走查确认现有实现已满足规格时不制造 Commit。Application 不比较 execution Commit 与当前 HEAD，不推断本轮文件归属，也不因换分支、改写历史、其他 Commit 或未提交变化阻塞开发完成。Runner 不创建 checkpoint，也不代理提交。
 
 ### 2.7 Agent 配置与演化（Agent Configuration and Evolution）
 
@@ -111,15 +111,15 @@ Application 从 Agent 的结构化结果写入文档，UI 直接读取数据库�
 - 关键命令：保存项目 Prompt、保存 Memory、切换自动演化、提升 Memory、创建 Prompt candidate、记录 Canary、接受或丢弃 candidate
 - 依赖：Loop 编排提供 execution evidence；不依赖需求状态迁移
 
-系统代码提供版本化 Prompt Template，但它不是运行时配置层。某个项目第一次初始化 Agent 时，把当时模板复制为项目数据库中的完整 Current Prompt；此后用户直接编辑这一份 Prompt，应用升级不会覆盖。新项目使用最新模板，旧项目新增此前不存在的 Agent 时只初始化该 Agent。Core Contract、实际工具能力和状态机权限不属于可编辑 Role Prompt，用户 Prompt 不能借此获得系统未授予的能力。自动演化基于当前 Prompt revision 产生完整 candidate；用户保存 Prompt 时立即丢弃 candidate。candidate 必须由匹配 candidate ID 的真实 execution attempt 验证：同一 candidate 同时最多一个 execution，Application 从持久化 execution 终态可重放地计算结果；三次 Canary 全部成功且原 Prompt revision 未变化时原子替换 Current Prompt，任一次失败或用户并发编辑时丢弃 candidate，当前 Prompt 不变。配置域不保存 Prompt 历史，UI 不提供恢复入口。本地 Runtime Workspace 只从数据库单向物化 Current Prompt，`PROMPT.md` 文件修改不得反向导入；目标代码库不拥有这套配置。Memory 提升继续生成并保留新的 revision；整个演化链路不能阻塞主 Loop。
+系统代码提供版本化 Prompt Template，但它不是运行时配置层。某个项目第一次初始化 Agent 时，把当时模板复制为全局数据库中该项目的完整 Current Prompt；此后用户直接编辑这一份 Prompt，应用升级不会覆盖。新项目使用最新模板，旧项目新增此前不存在的 Agent 时只初始化该 Agent。Core Contract、实际工具能力和状态机权限不属于可编辑 Role Prompt，用户 Prompt 不能借此获得系统未授予的能力。自动演化基于当前 Prompt revision 产生完整 candidate；用户保存 Prompt 时立即丢弃 candidate。candidate 必须由匹配 candidate ID 的真实 execution attempt 验证：同一 candidate 同时最多一个 execution，Application 从持久化 execution 终态可重放地计算结果；三次 Canary 全部成功且原 Prompt revision 未变化时原子替换 Current Prompt，任一次失败或用户并发编辑时丢弃 candidate，当前 Prompt 不变。配置域不保存 Prompt 历史，UI 不提供恢复入口。本地 Runtime Workspace 只从全局数据库单向物化 Current Prompt，`PROMPT.md` 文件修改不得反向导入；目标代码库不拥有这套配置。Memory 提升继续生成并保留新的 revision；整个演化链路不能阻塞主 Loop。
 
 Prompt 配置与 execution 审计严格分离。每个 `ExecutionAttempt` 永久保存当次实际发送给模型的完整 Prompt snapshot、execution input hash、项目 Prompt revision、初始模板 version、Prompt hash 以及 Memory revision/hash；Prompt 更新或 candidate 被丢弃都不能改写该快照，也不能把历史 execution 快照恢复为当前配置。
 
 ### 2.8 项目配置（Project Configuration）
 
-用户配置工作区根目录，并为每个流程 Agent 独立配置执行器及其可选模型参数：Codex 模型/思考强度或 Claude 模型。没有独立 Profile 的系统辅助 Agent 使用单独的项目级系统 Runtime。工作区短 hash、应用数据目录和 SQLite 路径对普通用户不可见。
+用户通过项目管理维护工作目录，并为每个流程 Agent 独立配置执行器及其可选模型参数：Codex 模型/思考强度或 Claude 模型。没有独立 Profile 的系统辅助 Agent 使用单独的全局系统 Runtime。应用数据目录和 SQLite 路径对普通用户不可见。
 
-当前工作区根目录存入应用级 `data/loopwork.db`；每个工作区的需求、文档、确认事项、Loop 运行、逐 Agent Runtime 和系统 Runtime 设置存入独立项目数据库。切换工作区前必须确认当前项目没有活跃 Loop 运行。
+应用级配置与默认项目工作目录存入 `data/loopwork.db`；所有项目的需求、文档、确认事项与 Loop 运行统一存入全局业务数据库 `data/loop-ui.db`，通过 `project_id` 和需求关联完成隔离。切换默认项目不会切换数据库连接，逐 Agent Runtime 与系统 Runtime 设置属于全局应用配置。
 
 ## 3. 领域关系
 
@@ -190,11 +190,12 @@ classDiagram
 10. 提交关键决策回答后，第一次执行必须交回问题来源 Agent：需求级交回需求梳理 Agent，交付级交回交付分析 Agent。
 11. 代码槽繁忙时自动排队，不能生成人工问题。Dev 执行前原子获取 `code:workspace`，Dev 完成后保留给同一交付单元的 Test；Test 通过、Dev/Test 等待人工输入、系统阻塞、取消或回退到 Analysis 时显式释放。Task 状态与进度不得作为资源占用事实。
 12. 同一任务最多同时运行一个 Analysis Agent 和一个 Delivery Agent；Delivery 严格执行 `Dev(N) → Test(N)`，且 `dev_index <= analysis_index`。该顺序只约束仓库状态形成的先后，不授权 Test 读取 Dev 的结果叙事。Test 场景受阻属于可协作补齐的验证事实，不是系统阻塞；系统阻塞只用于 Runner、CLI、浏览器控制或 Application 自身异常。
-13. 全局最多派发四个 Analysis Agent；`browser:exclusive` 同时只能属于一个 execution。Dev/Test 声明代码工作区和浏览器，Backlog/Repro 只声明浏览器，Idea Context 不声明资源。所有 Delegation 显式声明资源集合，多个资源必须在同一事务中全部取得；同优先级 Analysis 按 Lane 等待时间调度。
-14. 同一个 execution attempt 的 Agent Commit（如有）、验证和 Agent Result 必须幂等记录。
-15. execution attempt 必须记录实际发送给模型的完整 Prompt snapshot、execution input hash、项目 Prompt revision、初始模板 version、Prompt hash 和 Memory revision/hash；配置变化不得改写审计快照。
-16. 每个项目的每个 Agent 必须且只能有一条完整 Current Prompt，并且至多有一个临时 Prompt candidate。系统模板只在首次初始化时复制，应用升级不得覆盖项目 Prompt。自动提升必须满足证据阈值并通过三次真实 Canary，全部成功且原 revision 未变化后替换 Current Prompt，任一次失败或用户编辑则丢弃 candidate。配置域不得保存 Prompt 历史或提供恢复能力。
-17. runtime event 在持久化前必须脱敏，并保留 run/execution correlation、severity 和稳定异常 fingerprint。
+13. 全局 Agent 并发上限统一约束所有执行。Dev/Test/Direct 声明项目级代码工作区资源；浏览器由不同 Agent 在同一 Chrome 实例的独立标签页中共享，不参与资源互斥；其余 Agent 不声明独占资源。同优先级 Analysis 按 Lane 等待时间调度。
+14. 项目以规范化工作目录作为稳定业务身份。删除项目只写入 `deleted_at`：项目、需求、定时计划、Overlay、Memory 与执行历史均保留，但不再出现在普通 UI、调度或定时物化中；再次添加同一工作目录必须恢复原项目 ID 和全部历史数据。
+15. 同一个 execution attempt 的 Agent Commit（如有）、验证和 Agent Result 必须幂等记录。
+16. execution attempt 必须记录实际发送给模型的完整 Prompt snapshot、execution input hash、项目 Prompt revision、初始模板 version、Prompt hash 和 Memory revision/hash；配置变化不得改写审计快照。
+17. 每个项目的每个 Agent 必须且只能有一条完整 Current Prompt，并且至多有一个临时 Prompt candidate。系统模板只在首次初始化时复制，应用升级不得覆盖项目 Prompt。自动提升必须满足证据阈值并通过三次真实 Canary，全部成功且原 revision 未变化后替换 Current Prompt，任一次失败或用户编辑则丢弃 candidate。配置域不得保存 Prompt 历史或提供恢复能力。
+18. runtime event 在持久化前必须脱敏，并保留 run/execution correlation、severity 和稳定异常 fingerprint。
 
 ## 5. Agent 与流程的责任边界
 
@@ -235,7 +236,7 @@ classDiagram
 
 ## 6. SQLite 持久化映射
 
-V1 的 Requirement / Delivery Unit 等业务表暂时保留已有物理名，它们是基础设施兼容细节，不得出现在产品界面或 Agent Prompt 中。Prompt 配置按项目数据库保存一条完整 Current Prompt 和至多一个临时 candidate，不建立运行时分层。
+V1 的 Requirement / Delivery Unit 等业务表暂时保留已有物理名，它们是基础设施兼容细节，不得出现在产品界面或 Agent Prompt 中。Prompt 配置在全局数据库中按 `project_id` 保存一条完整 Current Prompt 和至多一个临时 candidate，不建立运行时分层。
 
 | 产品模型 | 当前物理实现 |
 |---|---|

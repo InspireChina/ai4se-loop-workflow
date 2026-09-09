@@ -3,12 +3,14 @@ import {
   CODE_WORKSPACE_RESOURCE,
   RESOURCE_DEFINITIONS,
   resourcesForAgent,
+  resourcesRequiringClaims,
   type ResourceKey,
 } from '../domain/resource';
 import { requirementPriorityRank } from '../domain/requirement-priority';
 import { nextDelegation, type Delegation } from '../domain/task';
 import {
   activeResourceClaimInDb,
+  resourceIdentityInDb,
   type ResourceClaim,
 } from './resource-claims';
 import {
@@ -246,43 +248,53 @@ function compareAnalysisCandidates(a: { task: Task; lane: TaskLane }, b: { task:
 }
 
 function schedulingResourceClaims(db: Db) {
-  const claims = new Map<ResourceKey, ResourceClaim>();
-  for (const resourceKey of Object.keys(RESOURCE_DEFINITIONS) as ResourceKey[]) {
-    const claim = activeResourceClaimInDb(db, resourceKey);
-    if (claim) claims.set(resourceKey, claim);
+  const claims = new Map<string, ResourceClaim>();
+  const rows = db.prepare('SELECT resource_key, owner_task_id FROM resource_claims')
+    .all() as { resource_key: ResourceKey; owner_task_id: string }[];
+  for (const row of rows) {
+    const claim = activeResourceClaimInDb(db, row.resource_key, row.owner_task_id);
+    if (claim) claims.set(resourceIdentityInDb(db, row.resource_key, row.owner_task_id), claim);
   }
   return claims;
 }
 
 function resourcesAvailable(
+  db: Db,
   delegation: Delegation,
-  claims: Map<ResourceKey, ResourceClaim>,
-  reserved: Set<ResourceKey>,
+  claims: Map<string, ResourceClaim>,
+  reserved: Set<string>,
 ) {
-  return delegation.resources.every((resourceKey) => {
-    const claim = claims.get(resourceKey);
+  return resourcesRequiringClaims(delegation.resources).every((resourceKey) => {
+    const identity = resourceIdentityInDb(db, resourceKey, delegation.taskId);
+    const claim = claims.get(identity);
     if (claim) {
       return RESOURCE_DEFINITIONS[resourceKey].ownerScope === 'task'
         && claim.owner_task_id === delegation.taskId;
     }
-    return !reserved.has(resourceKey);
+    return !reserved.has(identity);
   });
 }
 
-function reserveResources(delegation: Delegation, reserved: Set<ResourceKey>) {
-  for (const resourceKey of delegation.resources) reserved.add(resourceKey);
+function reserveResources(db: Db, delegation: Delegation, reserved: Set<string>) {
+  for (const resourceKey of resourcesRequiringClaims(delegation.resources)) {
+    reserved.add(resourceIdentityInDb(db, resourceKey, delegation.taskId));
+  }
 }
 
 export function planDispatchInDb(db: Db): DelegationEnvelope[] {
-  const tasks = db.prepare(`${dispatchTaskSelect} WHERE agile_status NOT IN ('done', 'cancelled') AND is_paused = 0`)
+  const tasks = db.prepare(`${dispatchTaskSelect}
+    WHERE agile_status NOT IN ('done', 'cancelled') AND is_paused = 0
+      AND EXISTS (
+        SELECT 1 FROM projects project
+        WHERE project.project_id = tasks.project_id AND project.deleted_at IS NULL
+      )`)
     .all() as Task[];
   tasks.sort(compareDispatchTasks);
   const active = activeLaneExecutions(db);
   const activeKeys = new Set(active.map((item) => `${item.task_id}:${item.lane}`));
   let agentSlots = Math.max(0, agentConcurrencyInDb(db) - activeAgentExecutionCount(db));
   const resourceClaims = schedulingResourceClaims(db);
-  const codeClaim = resourceClaims.get(CODE_WORKSPACE_RESOURCE);
-  const reservedResources = new Set<ResourceKey>();
+  const reservedResources = new Set<string>();
   const lines: DelegationEnvelope[] = [];
   const analysisCandidates: { task: Task; lane: TaskLane }[] = [];
 
@@ -290,8 +302,10 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
     if (!requirementDependencyGateOpenInDb(db, task.task_id)) continue;
     refreshTaskLaneStatesInDb(db, task);
     const lanes = taskLanesInDb(db, task);
+    const codeIdentity = resourceIdentityInDb(db, CODE_WORKSPACE_RESOURCE, task.task_id);
+    const codeClaim = resourceClaims.get(codeIdentity);
     const taskCodeAvailable = codeClaim?.owner_task_id === task.task_id
-      || (!codeClaim && !reservedResources.has(CODE_WORKSPACE_RESOURCE));
+      || (!codeClaim && !reservedResources.has(codeIdentity));
     const feedback = taskContextChatTurnIsRunning(db, task.task_id)
       ? undefined
       : nextFeedbackDispatchInDb(db, task.task_id);
@@ -300,8 +314,8 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
       const delegation = feedbackDelegation(task, feedback);
       if (!taskHasActive
         && agentSlots > 0
-        && resourcesAvailable(delegation, resourceClaims, reservedResources)) {
-        reserveResources(delegation, reservedResources);
+        && resourcesAvailable(db, delegation, resourceClaims, reservedResources)) {
+        reserveResources(db, delegation, reservedResources);
         lines.push(delegation);
         agentSlots -= 1;
       }
@@ -313,8 +327,8 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
     if (control) {
       if (!taskHasActive
         && agentSlots > 0
-        && resourcesAvailable(control, resourceClaims, reservedResources)) {
-        reserveResources(control, reservedResources);
+        && resourcesAvailable(db, control, resourceClaims, reservedResources)) {
+        reserveResources(db, control, reservedResources);
         lines.push(toEnvelope(task, control));
         agentSlots -= 1;
       }
@@ -327,8 +341,8 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
     const delivery = lanes.find((lane) => lane.lane === 'delivery');
     if (!delivery || activeKeys.has(`${task.task_id}:delivery`)) continue;
     const deliveryWork = laneLine(task, delivery, taskCodeAvailable);
-    if (!deliveryWork || !agentSlots || !resourcesAvailable(deliveryWork, resourceClaims, reservedResources)) continue;
-    reserveResources(deliveryWork, reservedResources);
+    if (!deliveryWork || !agentSlots || !resourcesAvailable(db, deliveryWork, resourceClaims, reservedResources)) continue;
+    reserveResources(db, deliveryWork, reservedResources);
     lines.push(toEnvelope(task, deliveryWork, delivery.retry_cycle));
     agentSlots -= 1;
   }
@@ -336,8 +350,8 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
   for (const candidate of analysisCandidates.sort(compareAnalysisCandidates)) {
     if (!agentSlots) break;
     const work = laneLine(candidate.task, candidate.lane, true);
-    if (!work || !resourcesAvailable(work, resourceClaims, reservedResources)) continue;
-    reserveResources(work, reservedResources);
+    if (!work || !resourcesAvailable(db, work, resourceClaims, reservedResources)) continue;
+    reserveResources(db, work, reservedResources);
     lines.push(toEnvelope(candidate.task, work, candidate.lane.retry_cycle));
     agentSlots -= 1;
   }
@@ -345,8 +359,16 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
 }
 
 export function projectRequirementWorkInDb(db: Db, taskId: string): Delegation[] {
-  const task = db.prepare(`${dispatchTaskSelect} WHERE task_id = ?`).get(taskId) as Task | undefined;
-  if (!task) throw new Error('需求不存在');
+  const task = db.prepare(`${dispatchTaskSelect}
+    WHERE task_id = ? AND EXISTS (
+      SELECT 1 FROM projects project
+      WHERE project.project_id = tasks.project_id AND project.deleted_at IS NULL
+    )`).get(taskId) as Task | undefined;
+  if (!task) {
+    const exists = db.prepare('SELECT 1 FROM tasks WHERE task_id = ?').get(taskId);
+    if (exists) return [];
+    throw new Error('需求不存在');
+  }
   if (task.is_paused) return [];
   if (!requirementDependencyGateOpenInDb(db, taskId)) return [];
   refreshTaskLaneStatesInDb(db, task);
@@ -356,17 +378,17 @@ export function projectRequirementWorkInDb(db: Db, taskId: string): Delegation[]
   const feedback = taskContextChatTurnIsRunning(db, taskId) ? undefined : nextFeedbackDispatchInDb(db, taskId);
   if (feedback && feedbackCanDispatch(task, lanes)) {
     const work = feedbackDelegation(task, feedback);
-    return active.length || !resourcesAvailable(work, resourceClaims, new Set()) ? [] : [work];
+    return active.length || !resourcesAvailable(db, work, resourceClaims, new Set()) ? [] : [work];
   }
   if (task.agile_status === 'blocked') return [];
-  const codeClaim = resourceClaims.get(CODE_WORKSPACE_RESOURCE);
+  const codeClaim = resourceClaims.get(resourceIdentityInDb(db, CODE_WORKSPACE_RESOURCE, taskId));
   const codeSlotAvailable = !codeClaim || codeClaim.owner_task_id === taskId;
   const rawControl = controlLine(task, codeSlotAvailable, lanes);
   const control = rawControl ? attachBusinessAnalysisRevisionFeedback(db, task, rawControl) : null;
-  if (control) return active.length || !resourcesAvailable(control, resourceClaims, new Set()) ? [] : [control];
+  if (control) return active.length || !resourcesAvailable(db, control, resourceClaims, new Set()) ? [] : [control];
   return lanes
     .filter((lane) => !active.some((item) => item.lane === lane.lane))
     .map((lane) => laneLine(task, lane, codeSlotAvailable))
     .filter((work): work is Delegation => Boolean(work))
-    .filter((work) => resourcesAvailable(work, resourceClaims, new Set()));
+    .filter((work) => resourcesAvailable(db, work, resourceClaims, new Set()));
 }

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { resourcesForAgent, type ResourceKey } from '../domain/resource';
+import { resourcesForAgent, resourcesRequiringClaims, type ResourceKey } from '../domain/resource';
 import { databaseConnection, hash } from '../infrastructure/database';
 import { acquireResourceClaimsInDb, releaseResourceClaimInDb, resourceClaimInDb } from './resource-claims';
 import { releaseExecutionResourceClaimsInDb } from './resource-claims';
@@ -13,7 +13,7 @@ import {
 } from './executions';
 import { retryNotBeforeForFailure } from './execution-retry-policy';
 import { requirementDependencyGateOpenInDb } from './task-dependencies';
-import { isActiveAgentConfigurationPromptCandidate } from './agent-configurations';
+import { isActiveProjectOverlayCandidateInDb } from './agent-profiles';
 
 export type DispatchWaitReason =
   | 'active-execution'
@@ -96,7 +96,7 @@ function releaseAcquiredReservationClaims(
   reservation: StoredReservation,
 ) {
   for (const [resourceKey, acquisition] of Object.entries(reservation.resourceAcquisitions) as [ResourceKey, 'acquired' | 'inherited'][]) {
-    const current = resourceClaimInDb(db, resourceKey);
+    const current = resourceClaimInDb(db, resourceKey, reservation.work.taskId);
     if (acquisition === 'acquired' && current?.owner_execution_id === reservation.executionId) {
       releaseResourceClaimInDb(db, resourceKey, reservation.work.taskId);
     }
@@ -181,8 +181,9 @@ async function reserveNext(input: { runId: string }): Promise<ReserveNextResult>
         WHERE dispatch_generation_key = ? AND dispatch_retry_consumed = 1
       `).get(generationKey) as { attempt: number | null };
       const attempt = (previous.attempt || 0) + 1;
-      const resourceAcquisitions = Object.fromEntries(work.resources.map((resourceKey) => {
-        const claim = resourceClaimInDb(db, resourceKey);
+      const claimedResources = resourcesRequiringClaims(work.resources);
+      const resourceAcquisitions = Object.fromEntries(claimedResources.map((resourceKey) => {
+        const claim = resourceClaimInDb(db, resourceKey, work.taskId);
         return [resourceKey, claim?.owner_task_id === work.taskId ? 'inherited' : 'acquired'];
       })) as Record<ResourceKey, 'acquired' | 'inherited'>;
       const reservation: StoredReservation = {
@@ -191,7 +192,7 @@ async function reserveNext(input: { runId: string }): Promise<ReserveNextResult>
         runId: input.runId,
         attempt,
         work,
-        claimedResources: work.resources,
+        claimedResources,
         generationKey,
         resourceAcquisitions,
       };
@@ -219,7 +220,7 @@ async function reserveNext(input: { runId: string }): Promise<ReserveNextResult>
         reservationJson,
       );
       acquireResourceClaimsInDb(db, {
-        resourceKeys: work.resources,
+        resourceKeys: claimedResources,
         taskId: work.taskId,
         lane: work.lane,
         storyIndex: work.storyIndex,
@@ -233,7 +234,7 @@ async function reserveNext(input: { runId: string }): Promise<ReserveNextResult>
           storyIndex: work.storyIndex,
         });
       }
-      reservations.push({ reservationId, executionId, runId: input.runId, attempt, work, claimedResources: work.resources });
+      reservations.push({ reservationId, executionId, runId: input.runId, attempt, work, claimedResources });
     }
     db.exec('COMMIT');
     if (!reservations.length && earliestRetryNotBefore) {
@@ -394,7 +395,7 @@ async function activate(input: { reservationId: string; prepared: PreparedExecut
   return db.transaction(() => {
     const attempt = db.prepare(`
       SELECT execution_attempts.*, tasks.agile_status AS task_status, tasks.is_paused AS task_is_paused,
-             loop_runs.status AS run_status
+             tasks.project_id AS task_project_id, loop_runs.status AS run_status
       FROM execution_attempts
       JOIN tasks ON tasks.task_id = execution_attempts.task_id
       LEFT JOIN loop_runs ON loop_runs.run_id = execution_attempts.run_id
@@ -404,6 +405,7 @@ async function activate(input: { reservationId: string; prepared: PreparedExecut
       dispatch_reservation_json: string;
       task_status: string;
       task_is_paused: number;
+      task_project_id: string;
       run_status: string | null;
     }) | undefined;
     if (!attempt) return { kind: 'invalidated', reason: 'superseded' } as const;
@@ -436,7 +438,7 @@ async function activate(input: { reservationId: string; prepared: PreparedExecut
     if (attempt.task_is_paused) return invalidate('requirement-paused');
     if (['done', 'cancelled'].includes(attempt.task_status)) return invalidate('requirement-terminal');
     if (input.prepared.evolutionCandidateId) {
-      if (!isActiveAgentConfigurationPromptCandidate(attempt.agent, input.prepared.evolutionCandidateId)) {
+      if (!isActiveProjectOverlayCandidateInDb(db, attempt.task_project_id, attempt.agent, input.prepared.evolutionCandidateId)) {
         return invalidate('canary-deferred');
       }
       const activeCanary = db.prepare(`
@@ -601,9 +603,9 @@ function recoverExecutionWork(attempt: ExecutionAttempt) {
   return {
     ...snapshot.delegation,
     lane: snapshot.delegation.lane || laneForAgent(snapshot.delegation.agent),
-    resources: Array.isArray(snapshot.delegation.resources)
+    resources: resourcesRequiringClaims(Array.isArray(snapshot.delegation.resources)
       ? snapshot.delegation.resources
-      : resourcesForAgent(snapshot.delegation.agent),
+      : resourcesForAgent(snapshot.delegation.agent)),
   } as DelegationEnvelope;
 }
 

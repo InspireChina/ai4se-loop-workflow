@@ -84,7 +84,11 @@ export async function beginTaskContextChatTurn(taskId: string, content: unknown,
   const message = messageSchema.parse(content);
   const db = await databaseConnection();
   return db.transaction(() => {
-    const task = db.prepare('SELECT task_id FROM tasks WHERE task_id = ?').get(taskId);
+    const task = db.prepare(`
+      SELECT task.task_id FROM tasks task
+      JOIN projects project ON project.project_id = task.project_id
+      WHERE task.task_id = ? AND project.deleted_at IS NULL
+    `).get(taskId);
     if (!task) throw new Error(`需求不存在：${taskId}`);
     let row = db.prepare('SELECT * FROM task_context_chat_sessions WHERE task_id = ?').get(taskId) as SessionRow | undefined;
     if (!row) {

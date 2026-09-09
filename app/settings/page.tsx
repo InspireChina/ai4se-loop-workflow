@@ -1,10 +1,9 @@
 import Link from 'next/link';
-import { basename } from 'node:path';
-import { Activity, ArrowRight, Bot, Check, FolderKanban, Gauge } from 'lucide-react';
+import { Activity, ArrowRight, Bot, Check, FolderKanban, Gauge, Plus, Star, Trash2 } from 'lucide-react';
 import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, MAX_AGENT_CONCURRENCY, OMP_THINKING_LEVELS, getAgentConcurrency, getAgentExecutorSettings, getFlowAgentDefaultRuntimeSettings, getLangfuseSettings } from '../../src/application/project-settings';
-import { paths } from '../../src/infrastructure/database';
-import { changeWorkspaceRootAction, saveAgentConcurrencyAction, saveAgentExecutorAction, saveFlowAgentDefaultRuntimeAction, saveLangfuseSettingsAction } from '../actions';
+import { createProjectAction, deleteProjectAction, saveAgentConcurrencyAction, saveAgentExecutorAction, saveFlowAgentDefaultRuntimeAction, saveLangfuseSettingsAction, setDefaultProjectAction, updateProjectAction } from '../actions';
 import { SettingsNavigator, type SettingsNavigationItem } from './settings-navigator';
+import { listProjects } from '../../src/application/projects';
 
 export const dynamic = 'force-dynamic';
 
@@ -28,34 +27,60 @@ function CursorRuntimeNotice() {
 }
 
 export default async function SettingsPage() {
-  const [settings, flowDefaults, agentConcurrency, langfuse] = await Promise.all([
-    getAgentExecutorSettings(), getFlowAgentDefaultRuntimeSettings(), getAgentConcurrency(), getLangfuseSettings(),
+  const [settings, flowDefaults, agentConcurrency, langfuse, projects] = await Promise.all([
+    getAgentExecutorSettings(), getFlowAgentDefaultRuntimeSettings(), getAgentConcurrency(), getLangfuseSettings(), listProjects(),
   ]);
   const flowRuntimeSummary = runtimeSummary(flowDefaults);
   const systemRuntimeSummary = runtimeSummary(settings);
   const langfuseStatus = langfuse.status === 'enabled' ? '已启用' : langfuse.status === 'disabled' ? '未启用' : '需配置';
   const navigationItems: SettingsNavigationItem[] = [
-    { id: 'workspace', group: '项目与调度', label: '当前项目', description: '工作区与独立数据', value: basename(paths.root) },
-    { id: 'concurrency', group: '项目与调度', label: 'Agent 并发', description: '当前项目运行容量', value: `上限 ${agentConcurrency}` },
+    { id: 'workspace', group: '项目与调度', label: '项目管理', description: '项目与工作目录', value: `${projects.length} 个项目` },
+    { id: 'concurrency', group: '项目与调度', label: 'Agent 并发', description: '全部项目运行容量', value: `上限 ${agentConcurrency}` },
     { id: 'flow-runtime', group: 'Agent Runtime', label: '流程 Agent 默认', description: '流程 Profile 继承', value: flowRuntimeSummary },
     { id: 'system-runtime', group: 'Agent Runtime', label: '系统辅助 Agent', description: '上下文对话、验证协助等能力', value: systemRuntimeSummary },
     { id: 'langfuse', group: '集成', label: 'Langfuse', description: 'Trace 与诊断', value: langfuseStatus },
   ];
 
   return <>
-    <header><p className="eyebrow">LOOPWORK SETTINGS</p><h1>设置</h1><p className="muted">项目数据保持隔离；Agent Runtime 保存在 LoopWork 全局配置中。</p></header>
+    <header><p className="eyebrow">LOOPWORK SETTINGS</p><h1>设置</h1><p className="muted">统一管理项目工作目录；Agent Runtime 保存在 LoopWork 全局配置中。</p></header>
     <SettingsNavigator items={navigationItems}>
       <section className="card settings-editor" aria-labelledby="workspace-settings-title">
-        <div className="settings-editor-head"><span className="executor-icon"><FolderKanban size={18}/></span><div><p className="eyebrow">PROJECT</p><h2 id="workspace-settings-title">当前项目</h2><p>切换后，需求、运行记录、Memory 和演化证据会使用该代码库对应的独立数据库。</p></div><span className="settings-current" title={paths.root}>{basename(paths.root)}</span></div>
-        <form action={changeWorkspaceRootAction} className="settings settings-editor-form">
-          <div className="workspace-switch"><label>工作区根目录<input name="workspaceRoot" required defaultValue={paths.root} spellCheck={false}/></label><button className="button" type="submit">切换项目</button></div>
-        </form>
+        <div className="settings-editor-head"><span className="executor-icon"><FolderKanban size={18}/></span><div><p className="eyebrow">PROJECTS</p><h2 id="workspace-settings-title">项目管理</h2><p>需求绑定项目后，Agent 会在该项目的工作目录中执行；多个项目可以由同一个 Runner 并行推进。</p></div><span className="settings-current">{projects.length} 个项目</span></div>
+        <div className="project-manager">
+          <div className="project-list">
+            {projects.map((project) => <details className="project-editor" key={project.project_id}>
+              <summary><span><strong>{project.name}{project.is_default ? <small className="project-default-badge"><Star size={11} fill="currentColor"/>默认项目</small> : null}</strong><small>{project.workspace_root}</small></span><em>{project.active_requirement_count} 个进行中 · {project.requirement_count} 个需求</em></summary>
+              <form action={updateProjectAction} className="settings settings-editor-form">
+                <input type="hidden" name="projectId" value={project.project_id}/>
+                <div className="fields"><label>项目名称<input name="name" required defaultValue={project.name}/></label><label>工作目录<input name="workspaceRoot" required defaultValue={project.workspace_root} spellCheck={false}/></label></div>
+                <label>说明（可选）<textarea name="description" rows={2} defaultValue={project.description || ''}/></label>
+                <div className="project-editor-actions"><button className="button" type="submit">保存项目</button></div>
+              </form>
+              <div className="project-secondary-actions">
+                <form action={setDefaultProjectAction}>
+                  <input type="hidden" name="projectId" value={project.project_id}/>
+                  <button className="button secondary" type="submit" disabled={Boolean(project.is_default)}><Star size={14}/>{project.is_default ? '当前默认' : '设为默认'}</button>
+                </form>
+                <form action={deleteProjectAction}>
+                  <input type="hidden" name="projectId" value={project.project_id}/>
+                  <button className="button danger" type="submit" disabled={projects.length <= 1 || project.active_execution_count > 0} title={projects.length <= 1 ? '至少需要保留一个项目' : project.active_execution_count > 0 ? '项目仍有 Agent 正在运行，请等待执行结束后再删除' : '移除项目但保留全部历史数据；再次添加同一工作目录即可恢复'}><Trash2 size={14}/>删除</button>
+                </form>
+              </div>
+            </details>)}
+          </div>
+          <form action={createProjectAction} className="settings settings-editor-form project-create-form">
+            <h3><Plus size={16}/>添加项目</h3>
+            <div className="fields"><label>项目名称<input name="name" required placeholder="例如：LoopWork Web"/></label><label>工作目录<input name="workspaceRoot" required placeholder="/path/to/project" spellCheck={false}/></label></div>
+            <label>说明（可选）<textarea name="description" rows={2} placeholder="项目用途或约定"/></label>
+            <button className="button" type="submit">添加项目</button>
+          </form>
+        </div>
       </section>
 
       <section className="card settings-editor" aria-labelledby="concurrency-settings-title">
-        <div className="settings-editor-head"><span className="executor-icon"><Gauge size={18}/></span><div><p className="eyebrow">SCHEDULING</p><h2 id="concurrency-settings-title">流程 Agent 并发</h2><p>统一限制所有流程 Agent 的运行总数；代码槽和浏览器锁继续作为额外资源约束。</p></div><span className="settings-current">上限 {agentConcurrency}</span></div>
+        <div className="settings-editor-head"><span className="executor-icon"><Gauge size={18}/></span><div><p className="eyebrow">SCHEDULING</p><h2 id="concurrency-settings-title">流程 Agent 并发</h2><p>统一限制所有流程 Agent 的运行总数；同一项目的代码工作区仍保持互斥，浏览器由各 Agent 通过独立标签页共享。</p></div><span className="settings-current">上限 {agentConcurrency}</span></div>
         <form action={saveAgentConcurrencyAction} className="settings settings-editor-form">
-          <div className="fields"><label>Agent 最大并发数<input name="agentConcurrency" type="number" min="1" max={MAX_AGENT_CONCURRENCY} step="1" required defaultValue={agentConcurrency}/><small className="muted">可设置 1–{MAX_AGENT_CONCURRENCY}。无锁 Agent 与占用代码槽、浏览器锁的 Agent 全部计入。</small></label></div>
+          <div className="fields"><label>Agent 最大并发数<input name="agentConcurrency" type="number" min="1" max={MAX_AGENT_CONCURRENCY} step="1" required defaultValue={agentConcurrency}/><small className="muted">可设置 1–{MAX_AGENT_CONCURRENCY}。所有 Agent 都计入；浏览器标签页不额外占用调度名额。</small></label></div>
           <small className="muted">保存后立即影响新的派发；已运行的 Agent 不会被终止。若当前占用超过新上限，系统会等待其自然结束。</small>
           <button className="button" type="submit">保存并发设置</button>
         </form>

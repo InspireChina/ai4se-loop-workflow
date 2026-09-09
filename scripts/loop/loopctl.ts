@@ -183,7 +183,7 @@ async function main() {
       console.log(JSON.stringify({
         app_root: paths.appRoot,
         workspace_root: paths.root,
-        repo_hash: paths.repoHash,
+        database_scope: 'global',
         data_dir: paths.dataDir,
         db_path: paths.dbPath,
         runs_dir: paths.runsDir,
