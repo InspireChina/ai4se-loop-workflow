@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import { promoteDailyMemoryObservation } from '../../../../../src/application/agent-profiles';
+import { isAllowedLocalRequestOrigin } from '../../../../../src/infrastructure/local-request-origin';
 
 function memoryPage(request: Request, agentId: string, projectId: string, parameters: Record<string, string>) {
   const url = new URL(`/agents/${agentId}`, request.url);
@@ -12,9 +13,7 @@ function memoryPage(request: Request, agentId: string, projectId: string, parame
 export async function POST(request: Request, { params }: { params: Promise<{ agentId: string }> }) {
   const { agentId } = await params;
   let projectId = '';
-  const requestUrl = new URL(request.url);
-  const origin = request.headers.get('origin');
-  if (origin && origin !== requestUrl.origin) {
+  if (!isAllowedLocalRequestOrigin(request)) {
     return NextResponse.json({ error: 'Origin 不匹配' }, { status: 403 });
   }
   try {

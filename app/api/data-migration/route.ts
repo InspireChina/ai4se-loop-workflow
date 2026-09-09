@@ -2,14 +2,13 @@ import { NextResponse } from 'next/server';
 import { revalidatePath } from 'next/cache';
 import { ensureAgentRuntimeWorkspace } from '../../../src/application/agent-profiles';
 import { scanAndImportLegacyProjectDatabases } from '../../../src/infrastructure/database';
+import { isAllowedLocalRequestOrigin } from '../../../src/infrastructure/local-request-origin';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
 
 export async function POST(request: Request) {
-  const requestUrl = new URL(request.url);
-  const origin = request.headers.get('origin');
-  if (origin && origin !== requestUrl.origin) {
+  if (!isAllowedLocalRequestOrigin(request)) {
     return NextResponse.json({ error: 'Origin 不匹配' }, { status: 403 });
   }
   try {
