@@ -64,6 +64,15 @@ test('merges a migrated single-project database into an existing global database
         work_dir TEXT NOT NULL DEFAULT '',
         project_id TEXT REFERENCES projects(project_id) ON DELETE RESTRICT
       );
+      CREATE TABLE execution_attempts (
+        execution_id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(task_id)
+      );
+      CREATE TABLE agent_evolution_runs (
+        evolution_id TEXT PRIMARY KEY,
+        execution_id TEXT NOT NULL REFERENCES execution_attempts(execution_id),
+        project_id TEXT NOT NULL REFERENCES projects(project_id)
+      );
       CREATE TABLE agent_profiles (agent_id TEXT PRIMARY KEY);
       CREATE TABLE project_agent_overlays (
         project_id TEXT NOT NULL REFERENCES projects(project_id),
@@ -79,11 +88,24 @@ test('merges a migrated single-project database into an existing global database
         content TEXT NOT NULL,
         PRIMARY KEY(project_id, agent_id, revision)
       );
+      CREATE TRIGGER trg_agent_evolution_runs_same_project_insert
+      BEFORE INSERT ON agent_evolution_runs
+      WHEN NOT EXISTS (
+        SELECT 1
+        FROM execution_attempts execution
+        JOIN tasks task ON task.task_id = execution.task_id
+        WHERE execution.execution_id = NEW.execution_id AND task.project_id = NEW.project_id
+      )
+      BEGIN
+        SELECT RAISE(ABORT, 'Agent 演化运行必须属于 execution 对应项目');
+      END;
     `;
     const source = new Database(sourcePath);
     source.exec(schema);
     source.prepare(`INSERT INTO projects(project_id, name, workspace_root, is_default) VALUES('PRJ-default', 'old', '/old/path', 1)`).run();
     source.prepare(`INSERT INTO tasks(task_id, title, work_dir, project_id) VALUES('REQ-old', 'historical', '/old/path', 'PRJ-default')`).run();
+    source.prepare(`INSERT INTO execution_attempts(execution_id, task_id) VALUES('EXEC-old', 'REQ-old')`).run();
+    source.prepare(`INSERT INTO agent_evolution_runs(evolution_id, execution_id, project_id) VALUES('EVO-old', 'EXEC-old', 'PRJ-default')`).run();
     source.prepare(`INSERT INTO agent_profiles(agent_id) VALUES('dev-agent')`).run();
     source.prepare(`INSERT INTO project_agent_overlays(project_id, agent_id, revision, content) VALUES('PRJ-default', 'dev-agent', 3, '历史 Overlay')`).run();
     source.prepare(`INSERT INTO project_agent_memory_versions(project_id, agent_id, revision, content) VALUES('PRJ-default', 'dev-agent', 4, '历史 Memory')`).run();
@@ -119,6 +141,10 @@ test('merges a migrated single-project database into an existing global database
       project_id: merged.projectId,
       revision: 4,
       content: '历史 Memory',
+    });
+    assert.deepEqual(target.prepare(`SELECT execution_id, project_id FROM agent_evolution_runs WHERE evolution_id = 'EVO-old'`).get(), {
+      execution_id: 'EXEC-old',
+      project_id: merged.projectId,
     });
     assert.equal(mergeLegacyProjectDatabase({ target, sourcePath, workspaceRoot }).status, 'already-imported');
     assert.equal((target.prepare('SELECT COUNT(*) AS count FROM tasks').get() as { count: number }).count, 1);

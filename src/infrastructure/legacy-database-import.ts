@@ -136,6 +136,7 @@ const MERGE_EXCLUDED_TABLES = new Set([
 ]);
 
 type TableColumn = { name: string; type: string; pk: number };
+type ForeignKey = { table: string };
 
 function identifier(value: string) {
   return `"${value.replaceAll('"', '""')}"`;
@@ -143,6 +144,29 @@ function identifier(value: string) {
 
 function projectIdForLegacySource(sourcePath: string, workspaceRoot: string) {
   return `PRJ-legacy-${createHash('sha256').update(`${resolve(sourcePath)}\0${resolve(workspaceRoot)}`).digest('hex').slice(0, 16)}`;
+}
+
+function orderTablesByForeignKeyDependencies(database: Database.Database, tableNames: string[]) {
+  const remaining = new Set(tableNames);
+  const dependencies = new Map(tableNames.map((name) => {
+    const parents = database.prepare(`PRAGMA main.foreign_key_list(${identifier(name)})`).all() as ForeignKey[];
+    return [name, new Set(parents.map((item) => item.table).filter((parent) => parent !== name && remaining.has(parent)))] as const;
+  }));
+  const ordered: string[] = [];
+
+  while (remaining.size) {
+    const ready = [...remaining]
+      .filter((name) => [...(dependencies.get(name) || [])].every((parent) => !remaining.has(parent)))
+      .sort();
+    if (!ready.length) {
+      throw new Error(`历史库表存在无法排序的循环依赖：${[...remaining].sort().join(', ')}`);
+    }
+    for (const name of ready) {
+      ordered.push(name);
+      remaining.delete(name);
+    }
+  }
+  return ordered;
 }
 
 /** Merge one migrated, historical single-project database into the global DB. */
@@ -185,17 +209,18 @@ export function mergeLegacyProjectDatabase(input: {
         `).run(projectId, input.projectName?.trim() || basename(workspaceRoot) || '历史项目', workspaceRoot, '由历史项目数据库迁移');
       }
 
-      const tables = input.target.prepare(`
+      const sourceTables = input.target.prepare(`
         SELECT name FROM legacy_project.sqlite_master
         WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
         ORDER BY name
       `).all() as { name: string }[];
-      for (const { name } of tables) {
-        if (MERGE_EXCLUDED_TABLES.has(name)) continue;
-        const targetExists = input.target.prepare(`
+      const mergeableTables = sourceTables
+        .map((item) => item.name)
+        .filter((name) => !MERGE_EXCLUDED_TABLES.has(name))
+        .filter((name) => Boolean(input.target.prepare(`
           SELECT 1 FROM main.sqlite_master WHERE type = 'table' AND name = ?
-        `).get(name);
-        if (!targetExists) continue;
+        `).get(name)));
+      for (const name of orderTablesByForeignKeyDependencies(input.target, mergeableTables)) {
         const sourceColumns = input.target.prepare(`PRAGMA legacy_project.table_info(${identifier(name)})`).all() as TableColumn[];
         const targetColumns = input.target.prepare(`PRAGMA main.table_info(${identifier(name)})`).all() as TableColumn[];
         const sourceNames = new Set(sourceColumns.map((column) => column.name));
