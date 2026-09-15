@@ -1,7 +1,8 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { Plus, Trash2 } from 'lucide-react';
+import { CalendarClock, ChevronDown, FileText, Plus, SlidersHorizontal, Trash2 } from 'lucide-react';
+import { useFormStatus } from 'react-dom';
 import { REQUIREMENT_PIPELINES } from '../../src/domain/pipeline-catalog';
 import { DEFAULT_REQUIREMENT_PRIORITY, REQUIREMENT_PRIORITY_OPTIONS } from '../../src/domain/requirement-priority';
 import { REQUIREMENT_METADATA_DEFINITIONS, type RequirementMetadataKey } from '../../src/domain/requirement-metadata';
@@ -44,6 +45,7 @@ export function ScheduleForm({
   const [recurrence, setRecurrence] = useState(plan?.recurrence_kind || 'weekdays');
   const [timezone, setTimezone] = useState(plan?.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
   const [metadata, setMetadata] = useState(initialMetadata);
+  const [advancedOpen, setAdvancedOpen] = useState(initialMetadata.length > 0);
 
   function addMetadata() {
     const available = REQUIREMENT_METADATA_DEFINITIONS.find((definition) => !metadata.some((item) => item.key === definition.key));
@@ -59,48 +61,28 @@ export function ScheduleForm({
 
   return <form action={saveScheduledRequirementAction} className="form-panel schedule-form">
     {plan && <input type="hidden" name="planId" value={plan.plan_id}/>}
-    <div className="fields schedule-fields">
+    <div className="schedule-form-body">
+    <section className="schedule-content-fields" aria-label="需求内容">
+      <div className="schedule-section-title"><FileText size={17}/><h3>需求内容</h3></div>
+      <label>需求标题<input name="title" required maxLength={300} defaultValue={plan?.template_title || ''} placeholder="例如：整理本周客户反馈"/></label>
+      <label>需求描述 <span className="schedule-optional">可选</span><textarea name="description" rows={5} defaultValue={plan?.template_description || ''} placeholder="描述要完成的工作、预期结果和注意事项。每次创建的需求都会使用这份描述。"/></label>
+      <div className="fields">
       <label>所属项目
         <select name="projectId" required defaultValue={plan?.project_id || projects[0]?.project_id}>
           {projects.map((project) => <option value={project.project_id} key={project.project_id}>{project.name}{project.is_default ? '（默认）' : ''}</option>)}
         </select>
       </label>
-      <label>计划类型
-        <select name="recurrenceKind" value={recurrence} onChange={(event) => setRecurrence(event.target.value as typeof recurrence)}>
-          <option value="once">单次</option>
-          <option value="daily">每天</option>
-          <option value="weekdays">每个工作日</option>
-          <option value="weekly">每周</option>
-          <option value="monthly">每月</option>
-        </select>
-      </label>
-      <label>时区
-        <select name="timezone" value={timezone} onChange={(event) => setTimezone(event.target.value)}>
-          {timezones.map((item) => <option value={item} key={item}>{item}</option>)}
-        </select>
-      </label>
-      {recurrence === 'once'
-        ? <label>执行时间<input type="datetime-local" name="onceAtLocal" required defaultValue={localDateTimeValue(plan?.once_at, timezone)}/></label>
-        : <label>执行时间<input type="time" name="localTime" required defaultValue={plan?.local_time || '09:30'}/></label>}
-      {recurrence === 'weekly' && <label>星期
-        <select name="weekday" defaultValue={String(plan?.weekday ?? 1)}>
-          <option value="1">星期一</option><option value="2">星期二</option><option value="3">星期三</option>
-          <option value="4">星期四</option><option value="5">星期五</option><option value="6">星期六</option><option value="0">星期日</option>
-        </select>
-      </label>}
-      {recurrence === 'monthly' && <label>每月日期<input name="dayOfMonth" type="number" min="1" max="31" required defaultValue={plan?.day_of_month || 1}/></label>}
-    </div>
-    <label>需求标题<input name="title" required maxLength={300} defaultValue={plan?.template_title || ''} placeholder="例如：整理本周客户反馈"/></label>
-    <label>需求描述（可选）<textarea name="description" rows={4} defaultValue={plan?.template_description || ''} placeholder="每次创建的新需求都会使用这里的描述"/></label>
-    <div className="fields">
-      <label>PIPELINE<select name="pipeline" defaultValue={plan?.template_pipeline || 'feature'}>{REQUIREMENT_PIPELINES.map((pipeline) => <option value={pipeline.id} key={pipeline.id}>{pipeline.label}</option>)}</select></label>
+      <label>工作流程<select name="pipeline" defaultValue={plan?.template_pipeline || 'feature'}>{REQUIREMENT_PIPELINES.map((pipeline) => <option value={pipeline.id} key={pipeline.id}>{pipeline.label}</option>)}</select></label>
+      </div>
+      <details className="schedule-advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>
+      <summary><SlidersHorizontal size={14}/>更多设置<span>优先级、需求参数</span><ChevronDown size={14}/></summary>
+      <div className="schedule-advanced-content">
       <label>优先级（9 最高）<select name="priority" defaultValue={plan?.template_priority || DEFAULT_REQUIREMENT_PRIORITY}>{REQUIREMENT_PRIORITY_OPTIONS.map((priority) => <option value={priority.value} key={priority.value}>{priority.label}</option>)}</select></label>
-    </div>
     <div className="metadata-editor">
       {metadata.map((item, index) => {
         const definition = REQUIREMENT_METADATA_DEFINITIONS.find((candidate) => candidate.key === item.key)!;
         return <div className="metadata-row" key={`${item.key}-${index}`}>
-          <label>Metadata
+          <label>参数
             <select name="metadataKey" value={item.key} onChange={(event) => changeMetadata(index, event.target.value as RequirementMetadataKey)}>
               {REQUIREMENT_METADATA_DEFINITIONS.map((option) => <option value={option.key} key={option.key} disabled={option.key !== item.key && metadata.some((candidate) => candidate.key === option.key)}>{option.label}</option>)}
             </select>
@@ -113,11 +95,45 @@ export function ScheduleForm({
           <button type="button" className="icon-button metadata-remove" aria-label={`删除${definition.label}`} onClick={() => setMetadata((current) => current.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={16}/></button>
         </div>;
       })}
-      <button className="metadata-add" type="button" onClick={addMetadata} disabled={metadata.length >= REQUIREMENT_METADATA_DEFINITIONS.length}><Plus size={14}/>添加 metadata</button>
+      <button className="metadata-add" type="button" onClick={addMetadata} disabled={metadata.length >= REQUIREMENT_METADATA_DEFINITIONS.length}><Plus size={14}/>添加需求参数</button>
     </div>
-    <div className="dialog-actions">
+      </div>
+      </details>
+    </section>
+    <section className="schedule-timing-fields" aria-label="执行安排">
+      <div className="schedule-section-title"><CalendarClock size={17}/><h3>执行安排</h3></div>
+      <label>重复频率
+        <select name="recurrenceKind" value={recurrence} onChange={(event) => setRecurrence(event.target.value as typeof recurrence)}>
+          <option value="once">单次</option><option value="daily">每天</option><option value="weekdays">每个工作日</option><option value="weekly">每周</option><option value="monthly">每月</option>
+        </select>
+      </label>
+      {recurrence === 'once'
+        ? <label>执行日期与时间<input type="datetime-local" name="onceAtLocal" required defaultValue={localDateTimeValue(plan?.once_at, timezone)}/></label>
+        : <label>执行时间<input type="time" name="localTime" required defaultValue={plan?.local_time || '09:30'}/></label>}
+      {recurrence === 'weekly' && <label>星期
+        <select name="weekday" defaultValue={String(plan?.weekday ?? 1)}>
+          <option value="1">星期一</option><option value="2">星期二</option><option value="3">星期三</option>
+          <option value="4">星期四</option><option value="5">星期五</option><option value="6">星期六</option><option value="0">星期日</option>
+        </select>
+      </label>}
+      {recurrence === 'monthly' && <label>每月日期<input name="dayOfMonth" type="number" min="1" max="31" required defaultValue={plan?.day_of_month || 1}/></label>}
+      <label>时区
+        <select name="timezone" value={timezone} onChange={(event) => setTimezone(event.target.value)}>
+          {timezones.map((item) => <option value={item} key={item}>{item}</option>)}
+        </select>
+      </label>
+      <p className="schedule-timing-note">{recurrence === 'weekdays' ? '每周一至周五，在指定时间创建一条新需求。' : recurrence === 'once' ? '在指定日期创建一条新需求，仅执行一次。' : '按设定的频率创建新需求，每次独立推进。'}</p>
+    </section>
+    </div>
+    <div className="dialog-actions schedule-form-actions">
+      <span>{plan && !plan.enabled ? '保存后保持暂停状态' : '保存后按计划自动创建需求'}</span>
       {onCancel && <button className="button secondary" type="button" onClick={onCancel}>取消</button>}
-      <button className="button" type="submit">{plan ? '保存计划' : '创建计划'}</button>
+      <ScheduleSubmitButton editing={Boolean(plan)}/>
     </div>
   </form>;
+}
+
+function ScheduleSubmitButton({ editing }: { editing: boolean }) {
+  const { pending } = useFormStatus();
+  return <button className="button" type="submit" disabled={pending}>{pending ? '正在保存…' : editing ? '保存计划' : '创建计划'}</button>;
 }
