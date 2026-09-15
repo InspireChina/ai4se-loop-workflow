@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
 import { agentResultSchema } from '../domain/agent-result';
+import { interventionRequestHelp } from './agent-intervention-request';
 
 type DirectExecution = {
   execution_id: string;
@@ -30,6 +31,7 @@ export function directHelp() {
     '',
     '先执行 run，再完成真实工作，最后执行 submit。普通最终文本不会完成需求。',
     'summary 最多 4000 字符；result 最多 100000 字符。长文本文件必须位于 $LOOP_AGENT_TMP_DIR。',
+    '', interventionRequestHelp,
   ].join('\n');
 }
 
@@ -58,6 +60,7 @@ export function runDirectCommand(input: {
       '- Outcome: ready',
       `- Requirement: ${execution.task_id}`,
       '- Next: 完成需求描述中的真实工作，然后执行 direct submit。',
+      '', interventionRequestHelp,
     ].join('\n');
   }
 

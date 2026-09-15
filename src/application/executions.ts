@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { databaseConnection } from '../infrastructure/database';
+import { databaseConnection, hash } from '../infrastructure/database';
 import {
   releaseResourceClaimInDb,
   resourceClaimInDb,
@@ -9,6 +9,10 @@ import {
 import { setTaskLaneStateInDb, settleTaskLaneInDb, type TaskLaneKind } from './task-lanes';
 import type { Task } from './tasks';
 import type { ResourceKey } from '../domain/resource';
+import { reconcileNativeWorkItemExecutionsInDb } from './work-item-transitions';
+import { projectNativeWorkflowDisplayInDb } from './native-workflow-projection';
+import { workflowEndedInDb, nativeTaskHoldInDb } from './work-item-controls';
+import { openInterventionInDb } from './interventions';
 import {
   EXECUTION_FAILURE_MAX_RETRIES,
   retryRecoveryPlanForFailure,
@@ -28,8 +32,44 @@ export type ExecutionStatus =
 
 export { EXECUTION_FAILURE_MAX_RETRIES } from './execution-retry-policy';
 
+export function settleNativeExecutionFailureInDb(db: Awaited<ReturnType<typeof databaseConnection>>, executionId: string) {
+  const source = db.prepare(`SELECT execution.*, task.workflow_engine FROM execution_attempts execution
+    JOIN tasks task ON task.task_id = execution.task_id WHERE execution.execution_id = ?`)
+    .get(executionId) as (ExecutionAttempt & { workflow_engine: string }) | undefined;
+  if (!source || source.workflow_engine !== 'native' || source.pipeline === 'intervention') return false;
+  if (!['retryable_failed', 'system_blocked'].includes(source.status)) return true;
+  db.prepare('DELETE FROM resource_claims WHERE owner_execution_id = ?').run(executionId);
+  const item = db.prepare(`SELECT item.item_id, item.task_id, item.status, item.dispatch_epoch FROM execution_attempts execution
+    JOIN workflow_items item ON item.item_id = execution.work_item_id
+    JOIN tasks task ON task.task_id = item.task_id
+    WHERE execution.execution_id = ? AND execution.pipeline != 'intervention'
+      AND item.task_id = execution.task_id AND item.agent = execution.agent
+      AND task.workflow_engine = 'native' AND item.origin = 'native'`)
+    .get(executionId) as { item_id: string; task_id: string; status: string; dispatch_epoch: number } | undefined;
+  if (workflowEndedInDb(db, source.task_id) || item && (['cancelled', 'superseded', 'completed'].includes(item.status)
+    || source.dispatch_generation_key !== hash(JSON.stringify({ itemId: item.item_id, epoch: item.dispatch_epoch }))
+    || (db.prepare(`SELECT execution_id FROM execution_attempts WHERE work_item_id = ? AND task_id = ?
+      AND agent = ? AND pipeline != 'intervention' ORDER BY work_item_attempt DESC, rowid DESC LIMIT 1`)
+      .get(item.item_id, source.task_id, source.agent) as { execution_id: string } | undefined)?.execution_id !== executionId)) return true;
+  reconcileNativeWorkItemExecutionsInDb(db, source.task_id);
+  if ((!item || source.status === 'system_blocked') && !db.prepare('SELECT 1 FROM interventions WHERE task_id = ? AND dedupe_key = ?')
+    .get(source.task_id, `native:execution-failure:${executionId}`)) {
+    openInterventionInDb(db, { taskId: source.task_id, ...(item ? { itemId: item.item_id } : {}),
+      sourceExecutionId: executionId, requestedBy: 'system', authority: 'arbitration',
+      dedupeKey: `native:execution-failure:${executionId}`,
+      summary: item ? `执行重试额度耗尽，需要核对并恢复工作项：${source.agent}` : `执行缺少一致的工作项来源绑定：${executionId}`,
+      context: { executionId, failureKind: source.failure_kind, failureAttempt: source.attempt,
+        error: source.last_error, inputHash: source.input_hash, dispatchGenerationKey: source.dispatch_generation_key,
+        guidance: '核对真实错误与原始输入；复用已有回退命令恢复当前工作项，不伪造执行或验证通过。' } });
+  }
+  projectNativeWorkflowDisplayInDb(db, source.task_id);
+  return true;
+}
+
 export type ExecutionAttempt = {
   execution_id: string;
+  work_item_id: string | null;
+  work_item_attempt: number | null;
   run_id: string;
   task_id: string;
   story_index: number | null;
@@ -37,6 +77,7 @@ export type ExecutionAttempt = {
   pipeline: string;
   lane: string | null;
   delegation_key: string;
+  dispatch_generation_key: string | null;
   attempt: number;
   status: ExecutionStatus;
   input_hash: string;
@@ -101,22 +142,21 @@ export function recordExecutionFailureActivityInDb(
   );
 }
 
-export function shouldRecordDevCodeCommit(
-  agent: string,
-  result: { outcome?: string; changedFiles?: readonly string[] },
-) {
-  return agent === 'dev-agent'
-    && result.outcome === 'completed'
-    && Array.isArray(result.changedFiles)
-    && result.changedFiles.length > 0;
-}
-
 export async function reconcileInterruptedExecutions(
   runId: string | null,
   reason: string,
   options: { countAsFailure?: boolean } = {},
 ) {
   const db = await databaseConnection();
+  return reconcileInterruptedExecutionsInDb(db, runId, reason, options);
+}
+
+export function reconcileInterruptedExecutionsInDb(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  runId: string | null,
+  reason: string,
+  options: { countAsFailure?: boolean } = {},
+) {
   const scope = runId ? 'AND execution_attempts.run_id = ?' : '';
   const countAsFailure = options.countAsFailure !== false;
   return db.transaction(() => {
@@ -226,6 +266,9 @@ export async function reconcileInterruptedExecutions(
             dispatch_settled_at = COALESCE(dispatch_settled_at, CURRENT_TIMESTAMP)
         WHERE execution_id = ? AND status = 'running'
       `).run(reason, interrupted.execution_id);
+      // Code slots are task-scoped in the legacy resource registry, but this
+      // cancelled source must release every claim that it actually owns.
+      db.prepare('DELETE FROM resource_claims WHERE owner_execution_id = ?').run(interrupted.execution_id);
       const scopeLabel = interrupted.lane ? `${interrupted.lane} Lane` : 'control';
       const unit = interrupted.story_index === null ? '' : ` · 交付单元 ${interrupted.story_index}`;
       db.prepare(`
@@ -259,7 +302,8 @@ export async function reconcileInterruptedExecutions(
       retryNotBefore,
       error: reason,
     });
-    if (!willRetry && interrupted.lane && interrupted.lane !== 'control') {
+    const nativeFailure = settleNativeExecutionFailureInDb(db, interrupted.execution_id);
+    if (!nativeFailure && !willRetry && interrupted.lane && interrupted.lane !== 'control') {
       setTaskLaneStateInDb(db, {
         taskId: interrupted.task_id,
         lane: interrupted.lane as TaskLaneKind,
@@ -268,7 +312,7 @@ export async function reconcileInterruptedExecutions(
         currentStoryIndex: interrupted.story_index,
         blockedReason: reason,
       });
-    } else if (!willRetry) {
+    } else if (!nativeFailure && !willRetry) {
       db.prepare(`
         UPDATE tasks SET agile_status = 'blocked', run_state = 'system_blocked',
           resume_status = CASE WHEN agile_status != 'blocked' THEN agile_status ELSE resume_status END,
@@ -388,27 +432,66 @@ export async function completeExecution(executionId: string) {
   releaseExecutionResourceClaimsInDb(db, executionId);
 }
 
-export async function executionCancellationRequested(executionId: string) {
+export async function executionCancellationRequested(executionId: string, options: { resolvingInterventionId?: string } = {}) {
   const db = await databaseConnection();
   const row = db.prepare(`
-    SELECT execution_attempts.status AS execution_status, tasks.agile_status AS task_status,
+    SELECT execution_attempts.status AS execution_status, execution_attempts.task_id,
            tasks.is_paused AS task_is_paused
     FROM execution_attempts
     JOIN tasks ON tasks.task_id = execution_attempts.task_id
     WHERE execution_attempts.execution_id = ?
-  `).get(executionId) as { execution_status: ExecutionStatus; task_status: string; task_is_paused: number } | undefined;
-  return !row || row.execution_status === 'cancelled' || row.task_status === 'cancelled' || Boolean(row.task_is_paused);
+  `).get(executionId) as { execution_status: ExecutionStatus; task_id: string; task_is_paused: number } | undefined;
+  if (!row || row.execution_status === 'cancelled' || workflowEndedInDb(db, row.task_id) || row.task_is_paused) return true;
+  const ownIntervention = options.resolvingInterventionId && db.prepare(`SELECT 1 FROM interventions intervention
+    JOIN execution_attempts source ON source.execution_id = intervention.current_execution_id
+    WHERE intervention.intervention_id = ? AND intervention.task_id = ? AND intervention.status = 'running'
+      AND source.execution_id = ? AND source.pipeline = 'intervention'`)
+    .get(options.resolvingInterventionId, row.task_id, executionId);
+  return Boolean(nativeTaskHoldInDb(db, row.task_id, ownIntervention ? options.resolvingInterventionId : undefined));
 }
 
-export async function cancelExecution(executionId: string, reason = '需求已取消') {
+/** Cancellation belongs to an execution. Do not infer task cancellation from
+ * an aborted CLI: a Loop stop, node replacement or arbitration also aborts it. */
+export async function executionCancellationReason(executionId: string) {
+  const db = await databaseConnection();
+  const row = db.prepare(`SELECT source.status, source.last_error, source.task_id, task.is_paused,
+      run.status AS run_status, item.status AS item_status, item.completion_authority
+    FROM execution_attempts source JOIN tasks task ON task.task_id = source.task_id
+    LEFT JOIN loop_runs run ON run.run_id = source.run_id
+    LEFT JOIN workflow_items item ON item.item_id = source.work_item_id AND item.task_id = source.task_id
+    WHERE source.execution_id = ?`).get(executionId) as {
+      status: string; last_error: string | null; task_id: string; is_paused: number;
+      run_status: string | null; item_status: string | null; completion_authority: string | null;
+    } | undefined;
+  if (!row) return '执行来源已不存在，停止运行';
+  if (row.status === 'cancelled' && row.last_error) return row.last_error;
+  if (row.is_paused) return '需求已暂停';
+  const cancellation = db.prepare(`SELECT event.reason FROM workflow_item_events event JOIN workflow_items item ON item.item_id = event.item_id
+    WHERE item.task_id = ? AND item.origin = 'native' AND event.event_key IN ('task:cancelled','native:adopt:task-cancelled')
+      AND event.authority IN ('human','system') ORDER BY event.created_at LIMIT 1`).get(row.task_id) as { reason: string } | undefined;
+  if (cancellation) return `需求已取消：${cancellation.reason}`;
+  const hold = nativeTaskHoldInDb(db, row.task_id);
+  if (hold) return `需求级介入暂停原执行：${hold.summary}`;
+  if (row.item_status === 'superseded') return '工作项已换代，旧执行停止';
+  if (row.item_status === 'completed' && row.completion_authority === 'arbitration') return '仲裁已完成工作项，原执行停止';
+  if (row.item_status === 'cancelled') return '工作项已取消，原执行停止';
+  if (row.run_status && !['starting','running'].includes(row.run_status)) return '本轮 Loop 已结束，执行停止';
+  if (workflowEndedInDb(db, row.task_id)) return '需求工作图已结束，原执行停止';
+  return '执行已取消';
+}
+
+export async function cancelExecution(executionId: string, reason = '执行已取消') {
   const db = await databaseConnection();
   db.prepare(`
     UPDATE execution_attempts
     SET status = 'cancelled', last_error = ?, finished_at = CURRENT_TIMESTAMP,
         heartbeat_at = CURRENT_TIMESTAMP
-    WHERE execution_id = ? AND status != 'applied'
+    WHERE execution_id = ? AND status IN ('planned','running','output_received','verifying','applying')
   `).run(reason, executionId);
   releaseExecutionResourceClaimsInDb(db, executionId);
+  db.prepare(`DELETE FROM resource_claims WHERE owner_execution_id = ? AND EXISTS (
+    SELECT 1 FROM execution_attempts WHERE execution_id = ? AND status = 'cancelled'
+  )`).run(executionId, executionId);
 }
 
 export async function deferExecutionResult(executionId: string, reason: string) {
@@ -471,7 +554,8 @@ export async function failExecutionWithRetryPolicy(
       retryNotBefore,
       error,
     });
-    if (!willRetry && current.lane && current.lane !== 'control') {
+    const nativeFailure = settleNativeExecutionFailureInDb(db, executionId);
+    if (!nativeFailure && !willRetry && current.lane && current.lane !== 'control') {
       setTaskLaneStateInDb(db, {
         taskId: current.task_id,
         lane: current.lane as TaskLaneKind,
@@ -480,7 +564,7 @@ export async function failExecutionWithRetryPolicy(
         currentStoryIndex: current.story_index,
         blockedReason: error,
       });
-    } else if (!willRetry) {
+    } else if (!nativeFailure && !willRetry) {
       db.prepare(`
         UPDATE tasks SET agile_status = 'blocked', run_state = 'system_blocked',
           resume_status = CASE WHEN agile_status != 'blocked' THEN agile_status ELSE resume_status END,

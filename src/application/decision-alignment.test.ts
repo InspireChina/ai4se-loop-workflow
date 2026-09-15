@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 import { decisionAlignmentQuestions, decisionAnswerText } from './decision-alignment';
-import type { DeliverySpecRecord, Question } from './tasks';
+import type { DeliverySpecRecord, Question } from '../test/legacy-task-fixtures';
 
 function specRecord(overrides: Partial<DeliverySpecRecord> = {}): DeliverySpecRecord {
   return {
@@ -77,6 +77,7 @@ test('does not duplicate delivery decisions already published as questions', () 
     resolved_at: '2026-08-08 10:01:00',
     created_at: '2026-08-08 10:00:00',
     updated_at: '2026-08-08 10:01:00',
+    intervention_id: null,
   } satisfies Question;
   const spec = deliverySpecFixture({
     decisions: [{

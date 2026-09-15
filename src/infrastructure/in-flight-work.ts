@@ -3,6 +3,13 @@ export type InFlightWorkItem<T> = {
   promise: Promise<void>;
 };
 
+/** Ready Work Items may share a requirement and a historical lane. The
+ * durable execution identity is the only in-memory launch dedupe key. */
+export function executionInFlightKey(execution: { executionId: string }) {
+  if (!execution.executionId.trim()) throw new Error('执行内存池必须使用真实 execution_id');
+  return `execution:${execution.executionId}`;
+}
+
 export class InFlightWork<T> {
   private readonly items = new Map<string, InFlightWorkItem<T>>();
   private completionRevision = 0;

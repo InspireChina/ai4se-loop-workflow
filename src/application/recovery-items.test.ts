@@ -8,7 +8,7 @@ test('lets workflow progress without a Recovery Claim and closes the item on lat
     listRecoveryItemsForStage,
     resolveActiveRecoveryItems,
   } = await import('./recovery-items');
-  const { getTask } = await import('./tasks');
+  const { getTask } = await import('../test/legacy-task-fixtures');
   const { parseAgentResult } = await import('../domain/agent-result');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -96,7 +96,7 @@ test('lets workflow progress without a Recovery Claim and closes the item on lat
 test('persists Test rewind evidence, reopens one active item, and supersedes it on task-level replanning', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { createOrReopenRecoveryItem, listRecoveryItemsForStage, recordRecoveryClaims, recoveryItemForPrompt } = await import('./recovery-items');
-  const { getTask, rewindTask } = await import('./tasks');
+  const { getTask, rewindTask } = await import('../test/legacy-task-fixtures');
   const { parseAgentResult } = await import('../domain/agent-result');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -195,7 +195,7 @@ test('persists Test rewind evidence, reopens one active item, and supersedes it 
 
 test('does not default an unclassified Test failure to Dev', async () => {
   const { applyAgentResult } = await import('./agent-results');
-  const { getTask } = await import('./tasks');
+  const { getTask } = await import('../test/legacy-task-fixtures');
   const { parseAgentResult } = await import('../domain/agent-result');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();

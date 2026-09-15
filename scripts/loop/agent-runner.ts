@@ -35,6 +35,7 @@ import {
 import { applyAgentResult, applyNextQueuedAgentResult } from '../../src/application/agent-results';
 import {
   cancelExecution,
+  executionCancellationReason,
   completeExecution,
   deferExecutionResult,
   executionCancellationRequested,
@@ -44,7 +45,6 @@ import {
   markExecutionStage,
   recordExecutionReceipt,
   recordCleanExitContinuationActivity,
-  shouldRecordDevCodeCommit,
   type ExecutionAttempt,
 } from '../../src/application/executions';
 import { buildCleanExitContinuationPrompt, shouldContinueAfterCleanExit } from '../../src/application/terminal-command-recovery';
@@ -58,14 +58,14 @@ import {
 import { appendLoopRunLog, CodeSlotBusyError, endRun, getRunStatus, getTask, getTaskContext, recordRuntimeEventWithFallback, startRunHeartbeat, type DelegationEnvelope } from '../../src/application/tasks';
 import { progressDispatcher, type ReservedExecution } from '../../src/application/progress-dispatch';
 import {
-  buildVerificationAssistancePrompt,
-  claimNextVerificationAssistance,
-  completeVerificationAssistanceExecution,
-  finishVerificationAssistanceAttempt,
-  reconcileVerificationAssistanceJobs,
-  verificationAssistanceJobStatus,
-  type ClaimedVerificationAssistance,
-} from '../../src/application/verification-assistance';
+  buildInterventionPrompt,
+  cancelInterventionAttempt,
+  claimNextIntervention,
+  finishInterventionAttempt,
+  interventionStatus,
+  reconcileInterventions,
+  type ClaimedIntervention,
+} from '../../src/application/interventions';
 import {
   listRecoveryItemsForStage,
   recoveryStageForAgent,
@@ -83,8 +83,10 @@ import {
 import { resolveAgentExecutionLimits } from '../../src/infrastructure/agent-execution-limits';
 import { databaseConnection, paths } from '../../src/infrastructure/database';
 import { gitHead } from '../../src/infrastructure/git';
+import { collectDevCodeEvidence } from '../../src/application/dev-code-evidence';
+import { readGitExecutionBaseline } from '../../src/infrastructure/git-commit-evidence';
 import { createLangfuseTelemetry, sanitizeLangfuseValue } from '../../src/infrastructure/langfuse';
-import { InFlightWork } from '../../src/infrastructure/in-flight-work';
+import { InFlightWork, executionInFlightKey } from '../../src/infrastructure/in-flight-work';
 import { waitForRunnerStartGate } from '../../src/infrastructure/run-process';
 import {
   subscribeRuntimeEvents,
@@ -117,101 +119,112 @@ function scheduleEvolution(evaluation: Promise<void>) {
   backgroundEvaluations.add(tracked);
 }
 
-async function runVerificationAssistanceAttempt(job: ClaimedVerificationAssistance, settings: AgentExecutorSettings) {
+
+async function runInterventionAttempt(intervention: ClaimedIntervention, settings: AgentExecutorSettings) {
   const executor = getAgentExecutor(settings.executorId);
   const executionOptions = agentExecutionOptions(settings);
   const limits = resolveAgentExecutionLimits(process.env);
-  const task = await getTask(job.taskId);
+  const task = await getTask(intervention.taskId);
   const workspaceRoot = task?.task.work_dir || paths.root;
-  const temporary = createAgentExecutionTempDirectory(workspaceRoot, job.executionId);
-  activeExecutionTemporaries.set(job.executionId, temporary);
+  const temporary = createAgentExecutionTempDirectory(workspaceRoot, intervention.executionId);
+  activeExecutionTemporaries.set(intervention.executionId, temporary);
   try {
     const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
     const execution = await executeDelegation({
       runId,
-      prompt: buildVerificationAssistancePrompt(job),
+      prompt: buildInterventionPrompt(intervention),
       workspaceRoot,
       executor,
       executionOptions,
       context: {
         agent: 'system-assistance-agent',
-        taskId: job.taskId,
-        storyIndex: job.storyIndex,
-        pipeline: 'verification-assistance',
+        taskId: intervention.taskId,
+        storyIndex: intervention.storyIndex,
+        pipeline: 'intervention',
         lane: 'control',
       },
-      description: `处理验证协助：${job.title}（第 ${job.attempt}/${job.maxAttempts} 次）`,
+      description: `处理${intervention.authority === 'arbitration' ? '仲裁' : '介入'}事项（第 ${intervention.attempt}/${intervention.maxAttempts} 次）`,
       telemetry,
       appendLog: (message) => appendLoopRunLog(runId, message),
       recordTelemetryEvent: async (event) => {
         await recordExecutionReceipt(
-          job.executionId,
+          intervention.executionId,
           'tool_event',
           String(event.sequence).padStart(8, '0'),
           event,
         );
         const input = event.input as Record<string, unknown> | undefined;
         if (typeof input?.command === 'string' && /loop-agent\.(?:mjs|cjs)/i.test(input.command)) {
-          await advanceAndPublishRuntimeInvalidation('task.progressed', job.taskId);
+          await advanceAndPublishRuntimeInvalidation('task.progressed', intervention.taskId);
         }
       },
       maxRuntimeMs: limits.maxRuntimeMs,
       startupTimeoutMs: limits.startupTimeoutMs,
       idleTimeoutMs: limits.idleTimeoutMs,
       environment: {
-        LOOP_VERIFICATION_ASSISTANCE_JOB_ID: job.jobId,
-        LOOP_VERIFICATION_ASSISTANCE_SESSION_ID: job.sessionId,
-        LOOP_VERIFICATION_ASSISTANCE_COMMAND_TOKEN: job.token,
+        LOOP_INTERVENTION_ID: intervention.interventionId,
+        LOOP_INTERVENTION_SESSION_ID: intervention.sessionId,
+        LOOP_INTERVENTION_COMMAND_TOKEN: intervention.token,
         LOOP_AGENT_TMP_DIR: temporary.directory,
       },
       cancellationRequested: async () => {
-        const db = await databaseConnection();
-        const row = db.prepare(`
-          SELECT job.status, task.is_paused
-          FROM verification_assistance_jobs job
-          JOIN tasks task ON task.task_id = job.task_id
-          WHERE job.job_id = ?
-        `).get(job.jobId) as { status: string; is_paused: number } | undefined;
-        return !row || row.status !== 'running' || Boolean(row.is_paused);
+        const current = await interventionStatus(intervention.interventionId);
+        return !current || current.status !== 'running'
+          || await executionCancellationRequested(intervention.executionId, { resolvingInterventionId: intervention.interventionId });
       },
       cancellationSignal: runnerAbort.signal,
     });
-    const current = await verificationAssistanceJobStatus(job.jobId);
+    const current = await interventionStatus(intervention.interventionId);
     if (current?.status !== 'running') {
-      await completeVerificationAssistanceExecution(job.executionId);
       await appendLoopRunLog(
         runId,
         current?.status === 'resolved'
-          ? `[系统辅助] 已解决验证协助 requirement=${job.taskId} attempt=${job.attempt}/${job.maxAttempts}`
-          : `[系统辅助] 已提交本次未解决结论 requirement=${job.taskId} attempt=${job.attempt}/${job.maxAttempts} status=${current?.status || 'missing'}`,
+          ? `[系统辅助] 已解决${intervention.authority === 'arbitration' ? '仲裁' : '介入'}事项 requirement=${intervention.taskId} attempt=${intervention.attempt}/${intervention.maxAttempts}`
+          : `[系统辅助] 已提交本次未解决结论 requirement=${intervention.taskId} attempt=${intervention.attempt}/${intervention.maxAttempts} status=${current?.status || 'missing'}`,
       );
       return;
     }
-    const reason = execution.cancelled
-      ? '系统辅助 Agent 因需求暂停或 Runner 停止而中断'
-      : execution.exitCode !== 0
+    if (execution.cancelled || runnerAbort.signal.aborted
+      || await executionCancellationRequested(intervention.executionId, { resolvingInterventionId: intervention.interventionId })) {
+      await cancelInterventionAttempt(intervention.interventionId, await executionCancellationReason(intervention.executionId));
+      await appendLoopRunLog(runId, `[系统辅助] 介入执行已中断，不消耗重试额度 requirement=${intervention.taskId}`);
+      return;
+    }
+    const reason = execution.exitCode !== 0
         ? execution.terminationReason
           ? `系统辅助 Agent ${execution.terminationReason}${execution.failureDetail ? `；${execution.failureDetail}` : ''}`
           : `系统辅助 Agent CLI 退出码 ${execution.exitCode}${execution.failureDetail ? `；${execution.failureDetail}` : ''}`
         : '系统辅助 Agent 已退出，但未执行 resolve 或 defer 终止命令';
-    const result = await finishVerificationAssistanceAttempt({ jobId: job.jobId, reason, outcome: 'failed' });
+    const result = await finishInterventionAttempt({
+      interventionId: intervention.interventionId,
+      reason,
+      outcome: 'failed',
+    });
     await appendLoopRunLog(
       runId,
       result.escalated
-        ? `[系统辅助] ${job.maxAttempts} 次验证协助均未解决，已转交人工 requirement=${job.taskId}：${reason}`
-        : `[系统辅助] 验证协助第 ${job.attempt}/${job.maxAttempts} 次失败，将继续自动尝试 requirement=${job.taskId}：${reason}`,
+        ? `[系统辅助] ${intervention.maxAttempts} 次介入均未解决，已转交人工 requirement=${intervention.taskId}：${reason}`
+        : `[系统辅助] 介入第 ${intervention.attempt}/${intervention.maxAttempts} 次失败，将继续自动尝试 requirement=${intervention.taskId}：${reason}`,
     );
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    const result = await finishVerificationAssistanceAttempt({ jobId: job.jobId, reason, outcome: 'failed' });
+    if (runnerAbort.signal.aborted || await executionCancellationRequested(intervention.executionId, { resolvingInterventionId: intervention.interventionId })) {
+      await cancelInterventionAttempt(intervention.interventionId, `系统辅助 Agent 中断：${reason}`);
+      return;
+    }
+    const result = await finishInterventionAttempt({
+      interventionId: intervention.interventionId,
+      reason,
+      outcome: 'failed',
+    });
     await appendLoopRunLog(
       runId,
       result.escalated
-        ? `[系统辅助] 验证协助重试已耗尽，已转交人工 requirement=${job.taskId}：${reason}`
-        : `[系统辅助] 验证协助执行异常，将继续自动尝试 requirement=${job.taskId} attempt=${job.attempt}/${job.maxAttempts}：${reason}`,
+        ? `[系统辅助] 介入重试已耗尽，已转交人工 requirement=${intervention.taskId}：${reason}`
+        : `[系统辅助] 介入执行异常，将继续自动尝试 requirement=${intervention.taskId} attempt=${intervention.attempt}/${intervention.maxAttempts}：${reason}`,
     );
   } finally {
-    activeExecutionTemporaries.delete(job.executionId);
+    activeExecutionTemporaries.delete(intervention.executionId);
     removeAgentExecutionTempDirectory(temporary);
   }
 }
@@ -533,7 +546,7 @@ async function runDelegation(
 async function processDurableResult(attempt: ExecutionAttempt, delegation: DelegationEnvelope, result: ReturnType<typeof parseAgentResult>) {
   let codeCommit = attempt.code_commit || '';
   const current = await getTask(delegation.taskId);
-  if (!current || current.task.is_paused || ['done', 'cancelled'].includes(current.task.agile_status)) {
+  if (!current || await executionCancellationRequested(attempt.execution_id)) {
     await markExecutionStage(attempt.execution_id, 'applying');
     const outcome = await applyAgentResult(runId, delegation, result, { codeCommit, executionId: attempt.execution_id });
     await recordExecutionReceipt(attempt.execution_id, 'application', outcome, { outcome, terminalTask: true });
@@ -541,21 +554,26 @@ async function processDurableResult(attempt: ExecutionAttempt, delegation: Deleg
     await appendLoopRunLog(runId, `[运行] ${agentLabel(delegation.agent)} 返回时需求已结束或暂停，结果仅保留为证据，不再应用`);
     return { outcome };
   }
-  if (shouldRecordDevCodeCommit(delegation.agent, result) && !codeCommit) {
-    const currentHead = gitHead(current?.task.work_dir || paths.root);
-    if (currentHead) {
-      codeCommit = currentHead;
+  if (delegation.agent === 'dev-agent' && result.outcome === 'completed' && !codeCommit) {
+    const evidence = await collectDevCodeEvidence(attempt.execution_id);
+    const codeEvidenceKey = createHash('sha256').update(JSON.stringify(evidence)).digest('hex').slice(0, 32);
+    await recordExecutionReceipt(attempt.execution_id, 'code_evidence', codeEvidenceKey, evidence);
+    if (evidence.kind === 'changed') {
+      codeCommit = evidence.commit;
       await recordExecutionReceipt(attempt.execution_id, 'code_commit', codeCommit, {
         taskId: delegation.taskId,
         storyIndex: delegation.storyIndex,
         mode: 'agent_committed',
+        baseCommit: evidence.baseCommit,
+        changedFiles: evidence.changedFiles,
+        evidence: 'owned-execution-git-diff',
       });
       await appendLoopRunLog(runId, `[运行] 记录开发实现 Agent 变更所在 commit：${codeCommit.slice(0, 10)}`);
+    } else if (evidence.kind === 'unchanged') {
+      await appendLoopRunLog(runId, '[运行] Git 核对执行基线与最终提交无代码差异；不记录新的代码提交证据');
     } else {
-      await appendLoopRunLog(runId, '[运行] 开发实现 Agent 声明了代码变更，但当前 Git HEAD 不可读；不记录代码提交证据');
+      await appendLoopRunLog(runId, `[运行] 开发代码成果暂不能确认：${evidence.reason}；不把已有 HEAD 当作本次成果`);
     }
-  } else if (delegation.agent === 'dev-agent' && result.outcome === 'completed' && !result.changedFiles?.length) {
-    await appendLoopRunLog(runId, '[运行] 开发实现 Agent 走查确认无需代码变更；不记录代码提交证据');
   }
 
   await markExecutionStage(attempt.execution_id, 'applying');
@@ -687,7 +705,7 @@ async function executeDelegationStep(
     return;
   }
   const task = await getTask(delegation.taskId);
-  if (!task || task.task.agile_status === 'cancelled' || task.task.is_paused) {
+  if (!task || await executionCancellationRequested(reservation.executionId)) {
     await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 已取消或暂停，跳过尚未启动的 ${agentLabel(delegation.agent)}`);
     await progressDispatcher.settle({ reservationId: reservation.reservationId });
     return;
@@ -703,7 +721,8 @@ async function executeDelegationStep(
     const executionOptions = agentExecutionOptions(runtimeSettings);
     await appendLoopRunLog(runId, `[Runtime] requirement=${delegation.taskId} agent=${delegation.agent} executor=${executor.id} model=${executionOptions.model || 'default'} reasoning=${executionOptions.reasoningEffort || 'default'} web_search=${executionOptions.webSearch ? 'enabled' : 'disabled'}`);
     const workspaceRoot = task.task.work_dir;
-    const headBefore = gitHead(workspaceRoot);
+    const codeBaseline = delegation.agent === 'dev-agent' ? await readGitExecutionBaseline(workspaceRoot) : null;
+    const headBefore = codeBaseline?.head || gitHead(workspaceRoot);
     const builtPrompt = await buildPrompt(delegation, headBefore || null, reservation.attempt, workspaceRoot, task.task.project_id);
     const activated = await progressDispatcher.activate({
       reservationId: reservation.reservationId,
@@ -735,12 +754,12 @@ async function executeDelegationStep(
       return;
     }
     attempt = activated.attempt;
+    if (codeBaseline) await recordExecutionReceipt(attempt.execution_id, 'code_baseline', 'execution-start', codeBaseline);
     await appendLoopRunLog(runId, `[上下文] requirement=${delegation.taskId} execution=${attempt.execution_id} snapshot=${builtPrompt.contextSnapshot.snapshotId} resources=${builtPrompt.contextSnapshot.resourceCount} startup_index=${builtPrompt.contextSnapshot.startupIndex.length} recovery=${builtPrompt.recovery.mode}`);
     if (await executionCancellationRequested(attempt.execution_id)) {
-      const currentTask = await getTask(delegation.taskId);
-      const paused = Boolean(currentTask?.task.is_paused);
-      await cancelExecution(attempt.execution_id, paused ? '需求已暂停' : '需求已取消');
-      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} 已${paused ? '暂停' : '取消'}，跳过尚未启动的 ${agentLabel(delegation.agent)}，执行资源已释放`);
+      const reason = await executionCancellationReason(attempt.execution_id);
+      await cancelExecution(attempt.execution_id, reason);
+      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} execution=${attempt.execution_id} ${reason}，跳过尚未启动的 ${agentLabel(delegation.agent)}，执行资源已释放`);
       return;
     }
     cycle = await recordExecutionCycleStarted(attempt, delegation);
@@ -817,7 +836,7 @@ async function executeDelegationStep(
           await recordCleanExitContinuationActivity(attempt.execution_id, 'succeeded', continuationCount);
           await appendLoopRunLog(runId, `[自动续跑] requirement=${delegation.taskId} execution=${attempt.execution_id} 经过 ${continuationCount} 次续跑后收到角色终止提交`);
         } else if (execution.cancelled) {
-          await recordCleanExitContinuationActivity(attempt.execution_id, 'stopped', continuationCount, '需求已暂停或取消');
+          await recordCleanExitContinuationActivity(attempt.execution_id, 'stopped', continuationCount, await executionCancellationReason(attempt.execution_id));
         } else {
           const reason = execution.evidencePersistenceError
             ? `本地执行证据写入失败：${execution.evidencePersistenceError}`
@@ -831,11 +850,10 @@ async function executeDelegationStep(
       activeExecutionControllers.delete(attempt.execution_id);
     }
     await progressDispatcher.executionExited({ reservationId: reservation.reservationId });
-    if (execution.cancelled) {
-      const currentTask = await getTask(delegation.taskId);
-      const paused = Boolean(currentTask?.task.is_paused);
-      await cancelExecution(attempt.execution_id, paused ? '需求已暂停' : '需求已取消');
-      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 已随需求${paused ? '暂停' : '取消'}，执行资源已释放`);
+    if (execution.cancelled || await executionCancellationRequested(attempt.execution_id)) {
+      const reason = await executionCancellationReason(attempt.execution_id);
+      await cancelExecution(attempt.execution_id, reason);
+      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} execution=${attempt.execution_id} ${agentLabel(delegation.agent)} 已停止：${reason}，执行资源已释放`);
       return;
     }
     if (execution.evidencePersistenceError) {
@@ -877,7 +895,7 @@ async function executeDelegationStep(
       await handleExecutionFailure(attempt, delegation, reason, 'agent-missing-terminal-command');
       return;
     }
-    if (shouldRetryReportedFailure(result, attempt.attempt)) {
+    if (shouldRetryReportedFailure(result, attempt.attempt, delegation.agent)) {
       const reason = `Agent 提交失败结果，将按统一策略重试：${result.summary || result.outcome || result.verdict || '未提供摘要'}`;
       await handleExecutionFailure(attempt, delegation, reason, 'agent-reported-failure');
       return;
@@ -930,23 +948,19 @@ async function executeDelegationStep(
   }
 }
 
-function delegationLaneKey(reservation: ReservedExecution) {
-  return `${reservation.work.taskId}:${reservation.work.lane}`;
-}
-
 function launchDelegation(
   reservation: ReservedExecution,
   inFlightExecutions: InFlightWork<ReservedExecution>,
 ) {
   const delegation = reservation.work;
-  const key = delegationLaneKey(reservation);
+  const key = executionInFlightKey(reservation);
   return inFlightExecutions.launch(
     key,
     reservation,
     () => executeDelegationStep(reservation).finally(() => runnerWake.wake('execution-completed')),
     async (error) => {
       try {
-        await appendLoopRunLog(runId, `[错误] requirement=${delegation.taskId} lane=${delegation.lane} agent=${delegation.agent} 执行器退出：${error instanceof Error ? error.message : String(error)}`);
+        await appendLoopRunLog(runId, `[错误] requirement=${delegation.taskId} execution=${reservation.executionId} work_item=${delegation.workItemId} revision=${delegation.workItemRevision} agent=${delegation.agent} 执行器退出：${error instanceof Error ? error.message : String(error)}`);
       } catch { /* An execution failure must not reject the scheduler promise. */ }
     },
   );
@@ -987,8 +1001,8 @@ async function cancelInvalidExecutions() {
 async function main() {
   const staleLanes = await progressDispatcher.reconcileStaleLanes();
   if (staleLanes) await appendLoopRunLog(runId, `[恢复] 已恢复 ${staleLanes} 条失去活跃 execution 的 Lane`);
-  const staleAssistance = await reconcileVerificationAssistanceJobs();
-  if (staleAssistance) await appendLoopRunLog(runId, `[恢复] 已恢复 ${staleAssistance} 条未正常收尾的系统验证协助`);
+  const staleInterventions = await reconcileInterventions();
+  if (staleInterventions) await appendLoopRunLog(runId, `[恢复] 已恢复 ${staleInterventions} 条未正常收尾的系统介入事项`);
   let recovery = await progressDispatcher.nextRecovery();
   while (recovery) {
     const { attempt: recoverable, work: delegation } = recovery;
@@ -1044,16 +1058,16 @@ async function main() {
     const completionRevision = inFlightExecutions.revision();
     await drainQueuedAgentResults();
     const systemSettings = await getAgentExecutorSettings();
-    const assistance = await claimNextVerificationAssistance({
+    const intervention = await claimNextIntervention({
       runId,
       executorId: systemSettings.executorId,
       executionOptions: agentExecutionOptions(systemSettings),
     });
-    if (assistance) {
-      scheduleEvolution(runVerificationAssistanceAttempt(assistance, systemSettings));
+    if (intervention) {
+      scheduleEvolution(runInterventionAttempt(intervention, systemSettings));
       await appendLoopRunLog(
         runId,
-        `[调度] 启动系统验证协助 Agent：requirement=${assistance.taskId} unit=${assistance.storyIndex ?? '-'} attempt=${assistance.attempt}/${assistance.maxAttempts}`,
+        `[调度] 启动系统${intervention.authority === 'arbitration' ? '仲裁' : '介入'} Agent：requirement=${intervention.taskId} attempt=${intervention.attempt}/${intervention.maxAttempts}`,
       );
     }
     const dispatch = await progressDispatcher.reserveNext({ runId });
@@ -1062,11 +1076,11 @@ async function main() {
       const delegation = reservation.work;
       if (launchDelegation(reservation, inFlightExecutions)) {
         launched += 1;
-        await appendLoopRunLog(runId, `[调度] 启动 Lane Agent：requirement=${delegation.taskId} lane=${delegation.lane} agent=${delegation.agent} resources=${reservation.claimedResources.join(',') || 'none'}`);
+        await appendLoopRunLog(runId, `[调度] 启动 Work Item Agent：requirement=${delegation.taskId} execution=${reservation.executionId} work_item=${delegation.workItemId} revision=${delegation.workItemRevision} epoch=${delegation.workItemEpoch} agent=${delegation.agent} resources=${reservation.claimedResources.join(',') || 'none'}`);
       }
     }
     if (launched) {
-      await appendLoopRunLog(runId, `[调度] 当前运行 ${inFlightExecutions.size} 个 Lane Agent`);
+      await appendLoopRunLog(runId, `[调度] 当前运行 ${inFlightExecutions.size} 个 Work Item 执行`);
     }
     if (inFlightExecutions.revision() !== completionRevision) {
       await appendLoopRunLog(runId, '[调度] Lane execution 已结束，立即重新计算可执行步骤');

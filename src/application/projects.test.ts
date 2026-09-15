@@ -5,7 +5,7 @@ import test from 'node:test';
 import { databaseConnection } from '../infrastructure/database';
 import { acquireResourceClaimInDb, CODE_WORKSPACE_RESOURCE, resourceClaimInDb } from './resource-claims';
 import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
-import { createTask, getTask, listTasks } from './tasks';
+import { createTask, getTask, listTasks } from '../test/legacy-task-fixtures';
 import { createProject, deleteProject, listProjects, setDefaultProject, updateProject } from './projects';
 
 test('soft deletes a project by workspace identity and restores all history when re-added', async () => {

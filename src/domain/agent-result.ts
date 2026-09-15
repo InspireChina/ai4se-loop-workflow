@@ -173,6 +173,10 @@ export const deliverySpecSchema = z.preprocess(omitNullObjectProperties, z.objec
 export const agentResultSchema = z.preprocess(omitNullObjectProperties, z.object({
   outcome: z.enum(['completed', 'needs_input', 'failed']),
   summary: z.string().min(1).max(4000),
+  intervention: z.object({
+    reason: z.string().trim().min(1).max(8000),
+    evidence: z.string().trim().min(1).max(100_000),
+  }).strict().optional(),
   artifact: artifactSchema.optional(),
   questions: z.array(questionSchema).max(50).optional().default([]),
   runtimeInputs: z.array(runtimeInputSchema).max(50).optional().default([]),
@@ -323,6 +327,15 @@ export function assertDeliverySpecDecisionCoverage(spec: DeliverySpec, questions
 }
 
 export function assertAgentResultRoleContract(result: AgentResult, agent: string) {
+  if (result.intervention) {
+    if (result.outcome !== 'needs_input') throw new Error('请求介入必须以 needs_input 交接，不能声明完成或失败');
+    if (result.questions.length || result.runtimeInputs.length || result.artifact || result.verdict
+      || result.businessAnalysis || result.deliveryUnits?.length || result.spec || result.changedFiles?.length
+      || result.rewindTo || result.feedback || result.closureGaps?.length || result.closureGapUnits?.length) {
+      throw new Error('请求介入不能同时提交角色完成结果、问题或其他流程处置');
+    }
+    return;
+  }
   const canAskAlignmentQuestions = agent === 'backlog-agent'
     || agent === 'analyst-agent'
     || agent === 'repro-agent'

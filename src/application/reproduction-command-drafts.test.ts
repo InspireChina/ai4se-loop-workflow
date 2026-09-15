@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
 import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
-import type { DelegationEnvelope } from './tasks';
+import type { DelegationEnvelope } from '../test/legacy-task-fixtures';
 
 async function command(executionId: string, token: string, args: string[]) {
   const { runAgentCommand } = await import('./agent-command-drafts');
@@ -23,7 +23,7 @@ async function begin(delegation: DelegationEnvelope, suffix: string) {
 
 async function bugDelegation(title: string) {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const taskId = await createTask({
     title,
     description: '管理员打开已归档需求并保存时页面显示空白；预期保存后仍停留在详情页。',
@@ -84,7 +84,7 @@ test('Repro Agent pauses for missing facts and resumes the same YAML command cha
   const { applyAgentResult } = await import('./agent-results');
   const { readAgentCommandSubmission, issueAgentCommandToken } = await import('./agent-command-drafts');
   const { completeExecution } = await import('./executions');
-  const { answerQuestion, getTask, submitClarificationAnswers } = await import('./tasks');
+  const { answerQuestion, getTask, submitClarificationAnswers } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const { taskId, delegation } = await bugDelegation('YAML 问题复现');
   const first = await begin(delegation, `${taskId}-first`);

@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
-import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
+import { inspectTaskDispatchEnvelope as inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import { deliverySpecFixture } from '../test/delivery-spec-fixture';
-import type { DelegationEnvelope } from './tasks';
+import type { DelegationEnvelope } from '../test/legacy-task-fixtures';
 
 async function command(executionId: string, token: string, args: string[]) {
   const { runAgentCommand } = await import('./agent-command-drafts');
@@ -45,9 +45,31 @@ async function begin(delegation: DelegationEnvelope, suffix: string) {
   return { executionId: started.attempt.execution_id, token };
 }
 
-async function verificationDelegation(title: string) {
+for (const native of [false, true]) test(`Test can submit arbitration before a verdict without reporting false success (${native ? 'native' : 'legacy'})`, async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask, saveDeliverySpec } = await import('./tasks');
+  const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+  const { applyAgentResult } = await import('./agent-results');
+  const { completeExecution } = await import('./executions');
+  const { taskId, delegation } = await verificationDelegation('Test contract conflict', native);
+  const active = await begin(delegation, taskId);
+  await command(active.executionId, active.token!, ['status']);
+  await command(active.executionId, active.token!, ['intervention', 'request', '--summary', '覆盖义务与单元边界矛盾',
+    '--reason', '测试不能自行修改冻结契约', '--evidence', 'Tab acceptance 属于后续前端单元，当前单元是后端查询']);
+  const result = await readAgentCommandSubmission(active.executionId);
+  assert.ok(result?.intervention);
+  assert.equal(result.verdict, undefined);
+  assert.equal(await applyAgentResult('RUN-test-conflict', delegation, result, { executionId: active.executionId }), 'blocked');
+  await completeExecution(active.executionId);
+  const db = await databaseConnection();
+  assert.equal((db.prepare('SELECT test_index FROM tasks WHERE task_id = ?').get(taskId) as { test_index: number }).test_index, 0);
+  assert.equal((db.prepare('SELECT status FROM interventions WHERE source_execution_id = ?')
+    .get(active.executionId) as { status: string }).status, 'pending');
+  assert.equal((await inspectTaskDispatch(taskId)).some((item) => item.agent === 'review-agent'), false);
+});
+
+async function verificationDelegation(title: string, native = false) {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { createTask, saveDeliverySpec } = await import('../test/legacy-task-fixtures');
   const db = await databaseConnection();
   db.prepare(`
     UPDATE tasks SET agile_status = 'cancelled', run_state = 'idle', current_subagent = NULL
@@ -103,6 +125,10 @@ async function verificationDelegation(title: string) {
       },
     }),
   });
+  if (native) {
+    const { adoptNativeWorkflowInDb } = await import('./work-item-transitions');
+    adoptNativeWorkflowInDb(db, taskId);
+  }
   const delegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'test-agent' && item.storyIndex === 1);
   assert.ok(delegation);
@@ -168,13 +194,13 @@ async function finish(executionId: string, token: string, risk?: string) {
   return command(executionId, token, ['phase', 'complete']);
 }
 
-test('Test Agent uses only the YAML command chain and compiles a passing independent verification result', async () => {
+for (const native of [false, true]) test(`Test Agent uses only the YAML command chain and compiles a passing independent verification result (${native ? 'native' : 'legacy'})`, async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { completeExecution } = await import('./executions');
-  const { getTask } = await import('./tasks');
+  const { getTask } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
-  const { taskId, delegation } = await verificationDelegation('YAML 独立验证通过');
+  const { taskId, delegation } = await verificationDelegation('YAML 独立验证通过', native);
   const active = await begin(delegation, `${taskId}-pass`);
 
   assert.match(await command(active.executionId, active.token!, ['help']), /通用命令链/);
@@ -237,12 +263,12 @@ test('Test final gate derives specification and implementation rewinds from fail
   assert.equal(result?.rewindDeliveryUnit, 1);
 });
 
-test('blocked verification pauses through generic runtime input and resumes the same frozen scenario', async () => {
+for (const native of [false, true]) test(`blocked verification pauses through generic runtime input and resumes the same frozen scenario (${native ? 'native' : 'legacy'})`, async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { completeExecution } = await import('./executions');
-  const { getTask } = await import('./tasks');
-  const { taskId, delegation } = await verificationDelegation('YAML 验证运行信息恢复');
+  const { getTask } = await import('../test/legacy-task-fixtures');
+  const { taskId, delegation } = await verificationDelegation('YAML 验证运行信息恢复', native);
   const first = await begin(delegation, `${taskId}-input`);
   await command(first.executionId, first.token!, ['status']);
   await reachExecute(first.executionId, first.token!);
@@ -273,6 +299,11 @@ test('blocked verification pauses through generic runtime input and resumes the 
   assert.match(restored, /Phase: execute/);
   assert.match(restored, /preview-url.*answered/s);
   await putResult(resumed.executionId, resumed.token!, {
+    status: 'blocked', failureKind: 'environment', evidence: '提供地址后仍无法连接预览环境',
+    actualBehavior: '已回答的预览地址暂时不可访问，不能伪造观察或通过',
+  });
+  await assert.rejects(command(resumed.executionId, resumed.token!, ['phase', 'complete']), /intervention request.*不要重复索取/);
+  await putResult(resumed.executionId, resumed.token!, {
     status: 'passed', evidence: '在用户提供的预览地址完成前端黑盒验证',
     actualBehavior: '页面结果符合冻结 Oracle',
   });
@@ -287,7 +318,7 @@ test('blocked verification pauses through generic runtime input and resumes the 
 
 test('a new verification cycle reuses a matching frozen plan but resets when the Delivery Spec changes', async () => {
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
-  const { saveDeliverySpec } = await import('./tasks');
+  const { saveDeliverySpec } = await import('../test/legacy-task-fixtures');
   const { taskId, delegation } = await verificationDelegation('YAML 验证计划跨轮复用');
   const first = await begin(delegation, `${taskId}-cycle-one`);
   await command(first.executionId, first.token!, ['status']);

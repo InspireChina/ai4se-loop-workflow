@@ -1,9 +1,83 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+test('native dispatch is independent of cursors and preserves the retry generation across released attempts', async () => {
+  const { createTask, beginRun, cancelTask, endRun, pauseTask, resumeTask } = await import('../test/legacy-task-fixtures');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { adoptNativeWorkflowInDb } = await import('./work-item-transitions');
+  const { progressDispatcher } = await import('../test/legacy-progress-dispatch');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Native dispatch generations' });
+  const context = adoptNativeWorkflowInDb(db, taskId).find((item) => item.work_key === 'delivery:context')!;
+  // Deliberately contradictory display state: native dispatch must read the
+  // persisted work graph, not regenerate it from these legacy cursors.
+  db.prepare("UPDATE tasks SET current_subagent = 'review-agent', total_stories = 4, analysis_index = 4, dev_index = 4, test_index = 4 WHERE task_id = ?").run(taskId);
+  const runId = await beginRun('native-dispatch-test');
+  try {
+    const first = await progressDispatcher.reserveNext({ runId });
+    assert.equal(first.kind, 'reserved');
+    const reservation = first.reservations.find((item) => item.work.taskId === taskId)!;
+    assert.equal(reservation.work.workItemId, context.item_id);
+    assert.equal(reservation.work.agent, 'backlog-agent');
+    await progressDispatcher.preparationFailed({ reservationId: reservation.reservationId, error: 'Native preparation failed' });
+    const firstKey = (db.prepare('SELECT dispatch_generation_key FROM execution_attempts WHERE execution_id = ?').get(reservation.executionId) as {dispatch_generation_key:string}).dispatch_generation_key;
+    const second = await progressDispatcher.reserveNext({ runId });
+    assert.equal(second.kind, 'reserved');
+    const retry = second.reservations.find((item) => item.work.taskId === taskId)!;
+    assert.equal(retry.attempt, 2);
+    assert.equal(retry.work.workItemId, context.item_id);
+    assert.equal((db.prepare('SELECT dispatch_generation_key FROM execution_attempts WHERE execution_id = ?').get(retry.executionId) as {dispatch_generation_key:string}).dispatch_generation_key, firstKey);
+    await pauseTask({ taskId });
+    await progressDispatcher.settle({ reservationId: retry.reservationId });
+    await resumeTask({ taskId });
+    const third = await progressDispatcher.reserveNext({ runId });
+    assert.equal(third.kind, 'reserved');
+    const resumed = third.reservations.find((item) => item.work.taskId === taskId)!;
+    assert.equal(resumed.attempt, 2, 'cancelled pre-activation attempt does not consume budget');
+    assert.equal((db.prepare('SELECT work_item_attempt FROM execution_attempts WHERE execution_id = ?').get(resumed.executionId) as {work_item_attempt:number}).work_item_attempt, 3);
+  } finally {
+    await cancelTask({ taskId, reason: 'test cleanup' });
+    await endRun(runId, true, { stopRunner: false });
+  }
+});
+
+test('anchors a legacy delivery reservation to the active Work Item revision', async () => {
+  const { createTask, beginRun, cancelTask, endRun, updateTask } = await import('../test/legacy-task-fixtures');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { progressDispatcher } = await import('../test/legacy-progress-dispatch');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Work Item anchored reservation' });
+  await updateTask(taskId, 'system', {
+    agile_status: 'in plan',
+    current_subagent: 'story-splitter-agent',
+    next_step: 'Plan the delivery units',
+  });
+  const runId = await beginRun('work-item-reservation-test');
+
+  try {
+    const result = await progressDispatcher.reserveNext({ runId });
+    assert.equal(result.kind, 'reserved');
+    const reservation = result.reservations.find((item) => item.work.taskId === taskId);
+    assert.ok(reservation);
+    const execution = db.prepare(`
+      SELECT attempt.work_item_id, attempt.work_item_attempt, item.work_key, item.revision
+      FROM execution_attempts attempt
+      LEFT JOIN workflow_items item ON item.item_id = attempt.work_item_id
+      WHERE attempt.execution_id = ?
+    `).get(reservation.executionId) as { work_item_id: string | null; work_item_attempt: number | null; work_key: string | null; revision: number | null };
+    assert.ok(execution.work_item_id);
+    assert.equal(execution.work_key, 'delivery:plan');
+    assert.equal(execution.revision, 1);
+    assert.equal(execution.work_item_attempt, 1);
+  } finally {
+    await cancelTask({ taskId, reason: 'test cleanup' });
+    await endRun(runId, true, { stopRunner: false });
+  }
+});
+
 test('reserves runnable work atomically and exposes the active reservation to inspection', async () => {
-  const { createTask, beginRun, cancelTask, endRun, getTask } = await import('./tasks');
-  const { progressDispatcher, progressDispatchInspector } = await import('./progress-dispatch');
+  const { createTask, beginRun, cancelTask, endRun, getTask } = await import('../test/legacy-task-fixtures');
+  const { progressDispatcher, progressDispatchInspector } = await import('../test/legacy-progress-dispatch');
 
   const taskId = await createTask({ title: 'Atomic dispatch reservation' });
   const runId = await beginRun('progress-dispatch-test');
@@ -91,8 +165,8 @@ test('reserves runnable work atomically and exposes the active reservation to in
 });
 
 test('retries preparation failures four times before blocking the requirement', async () => {
-  const { createTask, beginRun, cancelTask, endRun, releaseBlock } = await import('./tasks');
-  const { progressDispatcher } = await import('./progress-dispatch');
+  const { createTask, beginRun, cancelTask, endRun, releaseBlock } = await import('../test/legacy-task-fixtures');
+  const { progressDispatcher } = await import('../test/legacy-progress-dispatch');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Finite preparation retries' });
@@ -153,8 +227,8 @@ test('retries preparation failures four times before blocking the requirement', 
 });
 
 test('cancels an unactivated reservation from a dead runner without consuming a retry', async () => {
-  const { createTask, beginRun, cancelTask, endRun } = await import('./tasks');
-  const { progressDispatcher } = await import('./progress-dispatch');
+  const { createTask, beginRun, cancelTask, endRun } = await import('../test/legacy-task-fixtures');
+  const { progressDispatcher } = await import('../test/legacy-progress-dispatch');
   const taskId = await createTask({ title: 'Dead runner reservation recovery' });
   const firstRunId = await beginRun('dead-runner-reservation-test');
   let activeRunId = firstRunId;
@@ -181,8 +255,8 @@ test('cancels an unactivated reservation from a dead runner without consuming a 
 });
 
 test('manual Loop stop defers active work without consuming a retry', async () => {
-  const { createTask, beginRun, cancelTask, endRun } = await import('./tasks');
-  const { progressDispatcher } = await import('./progress-dispatch');
+  const { createTask, beginRun, cancelTask, endRun } = await import('../test/legacy-task-fixtures');
+  const { progressDispatcher } = await import('../test/legacy-progress-dispatch');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Manual Loop stop preserves retry budget' });
@@ -259,8 +333,8 @@ test('manual Loop stop defers active work without consuming a retry', async () =
 });
 
 test('waits for the universal retry backoff deadline before redispatching', async () => {
-  const { createTask, beginRun, cancelTask, endRun } = await import('./tasks');
-  const { progressDispatcher } = await import('./progress-dispatch');
+  const { createTask, beginRun, cancelTask, endRun } = await import('../test/legacy-task-fixtures');
+  const { progressDispatcher } = await import('../test/legacy-progress-dispatch');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const previousScale = process.env.LOOP_RETRY_BACKOFF_SCALE;

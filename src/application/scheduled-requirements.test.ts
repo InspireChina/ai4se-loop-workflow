@@ -11,7 +11,7 @@ import {
   resumeScheduledRequirement,
   updateScheduledRequirement,
 } from './scheduled-requirements';
-import { getTask } from './tasks';
+import { getTask } from '../test/legacy-task-fixtures';
 import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 
 test('materializes only the latest missed recurring requirement and remains idempotent', async () => {

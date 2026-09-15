@@ -1,5 +1,7 @@
 import type Database from 'better-sqlite3';
 import type { TaskState } from '../domain/task';
+import { syncLegacyDeliveryWorkItemsInDb } from './work-items';
+import { projectNativeWorkflowDisplayInDb } from './native-workflow-projection';
 
 export const TASK_LANES = ['analysis', 'delivery'] as const;
 export type TaskLaneKind = typeof TASK_LANES[number];
@@ -43,6 +45,10 @@ function inferredLaneStatus(task: TaskState, lane: TaskLaneKind): TaskLaneStatus
 }
 
 export function ensureTaskLanesInDb(db: Db, task: TaskState) {
+  if (db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(task.task_id)) {
+    projectNativeWorkflowDisplayInDb(db, task.task_id);
+    return;
+  }
   for (const lane of TASK_LANES) {
     const status = inferredLaneStatus(task, lane);
     db.prepare(`
@@ -100,10 +106,12 @@ export function setTaskLaneStateInDb(db: Db, input: {
     input.resumePending ?? 0,
     readyAt,
   );
+  syncLegacyDeliveryWorkItemsInDb(db, input.taskId);
 }
 
 export function refreshTaskLaneStatesInDb(db: Db, task: TaskState) {
   ensureTaskLanesInDb(db, task);
+  if (db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(task.task_id)) return;
   for (const lane of TASK_LANES) {
     const current = taskLaneInDb(db, task, lane);
     if (current.resume_pending || ['running', 'waiting_for_answers', 'waiting_for_runtime_input', 'system_blocked'].includes(current.status)) continue;
@@ -124,6 +132,10 @@ export function markTaskLaneRunningInDb(db: Db, input: { taskId: string; lane: T
 }
 
 export function settleTaskLaneInDb(db: Db, task: TaskState, lane: TaskLaneKind) {
+  if (db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(task.task_id)) {
+    projectNativeWorkflowDisplayInDb(db, task.task_id);
+    return taskLaneInDb(db, task, lane);
+  }
   const current = taskLaneInDb(db, task, lane);
   if (current.status !== 'running') return current;
   const status = inferredLaneStatus(task, lane);

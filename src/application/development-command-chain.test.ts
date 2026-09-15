@@ -3,17 +3,17 @@ import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
-import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
-import type { DelegationEnvelope } from './tasks';
+import { inspectTaskDispatchEnvelope as inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
+import type { DelegationEnvelope } from '../test/legacy-task-fixtures';
 
 async function command(executionId: string, token: string, args: string[]) {
   const { runAgentCommand } = await import('./agent-command-drafts');
   return runAgentCommand({ executionId, token, args });
 }
 
-async function developmentDelegation(title: string, requirementCardId?: string) {
+async function developmentDelegation(title: string, requirementCardId?: string, native = false) {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask, saveDeliverySpec } = await import('./tasks');
+  const { createTask, saveDeliverySpec } = await import('../test/legacy-task-fixtures');
   const taskId = await createTask({
     title,
     description: '用户需要在结果页看到明确的完成状态。',
@@ -71,6 +71,10 @@ async function developmentDelegation(title: string, requirementCardId?: string) 
       },
     }),
   });
+  if (native) {
+    const { adoptNativeWorkflowInDb } = await import('./work-item-transitions');
+    adoptNativeWorkflowInDb(db, taskId);
+  }
   const delegation = (await inspectTaskDispatch(taskId)).find((item) =>
     item.agent === 'dev-agent' && item.storyIndex === 1);
   assert.ok(delegation);
@@ -88,6 +92,45 @@ async function begin(delegation: DelegationEnvelope, suffix: string) {
   assert.ok(token);
   return { executionId: started.attempt.execution_id, token };
 }
+
+for (const native of [false, true]) test(`Dev can hand off a contract conflict without fake completion (${native ? 'native' : 'legacy'})`, async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { readAgentCommandSubmission } = await import('./agent-command-drafts');
+  const { applyAgentResult } = await import('./agent-results');
+  const { completeExecution } = await import('./executions');
+  const { taskId, delegation } = await developmentDelegation('Contract conflict handoff', undefined, native);
+  const active = await begin(delegation, taskId);
+  const db = await databaseConnection();
+  await assert.rejects(command(active.executionId, active.token!, ['intervention', 'request',
+    '--summary', '前端验收错误归属后端单元', '--reason', '契约范围矛盾', '--evidence', '前端实现属于下一单元']), /先执行 status/);
+  assert.match(await command(active.executionId, active.token!, ['status']), /intervention request/);
+  const args = ['intervention', 'request', '--summary', '前端验收错误归属后端单元',
+    '--reason', '契约范围矛盾', '--evidence', '前端实现属于下一单元，当前后端实现不能闭合 Tab 验收'];
+  assert.match(await command(active.executionId, active.token!, args), /Outcome: submitted/);
+  assert.match(await command(active.executionId, active.token!, args), /already_submitted/);
+  await assert.rejects(command(active.executionId, active.token!, ['phase', 'complete']), /已提交介入请求/);
+  const result = await readAgentCommandSubmission(active.executionId);
+  assert.ok(result?.intervention);
+  assert.equal(result.outcome, 'needs_input');
+  assert.equal(await applyAgentResult('RUN-handoff', delegation, result, { executionId: active.executionId }), 'blocked');
+  await completeExecution(active.executionId);
+  const state = db.prepare('SELECT dev_index FROM tasks WHERE task_id = ?').get(taskId) as { dev_index: number };
+  assert.equal(state.dev_index, 0);
+  assert.equal((db.prepare('SELECT dispatch_retry_consumed FROM execution_attempts WHERE execution_id = ?')
+    .get(active.executionId) as { dispatch_retry_consumed: number }).dispatch_retry_consumed, 0);
+  assert.equal((db.prepare('SELECT status FROM agent_work_drafts WHERE last_execution_id = ?')
+    .get(active.executionId) as { status: string }).status, 'editing');
+  const intervention = db.prepare('SELECT status, authority, item_id FROM interventions WHERE source_execution_id = ?')
+    .get(active.executionId) as { status: string; authority: string; item_id: string | null };
+  assert.equal(intervention.status, 'pending');
+  assert.equal(intervention.authority, 'arbitration');
+  if (native) {
+    assert.equal(intervention.item_id, delegation.workItemId);
+    assert.equal((db.prepare('SELECT status FROM workflow_items WHERE item_id = ?')
+      .get(intervention.item_id) as { status: string }).status, 'waiting');
+    assert.equal((await inspectTaskDispatch(taskId)).some((item) => item.agent === 'test-agent'), false);
+  }
+});
 
 async function recordCapturedCommand(executionId: string, actualCommand: string, passed = true) {
   const { databaseConnection } = await import('../infrastructure/database');
@@ -132,8 +175,8 @@ async function recordCriteria(executionId: string, token: string) {
   ]);
 }
 
-test('Dev Agent runs only through the YAML command chain and trusted command receipts', async () => {
-  const { taskId, delegation } = await developmentDelegation('通用命令链开发实现', 'CARD-DEV-001');
+for (const native of [false, true]) test(`Dev Agent runs only through the YAML command chain and trusted command receipts (${native ? 'native' : 'legacy'})`, async () => {
+  const { taskId, delegation } = await developmentDelegation('通用命令链开发实现', 'CARD-DEV-001', native);
   const active = await begin(delegation, taskId);
 
   assert.match(await command(active.executionId, active.token!, ['help']), /通用命令链/);
@@ -205,13 +248,26 @@ test('Dev Agent runs only through the YAML command chain and trusted command rec
   assert.equal(assessment.kind, 'implementation');
   assert.equal(assessment.result, 'claimed');
   assert.match(assessment.evidence, /可观察闭环/);
+  if (native) {
+    db.prepare(`UPDATE tasks SET agile_status = 'in plan', current_subagent = 'backlog-agent', total_stories = 0,
+      analysis_index = 0, spec_resolved_index = 0, dev_index = 0, test_index = 0 WHERE task_id = ?`).run(taskId);
+    const { applyAgentResult } = await import('./agent-results');
+    const { completeExecution } = await import('./executions');
+    const { getTask } = await import('../test/legacy-task-fixtures');
+    assert.equal(await applyAgentResult(`RUN-native-dev-result-${taskId}`, delegation, result!, { executionId: active.executionId }), 'advanced');
+    await completeExecution(active.executionId);
+    assert.equal((db.prepare('SELECT status FROM workflow_items WHERE item_id = ?').get(delegation.workItemId) as { status: string }).status, 'completed');
+    assert.equal((await getTask(taskId))?.task.dev_index, 1);
+    const { cancelTask } = await import('../test/legacy-task-fixtures');
+    await cancelTask({ taskId, reason: 'Release this completed fixture code claim' });
+  }
 });
 
-test('Dev runtime input pauses phase complete and resumes the same generic entities', async () => {
+for (const native of [false, true]) test(`Dev runtime input pauses phase complete and resumes the same generic entities (${native ? 'native' : 'legacy'})`, async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
-  const { answerRuntimeInput, getTask, submitRuntimeInputs } = await import('./tasks');
-  const { taskId, delegation } = await developmentDelegation('通用开发运行信息');
+  const { answerRuntimeInput, getTask, submitRuntimeInputs } = await import('../test/legacy-task-fixtures');
+  const { taskId, delegation } = await developmentDelegation('通用开发运行信息', undefined, native);
   const first = await begin(delegation, `${taskId}-input`);
   await enterImplement(first.executionId, first.token!);
   await command(first.executionId, first.token!, [
@@ -238,6 +294,26 @@ test('Dev runtime input pauses phase complete and resumes the same generic entit
   const status = await command(resumed.executionId, resumed.token!, ['status']);
   assert.match(status, /Phase: implement/);
   assert.match(status, /preview-url.*answered/);
+  if (native) {
+    const { databaseConnection } = await import('../infrastructure/database');
+    const { rewindWorkItemsInDb } = await import('./work-item-transitions');
+    const db = await databaseConnection();
+    rewindWorkItemsInDb(db, { taskId, targetItemId: resumedDelegation!.workItemId!, eventKey: 'fresh-runtime-question',
+      actor: 'human', authority: 'human', reason: 'New revision must not inherit an old answer just because the key matches' });
+    const freshWork = (await inspectTaskDispatch(taskId)).find((item) => item.agent === 'dev-agent')!;
+    assert.notEqual(freshWork.workItemId, resumedDelegation!.workItemId);
+    const fresh = await begin(freshWork, `${taskId}-new-revision`);
+    await enterImplement(fresh.executionId, fresh.token!);
+    await command(fresh.executionId, fresh.token!, ['runtime-input', 'put', '--key', 'preview-url',
+      '--title', '新版本预览地址', '--question', '新版本使用哪个地址？', '--why', '新版本需要独立运行信息',
+      '--recommendation', '提供新版本的实际地址']);
+    const freshStatus = await command(fresh.executionId, fresh.token!, ['status']);
+    assert.match(freshStatus, /preview-url.*waiting/);
+    assert.doesNotMatch(freshStatus, /preview-url.*answered/);
+    assert.match(await command(fresh.executionId, fresh.token!, ['phase', 'complete']), /waiting_for_human/);
+    const submission = await readAgentCommandSubmission(fresh.executionId);
+    assert.equal(submission?.runtimeInputs[0]?.key, 'preview-url');
+  }
 });
 
 test('Metadata Phase only writes declared Metadata and enforces required inputs', async () => {

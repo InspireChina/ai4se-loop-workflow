@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
-import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
-import type { DelegationEnvelope } from './tasks';
+import { inspectTaskDispatchEnvelope as inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
+import type { DelegationEnvelope } from '../test/legacy-task-fixtures';
 
-test('Direct Pipeline runs and submits one result before completing the requirement', async () => {
+for (const native of [false, true]) test(`Direct Pipeline runs and submits one result before completing the requirement (${native ? 'native' : 'legacy'})`, async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { applyAgentResult } = await import('./agent-results');
   const { issueAgentCommandToken, readAgentCommandSubmission, runAgentCommand } = await import('./agent-command-drafts');
   const { completeExecution } = await import('./executions');
-  const { createTask, getTask } = await import('./tasks');
+  const { createTask, getTask } = await import('../test/legacy-task-fixtures');
   const db = await databaseConnection();
   db.prepare(`
     UPDATE tasks
@@ -22,6 +22,10 @@ test('Direct Pipeline runs and submits one result before completing the requirem
     description: '读取现有资料并输出一份 Markdown 摘要。',
     itemType: 'direct',
   });
+  if (native) {
+    const { adoptNativeWorkflowInDb } = await import('./work-item-transitions');
+    adoptNativeWorkflowInDb(db, taskId);
+  }
   const delegation = (await inspectTaskDispatch(taskId))[0] as DelegationEnvelope | undefined;
   assert.ok(delegation);
   assert.equal(delegation.agent, 'direct-agent');

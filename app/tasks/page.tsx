@@ -77,7 +77,7 @@ export default async function TasksPage({ searchParams }: TasksPageProps) {
             && ['idea-context-agent', 'business-design-agent', 'backlog-agent'].includes(task.current_subagent || '');
           const pendingDependencies = terminalView ? [] : (task as TaskWithLanes).dependency_gate_open
             ? []
-            : (task as TaskWithLanes).dependencies.filter((dependency) => !requirementDependencySatisfied(dependency.agile_status));
+            : (task as TaskWithLanes).dependencies.filter((dependency) => !requirementDependencySatisfied(dependency));
           const waitingForDependencies = pendingDependencies.length > 0;
           const laneSummary = terminalView ? '' : task.is_paused
             ? `暂停推进${task.paused_reason ? ` · ${task.paused_reason}` : ''}`

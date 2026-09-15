@@ -1,6 +1,10 @@
 'use server';
 
 import { redirect } from 'next/navigation';
+import { revalidatePath } from 'next/cache';
+import { z } from 'zod';
+import { runHumanArbitrationCommand } from '../src/application/interventions';
+import { advanceAndPublishRuntimeInvalidation } from '../src/application/runtime-events';
 import { setAgentConcurrency, setAgentExecutorSettings, setFlowAgentDefaultRuntimeSettings, setLangfuseSettings } from '../src/application/project-settings';
 import { resetAgentPromptToSystemTemplate, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
 import {
@@ -35,6 +39,28 @@ import {
   updateScheduledRequirement,
 } from '../src/application/scheduled-requirements';
 import { createProject, deleteProject, setDefaultProject, updateProject } from '../src/application/projects';
+
+export async function arbitrateInterventionAction(_state: { ok: boolean; message: string }, formData: FormData) {
+  try {
+    const value = z.object({ taskId: z.string().min(1), interventionId: z.string().min(1),
+      command: z.enum(['task-rewind', 'work-item-complete']), to: z.string().optional(), reason: z.string().trim().min(1).max(20_000),
+    }).parse({ taskId: formData.get('taskId'), interventionId: formData.get('interventionId'),
+      command: formData.get('command'), to: formData.get('to') || undefined, reason: formData.get('reason') });
+    const args = ['intervention', value.command, '--reason', value.reason];
+    if (value.command === 'task-rewind') {
+      if (!value.to) throw new Error('请选择回退工作项');
+      args.push('--to', value.to);
+    }
+    const message = await runHumanArbitrationCommand({ taskId: value.taskId, interventionId: value.interventionId, args });
+    await advanceAndPublishRuntimeInvalidation('dispatch.invalidated', value.taskId);
+    revalidatePath(`/tasks/${value.taskId}`);
+    revalidatePath('/tasks');
+    revalidatePath('/');
+    return { ok: true, message };
+  } catch (error) {
+    return { ok: false, message: error instanceof z.ZodError ? '请填写有效的裁决操作与依据。' : error instanceof Error ? error.message : String(error) };
+  }
+}
 
 export async function createTaskAction(formData: FormData) {
   const pipeline = requirementPipeline(formData.get('pipeline') || 'feature');

@@ -6,6 +6,11 @@ import type { AgentResult } from '../domain/agent-result';
 import type { DeliveryUnitContract } from '../domain/delivery-unit';
 import { insertDeliveryUnitContractsInDb } from './delivery-units';
 import type { FeedbackBatch, FeedbackGroup, FeedbackVerificationDecision } from './tasks';
+import { appendDeliveryWorkItemsInDb } from './work-item-transitions';
+import { createFeedbackBatchWorkInDb, createFeedbackGroupWorkInDb, attachFeedbackUnitsInDb,
+  nativeFeedbackInDb, feedbackSourceItemInDb, attachFeedbackBatchBarriersInDb, captureFeedbackGroupDescriptorsInDb } from './work-item-feedback';
+import { nativeDeliveryReadyInDb } from './work-item-controls';
+import { projectNativeWorkflowDisplayInDb } from './native-workflow-projection';
 
 export type FeedbackWorkType = FeedbackGroup['work_type'];
 
@@ -31,47 +36,6 @@ type TaskRow = {
   total_stories: number;
 };
 
-export type FeedbackDispatch =
-  | {
-      kind: 'triage';
-      batchId: string;
-      commentIds: string[];
-      feedbackId: string;
-      description: string;
-    }
-  | {
-      kind: 'verify';
-      batchId: string;
-      groupId: string;
-      commentIds: string[];
-      feedbackId: string;
-      description: string;
-    }
-  | {
-      kind: 'repro';
-      batchId: string;
-      groupId: string;
-      commentIds: string[];
-      feedbackId: string;
-      resume: boolean;
-      description: string;
-    }
-  | {
-      kind: 'split';
-      batchId: string;
-      groupId: string;
-      commentIds: string[];
-      feedbackId: string;
-      description: string;
-    }
-  | {
-      kind: 'report';
-      batchId: string;
-      groupId: string;
-      commentIds: string[];
-      feedbackId: string;
-      description: string;
-    };
 
 function refreshTask(taskId: string) {
   try {
@@ -90,6 +54,12 @@ function addEvent(db: Db, taskId: string, actor: string, eventType: string, summ
 }
 
 function activeBatchInDb(db: Db, taskId: string) {
+  if (nativeFeedbackInDb(db, taskId)) {
+    return db.prepare(`SELECT batch.* FROM feedback_batches batch WHERE batch.task_id = ? AND EXISTS (
+      SELECT 1 FROM workflow_items item WHERE item.task_id = batch.task_id AND item.kind = 'feedback'
+        AND json_extract(item.context_json, '$.feedbackBatchId') = batch.batch_id
+        AND item.status NOT IN ('completed', 'superseded', 'cancelled')) ORDER BY batch.batch_number LIMIT 1`).get(taskId) as FeedbackBatch | undefined;
+  }
   return db.prepare(`
     SELECT * FROM feedback_batches
     WHERE task_id = ? AND status NOT IN ('completed', 'cancelled')
@@ -211,110 +181,11 @@ export function ensureFeedbackBatchInDb(db: Db, taskId: string) {
       WHERE comment_id IN (${placeholders})
     `).run(batchId, ...comments.map((comment) => comment.comment_id));
     addEvent(db, taskId, 'system', 'FeedbackBatchCreated', `冻结 ${comments.length} 条评论形成反馈批次 ${batchNumber}`);
+    createFeedbackBatchWorkInDb(db, taskId, db.prepare('SELECT * FROM feedback_batches WHERE batch_id = ?').get(batchId) as FeedbackBatch);
   })();
   return db.prepare('SELECT * FROM feedback_batches WHERE batch_id = ?').get(batchId) as FeedbackBatch;
 }
 
-export function nextFeedbackDispatchInDb(db: Db, taskId: string): FeedbackDispatch | undefined {
-  const batch = ensureFeedbackBatchInDb(db, taskId);
-  if (!batch) return undefined;
-  const comments = batchCommentIds(db, batch.batch_id);
-  if (!comments.length) return undefined;
-  if (batch.status === 'triaging') {
-    return {
-      kind: 'triage',
-      batchId: batch.batch_id,
-      commentIds: comments,
-      feedbackId: comments[0],
-      description: `批量判断 ${comments.length} 条反馈，并创建必要的追加交付单元`,
-    };
-  }
-  if (batch.status === 'waiting_for_answers') {
-    const task = db.prepare('SELECT run_state, resume_pending FROM tasks WHERE task_id = ?').get(taskId) as { run_state: string; resume_pending: number } | undefined;
-    if (task?.run_state === 'runnable' && task.resume_pending) {
-      const waitingRepro = activeGroups(db, batch.batch_id).find((group) => group.status === 'waiting_for_repro');
-      if (waitingRepro) {
-        const groupComments = groupCommentIds(db, waitingRepro.group_id);
-        return {
-          kind: 'repro',
-          batchId: batch.batch_id,
-          groupId: waitingRepro.group_id,
-          commentIds: groupComments,
-          feedbackId: groupComments[0],
-          resume: true,
-          description: `读取人工回答并继续复现反馈问题：${waitingRepro.title || waitingRepro.reason}`,
-        };
-      }
-      return {
-        kind: 'triage',
-        batchId: batch.batch_id,
-        commentIds: comments,
-        feedbackId: comments[0],
-        description: `读取人工回答并重新判断反馈批次 ${batch.batch_id}`,
-      };
-    }
-    return undefined;
-  }
-  const groups = activeGroups(db, batch.batch_id);
-  const repro = groups.find((group) => group.status === 'waiting_for_repro');
-  if (repro) {
-    const groupComments = groupCommentIds(db, repro.group_id);
-    return {
-      kind: 'repro',
-      batchId: batch.batch_id,
-      groupId: repro.group_id,
-      commentIds: groupComments,
-      feedbackId: groupComments[0],
-      resume: false,
-      description: `复现反馈问题：${repro.title || repro.reason}`,
-    };
-  }
-  const plan = groups.find((group) => group.status === 'waiting_for_plan');
-  if (plan) {
-    const groupComments = groupCommentIds(db, plan.group_id);
-    return {
-      kind: 'split',
-      batchId: batch.batch_id,
-      groupId: plan.group_id,
-      commentIds: groupComments,
-      feedbackId: groupComments[0],
-      description: `把反馈变化规划为完整的追加交付单元：${plan.title || plan.reason}`,
-    };
-  }
-  const verify = groups.find((group) => group.status === 'ready_for_verification');
-  if (verify) {
-    const groupComments = groupCommentIds(db, verify.group_id);
-    const comment = db.prepare(`
-      SELECT comment_id FROM document_comments
-      WHERE comment_id IN (${groupComments.map(() => '?').join(', ')})
-        AND feedback_status = 'verifying'
-      ORDER BY created_at, comment_id LIMIT 1
-    `).get(...groupComments) as { comment_id: string } | undefined;
-    if (comment) {
-      return {
-        kind: 'verify',
-        batchId: batch.batch_id,
-        groupId: verify.group_id,
-        commentIds: groupComments,
-        feedbackId: comment.comment_id,
-        description: `验证反馈是否已经满足：${verify.title || verify.reason}`,
-      };
-    }
-  }
-  const report = groups.find((group) => group.work_type === 'report_correction' && group.status === 'executing');
-  if (report && batch.status === 'reporting') {
-    const groupComments = groupCommentIds(db, report.group_id);
-    return {
-      kind: 'report',
-      batchId: batch.batch_id,
-      groupId: report.group_id,
-      commentIds: groupComments,
-      feedbackId: groupComments[0],
-      description: `根据反馈生成新版结卡报告：${report.title || report.reason}`,
-    };
-  }
-  return undefined;
-}
 
 export async function markFeedbackBatchWaitingForAnswers(taskId: string, batchId: string) {
   const db = await databaseConnection();
@@ -361,15 +232,17 @@ export async function applyFeedbackTriageGroups(input: {
   executionId?: string;
 }) {
   const db = await databaseConnection();
+  const source = feedbackSourceItemInDb(db, { taskId: input.taskId, batchId: input.batchId,
+    executionId: input.executionId, pipeline: 'feedback-triage' });
   const batch = db.prepare(`
     SELECT * FROM feedback_batches WHERE batch_id = ? AND task_id = ?
   `).get(input.batchId, input.taskId) as FeedbackBatch | undefined;
   if (!batch) throw new Error('反馈批次不存在');
-  if (batch.status !== 'triaging' && batch.status !== 'waiting_for_answers') {
+  if (!source && batch.status !== 'triaging' && batch.status !== 'waiting_for_answers') {
     if (activeGroups(db, batch.batch_id).length) return;
     throw new Error(`反馈批次当前不能分流：${batch.status}`);
   }
-  const expectedIds = batchCommentIds(db, batch.batch_id);
+  const expectedIds = source?.scope.feedbackIds || batchCommentIds(db, batch.batch_id);
   validateTriageGroups(expectedIds, input.groups);
   const task = db.prepare('SELECT total_stories FROM tasks WHERE task_id = ?').get(input.taskId) as { total_stories: number };
   for (const group of input.groups) {
@@ -455,7 +328,10 @@ export async function applyFeedbackTriageGroups(input: {
           `).run(JSON.stringify(group.acceptance), group.reason, commentId);
         }
       }
+      createFeedbackGroupWorkInDb(db, input.taskId, db.prepare('SELECT * FROM feedback_groups WHERE group_id = ?').get(groupId) as FeedbackGroup);
     }
+    attachFeedbackBatchBarriersInDb(db, input.taskId, input.batchId);
+    captureFeedbackGroupDescriptorsInDb(db, input.taskId, input.batchId);
     db.prepare(`
       UPDATE feedback_batches
       SET source_execution_id = COALESCE(source_execution_id, ?), summary = ?,
@@ -490,10 +366,11 @@ export async function applyFeedbackReproResult(input: {
   executionId?: string;
 }) {
   const db = await databaseConnection();
+  const source = feedbackSourceItemInDb(db, { ...input, pipeline: 'feedback-repro' });
   const group = db.prepare(`
     SELECT * FROM feedback_groups WHERE group_id = ? AND batch_id = ?
   `).get(input.groupId, input.batchId) as FeedbackGroup | undefined;
-  if (!group || group.work_type !== 'bug' || group.status !== 'waiting_for_repro') throw new Error('反馈 Bug 分组当前不能应用复现结果');
+  if (!group || group.work_type !== 'bug' || !source && group.status !== 'waiting_for_repro') throw new Error('反馈 Bug 分组当前不能应用复现结果');
   if (input.result.reproVerdict !== 'reproduced') throw new Error('反馈 Bug 只有成功复现后才能创建修复交付单元');
   db.transaction(() => {
     db.prepare(`
@@ -522,11 +399,12 @@ export async function applyFeedbackSplitResult(input: {
   sourceCommandChainDraftId: string;
 }) {
   const db = await databaseConnection();
+  const source = feedbackSourceItemInDb(db, { ...input, pipeline: 'feedback-split' });
   const group = db.prepare(`
     SELECT * FROM feedback_groups WHERE group_id = ? AND batch_id = ?
   `).get(input.groupId, input.batchId) as FeedbackGroup | undefined;
   const plannableTypes: FeedbackWorkType[] = ['bug', 'behavior_change', 'scope_addition', 'technical_change'];
-  if (!group || !plannableTypes.includes(group.work_type) || group.status !== 'waiting_for_plan') {
+  if (!group || !plannableTypes.includes(group.work_type) || !source && group.status !== 'waiting_for_plan') {
     throw new Error('当前反馈工作组不能应用交付规划');
   }
   if (!input.deliveryUnits.length) throw new Error('反馈交付规划必须产生至少一个交付单元');
@@ -540,6 +418,8 @@ export async function applyFeedbackSplitResult(input: {
       correctsStoryIndexes: affectedDeliveryUnits,
       sourceCommandChainDraftId: input.sourceCommandChainDraftId,
     });
+    appendDeliveryWorkItemsInDb(db, { taskId: input.taskId, units: inserted,
+      eventKey: `feedback-plan:${input.sourceCommandChainDraftId}`, actor: 'story-splitter-agent', reason: '反馈形成前向交付单元并扩展工作图' });
     for (const unit of inserted) {
       db.prepare(`
         INSERT INTO feedback_group_delivery_units(group_id, task_id, story_index)
@@ -553,6 +433,7 @@ export async function applyFeedbackSplitResult(input: {
         `反馈新增交付单元 ${unit.storyIndex}：${unit.title}（${unit.key}）`,
       );
     }
+    attachFeedbackUnitsInDb(db, input.taskId, input.groupId, inserted.map((unit) => unit.storyIndex));
     const lastIndex = inserted[inserted.length - 1].storyIndex;
     db.prepare(`
       UPDATE tasks
@@ -585,19 +466,26 @@ export async function recordFeedbackUnitTestPassed(input: {
   executionId?: string;
 }) {
   const db = await databaseConnection();
+  const native = nativeFeedbackInDb(db, input.taskId);
   const rows = db.prepare(`
     SELECT DISTINCT feedback_group.*
     FROM feedback_groups feedback_group
     JOIN feedback_group_delivery_units unit ON unit.group_id = feedback_group.group_id
     WHERE unit.task_id = ? AND unit.story_index = ?
-      AND feedback_group.status = 'executing'
-  `).all(input.taskId, input.storyIndex) as FeedbackGroup[];
+      AND (? OR feedback_group.status = 'executing')
+  `).all(input.taskId, input.storyIndex, native ? 1 : 0) as FeedbackGroup[];
   if (!rows.length) return;
   db.transaction(() => {
     for (const group of rows) {
       const units = groupDeliveryUnitIndexes(db, group.group_id, input.taskId);
       const task = db.prepare('SELECT test_index FROM tasks WHERE task_id = ?').get(input.taskId) as { test_index: number };
-      if (!units.length || units.some((index) => index > task.test_index)) continue;
+      if (!units.length || (native ? units.some((index) => !db.prepare(`SELECT 1 FROM workflow_items WHERE task_id = ?
+          AND work_key = ? AND origin = 'native' AND status = 'completed'`).get(input.taskId, `delivery:test:${index}`))
+        : units.some((index) => index > task.test_index))) continue;
+      if (native && !db.prepare(`SELECT 1 FROM workflow_items WHERE task_id = ? AND pipeline = 'feedback-verify'
+        AND json_extract(context_json, '$.feedbackGroupId') = ? AND status NOT IN ('completed', 'superseded', 'cancelled')`)
+        .get(input.taskId, group.group_id)) continue;
+      if (group.status === 'ready_for_verification') continue;
       db.prepare(`
         UPDATE feedback_groups
         SET status = 'ready_for_verification', updated_at = CURRENT_TIMESTAMP
@@ -622,6 +510,7 @@ export function markFeedbackReportGeneratedInDb(db: Db, input: {
   groupId: string;
   executionId?: string;
 }) {
+  const source = feedbackSourceItemInDb(db, { ...input, pipeline: 'feedback-report' });
   const group = db.prepare(`
     SELECT feedback_group.*
     FROM feedback_groups feedback_group
@@ -630,16 +519,17 @@ export function markFeedbackReportGeneratedInDb(db: Db, input: {
     WHERE feedback_group.group_id = ?
       AND feedback_group.batch_id = ?
       AND batch.task_id = ?
-      AND batch.status = 'reporting'
+      AND (? OR batch.status = 'reporting')
   `).get(
     input.groupId,
     input.batchId,
     input.taskId,
+    source ? 1 : 0,
   ) as FeedbackGroup | undefined;
   if (
     !group
     || group.work_type !== 'report_correction'
-    || group.status !== 'executing'
+    || !source && group.status !== 'executing'
   ) {
     throw new Error('反馈报告更正分组不存在或已离开执行状态');
   }
@@ -648,8 +538,8 @@ export function markFeedbackReportGeneratedInDb(db: Db, input: {
     SET status = 'ready_for_verification',
         source_execution_id = COALESCE(source_execution_id, ?),
         updated_at = CURRENT_TIMESTAMP
-    WHERE group_id = ? AND status = 'executing'
-  `).run(input.executionId || null, input.groupId);
+    WHERE group_id = ? AND (? OR status = 'executing')
+  `).run(input.executionId || null, input.groupId, source ? 1 : 0);
   if (updated.changes !== 1) throw new Error('反馈报告更正分组状态已变化');
   const comments = groupCommentIds(db, input.groupId);
   if (comments.length) {
@@ -682,7 +572,7 @@ export async function markFeedbackReportGenerated(input: {
   refreshTask(input.taskId);
 }
 
-function finalizeTaskAfterFeedbackInDb(db: Db, taskId: string, completedBatchId: string) {
+export function finalizeTaskAfterFeedbackInDb(db: Db, taskId: string, completedBatchId: string) {
   const active = activeBatchInDb(db, taskId);
   if (active) return;
   const unresolved = (db.prepare(`
@@ -691,7 +581,26 @@ function finalizeTaskAfterFeedbackInDb(db: Db, taskId: string, completedBatchId:
   `).get(taskId) as { count: number }).count;
   if (unresolved) return;
   const task = db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(taskId) as TaskRow | undefined;
-  if (!task || task.agile_status !== 'in feedback') return;
+  const native = nativeFeedbackInDb(db, taskId);
+  if (!task || !native && task.agile_status !== 'in feedback') return;
+  if (native) {
+    const unfinishedDelivery = db.prepare(`SELECT 1 FROM workflow_items WHERE task_id = ? AND origin = 'native'
+      AND story_index IS NOT NULL AND status NOT IN ('completed', 'superseded', 'cancelled') LIMIT 1`).get(taskId);
+    if (unfinishedDelivery) return;
+    const ready = nativeDeliveryReadyInDb(db, taskId);
+    const awaitingReport = db.prepare(`SELECT 1 FROM workflow_items WHERE task_id = ? AND origin = 'native'
+      AND work_key = 'delivery:review' AND status IN ('pending','ready','running','waiting') LIMIT 1`).get(taskId);
+    const summary = ready ? '反馈闭环已完成，当前最终文档可供阅读'
+      : awaitingReport ? '反馈追加交付已完成，等待工作图推进最终报告'
+        : '反馈验证已结束，等待当前工作项、介入或可信最终文档';
+    // Graph transitions and artifact publication own scheduling and the head.
+    // Never erase a prior artifact or synthesize old cursor/status authority.
+    projectNativeWorkflowDisplayInDb(db, taskId);
+    db.prepare("UPDATE tasks SET next_step = ?, last_actor = 'system', updated_at = CURRENT_TIMESTAMP WHERE task_id = ?")
+      .run(summary, taskId);
+    addEvent(db, taskId, 'system', ready ? 'FeedbackReportReady' : awaitingReport ? 'FeedbackDeliveryCompleted' : 'FeedbackVerificationCompleted', summary);
+    return;
+  }
   if (!(task.total_stories > 0
     && task.analysis_index === task.total_stories
     && task.dev_index === task.total_stories
@@ -730,20 +639,28 @@ function finalizeTaskAfterFeedbackInDb(db: Db, taskId: string, completedBatchId:
 
 export async function applyFeedbackVerificationV2(taskId: string, decision: FeedbackVerificationDecision, executionId?: string) {
   const db = await databaseConnection();
+  const source = feedbackSourceItemInDb(db, { taskId, commentId: decision.commentId, executionId, pipeline: 'feedback-verify' });
   const row = db.prepare(`
     SELECT feedback_group.*, feedback_batch.task_id
     FROM feedback_groups feedback_group
     JOIN feedback_batches feedback_batch ON feedback_batch.batch_id = feedback_group.batch_id
     JOIN feedback_group_comments link ON link.group_id = feedback_group.group_id
     WHERE feedback_batch.task_id = ? AND link.comment_id = ?
-      AND feedback_group.status = 'ready_for_verification'
+      AND (? OR feedback_group.status = 'ready_for_verification')
+      AND (? IS NULL OR feedback_group.group_id = ?)
     ORDER BY feedback_group.created_at DESC
     LIMIT 1
-  `).get(taskId, decision.commentId) as (FeedbackGroup & { task_id: string }) | undefined;
+  `).get(taskId, decision.commentId, source ? 1 : 0, source?.scope.feedbackGroupId || null, source?.scope.feedbackGroupId || null) as (FeedbackGroup & { task_id: string }) | undefined;
   if (!row) throw new Error('反馈当前没有可验证的前向工作结果');
   if (decision.verdict === 'resolved' && !decision.evidence.length) throw new Error('反馈标记 resolved 前必须提供验证证据');
   db.transaction(() => {
     const resolved = decision.verdict === 'resolved';
+    if (source && executionId) {
+      db.prepare(`INSERT INTO execution_receipts(receipt_id, execution_id, kind, receipt_key, payload_json)
+        VALUES(?, ?, 'feedback_verification', ?, ?) ON CONFLICT(execution_id, kind, receipt_key) DO NOTHING`)
+        .run(randomUUID(), executionId, decision.commentId, JSON.stringify({ ...decision, batchId: source.scope.feedbackBatchId,
+          groupId: source.scope.feedbackGroupId, itemId: source.item.item_id }));
+    }
     db.prepare(`
       UPDATE document_comments
       SET status = ?, feedback_status = ?, verification_json = ?,

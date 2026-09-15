@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ensureAgentRuntimeWorkspace } from './agent-profiles';
-import { createTask } from './tasks';
+import { createTask } from '../test/legacy-task-fixtures';
 import { databaseConnection } from '../infrastructure/database';
 
 test('rejects cross-project Agent evolution runs and observation evidence at the database boundary', async () => {

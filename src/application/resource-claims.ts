@@ -4,6 +4,7 @@ import {
   resourcesRequiringClaims,
   type ResourceKey,
 } from '../domain/resource';
+import { workflowEndedInDb } from './work-item-controls';
 
 export { BROWSER_EXCLUSIVE_RESOURCE, CODE_WORKSPACE_RESOURCE } from '../domain/resource';
 
@@ -53,21 +54,31 @@ export function resourceClaimInDb(db: Db, resourceKey: ResourceKey, taskId?: str
     : db.prepare('SELECT * FROM resource_claims WHERE resource_key = ? ORDER BY acquired_at, resource_scope LIMIT 1').get(resourceKey)) as ResourceClaim | undefined;
 }
 
-export function activeResourceClaimInDb(db: Db, resourceKey: ResourceKey, taskId?: string) {
+export function activeResourceClaimInDb(db: Db, resourceKey: ResourceKey, taskId?: string, options: { releaseStale?: boolean } = {}) {
   const claim = resourceClaimInDb(db, resourceKey, taskId);
   if (!claim) return undefined;
-  const owner = db.prepare('SELECT agile_status, is_paused FROM tasks WHERE task_id = ?')
-    .get(claim.owner_task_id) as { agile_status: string; is_paused: number } | undefined;
-  if (!owner || owner.is_paused || ['done', 'cancelled'].includes(owner.agile_status)) {
-    releaseResourceClaimInDb(db, resourceKey, claim.owner_task_id);
+  const owner = db.prepare('SELECT is_paused FROM tasks WHERE task_id = ?')
+    .get(claim.owner_task_id) as { is_paused: number } | undefined;
+  if (!owner || owner.is_paused || workflowEndedInDb(db, claim.owner_task_id)) {
+    if (options.releaseStale !== false) releaseResourceClaimInDb(db, resourceKey, claim.owner_task_id);
     return undefined;
+  }
+  if (RESOURCE_DEFINITIONS[resourceKey].ownerScope === 'task' && claim.owner_execution_id) {
+    const cancelled = db.prepare(`SELECT 1 FROM execution_attempts
+      WHERE execution_id = ? AND task_id = ? AND status = 'cancelled'`)
+      .get(claim.owner_execution_id, claim.owner_task_id);
+    if (cancelled) {
+      if (options.releaseStale !== false) db.prepare('DELETE FROM resource_claims WHERE owner_execution_id = ?')
+        .run(claim.owner_execution_id);
+      return undefined;
+    }
   }
   if (RESOURCE_DEFINITIONS[resourceKey].ownerScope === 'execution') {
     const execution = claim.owner_execution_id
       ? db.prepare('SELECT status FROM execution_attempts WHERE execution_id = ?').get(claim.owner_execution_id) as { status: string } | undefined
       : undefined;
     if (!execution || !['planned', 'running', 'output_received', 'verifying', 'applying'].includes(execution.status)) {
-      releaseResourceClaimInDb(db, resourceKey, claim.owner_task_id);
+      if (options.releaseStale !== false) releaseResourceClaimInDb(db, resourceKey, claim.owner_task_id);
       return undefined;
     }
   }

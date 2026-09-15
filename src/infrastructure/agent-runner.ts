@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
+import * as nodeModule from 'node:module';
 import { dirname, join } from 'node:path';
 import { appendLoopRunLog, registerRunProcess } from '../application/tasks';
 import { databaseConnection, paths } from './database';
@@ -15,6 +15,7 @@ import {
   runPidPath,
 } from './run-process';
 import { isDesktopRuntime, runtimeNodeEnvironment, runtimeNodeExecutable, runtimeScript } from './runtime-entry';
+import { upgradeWorkflowAtStartupInDb } from '../application/workflow-upgrade';
 
 export function resolveRunnerCommand(runId: string, scriptName: string) {
   const name = scriptName.replace(/\.ts$/, '');
@@ -22,7 +23,11 @@ export function resolveRunnerCommand(runId: string, scriptName: string) {
     return { command: runtimeNodeExecutable(), args: [runtimeScript(name), runId] };
   }
   const script = runtimeScript(name);
-  const requireFromApp = createRequire(join(paths.appRoot, 'package.json'));
+  // Resolve from the installed app at runtime. Webpack's createRequire parser
+  // only accepts static filenames and otherwise replaces the factory with
+  // undefined; the app root is deliberately dynamic in isolated/desktop runs.
+  const createAppRequire = Reflect.get(nodeModule, 'createRequire') as typeof nodeModule.createRequire;
+  const requireFromApp = createAppRequire(join(paths.appRoot, 'package.json'));
   const tsxCli = requireFromApp.resolve('tsx/cli');
   return { command: process.execPath, args: [tsxCli, script, runId] };
 }
@@ -113,8 +118,19 @@ async function startManagedRunner(runId: string, scriptName: string, supervision
 
 export async function startAgentRun(runId: string, supervisionToken = Number(process.env.LOOP_SUPERVISION_TOKEN || 0)) {
   if (!Number.isInteger(supervisionToken) || supervisionToken <= 0) throw new Error('缺少有效的 supervision token');
+  {
+    let receipt: ReturnType<typeof upgradeWorkflowAtStartupInDb>;
+    try {
+      receipt = upgradeWorkflowAtStartupInDb(await databaseConnection(), runId, supervisionToken);
+    } catch (error) {
+      await appendLoopRunLog(runId, `[工作流迁移] 未启动 Runner，整批迁移已回滚：${error instanceof Error ? error.message : String(error)}`);
+      throw error;
+    }
+    const adopted = receipt.tasks.filter(task => task.previousEngine === 'legacy').length;
+    await appendLoopRunLog(runId, `[工作流迁移] 原子采纳 ${adopted} 个历史需求，覆盖 ${receipt.tasks.length} 个需求；收据 run=${runId}`);
+  }
   const pid = await startManagedRunner(runId, 'agent-runner.ts', supervisionToken);
-  await appendLoopRunLog(runId, `[运行] 已启动 Lane 调度 runner pid=${pid}`);
+  await appendLoopRunLog(runId, `[运行] 已启动工作流调度 runner pid=${pid}`);
 }
 
 export async function stopAgentRun(runId: string) {

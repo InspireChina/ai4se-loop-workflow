@@ -1,87 +1,32 @@
 import { parse } from 'yaml';
 import { activeCommandChainYaml } from '../infrastructure/agent-configuration-store';
 import { COMMAND_CHAIN_FILE_BY_ID, commandChainCatalogItem } from './command-chain-catalog';
+import { commandChainRegistry } from './command-chain-registry';
 import {
   parseRequirementMetadata,
   requirementMetadataDefinition,
   type RequirementMetadataKey,
 } from './requirement-metadata';
+import type {
+  ArtifactBlockReference,
+  CommandChainArtifactStorage,
+  CommandChainBlockDefinition,
+  CommandChainDecisionTreeDefinition,
+  CommandChainDefinition,
+  CommandChainFieldDefinition,
+  CommandChainPhaseDefinition,
+} from './command-chain-types';
 
-export type CommandChainFieldDefinition = {
-  type: 'string' | 'enum' | 'array';
-  required: boolean;
-  label?: string;
-  values?: string[];
-  minItems?: number;
-};
-
-export type CommandChainBlockDefinition = {
-  title: string;
-  cardinality: 'one' | 'many';
-  format: 'markdown' | 'yaml' | 'text';
-  writable: boolean;
-  required: boolean;
-  render: boolean;
-  fields: Record<string, CommandChainFieldDefinition>;
-};
-
-export type CommandChainArtifactStorage = 'builtin' | 'repository';
-
-export type CommandChainArtifactDefinition = {
-  type: CommandChainArtifactStorage;
-  adapter: string | null;
-  title: string;
-  blocks: Record<string, CommandChainBlockDefinition>;
-};
-
-export type CommandChainPhaseDefinition = {
-  type: 'builtin' | 'artifact' | 'confirmation' | 'metadata';
-  builtin: string | null;
-  artifactBlocks: { artifactId: string; blockId: string }[];
-  inputs: string[];
-  title: string;
-  instructions: string;
-  objective: string;
-  required: string;
-  prohibited: string;
-  contexts: string[];
-  workCommands: string[];
-  completeCommand: 'phase complete';
-  rewindCommand: string | null;
-  commands: string[];
-  reviewBeforeSubmit: string[];
-  validators: string[];
-  transitions: string[];
-};
-
-export type CommandChainInputDefinition = {
-  metadataKey: RequirementMetadataKey;
-  required: boolean;
-  defaultValue?: string;
-};
-
-type ArtifactBlockReference = {
-  artifactId: string;
-  blockId: string;
-  block: CommandChainBlockDefinition;
-};
-
-export type CommandChainDecisionTreeDefinition = {
-  builtin: string;
-  minOptions: number;
-  recommendationAuthorities: string[];
-  resolutionAuthorities: string[];
-};
-
-export type CommandChainDefinition = {
-  version: number;
-  id: string;
-  agent: string;
-  artifacts: Record<string, CommandChainArtifactDefinition>;
-  inputs: Record<string, CommandChainInputDefinition>;
-  decisionTrees: Record<string, CommandChainDecisionTreeDefinition>;
-  phases: Record<string, CommandChainPhaseDefinition>;
-};
+export type {
+  CommandChainArtifactDefinition,
+  CommandChainArtifactStorage,
+  CommandChainBlockDefinition,
+  CommandChainDecisionTreeDefinition,
+  CommandChainDefinition,
+  CommandChainFieldDefinition,
+  CommandChainInputDefinition,
+  CommandChainPhaseDefinition,
+} from './command-chain-types';
 
 export { COMMAND_CHAIN_FILE_BY_ID } from './command-chain-catalog';
 
@@ -229,16 +174,14 @@ function phaseCommands(workCommands: string[], navigation: ReturnType<typeof pha
   ];
 }
 
-function builtInPhase(
-  commandChainId: string,
-  id: string,
-  phaseId: string,
-  phaseIds: string[],
-  artifacts: ArtifactBlockReference[],
-): Omit<CommandChainPhaseDefinition, 'inputs'> {
-  const navigation = phaseNavigation(phaseId, phaseIds);
-
-  if (id === 'acceptance-definition') {
+commandChainRegistry.registerBuiltin({
+  id: 'acceptance-definition',
+  label: 'ACCEPTANCE',
+  acceptsArtifacts: true,
+  allowsReadonlyArtifacts: true,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'acceptance-definition';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     if (commandChainId !== 'requirement-context') {
       throw new Error('acceptance-definition 仅用于 Requirement Context');
     }
@@ -265,9 +208,16 @@ function builtInPhase(
       reviewBeforeSubmit: ['每项 Acceptance 都能独立判断成立或不成立。'],
       validators: ['acceptance-required'], transitions: navigation.transitions,
     };
-  }
+  },
+});
 
-  if (id === 'delivery-unit') {
+commandChainRegistry.registerBuiltin({
+  id: 'delivery-unit',
+  label: 'DELIVERY UNIT',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'delivery-unit';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     const workCommands = ['delivery-unit current'];
     return {
       type: 'builtin',
@@ -287,9 +237,16 @@ function builtInPhase(
       validators: ['delivery-unit'],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'delivery-plan-inputs') {
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'delivery-plan-inputs',
+  label: 'FROZEN PLAN INPUTS',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'delivery-plan-inputs';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     return {
       type: 'builtin',
       builtin: id,
@@ -308,9 +265,16 @@ function builtInPhase(
       validators: ['artifact-schema', 'delivery-plan-inputs'],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'verification-inputs') {
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'verification-inputs',
+  label: 'FROZEN VERIFICATION INPUTS',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'verification-inputs';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     return {
       type: 'builtin', builtin: id, artifactBlocks: [], title: 'FROZEN VERIFICATION INPUTS',
       instructions: '读取并确认 Harness 从当前 Delivery Spec 与活动恢复事项冻结的验证输入。这些输入是独立测试的只读 Oracle，不要根据当前实现或 Dev 自述改写 Expected。',
@@ -322,8 +286,16 @@ function builtInPhase(
       commands: phaseCommands([], navigation), reviewBeforeSubmit: ['已读取全部冻结验证输入及其来源。'],
       validators: ['artifact-schema', 'verification-inputs'], transitions: navigation.transitions,
     };
-  }
-  if (id === 'verification-plan') {
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'verification-plan',
+  label: 'PLAN',
+  acceptsArtifacts: true,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'verification-plan';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     const scenarios = artifacts.find((artifact) => artifact.blockId === 'scenarios');
     if (!scenarios || artifacts.length !== 1 || scenarios.block.cardinality !== 'many' || !scenarios.block.required) {
       throw new Error(`内置 Phase phases.${phaseId} 必须声明 required cardinality: many 的 scenarios Artifact Block`);
@@ -348,8 +320,16 @@ function builtInPhase(
       validators: ['artifact-schema', `artifact-required:${scenarios.artifactId}.${scenarios.blockId}`, 'verification-plan', 'runtime-input-complete'],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'verification-execution') {
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'verification-execution',
+  label: 'EXECUTE',
+  acceptsArtifacts: true,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'verification-execution';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     const scenarios = artifacts.find((artifact) => artifact.blockId === 'scenarios');
     const results = artifacts.find((artifact) => artifact.blockId === 'results');
     if (!scenarios || !results || artifacts.length !== 2 || results.block.cardinality !== 'many' || !results.block.required) {
@@ -375,9 +355,16 @@ function builtInPhase(
       validators: ['artifact-schema', `artifact-required:${results.artifactId}.${results.blockId}`, 'verification-plan', 'verification-execution', 'runtime-input-complete'],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'delivery-spec') {
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'delivery-spec',
+  label: 'DELIVERY SPEC',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'delivery-spec';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     const workCommands = ['delivery-spec current'];
     return {
       type: 'builtin',
@@ -397,8 +384,16 @@ function builtInPhase(
       validators: ['delivery-spec'],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'implementation-evidence') {
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'implementation-evidence',
+  label: 'IMPLEMENT',
+  acceptsArtifacts: true,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'implementation-evidence';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     const recovery = artifacts.find((artifact) => artifact.blockId === 'recovery-resolutions');
     if (!recovery || artifacts.length !== 1 || recovery.block.cardinality !== 'many') {
       throw new Error(`内置 Phase phases.${phaseId} 必须声明 cardinality: many 的 recovery-resolutions Artifact Block`);
@@ -433,8 +428,16 @@ function builtInPhase(
       ],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'command-verification') {
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'command-verification',
+  label: 'DEVELOPER VERIFY',
+  acceptsArtifacts: true,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'command-verification';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     const risks = artifacts.find((artifact) => artifact.blockId === 'risks');
     if (!risks || artifacts.length !== 1 || risks.block.cardinality !== 'many') {
       throw new Error(`内置 Phase phases.${phaseId} 必须声明 cardinality: many 的 risks Artifact Block`);
@@ -465,8 +468,16 @@ function builtInPhase(
       validators: ['artifact-schema', 'development-ready', 'runtime-input-complete'],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'decision-proposal') {
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'decision-proposal',
+  label: 'DECISION TREE · PROPOSE',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'decision-proposal';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     const requirementContext = commandChainId === 'requirement-context';
     const reproduction = commandChainId === 'reproduction';
     const feedback = commandChainId === 'feedback-triage';
@@ -510,8 +521,19 @@ function builtInPhase(
       ],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'decision-resolution') {
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'decision-resolution',
+  label: 'DECISION TREE · RESOLVE',
+  acceptsArtifacts: true,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'decision-resolution';
+    const navigation = phaseNavigation(phaseId, phaseIds);
+    if (artifacts.some(({ block }) => block.cardinality !== 'many')) {
+      throw new Error(`内置 Phase phases.${phaseId}.artifacts 只能引用 cardinality: many 的 Block`);
+    }
     const requirementContext = commandChainId === 'requirement-context';
     const reproduction = commandChainId === 'reproduction';
     const feedback = commandChainId === 'feedback-triage';
@@ -559,10 +581,24 @@ function builtInPhase(
       ],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'decision-answer-review') {
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'decision-answer-review',
+  label: 'ANSWER REVIEW',
+  acceptsArtifacts: true,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'decision-answer-review';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     if (artifacts.length !== 1) throw new Error(`内置 Phase phases.${phaseId} 必须声明一个 Artifact Block`);
     const [artifact] = artifacts;
+    if (artifact.block.cardinality !== 'one') {
+      throw new Error(`内置 Phase phases.${phaseId}.artifacts 必须引用 cardinality: one 的 Block`);
+    }
+    if (!artifact.block.required) {
+      throw new Error(`内置 Phase phases.${phaseId}.artifacts 必须引用 required: true 的 Block`);
+    }
     const workCommands = artifactCommands(artifacts);
     return {
       type: 'builtin',
@@ -593,9 +629,16 @@ function builtInPhase(
       ],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'requirement-context-finalize') {
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'requirement-context-finalize',
+  label: 'FINALIZE',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'requirement-context-finalize';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     return {
       type: 'builtin',
       builtin: id,
@@ -614,9 +657,16 @@ function builtInPhase(
       validators: ['artifact-schema', 'decision-schema', 'decision-graph', 'decision-complete', 'requirement-context-complete'],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'delivery-plan-finalize') {
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'delivery-plan-finalize',
+  label: 'FINALIZE',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'delivery-plan-finalize';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     return {
       type: 'builtin',
       builtin: id,
@@ -635,9 +685,16 @@ function builtInPhase(
       validators: ['artifact-schema', 'delivery-plan-complete'],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'reproduction-finalize') {
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'reproduction-finalize',
+  label: 'FINALIZE',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'reproduction-finalize';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     return {
       type: 'builtin',
       builtin: id,
@@ -656,9 +713,16 @@ function builtInPhase(
       validators: ['artifact-schema', 'decision-schema', 'decision-graph', 'decision-complete', 'reproduction-complete'],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'verification-finalize') {
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'verification-finalize',
+  label: 'FINALIZE',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'verification-finalize';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     return {
       type: 'builtin', builtin: id, artifactBlocks: [], title: 'FINALIZE',
       instructions: '最终校验冻结验证输入、黑盒计划、逐项结果与证据复核，并由 Harness 确定性编译 passed 或 failed 结果。环境或证据仍受阻时回退 execute 登记 runtime input，不能提交不确定结论。',
@@ -671,9 +735,16 @@ function builtInPhase(
       validators: ['artifact-schema', 'verification-inputs', 'verification-plan', 'verification-execution', 'verification-complete'],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'review-inputs') {
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'review-inputs',
+  label: 'FROZEN REVIEW INPUTS',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'review-inputs';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     return {
       type: 'builtin', builtin: id, artifactBlocks: [], title: 'FROZEN REVIEW INPUTS',
       instructions: '读取 Harness 冻结的需求级承诺、全部交付单元、报告更正要求、证据来源和 Review 版本边界。普通结卡必须覆盖完整 Requirement Context；报告更正只处理当前反馈工作组与当前报告基线。',
@@ -685,8 +756,16 @@ function builtInPhase(
       commands: phaseCommands([], navigation), reviewBeforeSubmit: ['已读取全部冻结对象及证据来源。'],
       validators: ['artifact-schema', 'review-inputs'], transitions: navigation.transitions,
     };
-  }
-  if (id === 'review-reconciliation') {
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'review-reconciliation',
+  label: 'FACT RECONCILIATION',
+  acceptsArtifacts: true,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'review-reconciliation';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     const reconciliations = artifacts.find((artifact) => artifact.blockId === 'reconciliations');
     const gaps = artifacts.find((artifact) => artifact.blockId === 'gaps');
     if (!reconciliations || !gaps || artifacts.length !== 2
@@ -698,17 +777,25 @@ function builtInPhase(
       type: 'builtin', builtin: id,
       artifactBlocks: artifacts.map(({ artifactId, blockId }) => ({ artifactId, blockId })),
       title: 'FACT RECONCILIATION',
-      instructions: '逐项处理冻结对象：已被事实证明的对象登记 reconciliation，尚不能闭合的对象登记 gap，同一对象只能选择一种。普通结卡的每项 reconciliation 都必须引用当前冻结来源中的独立 Test 通过证据；报告更正不能登记 gap。',
+      instructions: '逐项处理冻结对象：已被事实证明的对象登记 reconciliation，尚不能闭合的对象登记 gap，同一对象只能选择一种。普通结卡引用冻结的独立 Test 通过证据；若同范围 Test 已由仲裁完成，可明确采用冻结的 WORKITEM 与已解决 INTERVENTION 裁决例外，evidenceRefs 同时引用二者、result 忠实概述裁决事实与未验证边界；Harness 自动保留权威裁决全文，无需逐字重抄，不宣称测试通过。Dev 仲裁不能替代 Test，单元裁决不能替代其他单元的验证。报告更正不能登记 gap。',
       objective: '把每个需求级承诺和交付结果收敛为最终事实或明确结卡缺口。',
       required: '每个冻结对象恰好有一个 reconciliation 或 gap，引用有效且没有重复绑定。',
-      prohibited: '不要用文档、规格或 Dev 自述代替独立 Test 通过证据，也不要创建问题或 runtime input。',
+      prohibited: '不要用文档、规格或 Dev 自述代替独立 Test 通过证据，不要把仲裁完成冒充 Test 通过，也不要创建问题或 runtime input。',
       contexts: ['review-inputs'], workCommands,
       completeCommand: navigation.completeCommand, rewindCommand: navigation.rewindCommand,
       commands: phaseCommands(workCommands, navigation), reviewBeforeSubmit: ['全部冻结对象都已逐项处理。'],
       validators: ['artifact-schema', 'review-inputs', 'review-reconciliation'], transitions: navigation.transitions,
     };
-  }
-  if (id === 'review-output') {
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'review-output',
+  label: 'CLOSURE OUTPUT',
+  acceptsArtifacts: true,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'review-output';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     const report = artifacts.find((artifact) => artifact.blockId === 'report-sections');
     const units = artifacts.find((artifact) => artifact.blockId === 'forward-units');
     if (!report || !units || artifacts.length !== 2
@@ -720,7 +807,7 @@ function builtInPhase(
       type: 'builtin', builtin: id,
       artifactBlocks: artifacts.map(({ artifactId, blockId }) => ({ artifactId, blockId })),
       title: 'CLOSURE OUTPUT',
-      instructions: '根据已冻结的对账分支登记输出。没有 gap 时用 report-sections 编写结卡报告核心章节；存在 gap 时用 forward-units 形成可直接追加的完整交付单元，每个 gap 恰好覆盖一次且依赖无环。不要同时构造两个分支。',
+      instructions: '根据已冻结的对账分支登记输出。没有 gap 时用 report-sections 编写结卡报告核心章节；存在仲裁放行时，assessment.evidenceBoundary 同时列出 WORKITEM 与 INTERVENTION，verification 和 risks 章节保留 WORKITEM 引用、裁决原因及未验证边界。存在 gap 时用 forward-units 形成可直接追加的完整交付单元，每个 gap 恰好覆盖一次且依赖无环。不要同时构造两个分支，不要将仲裁完成写成独立 Test 通过。',
       objective: '形成唯一且可由 Harness 应用的结卡报告或前向交付单元集合。',
       required: '无 gap 时核心报告章节完整；有 gap 时全部缺口恰好被完整单元覆盖。',
       prohibited: '不要手工选择 verdict，不要让一个 gap 被多个单元重复覆盖。',
@@ -730,9 +817,16 @@ function builtInPhase(
       validators: ['artifact-schema', 'review-inputs', 'review-reconciliation', 'review-assessment', 'review-output'],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'review-finalize') {
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'review-finalize',
+  label: 'FINALIZE',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'review-finalize';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     return {
       type: 'builtin', builtin: id, artifactBlocks: [], title: 'FINALIZE',
       instructions: '重新校验当前任务状态、Review 版本、冻结证据、逐项事实、需求级评估和唯一输出分支，并由 Harness 确定性编译 report_ready 或 closure_gap。发现变化时结束当前 execution 等待重新派发。',
@@ -745,9 +839,16 @@ function builtInPhase(
       validators: ['artifact-schema', 'review-inputs', 'review-reconciliation', 'review-assessment', 'review-output'],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'feedback-triage-inputs') {
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'feedback-triage-inputs',
+  label: 'FROZEN FEEDBACK BATCH',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'feedback-triage-inputs';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     return {
       type: 'builtin', builtin: id, artifactBlocks: [], title: 'FROZEN FEEDBACK BATCH',
       instructions: '读取 Harness 冻结的当前反馈批次评论和既有交付单元数量。后续分组必须完整覆盖这些评论，不能引入批次外评论。',
@@ -757,9 +858,16 @@ function builtInPhase(
       commands: phaseCommands([], navigation), reviewBeforeSubmit: ['已读取全部冻结评论。'],
       validators: ['artifact-schema', 'feedback-triage-inputs'], transitions: navigation.transitions,
     };
-  }
-  if (id === 'feedback-triage-finalize') {
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'feedback-triage-finalize',
+  label: 'FINALIZE',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'feedback-triage-finalize';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     return {
       type: 'builtin', builtin: id, artifactBlocks: [], title: 'FINALIZE',
       instructions: '最终校验评论覆盖、工作组结构、影响单元引用和已关闭澄清，由 Harness 编译反馈分流结果。',
@@ -770,9 +878,16 @@ function builtInPhase(
       validators: ['artifact-schema', 'decision-schema', 'decision-graph', 'decision-complete', 'feedback-triage-inputs', 'feedback-triage-complete'],
       transitions: navigation.transitions,
     };
-  }
-  if (id === 'feedback-verify-inputs') {
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'feedback-verify-inputs',
+  label: 'FROZEN FEEDBACK TARGET',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'feedback-verify-inputs';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     return {
       type: 'builtin', builtin: id, artifactBlocks: [], title: 'FROZEN FEEDBACK TARGET',
       instructions: '读取 Harness 冻结的当前目标评论和工作组。本轮只能独立验证这一条评论，不能顺带修改或关闭其他反馈。',
@@ -782,9 +897,16 @@ function builtInPhase(
       commands: phaseCommands([], navigation), reviewBeforeSubmit: ['已确认唯一目标评论。'],
       validators: ['artifact-schema', 'feedback-verify-inputs'], transitions: navigation.transitions,
     };
-  }
-  if (id === 'feedback-verify-finalize') {
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'feedback-verify-finalize',
+  label: 'FINALIZE',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'feedback-verify-finalize';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     return {
       type: 'builtin', builtin: id, artifactBlocks: [], title: 'FINALIZE',
       instructions: '最终校验目标评论、独立证据和 resolved/reopened 结论，由 Harness 编译单评论验证结果。',
@@ -794,12 +916,19 @@ function builtInPhase(
       commands: phaseCommands([], navigation), reviewBeforeSubmit: ['证据足以支持当前 verdict。'],
       validators: ['artifact-schema', 'feedback-verify-inputs', 'feedback-verify-complete'], transitions: navigation.transitions,
     };
-  }
-  if (id === 'business-analysis-finalize') {
+  },
+});
+
+commandChainRegistry.registerBuiltin({
+  id: 'business-analysis-finalize',
+  label: 'FINALIZE',
+  acceptsArtifacts: false,
+  compile: ({ commandChainId, phaseId, phaseIds, artifacts }) => {
+    const id = 'business-analysis-finalize';
+    const navigation = phaseNavigation(phaseId, phaseIds);
     if (!['idea-context', 'business-design', 'requirement-spec', 'spec-review'].includes(commandChainId)) {
       throw new Error('business-analysis-finalize 仅用于 Business Analysis 命令链');
     }
-    if (artifacts.length) throw new Error(`内置 Phase phases.${phaseId} 不接受 Artifact Block`);
     return {
       type: 'builtin', builtin: id, artifactBlocks: [], title: 'FINALIZE',
       instructions: '最终校验当前 Business Analysis 产物、决策和回流分支。Harness 将根据结构化 gap 确定性选择推进、批准或回流；发现内容缺口时使用 phase rewind 返回对应阶段修正。',
@@ -819,10 +948,18 @@ function builtInPhase(
       ],
       transitions: navigation.transitions,
     };
-  }
-  throw new Error(`未知内置 Phase：${id}`);
-}
+  },
+});
 
+function builtInPhase(
+  commandChainId: string,
+  id: string,
+  phaseId: string,
+  phaseIds: string[],
+  artifacts: ArtifactBlockReference[],
+): Omit<CommandChainPhaseDefinition, 'inputs'> {
+  return commandChainRegistry.compileBuiltin(id, { commandChainId, phaseId, phaseIds, artifacts });
+}
 function reachablePhase(
   phases: Record<string, CommandChainPhaseDefinition>,
   start: string,
@@ -1032,28 +1169,6 @@ export function parseCommandChainDefinition(id: string, yaml: string): CommandCh
       const phaseArtifacts = phase.artifacts === undefined
         ? []
         : resolveArtifactReferences(phase.artifacts, `phases.${phaseId}.artifacts`, true);
-      const artifactBuiltins = [
-        'decision-resolution', 'decision-answer-review', 'implementation-evidence', 'command-verification',
-        'verification-plan', 'verification-execution', 'review-reconciliation', 'review-output',
-        'acceptance-definition',
-      ];
-      if (!artifactBuiltins.includes(builtin) && phaseArtifacts.length) {
-        throw new Error(`内置 Phase ${builtin} 不接受 Artifact Block`);
-      }
-      if (builtin !== 'acceptance-definition' && phaseArtifacts.some(({ block }) => !block.writable)) {
-        throw new Error(`内置 Phase ${builtin} 不能写入只读 Artifact Block`);
-      }
-      if (builtin === 'decision-answer-review') {
-        if (phaseArtifacts.length !== 1) throw new Error(`内置 Phase phases.${phaseId} 必须声明一个 Artifact Block`);
-        const block = phaseArtifacts[0].block;
-        if (block.cardinality !== 'one') {
-          throw new Error(`内置 Phase phases.${phaseId}.artifacts 必须引用 cardinality: one 的 Block`);
-        }
-        if (!block.required) throw new Error(`内置 Phase phases.${phaseId}.artifacts 必须引用 required: true 的 Block`);
-      }
-      if (builtin === 'decision-resolution' && phaseArtifacts.some(({ block }) => block.cardinality !== 'many')) {
-        throw new Error(`内置 Phase phases.${phaseId}.artifacts 只能引用 cardinality: many 的 Block`);
-      }
       return [phaseId, {
         ...builtInPhase(
           definitionId,

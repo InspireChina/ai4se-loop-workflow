@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 import { resourcesForAgent } from '../domain/resource';
-import type { DelegationEnvelope } from './tasks';
+import type { DelegationEnvelope } from '../test/legacy-task-fixtures';
 
 async function resolveTestVerificationAssistance(answer: string) {
   const { claimNextVerificationAssistance, completeVerificationAssistanceExecution, runVerificationAssistanceCommand } = await import('./verification-assistance');
@@ -33,7 +33,7 @@ async function resolveTestVerificationAssistance(answer: string) {
 
 test('updates an existing task-level document instead of inserting a duplicate NULL-story row', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { listDocuments, upsertDocument } = await import('./tasks');
+  const { listDocuments, upsertDocument } = await import('../test/legacy-task-fixtures');
   const db = await databaseConnection();
   db.prepare(`
     INSERT INTO tasks(task_id, title, item_type, agile_status, work_dir)
@@ -65,7 +65,7 @@ test('updates an existing task-level document instead of inserting a duplicate N
 });
 
 test('anchors verified file feedback to document revisions and supplies it to Agent evolution', async () => {
-  const { addDocumentComment, createTask, getTask, upsertDocument } = await import('./tasks');
+  const { addDocumentComment, createTask, getTask, upsertDocument } = await import('../test/legacy-task-fixtures');
   const { applyFeedbackTriageGroups } = await import('./feedback');
   const { applyEvolutionResult, beginEvolutionRun } = await import('./agent-evolution');
   const { databaseConnection } = await import('../infrastructure/database');
@@ -157,7 +157,7 @@ test('anchors verified file feedback to document revisions and supplies it to Ag
 });
 
 test('creates title-only and described Tasks without blocking delegation and serializes description into agent context', async () => {
-  const { createTask, getTaskContext, getTask, setTaskPriority } = await import('./tasks');
+  const { createTask, getTaskContext, getTask, setTaskPriority } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const titleOnlyTaskId = await createTask({ title: 'Title only Task' });
@@ -204,7 +204,7 @@ test('creates title-only and described Tasks without blocking delegation and ser
 });
 
 test('always creates a new UUID requirement without title, URL, external ID, or terminal-state deduplication', async () => {
-  const { cancelTask, createTask, getTask } = await import('./tasks');
+  const { cancelTask, createTask, getTask } = await import('../test/legacy-task-fixtures');
   const input = {
     title: 'Repeated requirement',
     link: 'https://example.test/requirements/repeated',
@@ -227,7 +227,7 @@ test('always creates a new UUID requirement without title, URL, external ID, or 
 });
 
 test('changes priority without clearing a pending resume or moving workflow state', async () => {
-  const { createTask, getTask, setTaskPriority } = await import('./tasks');
+  const { createTask, getTask, setTaskPriority } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Priority-only update', priority: '3' });
@@ -247,7 +247,7 @@ test('changes priority without clearing a pending resume or moving workflow stat
 });
 
 test('edits the complete requirement input only before the first Agent execution', async () => {
-  const { createTask, getTask, updateUnstartedTaskInput } = await import('./tasks');
+  const { createTask, getTask, updateUnstartedTaskInput } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const firstDependencyId = await createTask({ title: 'Original dependency' });
@@ -313,7 +313,7 @@ test('edits the complete requirement input only before the first Agent execution
 });
 
 test('persists predefined metadata independently from legacy task columns', async () => {
-  const { createTask, getTask } = await import('./tasks');
+  const { createTask, getTask } = await import('../test/legacy-task-fixtures');
   const taskId = await createTask({
     title: 'Requirement metadata',
     metadata: [{
@@ -342,7 +342,7 @@ test('persists predefined metadata independently from legacy task columns', asyn
 });
 
 test('lists only completed Tasks in completion order while preserving terminal Task details', async () => {
-  const { getTask, listCompletedTasks, listTasks } = await import('./tasks');
+  const { getTask, listCompletedTasks, listTasks } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
 
@@ -391,7 +391,9 @@ test('lists only completed Tasks in completion order while preserving terminal T
 test('pauses requirement intake for user alignment and resumes the same backlog agent before splitting', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { parseAgentResult } = await import('../domain/agent-result');
-  const { answerQuestion, createTask, getTask, submitClarificationAnswers } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { answerQuestion, createTask, getTask, submitClarificationAnswers } = await import('../test/legacy-task-fixtures');
+  const db = await databaseConnection();
   const taskId = await createTask({
     title: 'Requirement-level clarification',
     description: 'Add an export action, but the intended audience is not specified.',
@@ -430,10 +432,34 @@ test('pauses requirement intake for user alignment and resumes the same backlog 
   assert.equal(question?.story_index, null);
   assert.equal(question?.kind, 'local');
   assert.equal(question?.status, 'pending');
+  assert.ok(question?.intervention_id);
+  assert.deepEqual(db.prepare(`
+    SELECT status, resolver_strategy, item_id IS NOT NULL AS has_item
+    FROM interventions WHERE intervention_id = ?
+  `).get(question!.intervention_id!), {
+    status: 'awaiting_human',
+    resolver_strategy: 'human_only',
+    has_item: 1,
+  });
   assert.deepEqual(await inspectTaskDispatch(taskId), []);
 
   await answerQuestion({ taskId, questionId: question!.question_id, answer: '本轮只面向管理员。' });
+  assert.equal((db.prepare(`
+    SELECT status FROM interventions WHERE intervention_id = ?
+  `).get(question!.intervention_id!) as { status: string }).status, 'resolved');
+  assert.equal((db.prepare(`
+    SELECT item.status
+    FROM interventions intervention
+    JOIN workflow_items item ON item.item_id = intervention.item_id
+    WHERE intervention.intervention_id = ?
+  `).get(question!.intervention_id!) as { status: string }).status, 'waiting');
   await submitClarificationAnswers(taskId);
+  assert.equal((db.prepare(`
+    SELECT item.status
+    FROM interventions intervention
+    JOIN workflow_items item ON item.item_id = intervention.item_id
+    WHERE intervention.intervention_id = ?
+  `).get(question!.intervention_id!) as { status: string }).status, 'ready');
   detail = await getTask(taskId);
   assert.equal(detail?.task.run_state, 'runnable');
   assert.equal(detail?.task.resume_pending, 1);
@@ -464,7 +490,7 @@ test('keeps an unreproduced Bug in Repro until a human aligns the missing condit
   const { applyAgentResult } = await import('./agent-results');
   const { parseAgentResult } = await import('../domain/agent-result');
   const { databaseConnection } = await import('../infrastructure/database');
-  const { answerQuestion, createTask, getTask, submitClarificationAnswers } = await import('./tasks');
+  const { answerQuestion, createTask, getTask, submitClarificationAnswers } = await import('../test/legacy-task-fixtures');
   const taskId = await createTask({ title: 'Bug must be reproduced before planning' });
   const db = await databaseConnection();
   db.prepare(`
@@ -527,7 +553,7 @@ test('keeps an unreproduced Bug in Repro until a human aligns the missing condit
 });
 
 test('submits answered analysis clarifications back to the analyst without approving or advancing', async () => {
-  const { addQuestion, answerQuestion, getTask, submitClarificationAnswers } = await import('./tasks');
+  const { addQuestion, answerQuestion, getTask, submitClarificationAnswers } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = 'TASK-agent-analysis-question';
@@ -588,7 +614,7 @@ test('submits answered analysis clarifications back to the analyst without appro
 test('resumes Analysis by lane ownership when Delivery leaves test-agent at task level', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { parseAgentResult } = await import('../domain/agent-result');
-  const { addQuestion, answerQuestion, getTask, submitClarificationAnswers } = await import('./tasks');
+  const { addQuestion, answerQuestion, getTask, submitClarificationAnswers } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = 'TASK-analysis-resume-with-test-owner';
@@ -671,7 +697,7 @@ test('resumes Analysis by lane ownership when Delivery leaves test-agent at task
 });
 
 test('acknowledges the current review report as read without an approval decision', async () => {
-  const { acknowledgeClosure, addDocumentComment, addQuestion, getTask } = await import('./tasks');
+  const { acknowledgeClosure, addDocumentComment, addQuestion, getTask } = await import('../test/legacy-task-fixtures');
   const { applyFeedbackTriageGroups } = await import('./feedback');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -737,7 +763,7 @@ test('acknowledges the current review report as read without an approval decisio
 // 评论驱动的逆向回退契约已由 forward-feedback.test.ts 中的前向追加场景取代。
 
 test('versions delivery specs and advances Dev without requiring a commit', async () => {
-  const { addQuestion, answerQuestion, getTask, saveDeliverySpec, updateTask } = await import('./tasks');
+  const { addQuestion, answerQuestion, getTask, saveDeliverySpec, updateTask } = await import('../test/legacy-task-fixtures');
   const { AgentResultContractError } = await import('../domain/agent-result');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -865,7 +891,7 @@ test('lets Dev and Test request runtime information and resume the same delivery
     answerRuntimeInput,
     getTask,
     submitRuntimeInputs,
-  } = await import('./tasks');
+  } = await import('../test/legacy-task-fixtures');
   const { markTestDelegationRunning } = await import('../test/dispatch-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const {
@@ -953,6 +979,16 @@ test('lets Dev and Test request runtime information and resume the same delivery
   assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE), undefined);
   assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
   assert.equal(detail?.runtimeInputs[0]?.status, 'pending');
+  assert.ok(detail?.runtimeInputs[0]?.intervention_id);
+  const runtimeInterventionId = detail!.runtimeInputs[0].intervention_id!;
+  assert.deepEqual(db.prepare(`
+    SELECT status, resolver_strategy, item_id IS NOT NULL AS has_item
+    FROM interventions WHERE intervention_id = ?
+  `).get(runtimeInterventionId), {
+    status: 'awaiting_human',
+    resolver_strategy: 'human_only',
+    has_item: 1,
+  });
 
   const competingTaskId = 'TASK-runtime-input-competitor';
   db.prepare(`
@@ -975,7 +1011,22 @@ test('lets Dev and Test request runtime information and resume the same delivery
   db.prepare("UPDATE tasks SET agile_status = 'in dev', current_subagent = 'dev-agent' WHERE task_id = ?").run(competingTaskId);
 
   await answerRuntimeInput({ taskId, requestId: detail!.runtimeInputs[0].request_id, answer: '#N/A' });
+  assert.equal((db.prepare(`
+    SELECT status FROM interventions WHERE intervention_id = ?
+  `).get(runtimeInterventionId) as { status: string }).status, 'resolved');
+  assert.equal((db.prepare(`
+    SELECT item.status
+    FROM interventions intervention
+    JOIN workflow_items item ON item.item_id = intervention.item_id
+    WHERE intervention.intervention_id = ?
+  `).get(runtimeInterventionId) as { status: string }).status, 'waiting');
   await submitRuntimeInputs(taskId);
+  assert.equal((db.prepare(`
+    SELECT item.status
+    FROM interventions intervention
+    JOIN workflow_items item ON item.item_id = intervention.item_id
+    WHERE intervention.intervention_id = ?
+  `).get(runtimeInterventionId) as { status: string }).status, 'ready');
   assert.equal((await getTask(taskId))?.task.resume_pending, 0);
   assert.equal(resourceClaimInDb(db, CODE_WORKSPACE_RESOURCE)?.owner_task_id, competingTaskId);
   assert.equal(resourceClaimInDb(db, BROWSER_EXCLUSIVE_RESOURCE), undefined);
@@ -1063,13 +1114,13 @@ test('lets Dev and Test request runtime information and resume the same delivery
 });
 
 test('persists execution input before work and recovers output without rerunning the Agent', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const {
     completeExecution,
     markExecutionOutput,
     recordExecutionReceipt,
   } = await import('./executions');
-  const { progressDispatcher } = await import('./progress-dispatch');
+  const { progressDispatcher } = await import('../test/legacy-progress-dispatch');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Durable execution input' });
@@ -1100,7 +1151,7 @@ test('persists execution input before work and recovers output without rerunning
 });
 
 test('keeps retry attempts in one logical generation even when the rebuilt prompt changes', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { completeExecution, failExecutionWithRetryPolicy } = await import('./executions');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -1128,7 +1179,7 @@ test('keeps retry attempts in one logical generation even when the rebuilt promp
 });
 
 test('shares one four-retry budget across every failure kind in a generation', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { completeExecution, failExecutionWithRetryPolicy } = await import('./executions');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -1207,7 +1258,7 @@ test('shares one four-retry budget across every failure kind in a generation', a
 });
 
 test('records background Evolution evaluator failures with four retries and the exact error', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { beginEvolutionRun, recordEvolutionFailureAttempt } = await import('./agent-evolution');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
@@ -1265,7 +1316,7 @@ test('records background Evolution evaluator failures with four retries and the 
 });
 
 test('does not let a late execution failure overwrite cancellation', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const {
     cancelExecution,
     failExecutionWithRetryPolicy,
@@ -1298,7 +1349,7 @@ test('does not let a late execution failure overwrite cancellation', async () =>
 test('records a late Agent result after cancellation without reopening task lanes or applying effects', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { parseAgentResult } = await import('../domain/agent-result');
-  const { cancelTask, createTask, getTask } = await import('./tasks');
+  const { cancelTask, createTask, getTask } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Cancel while Agent is running' });
@@ -1327,7 +1378,7 @@ test('cancels an active Dev requirement and automatically releases its code reso
     cancelExecution,
     executionCancellationRequested,
   } = await import('./executions');
-  const { cancelTask, getTask } = await import('./tasks');
+  const { cancelTask, getTask } = await import('../test/legacy-task-fixtures');
   const {
     acquireResourceClaimsInDb,
     BROWSER_EXCLUSIVE_RESOURCE,
@@ -1419,6 +1470,14 @@ test('cancels an active Dev requirement and automatically releases its code reso
   `).get() as { application_status: string; effect_outcome: string };
   assert.deepEqual(pending, { application_status: 'applied', effect_outcome: 'discarded' });
 
+  const cancelledImmediately = db.prepare('SELECT status FROM execution_attempts WHERE execution_id = ?')
+    .get(execution.attempt.execution_id) as { status: string };
+  assert.equal(cancelledImmediately.status, 'cancelled');
+  const { failExecutionWithRetryPolicy } = await import('./executions');
+  assert.equal((await failExecutionWithRetryPolicy(execution.attempt.execution_id, 'CLI exited after manual cancellation', {
+    kind: 'agent-cli-exit', maxRetries: 4,
+  })).ignored, true, 'late process exit after cancellation is not an Agent failure');
+
   await cancelExecution(execution.attempt.execution_id);
   const status = db.prepare('SELECT status FROM execution_attempts WHERE execution_id = ?').get(execution.attempt.execution_id) as { status: string };
   assert.equal(status.status, 'cancelled');
@@ -1427,7 +1486,7 @@ test('cancels an active Dev requirement and automatically releases its code reso
 
 test('pauses one requirement without changing its workflow state and resumes it from the same step', async () => {
   const { executionCancellationRequested } = await import('./executions');
-  const { createTask, getTask, pauseTask, resumeTask } = await import('./tasks');
+  const { createTask, getTask, pauseTask, resumeTask } = await import('../test/legacy-task-fixtures');
   const {
     acquireResourceClaimsInDb,
     BROWSER_EXCLUSIVE_RESOURCE,
@@ -1488,7 +1547,7 @@ test('pauses one requirement without changing its workflow state and resumes it 
 
 test('isolates feedback scheduling per task and emits one concurrent delegation for each task queue', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { addDocumentComment, createTask, upsertDocument } = await import('./tasks');
+  const { addDocumentComment, createTask, upsertDocument } = await import('../test/legacy-task-fixtures');
   const feedbackTasks: string[] = [];
   for (const [index, suffix] of ['A', 'B'].entries()) {
     const taskId = await createTask({ title: `Isolated feedback task ${suffix}` });
@@ -1524,7 +1583,7 @@ test('isolates feedback scheduling per task and emits one concurrent delegation 
 
 test('dispatches independent Analysis and Delivery lanes for the same task', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { toPipeEnvelope } = await import('./tasks');
+  const { toPipeEnvelope } = await import('../test/legacy-task-fixtures');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
@@ -1558,7 +1617,7 @@ test('dispatches independent Analysis and Delivery lanes for the same task', asy
 
 test('keeps Delivery runnable while Analysis waits for human clarification', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask, setTaskLaneState } = await import('./tasks');
+  const { getTask, setTaskLaneState } = await import('../test/legacy-task-fixtures');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   const taskId = 'TASK-analysis-waits-delivery-runs';
@@ -1606,7 +1665,7 @@ test('keeps Delivery runnable while Analysis waits for human clarification', asy
 
 test('does not infer code-slot ownership from an Analysis task status', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask, setTaskLaneState } = await import('./tasks');
+  const { getTask, setTaskLaneState } = await import('../test/legacy-task-fixtures');
   const { CODE_WORKSPACE_RESOURCE } = await import('./resource-claims');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
@@ -1689,8 +1748,8 @@ test('does not allocate an exclusive browser resource to browser-using Agents', 
 
 test('persists resource and lane reservations before returning work to the runner', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { beginRun, endRun } = await import('./tasks');
-  const { progressDispatcher } = await import('./progress-dispatch');
+  const { beginRun, endRun } = await import('../test/legacy-task-fixtures');
+  const { progressDispatcher } = await import('../test/legacy-progress-dispatch');
   const {
     CODE_WORKSPACE_RESOURCE,
   } = await import('./resource-claims');
@@ -1738,7 +1797,7 @@ test('persists resource and lane reservations before returning work to the runne
 
 test('orders concurrently dispatchable requirements by numeric priority', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
@@ -1757,7 +1816,7 @@ test('orders concurrently dispatchable requirements by numeric priority', async 
 
 test('applies the configured global Agent concurrency to Analysis and preserves existing task cursors', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask } = await import('./tasks');
+  const { getTask } = await import('../test/legacy-task-fixtures');
   const { getAgentConcurrency, setAgentConcurrency } = await import('./project-settings');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
@@ -1807,7 +1866,7 @@ test('applies the configured global Agent concurrency to Analysis and preserves 
 
 test('shares the global Agent concurrency limit between browser and non-browser Agents', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { getAgentConcurrency, setAgentConcurrency } = await import('./project-settings');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
@@ -1819,7 +1878,8 @@ test('shares the global Agent concurrency limit between browser and non-browser 
   try {
     await setAgentConcurrency(2);
     const lockedTaskId = await createTask({ title: 'Locked active Agent' });
-    const lockedDelegation = (await inspectTaskDispatch(lockedTaskId))[0];
+    const { inspectTaskDispatchEnvelope } = await import('../test/dispatch-inspection-fixtures');
+    const lockedDelegation = (await inspectTaskDispatchEnvelope(lockedTaskId))[0];
     assert.deepEqual(lockedDelegation.resources, []);
     await beginTestExecutionAttempt({
       runId: 'run-global-agent-concurrency-locked',
@@ -1851,7 +1911,7 @@ test('shares the global Agent concurrency limit between browser and non-browser 
 
 test('releases only the requested blocked lane and resumes its persisted delivery unit', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask, releaseBlock, setTaskLaneState } = await import('./tasks');
+  const { getTask, releaseBlock, setTaskLaneState } = await import('../test/legacy-task-fixtures');
   const {
     acquireResourceClaimInDb,
     CODE_WORKSPACE_RESOURCE,
@@ -1892,7 +1952,7 @@ test('releases only the requested blocked lane and resumes its persisted deliver
 
 test('opens Review only after both lanes are completed and never skips a post-result lane block', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask, releaseBlock, setTaskLaneState } = await import('./tasks');
+  const { getTask, releaseBlock, setTaskLaneState } = await import('../test/legacy-task-fixtures');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   const taskId = 'TASK-review-lane-gate';
@@ -1933,7 +1993,7 @@ test('does not dispatch Review when a task is manually moved to review with inco
 
 test('treats legacy task-level blocked state as an exclusive control gate', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask } = await import('./tasks');
+  const { getTask } = await import('../test/legacy-task-fixtures');
   const db = await databaseConnection();
   db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
   const taskId = 'TASK-global-control-block';
@@ -2066,7 +2126,7 @@ test('keeps one hidden global role Prompt while isolating Overlay and Memory by 
 });
 
 test('promotes repeated project evidence into only that project Overlay through deterministic Canary runs', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { databaseConnection, hash } = await import('../infrastructure/database');
   const { applyEvolutionResult, beginEvolutionRun, updatePromptCanary } = await import('./agent-evolution');
   const { ensureAgentRuntimeWorkspace, getAgentProfile, loadAgentRuntime } = await import('./agent-profiles');
@@ -2293,7 +2353,7 @@ test('redacts nested authorization attributes before persisting runtime events',
 });
 
 test('runtime-event-tolerance run-log: retains text log and writes a warning when its structured mirror fails', async () => {
-  const { appendLoopRunLog, readLoopRunLogChunk } = await import('./tasks');
+  const { appendLoopRunLog, readLoopRunLogChunk } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const runId = 'runtime-event-tolerance-run-log';
@@ -2310,7 +2370,7 @@ test('runtime-event-tolerance run-log: retains text log and writes a warning whe
 });
 
 test('runtime-event-tolerance cycle-start: isolates startup event writes and preserves a null boundary', async () => {
-  const { recordRuntimeEventWithFallback, readLoopRunLogChunk } = await import('./tasks');
+  const { recordRuntimeEventWithFallback, readLoopRunLogChunk } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const { recordRuntimeEvent } = await import('./runtime-events');
   const db = await databaseConnection();

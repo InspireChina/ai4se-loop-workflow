@@ -30,6 +30,9 @@ function classify(positionals: string[]) {
   if (namespace === 'status' && !resource) {
     return { kind: 'status' as const, namespace: null, resource: null, action: 'status' };
   }
+  if (namespace === 'intervention' && resource === 'request' && !action) {
+    return { kind: 'terminal' as const, namespace, resource: null, action: resource };
+  }
   if (namespace === 'phase' && resource && !action && ['complete', 'rewind'].includes(resource)) {
     return { kind: 'transition' as const, namespace, resource, action: resource };
   }

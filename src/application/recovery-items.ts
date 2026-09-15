@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { databaseConnection } from '../infrastructure/database';
+import { createNativeRecoveryDirectiveInDb, nativeRecoveryItemsInDb, recordNativeRecoveryClaimsInDb,
+  recordNativeRecoveryVerificationInDb, usesNativeRecoveryInDb } from './work-item-recovery';
 
 export const RECOVERY_STAGES = ['analysis', 'dev', 'test'] as const;
 export type RecoveryStage = typeof RECOVERY_STAGES[number];
@@ -64,6 +66,7 @@ function parsedResolution(item: RecoveryItem) {
 export async function createOrReopenRecoveryItem(input: unknown) {
   const value = createRecoverySchema.parse(input);
   const db = await databaseConnection();
+  if (usesNativeRecoveryInDb(db, value.taskId)) return createNativeRecoveryDirectiveInDb(db, value);
   if (value.sourceExecutionId) {
     const duplicate = db.prepare(`
       SELECT * FROM recovery_items
@@ -122,6 +125,9 @@ export async function createOrReopenRecoveryItem(input: unknown) {
 export async function listRecoveryItemsForStage(input: { taskId: string; storyIndex: number | null; stage: RecoveryStage }) {
   if (!input.storyIndex) return [];
   const db = await databaseConnection();
+  if (usesNativeRecoveryInDb(db, input.taskId)) return nativeRecoveryItemsInDb(db, input.taskId)
+    .filter((item) => item.story_index === input.storyIndex && ['pending', 'claimed'].includes(item.status)
+      && stageRank[item.target_stage] <= stageRank[input.stage]);
   const items = db.prepare(`
     SELECT * FROM recovery_items
     WHERE task_id = ? AND story_index = ?
@@ -147,6 +153,7 @@ export async function recordRecoveryClaims(input: {
 }) {
   if (!input.claims.length) return;
   const db = await databaseConnection();
+  if (usesNativeRecoveryInDb(db, input.taskId)) return recordNativeRecoveryClaimsInDb(db, input);
   for (const claim of input.claims) {
     const item = db.prepare(`
       SELECT * FROM recovery_items
@@ -188,6 +195,7 @@ export async function resolveActiveRecoveryItems(input: {
   summary: string;
 }) {
   const db = await databaseConnection();
+  if (usesNativeRecoveryInDb(db, input.taskId)) return recordNativeRecoveryVerificationInDb(db, input);
   const items = db.prepare(`
     SELECT * FROM recovery_items
     WHERE task_id = ? AND story_index = ? AND kind = ?

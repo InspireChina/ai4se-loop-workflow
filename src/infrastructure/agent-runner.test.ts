@@ -2,8 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
-import { shouldRecordDevCodeCommit } from '../application/executions';
 import { resolveRunnerCommand, runnerDiagnosticPath } from './agent-runner';
+
+test('uses one Intervention runner for assistance and arbitration and cancels without spending retry budget', () => {
+  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+  assert.match(source, /claimNextIntervention\(/);
+  assert.match(source, /runInterventionAttempt\(/);
+  assert.match(source, /cancelInterventionAttempt\(/);
+  assert.doesNotMatch(source, /claimNextVerificationAssistance|runVerificationAssistanceAttempt/);
+});
 
 test('starts the TypeScript Runner through Node and the local tsx CLI', () => {
   const launch = resolveRunnerCommand('RUN-123', 'agent-runner.ts');
@@ -79,34 +86,15 @@ test('core contract constrains flow writes without prohibiting target database o
   assert.doesNotMatch(source, /`Loop App Root:/);
 });
 
-test('records a Dev code commit only for a completed result that declares changed files', () => {
-  assert.equal(shouldRecordDevCodeCommit('dev-agent', {
-    outcome: 'completed',
-    changedFiles: ['src/example.ts'],
-  }), true);
-  assert.equal(shouldRecordDevCodeCommit('dev-agent', {
-    outcome: 'completed',
-    changedFiles: [],
-  }), false);
-  assert.equal(shouldRecordDevCodeCommit('dev-agent', {
-    outcome: 'completed',
-  }), false);
-  assert.equal(shouldRecordDevCodeCommit('test-agent', {
-    outcome: 'completed',
-    changedFiles: ['src/example.ts'],
-  }), false);
-  assert.equal(shouldRecordDevCodeCommit('dev-agent', {
-    outcome: 'failed',
-    changedFiles: ['src/example.ts'],
-  }), false);
-});
-
-test('runner records the current HEAD without inferring a Dev commit from base_commit', () => {
+test('runner records owned Git evidence rather than inferring changes from model declarations', () => {
   const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
 
-  assert.match(source, /shouldRecordDevCodeCommit\(delegation\.agent,\s*result\)/);
-  assert.match(source, /const currentHead = gitHead\(current\?\.task\.work_dir \|\| paths\.root\)/);
-  assert.doesNotMatch(source, /currentHead\s*!==\s*attempt\.base_commit/);
+  assert.match(source, /collectDevCodeEvidence\(attempt\.execution_id\)/);
+  assert.match(source, /'code_baseline', 'execution-start', codeBaseline/);
+  assert.match(source, /'code_evidence', codeEvidenceKey, evidence/);
+  assert.match(source, /codeCommit = evidence\.commit/);
+  assert.match(source, /changedFiles: evidence\.changedFiles/);
+  assert.doesNotMatch(source, /shouldRecordDevCodeCommit|走查确认无需代码变更/);
 });
 
 test('runner resolves runtime settings for each delegated agent instead of once per run', () => {
@@ -147,7 +135,7 @@ test('retries every Agent execution failure four times with progressively reduce
   assert.match(source, /EXECUTION_FAILURE_MAX_RETRIES/);
   assert.match(source, /failExecutionWithRetryPolicy\(attempt\.execution_id, reason/);
   assert.match(source, /execution\.terminationReason \? 'agent-timeout' : 'agent-cli-exit'/);
-  assert.match(source, /shouldRetryReportedFailure\(result, attempt\.attempt\)/);
+  assert.match(source, /shouldRetryReportedFailure\(result, attempt\.attempt, delegation\.agent\)/);
   assert.match(source, /executionRecoveryModeForAttempt\(attemptNumber\)/);
   assert.match(source, /retryRecoveryPlanForFailure\(retry\.failureAttempt\)/);
   assert.match(source, /Error Recovery · retry/);

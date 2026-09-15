@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
 import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
-import type { DelegationEnvelope } from './tasks';
+import type { DelegationEnvelope } from '../test/legacy-task-fixtures';
 
 async function command(executionId: string, token: string, args: string[]) {
   const { runAgentCommand } = await import('./agent-command-drafts');
@@ -23,7 +23,7 @@ async function begin(delegation: DelegationEnvelope, suffix: string) {
 
 async function deliveryAnalysisDelegation(title: string) {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const taskId = await createTask({
     title,
     description: '导出完成后用户需要选择下载 CSV，或在页面直接查看结果。',

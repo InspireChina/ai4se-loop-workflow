@@ -4,6 +4,7 @@ import type { AgentExecutorId } from '../domain/agent-executor';
 import { databaseConnection, hash } from '../infrastructure/database';
 import { EXECUTION_FAILURE_MAX_RETRIES } from './executions';
 import { retryRecoveryPlanForFailure, retryNotBeforeForFailure } from './execution-retry-policy';
+import { workflowEndedInDb } from './work-item-controls';
 
 const messageSchema = z.string().trim().min(1, '请输入问题').max(20_000, '单条消息不能超过 20000 个字符');
 
@@ -178,12 +179,18 @@ export async function submitTaskContextChatChangeRequest(input: unknown) {
       };
     }
     const task = db.prepare(`
-      SELECT task_id, agile_status, total_stories
+      SELECT task_id, workflow_engine, total_stories
       FROM tasks WHERE task_id = ?
-    `).get(session.task_id) as { task_id: string; agile_status: string; total_stories: number } | undefined;
+    `).get(session.task_id) as { task_id: string; workflow_engine: string; total_stories: number } | undefined;
     if (!task) throw new Error('需求不存在');
-    if (['done', 'cancelled'].includes(task.agile_status)) throw new Error('终态需求不能追加变更请求，请新建需求');
-    if (task.total_stories < 1) throw new Error('当前需求尚未形成交付单元，请先完成需求整理和交付拆分');
+    if (workflowEndedInDb(db, task.task_id)) throw new Error('终态需求不能追加变更请求，请新建需求');
+    const hasDeliveryUnit = task.workflow_engine === 'native'
+      ? Boolean(db.prepare(`SELECT 1 FROM workflow_items item JOIN stories story
+          ON story.task_id = item.task_id AND story.story_index = item.story_index
+          WHERE item.task_id = ? AND item.origin = 'native' AND item.kind = 'development'
+            AND item.status NOT IN ('cancelled', 'superseded') LIMIT 1`).get(task.task_id))
+      : task.total_stories > 0;
+    if (!hasDeliveryUnit) throw new Error('当前需求尚未形成交付单元，请先完成需求整理和交付拆分');
 
     let document = db.prepare(`
       SELECT document_id, revision

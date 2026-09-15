@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
-import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
-import type { DelegationEnvelope } from './tasks';
+import { inspectTaskDispatchEnvelope as inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
+import type { DelegationEnvelope } from '../test/legacy-task-fixtures';
 
 const put = (artifact: string, block: string, content: string, key?: string) => [
   'artifact', 'put', '--artifact', artifact, '--block', block,
@@ -10,6 +10,50 @@ const put = (artifact: string, block: string, content: string, key?: string) => 
 ];
 
 const yaml = (value: Record<string, unknown>) => JSON.stringify(value);
+
+test('native Business Analysis specification comments rewind only Spec/Review and reading closes the new graph revision', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { createTask, getTask, addDocumentComment, acknowledgeClosure } = await import('../test/legacy-task-fixtures');
+  const { adoptNativeWorkflowInDb } = await import('./work-item-transitions');
+  const { listWorkflowItems } = await import('./work-items');
+  const db = await databaseConnection();
+  const taskId = await createTask({ title: 'Native specification revisions', itemType: 'business-analysis',
+    metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }] });
+  adoptNativeWorkflowInDb(db, taskId);
+  for (const [stage, commands] of [
+    ['intent', intentCommands('识别可解释的项目健康风险')],
+    ['design', designCommands('发起体检并阅读风险依据')],
+    ['spec', specificationCommands(specification)],
+    ['review', reviewCommands(specification)],
+  ] as const) await executeAgent((await inspectTaskDispatch(taskId))[0], commands, `${taskId}-${stage}`);
+  const before = await getTask(taskId);
+  assert.equal(before?.task.agile_status, 'ready_to_close');
+  await addDocumentComment({ taskId, documentId: before!.task.review_document_id, content: '请增加风险依据的说明。' });
+  assert.equal((await inspectTaskDispatch(taskId))[0].agent, 'requirement-spec-agent');
+  for (const [stage, commands] of [
+    ['spec-revision', specificationCommands(specification)],
+    ['review-revision', reviewCommands(specification)],
+  ] as const) await executeAgent((await inspectTaskDispatch(taskId))[0], commands, `${taskId}-${stage}`);
+  const reviewed = await getTask(taskId);
+  assert.equal(reviewed?.task.review_revision, 2);
+  assert.equal(reviewed?.documentComments[0]?.feedback_status, 'resolved');
+  await acknowledgeClosure({ taskId, reviewRevision: 2 });
+  assert.equal((await getTask(taskId))?.task.agile_status, 'done');
+  const items = await listWorkflowItems(taskId);
+  assert.deepEqual(items.filter((item) => item.work_key === 'ba:spec').map((item) => [item.revision, item.status]),
+    [[1, 'superseded'], [2, 'completed']]);
+  assert.equal(items.find((item) => item.work_key === 'ba:intent')?.revision, 1);
+  assert.equal(items.find((item) => item.work_key === 'ba:closure' && item.revision === 2)?.status, 'completed');
+  const closure = items.find((item) => item.work_key === 'ba:closure' && item.revision === 2)!;
+  const activity = db.prepare("SELECT summary FROM task_events WHERE task_id = ? AND event_type = 'ClosureAcknowledged'")
+    .get(taskId) as { summary: string };
+  assert.match(activity.summary, /已阅读需求规格说明书 v2/);
+  assert.doesNotMatch(activity.summary, /结卡报告/);
+  const completion = db.prepare("SELECT reason FROM workflow_item_events WHERE item_id = ? AND event_type = 'complete'")
+    .get(closure.item_id) as { reason: string };
+  assert.match(completion.reason, /需求规格说明书 v2/);
+  assert.equal((await getTask(taskId))?.task.next_step, '需求规格说明书已阅读，需求已关闭');
+});
 
 async function startAgent(delegation: DelegationEnvelope, suffix: string) {
   const { issueAgentCommandToken, runAgentCommand } = await import('./agent-command-drafts');
@@ -173,7 +217,7 @@ test('declares every End-to-End Agent command chain in YAML', async () => {
 });
 
 test('rejects undeclared fields before an Artifact Block can enter the rendered document', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { applyAgentResult } = await import('./agent-results');
@@ -214,14 +258,19 @@ test('rejects undeclared fields before an Artifact Block can enter the rendered 
   await completeExecution(started.attempt.execution_id);
 });
 
-test('runs the End-to-End Business Analysis front half through YAML command chains', async () => {
-  const { createTask, getTask } = await import('./tasks');
+for (const native of [false, true]) test(`runs the End-to-End Business Analysis front half through YAML command chains (${native ? 'native graph' : 'legacy compatibility'})`, async () => {
+  const { createTask, getTask } = await import('../test/legacy-task-fixtures');
   const taskId = await createTask({
     title: '从想法自动交付项目体检能力',
     description: '从模糊想法开始形成可执行需求规格，并自动进入开发交付。',
     itemType: 'end-to-end',
     metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
   });
+  if (native) {
+    const { databaseConnection } = await import('../infrastructure/database');
+    const { adoptNativeWorkflowInDb } = await import('./work-item-transitions');
+    adoptNativeWorkflowInDb(await databaseConnection(), taskId);
+  }
 
   let delegation = (await inspectTaskDispatch(taskId))[0];
   assert.equal(delegation.agent, 'idea-context-agent');
@@ -258,8 +307,8 @@ test('runs the End-to-End Business Analysis front half through YAML command chai
   assert.match(detail?.documents.find((document) => document.kind === 'ba_review')?.content || '', /# ACCEPTANCE/);
 });
 
-test('uses generic Decision commands for Business Analysis HUMAN clarification and resume', async () => {
-  const { answerQuestion, createTask, getTask, submitClarificationAnswers } = await import('./tasks');
+for (const native of [false, true]) test(`uses generic Decision commands for Business Analysis HUMAN clarification and resume (${native ? 'native graph' : 'legacy compatibility'})`, async () => {
+  const { answerQuestion, createTask, getTask, submitClarificationAnswers } = await import('../test/legacy-task-fixtures');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { applyAgentResult } = await import('./agent-results');
@@ -269,6 +318,11 @@ test('uses generic Decision commands for Business Analysis HUMAN clarification a
     itemType: 'business-analysis',
     metadata: [{ key: 'workflow.analysis_decision_mode', value: 'balanced' }],
   });
+  if (native) {
+    const { databaseConnection } = await import('../infrastructure/database');
+    const { adoptNativeWorkflowInDb } = await import('./work-item-transitions');
+    adoptNativeWorkflowInDb(await databaseConnection(), taskId);
+  }
   let delegation = (await inspectTaskDispatch(taskId))[0];
   const first = await startAgent(delegation, `${taskId}-question-1`);
   await first.run(put('requirement-intent', 'discovery', '# 调查\n\n主要参与者会改变成功结果。'));
@@ -326,14 +380,19 @@ test('uses generic Decision commands for Business Analysis HUMAN clarification a
   assert.equal(detail?.task.current_subagent, 'business-design-agent');
 });
 
-test('routes structured Business Analysis gaps without namespace-specific terminal commands', async () => {
-  const { createTask, getTask } = await import('./tasks');
+for (const native of [false, true]) test(`routes structured Business Analysis gaps without namespace-specific terminal commands (${native ? 'native graph' : 'legacy compatibility'})`, async () => {
+  const { createTask, getTask } = await import('../test/legacy-task-fixtures');
   const taskId = await createTask({
     title: '业务方案发现需求意图缺口',
     description: '先形成意图，再由业务方案判断是否足以唯一设计。',
     itemType: 'business-analysis',
     metadata: [{ key: 'workflow.analysis_decision_mode', value: 'fully_autonomous' }],
   });
+  if (native) {
+    const { databaseConnection } = await import('../infrastructure/database');
+    const { adoptNativeWorkflowInDb } = await import('./work-item-transitions');
+    adoptNativeWorkflowInDb(await databaseConnection(), taskId);
+  }
   let delegation = (await inspectTaskDispatch(taskId))[0];
   await executeAgent(delegation, intentCommands('帮助项目成员理解项目健康。'), `${taskId}-intent`);
   delegation = (await inspectTaskDispatch(taskId))[0];
@@ -353,4 +412,11 @@ test('routes structured Business Analysis gaps without namespace-specific termin
   assert.equal(result.businessAnalysis?.disposition, 'return_revision');
   assert.equal(result.businessAnalysis?.target, 'intent');
   assert.equal((await getTask(taskId))?.task.current_subagent, 'idea-context-agent');
+  if (native) {
+    const { listWorkflowItems } = await import('./work-items');
+    const items = await listWorkflowItems(taskId);
+    assert.deepEqual(items.filter((item) => item.work_key === 'ba:intent').map((item) => [item.revision, item.status]),
+      [[1, 'superseded'], [2, 'ready']]);
+    assert.equal((await inspectTaskDispatch(taskId))[0].agent, 'idea-context-agent');
+  }
 });

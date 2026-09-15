@@ -2,13 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { databaseConnection } from '../infrastructure/database';
 import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
-import { progressDispatchInspector } from './progress-dispatch';
+import { progressDispatchInspector } from '../test/legacy-progress-dispatch';
 import {
   configureRequirementDependenciesInDb,
   requirementDependencyCandidatesInDb,
   requirementDependencyGateOpenInDb,
 } from './task-dependencies';
-import { createTask, getTask } from './tasks';
+import { createTask, getTask } from '../test/legacy-task-fixtures';
 
 test('holds a requirement until every prerequisite is ready for reading, then permanently opens its first-dispatch gate', async () => {
   const db = await databaseConnection();

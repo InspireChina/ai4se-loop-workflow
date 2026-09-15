@@ -78,6 +78,7 @@ export function decisionAlignmentQuestions(
         resolved_at: resolved ? record.resolved_at : null,
         created_at: record.created_at,
         updated_at: record.resolved_at || record.created_at,
+        intervention_id: null,
       });
       published.add(identity);
     }

@@ -14,11 +14,29 @@ import {
   releaseBlock,
   upsertDocument,
   type DelegationEnvelope,
-} from './tasks';
-import { applyAgentResult, applyNextQueuedAgentResult, blockDelegation } from './agent-results';
+} from '../test/legacy-task-fixtures';
+import { applyAgentResult as applyAgentResultRaw, applyNextQueuedAgentResult, blockDelegation } from './agent-results';
 import { applyFeedbackSplitResult } from './feedback';
+import { adoptNativeWorkflowInDb, transitionWorkItemInDb } from './work-item-transitions';
+import { completeExecution, markExecutionOutput } from './executions';
 
-async function completedRequirement(label: string, options: { readyToClose?: boolean } = {}) {
+async function applyAgentResult(...args: Parameters<typeof applyAgentResultRaw>) {
+  if (!args[1].workItemId || args[3]?.executionId) return applyAgentResultRaw(...args);
+  const execution = await beginTestExecutionAttempt({ runId: args[0], delegation: args[1], prompt: 'Native feedback role result' });
+  const executionId = execution.attempt.execution_id;
+  await markExecutionOutput(executionId, args[2]);
+  const outcome = await applyAgentResultRaw(args[0], args[1], args[2], { ...args[3], executionId });
+  if (outcome === 'advanced' && args[1].agent === 'dev-agent') {
+    const db = await databaseConnection();
+    assert.equal((db.prepare("SELECT owner_execution_id FROM resource_claims WHERE resource_key = 'code:workspace' AND owner_task_id = ?")
+      .get(args[1].taskId) as { owner_execution_id: string } | undefined)?.owner_execution_id, executionId,
+    'native Dev handoff code lease is bound to its actual source, never an unowned task-wide lease');
+  }
+  if (outcome === 'advanced' || args[2].outcome === 'needs_input') await completeExecution(executionId);
+  return outcome;
+}
+
+async function completedRequirement(label: string, options: { readyToClose?: boolean; native?: boolean } = {}) {
   const taskId = await createTask({ title: `前向反馈验证 · ${label} · ${randomUUID()}` });
   const db = await databaseConnection();
   db.prepare(`
@@ -61,6 +79,7 @@ async function completedRequirement(label: string, options: { readyToClose?: boo
     documentId,
     taskId,
   );
+  if (options.native) adoptNativeWorkflowInDb(db, taskId);
   return { taskId, documentId };
 }
 
@@ -105,6 +124,7 @@ async function applyNextFeedbackPlan(
   assert.ok(split.feedbackGroupId);
   const db = await databaseConnection();
   const draftId = `DRAFT-feedback-split-${randomUUID()}`;
+  const execution = split.workItemId ? await beginTestExecutionAttempt({ runId: `RUN-${randomUUID()}`, delegation: split, prompt: 'Native feedback plan' }) : undefined;
   db.prepare(`
     INSERT INTO agent_work_drafts(
       draft_id, work_key, draft_version, draft_type, task_id, agent,
@@ -118,7 +138,13 @@ async function applyNextFeedbackPlan(
     groupId: split.feedbackGroupId,
     deliveryUnits: units,
     sourceCommandChainDraftId: draftId,
+    executionId: execution?.attempt.execution_id,
   });
+  if (execution) {
+    transitionWorkItemInDb(db, { itemId: split.workItemId!, action: 'complete', eventKey: `plan:${draftId}`,
+      actor: 'story-splitter-agent', authority: 'agent', reason: 'Applied frozen feedback delivery plan', executionId: execution.attempt.execution_id });
+    await completeExecution(execution.attempt.execution_id);
+  }
   return split;
 }
 
@@ -183,8 +209,8 @@ const resolvedSpec = deliverySpecFixture({
   },
 });
 
-test('行为修订只追加新交付单元，并经过 Analysis、Dev、Test 和独立反馈验证', async () => {
-  const { taskId, documentId } = await completedRequirement('行为修订');
+for (const native of [false, true]) test(`行为修订只追加新交付单元，并经过 Analysis、Dev、Test 和独立反馈验证 (${native ? 'native' : 'legacy'})`, async () => {
+  const { taskId, documentId } = await completedRequirement('行为修订', { native });
   const commentId = await comment(taskId, documentId, '增加明确的空状态提示。');
   const triage = await delegation(taskId, 'feedback-triage');
   assert.equal(triage.feedbackIds?.[0], commentId);
@@ -306,7 +332,7 @@ test('反馈交付规划解除系统阻塞后重新派发 feedback-split 而不�
   assert.equal((await getTask(taskId))?.task.resume_pending, 0);
 });
 
-test('新版本会重新应用被旧版范围守卫误拒绝的反馈交付规划结果', async () => {
+test('历史反馈规划失败不被普通结果队列覆写，启动采纳后通过统一介入处置', async () => {
   const { taskId, documentId } = await completedRequirement('旧版反馈规划结果恢复');
   const commentId = await comment(taskId, documentId, '增加新的状态提示。');
   const triage = await delegation(taskId, 'feedback-triage');
@@ -383,22 +409,37 @@ test('新版本会重新应用被旧版范围守卫误拒绝的反馈交付规�
     WHERE task_id = ?
   `).run(taskId);
 
-  const recovered = await applyNextQueuedAgentResult();
-  assert.equal(recovered.status, 'applied');
-  const detail = await getTask(taskId);
-  assert.equal(detail?.stories.length, 2);
-  assert.equal(detail?.stories[1].unit_key, 'legacy-plan-recovery');
-  assert.equal(detail?.task.agile_status, 'in feedback');
-  assert.equal(detail?.task.run_state, 'runnable');
-  assert.equal(detail?.task.blocked_reason, null);
-  assert.equal(
-    (db.prepare('SELECT status FROM execution_attempts WHERE execution_id = ?').get(attempt.execution_id) as { status: string }).status,
-    'applied',
-  );
+  const sourceBefore = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(attempt.execution_id);
+  const resultBefore = db.prepare('SELECT * FROM agent_results WHERE execution_id = ?').get(attempt.execution_id);
+  const taskBefore = db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(taskId);
+  assert.deepEqual(await applyNextQueuedAgentResult(), { status: 'none' });
+  assert.deepEqual(db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(attempt.execution_id), sourceBefore);
+  assert.deepEqual(db.prepare('SELECT * FROM agent_results WHERE execution_id = ?').get(attempt.execution_id), resultBefore);
+  assert.deepEqual(db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(taskId), taskBefore);
+
+  // Explicit adoption models the startup boundary; polling the queue must never
+  // infer a recovery from a historical error string or clear the failed source.
+  adoptNativeWorkflowInDb(db, taskId);
+  const graphBeforePoll = db.prepare('SELECT * FROM workflow_items WHERE task_id = ? ORDER BY item_id').all(taskId);
+  const ledgerBeforePoll = db.prepare(`SELECT event.* FROM workflow_item_events event
+    JOIN workflow_items item ON item.item_id = event.item_id WHERE item.task_id = ? ORDER BY event.event_id`).all(taskId);
+  const interventionsBeforePoll = db.prepare('SELECT * FROM interventions WHERE task_id = ? ORDER BY intervention_id').all(taskId);
+  assert.ok(interventionsBeforePoll.length, 'the historical blocker becomes an explicit intervention');
+  assert.deepEqual(await applyNextQueuedAgentResult(), { status: 'none' });
+  assert.deepEqual(db.prepare('SELECT * FROM agent_results WHERE execution_id = ?').get(attempt.execution_id), resultBefore);
+  const sourceAfter = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(attempt.execution_id) as Record<string, unknown>;
+  for (const field of ['status', 'last_error', 'result_json', 'input_json', 'input_hash', 'finished_at']) {
+    assert.deepEqual(sourceAfter[field], (sourceBefore as Record<string, unknown>)[field], field);
+  }
+  assert.deepEqual(db.prepare('SELECT * FROM workflow_items WHERE task_id = ? ORDER BY item_id').all(taskId), graphBeforePoll);
+  assert.deepEqual(db.prepare(`SELECT event.* FROM workflow_item_events event JOIN workflow_items item
+    ON item.item_id = event.item_id WHERE item.task_id = ? ORDER BY event.event_id`).all(taskId), ledgerBeforePoll);
+  assert.deepEqual(db.prepare('SELECT * FROM interventions WHERE task_id = ? ORDER BY intervention_id').all(taskId), interventionsBeforePoll);
+  assert.equal((await getTask(taskId))?.stories.length, 1, 'a failed historical result cannot append units');
 });
 
-test('Bug 反馈先复现，未复现时可人工对齐，复现后才追加修复单元', async () => {
-  const { taskId, documentId } = await completedRequirement('Bug 复现');
+for (const native of [false, true]) test(`Bug 反馈先复现，未复现时可人工对齐，复现后才追加修复单元 (${native ? 'native' : 'legacy'})`, async () => {
+  const { taskId, documentId } = await completedRequirement('Bug 复现', { native });
   const commentId = await comment(taskId, documentId, 'Windows 下保存后页面崩溃。');
   const triage = await delegation(taskId, 'feedback-triage');
   await applyAgentResult(`run-${randomUUID()}`, triage, result({
@@ -435,7 +476,7 @@ test('Bug 反馈先复现，未复现时可人工对齐，复现后才追加修�
   const detail = await getTask(taskId);
   const question = detail?.questions.find((item) => item.source_agent === 'repro-agent');
   assert.ok(question);
-  const { answerQuestion, submitClarificationAnswers } = await import('./tasks');
+  const { answerQuestion, submitClarificationAnswers } = await import('../test/legacy-task-fixtures');
   await answerQuestion({ taskId, questionId: question.question_id, answer: 'Windows 11 24H2' });
   await submitClarificationAnswers(taskId);
   repro = await delegation(taskId, 'feedback-repro');
@@ -504,8 +545,8 @@ test('范围新增通过追加拆分产生多个单元；回复和历史说明�
   assert.equal(detail?.documentComments.find((item) => item.comment_id === replyComment)?.status, 'resolved');
 });
 
-test('结卡报告修订生成新版本，验证通过后直接回到等待阅读', async () => {
-  const { taskId, documentId } = await completedRequirement('报告修订', { readyToClose: true });
+for (const native of [false, true]) test(`结卡报告修订生成新版本，验证通过后直接回到等待阅读 (${native ? 'native' : 'legacy'})`, async () => {
+  const { taskId, documentId } = await completedRequirement('报告修订', { readyToClose: true, native });
   const commentId = await comment(taskId, documentId, '报告需要明确写出不支持离线模式。');
   const triage = await delegation(taskId, 'feedback-triage');
   await applyAgentResult(`run-${randomUUID()}`, triage, result({
@@ -555,8 +596,8 @@ test('结卡报告修订生成新版本，验证通过后直接回到等待阅�
   assert.equal(detail?.stories.length, 1);
 });
 
-test('反馈验证未通过会开启新批次，不回退旧单元或改写历史规格', async () => {
-  const { taskId, documentId } = await completedRequirement('验证未通过');
+for (const native of [false, true]) test(`反馈验证未通过会开启新批次，不回退旧单元或改写历史规格 (${native ? 'native' : 'legacy'})`, async () => {
+  const { taskId, documentId } = await completedRequirement('验证未通过', { native });
   const commentId = await comment(taskId, documentId, '调整按钮文案。');
   const triage = await delegation(taskId, 'feedback-triage');
   await applyAgentResult(`run-${randomUUID()}`, triage, result({
@@ -582,16 +623,24 @@ test('反馈验证未通过会开启新批次，不回退旧单元或改写历�
     ]),
   ]);
   const db = await databaseConnection();
-  db.prepare(`
-    UPDATE tasks SET analysis_index = 2, dev_index = 2, test_index = 2, spec_resolved_index = 2
-    WHERE task_id = ?
-  `).run(taskId);
-  db.prepare(`
-    UPDATE feedback_groups SET status = 'ready_for_verification' WHERE batch_id = ?
-  `).run(triage.feedbackBatchId);
-  db.prepare(`
-    UPDATE document_comments SET feedback_status = 'verifying' WHERE comment_id = ?
-  `).run(commentId);
+  if (native) {
+    await applyAgentResult(`RUN-${randomUUID()}`, await delegation(taskId, 'analysis'), result({ outcome: 'completed', summary: 'Freeze forward button contract',
+      artifact: { title: 'Forward button analysis', content: 'Only the new unit changes' }, spec: resolvedSpec }));
+    await applyAgentResult(`RUN-${randomUUID()}`, await delegation(taskId, 'dev'), result({ outcome: 'completed', summary: 'Implement forward button', changedFiles: ['src/button.ts'] }));
+    await applyAgentResult(`RUN-${randomUUID()}`, await delegation(taskId, 'test'), result({ outcome: 'completed', summary: 'Forward button Test completed',
+      verdict: 'passed', tests: [{ command: 'button test', passed: true }] }));
+  } else {
+    db.prepare(`
+      UPDATE tasks SET analysis_index = 2, dev_index = 2, test_index = 2, spec_resolved_index = 2
+      WHERE task_id = ?
+    `).run(taskId);
+    db.prepare(`
+      UPDATE feedback_groups SET status = 'ready_for_verification' WHERE batch_id = ?
+    `).run(triage.feedbackBatchId);
+    db.prepare(`
+      UPDATE document_comments SET feedback_status = 'verifying' WHERE comment_id = ?
+    `).run(commentId);
+  }
   const verify = await delegation(taskId, 'feedback-verify');
   await applyAgentResult(`run-${randomUUID()}`, verify, result({
     outcome: 'completed',
@@ -799,8 +848,8 @@ test('活动批次执行期间新增的评论进入下一批，不污染已冻�
   assert.equal(batchEvents.some((event) => event.summary.includes(firstBatch.feedbackBatchId!)), false);
 });
 
-test('反馈追加单元测试失败时只重做当前新单元，并保持反馈处理状态', async () => {
-  const { taskId, documentId } = await completedRequirement('反馈单元失败恢复');
+for (const native of [false, true]) test(`反馈追加单元测试失败时只重做当前新单元，并保持反馈处理状态 (${native ? 'native' : 'legacy'})`, async () => {
+  const { taskId, documentId } = await completedRequirement('反馈单元失败恢复', { native });
   const commentId = await comment(taskId, documentId, '增加明确的空状态操作入口。');
   const triage = await delegation(taskId, 'feedback-triage');
   await applyAgentResult(`run-${randomUUID()}`, triage, result({

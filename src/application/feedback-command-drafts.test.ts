@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { stringify } from 'yaml';
 import { deliverySpecFixture } from '../test/delivery-spec-fixture';
-import type { DelegationEnvelope } from './tasks';
+import type { DelegationEnvelope } from '../test/legacy-task-fixtures';
 
 async function command(executionId: string, token: string, args: string[]) {
   const { runAgentCommand } = await import('./agent-command-drafts');
@@ -30,7 +30,7 @@ async function completedRequirement(label: string) {
     addDocumentComment,
     createTask,
     upsertDocument,
-  } = await import('./tasks');
+  } = await import('../test/legacy-task-fixtures');
   const db = await databaseConnection();
   db.prepare(`
     UPDATE tasks
@@ -164,7 +164,7 @@ test('feedback triage progressively covers the frozen batch and appends forward 
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
-  const { getTask } = await import('./tasks');
+  const { getTask } = await import('../test/legacy-task-fixtures');
   const { taskId, commentId, delegation } = await completedRequirement('渐进式反馈分流');
   const started = await begin(delegation, `${taskId}-triage`);
 
@@ -210,7 +210,7 @@ test('feedback clarification preserves the original decision key and partial dra
     answerQuestion,
     getTask,
     submitClarificationAnswers,
-  } = await import('./tasks');
+  } = await import('../test/legacy-task-fixtures');
   const { taskId, commentId, delegation } = await completedRequirement('反馈澄清恢复');
   const first = await begin(delegation, `${taskId}-question`);
   await command(first.executionId, first.token!, ['status']);
@@ -278,7 +278,7 @@ test('feedback verify progressively records independent evidence and resolves on
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { databaseConnection } = await import('../infrastructure/database');
-  const { getTask } = await import('./tasks');
+  const { getTask } = await import('../test/legacy-task-fixtures');
   const { recordFeedbackUnitTestPassed } = await import('./feedback');
   const { taskId, commentId, delegation } = await completedRequirement('渐进式反馈验证');
   const triage = await begin(delegation, `${taskId}-triage`);

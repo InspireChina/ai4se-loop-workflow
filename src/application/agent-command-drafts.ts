@@ -12,6 +12,9 @@ import {
   directHelp, runDirectCommand,
 } from './direct-command';
 import { parseAgentCommand } from '../domain/agent-command';
+import { commandChainRegistry } from '../domain/command-chain-registry';
+import { interventionRequestHelp, submitAgentInterventionRequestInDb } from './agent-intervention-request';
+import { activeWorkflowItemForLegacyExecutionInDb, syncLegacyDeliveryWorkItemsInDb } from './work-items';
 import {
   cloneCommandChainDraft,
   commandChainHelp,
@@ -21,6 +24,7 @@ import {
 
 type ExecutionRow = {
   execution_id: string;
+  work_item_id: string | null;
   task_id: string;
   story_index: number | null;
   agent: string;
@@ -54,7 +58,7 @@ type DraftRow = {
 
 function executionInDb(db: Awaited<ReturnType<typeof databaseConnection>>, executionId: string) {
   return db.prepare(`
-    SELECT execution_id, task_id, story_index, agent, pipeline, delegation_key, input_json,
+    SELECT execution_id, work_item_id, task_id, story_index, agent, pipeline, delegation_key, input_json,
            status, command_token_hash, base_commit, web_search_enabled
     FROM execution_attempts WHERE execution_id = ?
   `).get(executionId) as ExecutionRow | undefined;
@@ -94,7 +98,12 @@ async function authorize(executionId: string, token: string) {
   } catch {
     // The execution was already validated when persisted; fall back to its delegation key.
   }
-  const workKey = agentCommandWorkKey(
+  const nativeItem = execution.work_item_id && db.prepare(`
+    SELECT item_id FROM workflow_items WHERE item_id = ? AND task_id = ? AND origin = 'native'
+  `).get(execution.work_item_id, execution.task_id) as { item_id: string } | undefined;
+  const workKey = nativeItem
+    ? `work-item:${nativeItem.item_id}:chain:${profile.commandChainId || profile.draftType}`
+    : agentCommandWorkKey(
     execution.agent,
     execution.pipeline,
     execution.task_id,
@@ -178,6 +187,11 @@ function ensureDraft(
   const latest = latestDraft(db, workKey);
   if (!latest) return createDraft(db, execution, profile, workKey);
   if (latest.last_execution_id === execution.execution_id) return latest;
+  // A resumed Review has a new frozen context (even normal cancellation
+  // changes execution evidence). Never rebind an editing draft's old inputs
+  // to that context: version it and rebuild Review inputs using the same
+  // clone path as a submitted Review, preserving the original audit trail.
+  if (latest.command_chain_id === 'review') return createDraft(db, execution, profile, workKey, latest);
   if (latest.status === 'editing') {
     db.prepare(`
       UPDATE agent_work_drafts
@@ -259,6 +273,11 @@ export async function readAgentCommandSubmission(executionId: string): Promise<A
           SELECT 1 FROM direct_execution_state
           WHERE execution_id = execution_attempts.execution_id AND submitted_at IS NOT NULL
         )
+        OR EXISTS (
+          SELECT 1 FROM execution_receipts
+          WHERE execution_id = execution_attempts.execution_id
+            AND kind = 'intervention_submission' AND receipt_key = 'request'
+        )
       )
   `).get(executionId) as { result_json: string } | undefined;
   return row ? agentResultSchema.parse(JSON.parse(row.result_json)) : null;
@@ -274,10 +293,41 @@ export async function runAgentCommand(input: {
   const { positionals, flags } = parsed;
   const command = parsed.raw;
 
+  const handoff = db.prepare(`SELECT 1 FROM execution_receipts WHERE execution_id = ?
+    AND kind = 'intervention_submission' AND receipt_key = 'request'`).get(execution.execution_id);
+  if (handoff && !['help', 'whoami', 'status', 'direct run', 'intervention request'].includes(command)) {
+    throw new Error('本次 execution 已提交介入请求，请结束执行，不能继续编辑或提交完成');
+  }
+
+  if (command === 'intervention request') {
+    if (!execution.work_item_id && !execution.pipeline.startsWith('feedback-')) {
+      syncLegacyDeliveryWorkItemsInDb(db, execution.task_id);
+      const item = activeWorkflowItemForLegacyExecutionInDb(db, { taskId: execution.task_id,
+        agent: execution.agent, pipeline: execution.pipeline, storyIndex: execution.story_index });
+      if (item) db.prepare('UPDATE execution_attempts SET work_item_id = ? WHERE execution_id = ? AND work_item_id IS NULL')
+        .run(item.item_id, execution.execution_id);
+    }
+    if (profile.draftType === 'direct') {
+      if (!db.prepare('SELECT 1 FROM direct_execution_state WHERE execution_id = ?').get(execution.execution_id)) {
+        throw new Error('必须先执行 direct run，再请求介入');
+      }
+      return submitAgentInterventionRequestInDb(db, { executionId: execution.execution_id, agent: execution.agent,
+        flags, draftId: null, phase: 'run' });
+    }
+    const draft = ensureDraft(db, execution, profile, workKey);
+    if (draft.status_viewed_execution_id !== execution.execution_id || draft.status !== 'editing') {
+      throw new Error('本次启动尚未查看可编辑草稿状态，请先执行 status');
+    }
+    const state = db.prepare('SELECT workflow_phase FROM command_chain_drafts WHERE draft_id = ?')
+      .get(draft.draft_id) as { workflow_phase: string };
+    return submitAgentInterventionRequestInDb(db, { executionId: execution.execution_id, agent: execution.agent,
+      flags, draftId: draft.draft_id, phase: state.workflow_phase });
+  }
+
   if (parsed.kind === 'help') {
     if (positionals.length > 2) throw new Error('help 最多接受一个主题');
     if (profile.draftType === 'direct') return helpText(execution, profile, positionals[1] || null);
-    if (!positionals[1]) return commandChainHelp();
+    if (!positionals[1]) return `${commandChainHelp()}\n\n${interventionRequestHelp}`;
     if (positionals[1] !== 'context') {
       throw new Error('通用命令链 help 只支持 context 主题；当前阶段的具体命令请执行 status');
     }
@@ -286,17 +336,14 @@ export async function runAgentCommand(input: {
   if (parsed.kind === 'identity') {
     return `${execution.agent} · ${execution.pipeline} · execution=${execution.execution_id}`;
   }
-  const genericCommand = [
-    'status', 'delivery-unit', 'delivery-spec', 'artifact', 'decision',
-    'acceptance', 'check', 'runtime-input', 'metadata', 'phase', 'draft',
-  ].includes(positionals[0] || '');
+  const registeredCommand = commandChainRegistry.resolveCommand(positionals);
   if (profile.draftType === 'direct') {
     if (!command.startsWith(profile.namespace)) {
       throw new Error(`当前 execution 不允许命令：${command || '(empty)'}。请使用 loop-agent help`);
     }
     return runDirectCommand({ db, execution, command, flags });
   }
-  if (!genericCommand) {
+  if (!registeredCommand) {
     throw new Error(`当前 execution 只允许 YAML 命令链协议：${command || '(empty)'}。请先执行 status`);
   }
 
