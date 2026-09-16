@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { configureUpdater, detachUpdaterWindow } from './updater.mjs';
 import { runtimeFallbackDocument } from './runtime-fallback.mjs';
-import {createDesktopRuntimeHost} from './runtime-host.mjs';
+import {createDesktopRuntimeHost,prepareDesktopRuntimeInstall} from './runtime-host.mjs';
 
 let mainWindow;
 let lifecycle;
@@ -18,6 +18,8 @@ let selectedRuntimeRoot;
 let acceptedRendererUrl;
 let startupStore;
 let startupPromise;
+let uiRecoveryTimer;
+let uiRecoveryDelay = 1_000;
 const startupCancellation=new AbortController();
 
 function runtimeRoot() {
@@ -55,7 +57,7 @@ async function createLifecycle(root) {
     onUiUnavailable:(error)=>{
       if(mainWindow&&!mainWindow.isDestroyed()&&!quitting){
         acceptedRendererUrl=`data:text/html;charset=utf-8,${encodeURIComponent(runtimeFallbackDocument(error.message))}`;
-        void mainWindow.loadURL(acceptedRendererUrl).catch(reason=>console.error('[control-page]',reason));
+        void mainWindow.loadURL(acceptedRendererUrl).then(scheduleUiRecovery).catch(reason=>console.error('[control-page]',reason));
       }
     },
     inhibitIdleSleep: async (signal) => {
@@ -90,7 +92,31 @@ function availablePort() {
 
 async function startServer() {
   if (!lifecycle) throw new Error('独立运行宿主尚未初始化');
+  const state=await lifecycle.reconcile();
+  if(state==='observer'||state==='updating')throw new Error(`桌面外部 root 交接尚未完成：${state}`);
   return lifecycle.ui.start(await availablePort());
+}
+
+function cancelUiRecovery(){
+  if(uiRecoveryTimer)clearTimeout(uiRecoveryTimer);
+  uiRecoveryTimer=undefined;uiRecoveryDelay=1_000;
+}
+
+function scheduleUiRecovery(){
+  if(uiRecoveryTimer||quitting||!mainWindow||mainWindow.isDestroyed())return;
+  const delay=uiRecoveryDelay;
+  uiRecoveryTimer=setTimeout(async()=>{
+    uiRecoveryTimer=undefined;
+    if(quitting||!mainWindow||mainWindow.isDestroyed())return;
+    try{
+      const {url}=await startServer();
+      acceptedRendererUrl=url;await mainWindow.loadURL(url);cancelUiRecovery();
+    }catch(error){
+      console.error('[ui-recovery]',error);
+      uiRecoveryDelay=Math.min(delay*2,30_000);scheduleUiRecovery();
+    }
+  },delay);
+  uiRecoveryTimer.unref();
 }
 
 async function stopServer() {
@@ -110,8 +136,8 @@ function prepareForUpdate(targetVersion) {
     if (receipt.outcome !== 'ready-for-update') {
       throw new Error(receipt.error || `后台进程尚未清理：${JSON.stringify(receipt.residualProcesses || [])}`);
     }
-    await stopServer();
-    await lifecycle.service.assertUpdateReady();
+    await prepareDesktopRuntimeInstall({lifecycle,stopUi:stopServer});
+    quitPrepared = true;
   })().catch(async (error) => {
     quitting = false;
     updatePreparation = undefined;
@@ -142,7 +168,7 @@ function trustedRenderer(event) {
 
 function installLifecycleHandlers() {
   ipcMain.handle('loopwork:lifecycle:retry-ui',async(event)=>{
-    trustedRenderer(event);const {url}=await startServer();acceptedRendererUrl=url;await mainWindow.loadURL(url);
+    trustedRenderer(event);const {url}=await startServer();acceptedRendererUrl=url;await mainWindow.loadURL(url);cancelUiRecovery();
   });
   ipcMain.handle('loopwork:lifecycle:status', async (event) => {
     trustedRenderer(event);
@@ -184,6 +210,7 @@ function reportShutdownFailure(error){
 async function requestExplicitQuit() {
   if (quitPrepared) return;
   quitting = true;
+  cancelUiRecovery();
   let commandError;
   if(!lifecycle&&startupPromise){
     try{startupStore?.setIntent('stopped',randomUUID());}catch(error){commandError=error;}
@@ -210,6 +237,7 @@ async function requestSystemShutdown() {
   if (quitPrepared) return;
   systemShutdown = true;
   quitting = true;
+  cancelUiRecovery();
   await lifecycle?.shutdown(true);
   quitPrepared = true;
   app.quit();
@@ -270,6 +298,7 @@ async function createWindow() {
     if (!process.argv.includes('--hidden')) window.show();
   });
   acceptedRendererUrl=url;await window.loadURL(url);
+  if(url.startsWith('data:'))scheduleUiRecovery();
 }
 
 const hasLock = app.requestSingleInstanceLock();

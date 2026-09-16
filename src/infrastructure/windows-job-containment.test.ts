@@ -5,6 +5,8 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   waitForWindowsJobAdmission,
+  confirmWindowsJobContainmentExit,
+  processPredatesWindowsBoot,
   windowsJobGuardianScript,
   windowsJobPaths,
   withWindowsJobAdmission,
@@ -35,6 +37,23 @@ test('the Windows guardian assigns before admission and proves the Job is empty 
   assert.match(script, /TerminateJobObject/);
   assert.match(script, /ActiveProcesses/);
   assert.match(script, /Write-Receipt \$outcomePath/);
+  assert.match(script, /LastBootUpTime|bootMarker/);
+});
+
+test('a reboot is positive exit proof for a prior Windows Job even without its final guardian outcome',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'loop-windows-reboot-'));
+  const allocationId='prior-boot-job',pid=4321,paths=windowsJobPaths(root,allocationId);
+  await mkdir(paths.directory,{recursive:true});
+  await writeFile(paths.ready,JSON.stringify({schema:'loop-windows-job/v1',allocationId,pid,jobName:paths.jobName,
+    assigned:true,bootMarker:'2026-09-15T01:00:00.0000000Z'}));
+  assert.equal(processPredatesWindowsBoot('2026-09-15T02:00:00.1234567Z','2026-09-16T03:00:00.0000000Z'),true);
+  assert.equal(await confirmWindowsJobContainmentExit({dataRoot:root,process:{allocationId,pid,
+    marker:'2026-09-15T02:00:00.1234567Z'},platform:'win32',inspectBootMarker:async()=> '2026-09-16T03:00:00.0000000Z'}),true);
+});
+
+test('same-boot PID replacement is not enough to waive a Windows descendant barrier',()=>{
+  assert.equal(processPredatesWindowsBoot('2026-09-16T04:00:00.0000000Z','2026-09-16T03:00:00.0000000Z'),false);
+  assert.equal(processPredatesWindowsBoot('malformed','2026-09-16T03:00:00.0000000Z'),false);
 });
 
 test('non-Windows launches are unchanged and do not acquire a synthetic receipt', () => {

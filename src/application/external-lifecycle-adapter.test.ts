@@ -4,7 +4,7 @@ import {createExternalLifecycleAdapter,externalLifecycleView} from './external-l
 import {runtimeFallbackDocument} from '../../desktop/runtime-fallback.mjs';
 import {uiLifecycleRequestSchema} from '../domain/ui-lifecycle-protocol';
 import {randomUUID} from 'node:crypto';
-import {createDesktopRuntimeHost} from '../../desktop/runtime-host.mjs';
+import {createDesktopRuntimeHost,prepareDesktopRuntimeInstall} from '../../desktop/runtime-host.mjs';
 
 const control={desired_intent:'stopped' as const,intent_revision:4,management_mode:'update-silence' as const,owner_id:'actual-manager',fencing_token:7,expires_at:123};
 test('desktop view uses independent intent, preserves unknown business state and never invents liveness or ownership',()=>{
@@ -50,4 +50,20 @@ test('quit requested during service construction skips business startup entirely
   await createDesktopRuntimeHost({createService:async()=>({start:async()=>{starts++;},shutdown:async()=>{stops++;},store:{control:()=>({desired_intent:'stopped'})},
     lifecycle:{status:async()=>({}),command:async()=>({})},ui:{},reconcile:async()=>{}}),onCreated:()=>{},isQuitting:()=>true});
   assert.equal(starts,0);assert.equal(stops,1);
+});
+
+test('desktop waits through stale-owner and update handoff states before exposing the UI host',async()=>{
+  const states=['observer','updating','updating','hosting'];let reconciles=0;let waits=0;let now=0;
+  const service={start:async()=>states[0],shutdown:async()=>undefined,store:{control:()=>({desired_intent:'stopped'})},
+    lifecycle:{status:async()=>({}),command:async()=>({})},ui:{},reconcile:async()=>states[++reconciles]};
+  await createDesktopRuntimeHost({createService:async()=>service,onCreated:()=>{},isQuitting:()=>false,
+    waitBeforeRetry:async()=>{waits++;now+=100;},now:()=>now,startupHandoffTimeoutMs:1_000});
+  assert.equal(reconciles,3);assert.equal(waits,3);
+});
+
+test('desktop update handoff releases the external root only after UI and update barriers are ready',async()=>{
+  const order:string[]=[];
+  const lifecycle={service:{assertUpdateReady:async()=>{order.push('ready');}},shutdown:async()=>{order.push('shutdown');}};
+  await prepareDesktopRuntimeInstall({lifecycle,stopUi:async()=>{order.push('ui');}});
+  assert.deepEqual(order,['ui','ready','shutdown']);
 });

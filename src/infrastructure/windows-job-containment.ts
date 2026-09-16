@@ -13,11 +13,13 @@ type JobReceipt = {
   pid: number;
   jobName: string;
   assigned: boolean;
+  bootMarker?: string;
   activeProcesses?: number;
   error?: string;
 };
 
 const RECEIPT_SCHEMA = 'loop-windows-job/v1' as const;
+let bootMarkerQuery:Promise<string|null>|undefined;
 
 function safeSegment(value: string) {
   const readable=value.replace(/[^A-Za-z0-9._-]/g, '_').slice(0,80);
@@ -53,6 +55,43 @@ export function withWindowsJobAdmission(
 
 function ps(value: string) { return `'${value.replaceAll("'", "''")}'`; }
 
+export function windowsBootMarkerCommand() {
+  return {command:'powershell.exe',args:['-NoProfile','-NonInteractive','-Command',
+    `(Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime().ToString('o')`]};
+}
+
+function readWindowsBootMarker() {
+  const command=windowsBootMarkerCommand();
+  return new Promise<string|null>(resolve=>{
+    const child=spawn(command.command,command.args,{windowsHide:true,stdio:['ignore','pipe','ignore']});
+    let output='',settled=false;let timer:NodeJS.Timeout|undefined;
+    const finish=(value:string|null)=>{if(settled)return;settled=true;if(timer)clearTimeout(timer);resolve(value);};
+    child.stdout?.on('data',bytes=>{output=(output+bytes.toString('utf8')).slice(-1024);});
+    child.once('error',()=>finish(null));child.once('close',code=>finish(code===0&&output.trim()?output.trim():null));
+    timer=setTimeout(()=>{child.kill('SIGKILL');finish(null);},5_000);timer.unref();
+  });
+}
+
+async function inspectWindowsBootMarker() {
+  if(!bootMarkerQuery){
+    bootMarkerQuery=readWindowsBootMarker().then(value=>{if(!value)bootMarkerQuery=undefined;return value;});
+  }
+  return bootMarkerQuery;
+}
+
+function windowsTimestamp(value:string) {
+  const normalized=value.trim().replace(/\.(\d{3})\d+(Z|[+-]\d\d:\d\d)$/,'.$1$2');
+  const parsed=Date.parse(normalized);return Number.isFinite(parsed)?parsed:null;
+}
+
+/** A Windows Job and every process in it are destroyed by an OS restart. A
+ * start marker from before the current boot is therefore positive whole-job
+ * exit evidence even when shutdown prevented the guardian outcome write. */
+export function processPredatesWindowsBoot(startMarker:string,bootMarker:string) {
+  const started=windowsTimestamp(startMarker),booted=windowsTimestamp(bootMarker);
+  return started!==null&&booted!==null&&started<booted;
+}
+
 /** The target entrypoint waits on the ready receipt before it can create a
  * descendant. The guardian therefore assigns the still-quiescent root to a
  * kill-on-close Job Object without relying on taskkill's tree snapshot. */
@@ -65,6 +104,8 @@ $targetPid = ${input.pid}
 $jobName = ${ps(paths.jobName)}
 $readyPath = ${ps(paths.ready)}
 $outcomePath = ${ps(paths.outcome)}
+$bootMarker = ''
+try { $bootMarker = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).LastBootUpTime.ToUniversalTime().ToString('o') } catch {}
 Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
@@ -103,7 +144,7 @@ try {
   $process = [LoopWorkJob]::OpenProcess(0x001F0FFF, $false, $targetPid)
   if ($process -eq [IntPtr]::Zero) { throw "OpenProcess failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
   if (-not [LoopWorkJob]::AssignProcessToJobObject($job, $process)) { throw "AssignProcessToJobObject failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
-  Write-Receipt $readyPath @{ schema='${RECEIPT_SCHEMA}'; allocationId=$allocation; pid=$targetPid; jobName=$jobName; assigned=$true }
+  Write-Receipt $readyPath @{ schema='${RECEIPT_SCHEMA}'; allocationId=$allocation; pid=$targetPid; jobName=$jobName; assigned=$true; bootMarker=$bootMarker }
   [void][LoopWorkJob]::WaitForSingleObject($process, 0xffffffff)
   [void][LoopWorkJob]::TerminateJobObject($job, 1)
   $accounting = New-Object LoopWorkJob+BASIC_ACCOUNTING
@@ -117,10 +158,10 @@ try {
       if ($accounting.ActiveProcesses -eq 0) { break }
       Start-Sleep -Milliseconds 50
     } while ([DateTime]::UtcNow -lt $deadline)
-    Write-Receipt $outcomePath @{ schema='${RECEIPT_SCHEMA}'; allocationId=$allocation; pid=$targetPid; jobName=$jobName; assigned=$true; activeProcesses=[int]$accounting.ActiveProcesses }
+    Write-Receipt $outcomePath @{ schema='${RECEIPT_SCHEMA}'; allocationId=$allocation; pid=$targetPid; jobName=$jobName; assigned=$true; activeProcesses=[int]$accounting.ActiveProcesses; bootMarker=$bootMarker }
   } finally { [Runtime.InteropServices.Marshal]::FreeHGlobal($accountingMemory) }
 } catch {
-  Write-Receipt $outcomePath @{ schema='${RECEIPT_SCHEMA}'; allocationId=$allocation; pid=$targetPid; jobName=$jobName; assigned=$false; activeProcesses=-1; error=$_.Exception.Message }
+  Write-Receipt $outcomePath @{ schema='${RECEIPT_SCHEMA}'; allocationId=$allocation; pid=$targetPid; jobName=$jobName; assigned=$false; activeProcesses=-1; error=$_.Exception.Message; bootMarker=$bootMarker }
   throw
 } finally {
   if ($process -ne [IntPtr]::Zero) { [void][LoopWorkJob]::CloseHandle($process) }
@@ -179,6 +220,7 @@ export async function waitForWindowsJobAdmission(
 
 export async function confirmWindowsJobContainmentExit(input: {
   dataRoot: string; process: ContainedProcess; platform?: Platform; timeoutMs?: number;
+  inspectBootMarker?:()=>Promise<string|null>;
 }) {
   if ((input.platform ?? process.platform) !== 'win32') return false;
   const record = input.process;
@@ -189,6 +231,13 @@ export async function confirmWindowsJobContainmentExit(input: {
     return Boolean(receipt?.assigned && receipt.allocationId === record.allocationId && receipt.pid === record.pid && receipt.activeProcesses === 0);
   };
   if (proven()) return true;
+  if(record.marker){
+    const bootMarker=await (input.inspectBootMarker??inspectWindowsBootMarker)();
+    const admission=readReceipt(paths.ready);
+    if(bootMarker&&processPredatesWindowsBoot(record.marker,bootMarker)
+      &&(!admission?.bootMarker||admission.assigned&&admission.allocationId===record.allocationId
+        &&admission.pid===record.pid&&admission.bootMarker!==bootMarker))return true;
+  }
   let mayTerminate=true;
   if (record.marker) {
     const identity = await inspectProcessIdentity(record.pid);

@@ -22,6 +22,7 @@ test('packages a visible tray asset and restores the hidden single-instance wind
   assert.match(mainSource,/runtimeFallbackDocument/);
   assert.ok(manifest.build?.files?.includes('runtime-host.mjs'));
   assert.match(mainSource,/Promise\.allSettled\(\[lifecycle\?\.shutdown\(\)\]\)/);
+  assert.match(mainSource,/prepareDesktopRuntimeInstall\(\{lifecycle,stopUi:stopServer\}\)/);
   assert.deepEqual([...png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
   assert.equal(png.readUInt32BE(16), 32);
   assert.equal(png.readUInt32BE(20), 32);
