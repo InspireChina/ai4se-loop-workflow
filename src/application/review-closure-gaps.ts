@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { revalidatePath } from 'next/cache';
+import { invalidatePage as revalidatePath } from '../infrastructure/page-invalidation';
 import type { AgentResult } from '../domain/agent-result';
 import {
   assertReviewClosureGapForward,
@@ -7,6 +7,7 @@ import {
 } from '../domain/task';
 import { databaseConnection } from '../infrastructure/database';
 import { setTaskLaneStateInDb } from './task-lanes';
+import { appendDeliveryWorkItemsInDb } from './work-item-transitions';
 
 type ClosureGap = NonNullable<AgentResult['closureGaps']>[number];
 type ClosureGapUnit = NonNullable<AgentResult['closureGapUnits']>[number];
@@ -266,6 +267,9 @@ export async function forwardReviewClosureGaps(input: {
     }
 
     const totalStories = firstIndex + input.units.length - 1;
+    appendDeliveryWorkItemsInDb(db, { taskId: input.taskId,
+      units: input.units.map((unit) => ({ storyIndex: unitStoryIndexes.get(unit.key)!, title: unit.title })),
+      eventKey: `review-gap:${input.sourceResultId}`, actor: 'review-agent', reason: '验收发现事实缺口，追加前向交付工作项' });
     const prospective: TaskState = {
       ...task,
       agile_status: 'ready for dev',

@@ -59,15 +59,13 @@ export function shouldRetryReportedFailure(
   attempt: number,
   agent?: string,
 ) {
-  // A classified Test verdict is a workflow result: apply its rewind immediately.
-  // Provider/CLI failures still use the universal execution recovery ladder.
-  const failureKind = result.failureKind
-    || (result.rewindTo === 'analysis' ? 'specification' : result.rewindTo === 'dev' ? 'implementation' : 'inconclusive');
-  if (agent === 'test-agent' && result.verdict === 'failed'
-    && (result.outcome === 'completed' || result.outcome === 'failed')
-    && (failureKind === 'implementation' || failureKind === 'specification')) {
-    return false;
-  }
+  // A submitted Test verdict is a domain result: the application layer must
+  // preserve its evidence and immediately perform the declared Work Item
+  // rewind/intervention. Retrying the Test CLI here skips that transition and
+  // repeats a known failing verification against unchanged implementation.
+  // This does not classify provider errors; all execution failures keep the
+  // same runtime-neutral recovery ladder.
+  if (agent === 'test-agent' && result.verdict === 'failed') return false;
   return (result.outcome === 'failed' || result.verdict === 'failed')
     && attempt <= EXECUTION_FAILURE_MAX_RETRIES;
 }

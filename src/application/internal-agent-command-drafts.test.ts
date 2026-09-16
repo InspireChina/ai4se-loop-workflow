@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import test from 'node:test';
-import type { DelegationEnvelope } from './tasks';
+import type { DelegationEnvelope } from '../test/legacy-task-fixtures';
 
 function backlogDelegation(taskId: string): DelegationEnvelope {
   return {
@@ -62,7 +62,7 @@ test('Prompt evolution progressively restores observations and submits without A
     readInternalAgentCommandSubmission,
   } = await import('./internal-agent-command-drafts');
   const { completeExecution } = await import('./executions');
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
 
   await ensureAgentRuntimeWorkspace();

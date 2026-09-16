@@ -1,12 +1,12 @@
 {
   "name": "loop-engineering",
   "private": true,
-  "version": "0.1.30",
+  "version": "0.2.0",
   "type": "module",
   "scripts": {
     "version:check": "node scripts/check-release-version.mjs",
     "dev": "next dev",
-    "build": "next build",
+    "build": "node scripts/build-harness.mjs",
     "build:desktop-runtime": "node scripts/build-desktop-runtime.mjs",
     "desktop:install": "npm ci --prefix desktop --omit=dev --ignore-scripts",
     "desktop:prepare": "npm run desktop:install && npm run build && npm run build:desktop-runtime",
@@ -18,7 +18,9 @@
     "start": "next start",
     "test": "tsx --test --import ./src/test/setup.ts src/**/*.test.ts",
     "db:migrate": "tsx scripts/migrate.ts",
-    "loopctl": "tsx scripts/loop/loopctl.ts"
+    "loopctl": "tsx scripts/loop/loopctl.ts",
+    "host:run": "tsx scripts/loop/external-host-entry.ts",
+    "host:configure": "tsx scripts/host-service.ts"
   },
   "dependencies": {
     "@types/better-sqlite3": "^7.6.13",

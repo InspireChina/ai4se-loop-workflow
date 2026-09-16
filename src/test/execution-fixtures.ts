@@ -5,6 +5,7 @@ import type { ExecutionAttempt } from '../application/executions';
 import { laneForAgent } from '../application/task-lanes';
 import type { DelegationEnvelope } from '../application/tasks';
 import { isActiveProjectOverlayCandidateInDb } from '../application/agent-profiles';
+import { transitionWorkItemInDb } from '../application/work-item-transitions';
 
 export class PromptCanaryDeferredError extends Error {
   constructor(message: string) {
@@ -189,6 +190,15 @@ export async function beginTestExecutionAttempt(input: {
       input.reasoningEffort || null,
       input.webSearchEnabled ? 1 : 0,
     );
+    if (input.delegation.workItemId) {
+      const sequence = (db.prepare('SELECT COALESCE(MAX(work_item_attempt), 0) + 1 AS sequence FROM execution_attempts WHERE work_item_id = ?')
+        .get(input.delegation.workItemId) as { sequence: number }).sequence;
+      db.prepare('UPDATE execution_attempts SET work_item_id = ?, work_item_attempt = ?, dispatch_generation_key = ? WHERE execution_id = ?')
+        .run(input.delegation.workItemId, sequence,
+          hash(JSON.stringify({ itemId: input.delegation.workItemId, epoch: input.delegation.workItemEpoch || 1 })), executionId);
+      transitionWorkItemInDb(db, { itemId: input.delegation.workItemId, action: 'start', eventKey: `fixture:${executionId}`,
+        actor: 'system', authority: 'system', executionId, reason: '测试执行绑定原生工作项' });
+    }
     const attempt = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(executionId) as ExecutionAttempt;
     return { attempt, recovered: false };
   }).immediate();

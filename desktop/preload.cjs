@@ -15,4 +15,5 @@ contextBridge.exposeInMainWorld('loopworkUpdater', {
 contextBridge.exposeInMainWorld('loopworkLifecycle', {
   status: () => ipcRenderer.invoke('loopwork:lifecycle:status'),
   command: (action) => ipcRenderer.invoke('loopwork:lifecycle:command', action),
+  retryUI:()=>ipcRenderer.invoke('loopwork:lifecycle:retry-ui'),
 });

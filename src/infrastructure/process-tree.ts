@@ -27,10 +27,11 @@ async function withWindowsIdentitySlot<T>(work: () => Promise<T>) {
   }
 }
 
-function commandOutput(command: string, args: string[], timeoutMs = 5_000) {
+function commandOutput(command: string, args: string[], timeoutMs = 5_000, maxOutput = 64 * 1024) {
   return new Promise<string>((resolve) => {
     let stdout = '';
     let settled = false;
+    let overflow = false;
     let child: ReturnType<typeof spawn>;
     try {
       child = spawn(command, args, {
@@ -48,16 +49,80 @@ function commandOutput(command: string, args: string[], timeoutMs = 5_000) {
       resolve(value.trim());
     };
     child.stdout?.on('data', (chunk: Buffer) => {
-      if (stdout.length < 64 * 1024) stdout += chunk.toString('utf8');
+      stdout += chunk.toString('utf8');
+      if (stdout.length > maxOutput) { overflow = true; stdout = stdout.slice(0, maxOutput); }
     });
     child.once('error', () => finish(''));
-    child.once('close', (code) => finish(code === 0 ? stdout : ''));
+    child.once('close', (code) => finish(code === 0 && !overflow ? stdout : ''));
     const timer = setTimeout(() => {
       child.kill('SIGKILL');
       finish('');
     }, timeoutMs);
     timer.unref();
   });
+}
+
+export function parseProcessGroupSnapshot(output: string, groupId: number): ProcessIdentity[] {
+  const result: ProcessIdentity[] = [];
+  for (const line of output.split(/\r?\n/)) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/);
+    if (!match || Number(match[2]) !== groupId) continue;
+    result.push({ pid: Number(match[1]), startMarker: match[3].replace(/\s+/g, ' ') });
+  }
+  return result;
+}
+
+/** Includes orphaned members even after the original root was reaped. */
+export async function inspectProcessGroup(groupId: number): Promise<ProcessIdentity[] | null> {
+  if (process.platform === 'win32' || !Number.isInteger(groupId) || groupId <= 0) return null;
+  const output = await commandOutput('ps', ['-axo', 'pid=,pgid=,lstart='], 5_000, 2 * 1024 * 1024);
+  return output ? parseProcessGroupSnapshot(output, groupId) : null;
+}
+
+export async function terminateProcessGroup(groupId: number, timeoutMs = 5_000, expectedStartMarker?: string) {
+  if (process.platform === 'win32' || !Number.isInteger(groupId) || groupId <= 0 || groupId === process.pid) return false;
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  const inspectOwned = async () => {
+    const members = await inspectProcessGroup(groupId);
+    if (!members || members.some((member) => member.pid === process.pid)) return null;
+    const root = members.find((member) => member.pid === groupId);
+    if (root && expectedStartMarker && !processIdentityMatches(root, expectedStartMarker)) return null;
+    return members;
+  };
+  const original = await inspectOwned();
+  if (!original) return false;
+  if (!original.length) return true;
+  const signal = async (kind: NodeJS.Signals) => {
+    const current = await inspectOwned();
+    if (!current) return false;
+    if (!current.length) return true;
+    try { process.kill(-groupId, kind); return true; } catch { return false; }
+  };
+  const wait = async (until: number) => {
+    while (true) {
+      const members = await inspectOwned();
+      if (!members) return false;
+      if (!members.length) return true;
+      if (Date.now() >= until) return false;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+  if (!await signal('SIGTERM')) return wait(Date.now());
+  if (await wait(Math.min(deadline, Date.now() + 3_000))) return true;
+  if (!await signal('SIGKILL')) return false;
+  return wait(deadline);
+}
+
+/** POSIX process groups do not contain descendants that call setsid/setpgid
+ * (Cursor tool shells do this). While the CLI root is still present, capture
+ * and terminate its full parent tree as well as its original orphan-safe
+ * group. Both proofs are required before the allocation can be released. */
+export async function terminateProcessGroupTree(rootPid: number, timeoutMs = 5_000, expectedStartMarker?: string) {
+  if (process.platform === 'win32') return false;
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  const tree = await terminateProcessTree(rootPid, Math.max(0, deadline - Date.now()), expectedStartMarker);
+  const group = await terminateProcessGroup(rootPid, Math.max(0, deadline - Date.now()), expectedStartMarker);
+  return tree && group;
 }
 
 export function processIdentityCommand(pid: number, platform: ProcessIdentityPlatform = process.platform) {
@@ -153,13 +218,11 @@ async function processTreePids(rootPid: number) {
   return [...new Set(ordered)];
 }
 
-export function waitForProcessExit(pid: number, timeoutMs: number) {
+export function waitForProcessExit(pid: number, timeoutMs: number, isAlive = processExists) {
   return new Promise<boolean>((resolve) => {
     const deadline = Date.now() + timeoutMs;
     const poll = () => {
-      try {
-        process.kill(pid, 0);
-      } catch {
+      if (!isAlive(pid)) {
         resolve(true);
         return;
       }
@@ -211,18 +274,35 @@ export async function terminateProcessTree(pid: number, timeoutMs = 5_000, expec
   if (expectedStartMarker && !processIdentityMatches(identity, expectedStartMarker)) return true;
   const tree = await processTreePids(pid);
   if (!tree) return false;
-  for (const processId of tree) {
-    try { process.kill(processId, 'SIGTERM'); } catch { /* process already stopped */ }
-  }
-  if (await waitForProcessExit(pid, Math.min(timeoutMs, 3_000))) {
-    const identities = await Promise.all(tree.map((processId) => inspectProcessIdentity(processId)));
-    return identities.every((candidate) => candidate === null);
-  }
-  for (const processId of tree) {
-    try { process.kill(processId, 'SIGKILL'); } catch { /* process already stopped */ }
-  }
-  const exited = await waitForProcessExit(pid, Math.max(0, timeoutMs - 3_000));
-  if (!exited) return false;
   const identities = await Promise.all(tree.map((processId) => inspectProcessIdentity(processId)));
-  return identities.every((candidate) => candidate === null);
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  const signalOriginalProcesses = async (signal: NodeJS.Signals) => {
+    for (let index = 0; index < tree.length; index += 1) {
+      const original = identities[index];
+      const current = await inspectProcessIdentity(tree[index]);
+      // A recycled PID must not receive a signal intended for the old tree.
+      if (!original || !current || !processIdentityMatches(current, original.startMarker)) continue;
+      try { process.kill(tree[index], signal); } catch { /* verification below remains authoritative */ }
+    }
+  };
+  const waitForTree = async (durationMs: number) => {
+    const until = Math.min(deadline, Date.now() + Math.max(0, durationMs));
+    while (true) {
+      const remaining = await Promise.all(tree.map(async (processId, index) => {
+        if (!processExists(processId)) return false;
+        const current = await inspectProcessIdentity(processId);
+        // Inspection failure for a live process is uncertainty, not proof of exit.
+        return !current || !identities[index] || processIdentityMatches(current, identities[index]!.startMarker);
+      }));
+      if (remaining.every((alive) => !alive)) return true;
+      if (Date.now() >= until) return false;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  };
+  await signalOriginalProcesses('SIGTERM');
+  if (await waitForTree(Math.min(timeoutMs, 3_000))) return true;
+  // The root may have exited while a descendant ignored SIGTERM. Escalate the
+  // captured tree, rather than treating root exit as successful cancellation.
+  await signalOriginalProcesses('SIGKILL');
+  return waitForTree(Math.max(0, deadline - Date.now()));
 }

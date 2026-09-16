@@ -1,15 +1,43 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  agentContextCommandPrefix,
   agentCommandChains,
   agentCommandProfile,
   agentCommandPrompt,
   agentCommandProfiles,
   agentContextHelpLines,
+  loopAgentCommandPrefix,
 } from './agent-command-profile';
 import { loadCommandChainDefinition, parseCommandChainDefinition } from './command-chain-definition';
 import { bundledCommandChainYaml } from '../infrastructure/agent-configuration-store';
 import { COMMAND_CHAIN_CATALOG } from './command-chain-catalog';
+
+test('desktop command prefixes force Electron into Node mode inside the Agent shell', () => {
+  const previous = {
+    desktop: process.env.LOOP_DESKTOP,
+    desktopNode: process.env.LOOP_DESKTOP_NODE,
+  };
+  process.env.LOOP_DESKTOP = '1';
+  process.env.LOOP_DESKTOP_NODE = '/Applications/LoopWork.app/Contents/MacOS/LoopWork';
+  try {
+    assert.equal(
+      loopAgentCommandPrefix('/opt/Loop Work'),
+      'ELECTRON_RUN_AS_NODE=1 "/Applications/LoopWork.app/Contents/MacOS/LoopWork" "/opt/Loop Work/desktop-runners/loop-agent.cjs"',
+    );
+    assert.equal(
+      agentContextCommandPrefix('/opt/Loop Work'),
+      'ELECTRON_RUN_AS_NODE=1 "/Applications/LoopWork.app/Contents/MacOS/LoopWork" "/opt/Loop Work/desktop-runners/loopctl.cjs" agent-context',
+    );
+    assert.equal(loopAgentCommandPrefix('C:\\Loop Work','win32'),
+      `$env:ELECTRON_RUN_AS_NODE='1'; & '/Applications/LoopWork.app/Contents/MacOS/LoopWork' 'C:\\Loop Work/desktop-runners/loop-agent.cjs'`);
+  } finally {
+    if (previous.desktop === undefined) delete process.env.LOOP_DESKTOP;
+    else process.env.LOOP_DESKTOP = previous.desktop;
+    if (previous.desktopNode === undefined) delete process.env.LOOP_DESKTOP_NODE;
+    else process.env.LOOP_DESKTOP_NODE = previous.desktopNode;
+  }
+});
 
 test('projects YAML command chains as real phases with their available commands', () => {
   const [chain] = agentCommandChains('backlog-agent');

@@ -1,10 +1,18 @@
 import { randomUUID } from 'node:crypto';
-import { revalidatePath } from 'next/cache';
+import { invalidatePage as revalidatePath } from '../infrastructure/page-invalidation';
 import type { AgentResult } from '../domain/agent-result';
 import { assertState, type TaskState } from '../domain/task';
 import { databaseConnection } from '../infrastructure/database';
 import { markFeedbackReportGeneratedInDb } from './feedback';
 import type { DelegationEnvelope } from './tasks';
+import type { WorkflowItemRow } from './work-items';
+import { transitionWorkItemInDb } from './work-item-transitions';
+import { feedbackSourceItemInDb } from './work-item-feedback';
+import { projectNativeWorkflowDisplayInDb } from './native-workflow-projection';
+import { workflowEndedInDb, workflowResultHeldInDb } from './work-item-controls';
+import { restoreExecutionDelegationInDb } from './execution-delegation';
+import type { ExecutionAttempt } from './executions';
+import { finalDocumentSnapshotInDb } from './work-item-artifacts';
 
 type PublicationOutcome = 'advanced' | 'discarded';
 
@@ -35,13 +43,41 @@ export async function publishReviewReport(input: {
              analysis_index, dev_index, test_index, total_stories,
              spec_resolved_index, run_state, closure_status,
              review_revision, review_document_id, closure_acknowledged_at,
-             resume_status, resume_pending, blocked_reason
+             resume_status, resume_pending, blocked_reason, workflow_engine, is_paused
       FROM tasks WHERE task_id = ?
-    `).get(delegation.taskId) as TaskState | undefined;
+    `).get(delegation.taskId) as (TaskState & { workflow_engine: string; is_paused: number }) | undefined;
     if (!task) throw new Error(`需求不存在：${delegation.taskId}`);
     const baselineMatches = task.review_revision === delegation.reviewRevision
       && (task.review_document_id || '') === delegation.reviewDocumentId;
-    if (delegation.pipeline === 'review') {
+    const native = task.workflow_engine === 'native';
+    let nativeItem: (WorkflowItemRow & { source_status: string }) | undefined;
+    if (native) {
+      if (!input.executionId) throw new Error('原生报告发布必须关联来源执行');
+      nativeItem = db.prepare(`SELECT item.*, execution.status AS source_status FROM execution_attempts execution JOIN workflow_items item ON item.item_id = execution.work_item_id
+        WHERE execution.execution_id = ? AND execution.task_id = ? AND execution.agent = 'review-agent'
+          AND item.task_id = execution.task_id AND item.origin = 'native' AND item.agent = execution.agent
+          AND item.pipeline = ?`).get(input.executionId, delegation.taskId, delegation.pipeline) as (WorkflowItemRow & { source_status: string }) | undefined;
+      if (!nativeItem || delegation.workItemId && nativeItem.item_id !== delegation.workItemId) throw new Error('原生报告来源与工作项绑定不一致');
+      if (task.is_paused || nativeItem.source_status === 'cancelled' || workflowEndedInDb(db, delegation.taskId)
+        || ['superseded', 'cancelled', 'completed'].includes(nativeItem.status) || !baselineMatches) return 'discarded';
+      const source = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?')
+        .get(input.executionId) as ExecutionAttempt;
+      const frozen = restoreExecutionDelegationInDb(db, source);
+      if (delegation.reviewRevision !== frozen.reviewRevision || delegation.reviewDocumentId !== frozen.reviewDocumentId
+        || delegation.workItemRevision !== undefined && delegation.workItemRevision !== frozen.workItemRevision
+        || delegation.workItemEpoch !== undefined && delegation.workItemEpoch !== frozen.workItemEpoch) {
+        throw new Error('原生报告发布的产物版本、工作项版本或派发代次与冻结来源不一致');
+      }
+      if (workflowResultHeldInDb(db, delegation.taskId, input.executionId)) throw new Error('报告来源工作项仍有未解除的依赖或介入门禁，不能发布');
+      if (nativeItem.status !== 'running') throw new Error('报告工作项未在运行');
+      if (delegation.pipeline === 'feedback-report') {
+        if (!delegation.feedbackBatchId || !delegation.feedbackGroupId) throw new Error('反馈报告缺少冻结归属');
+        feedbackSourceItemInDb(db, { taskId: delegation.taskId, executionId: input.executionId, pipeline: delegation.pipeline,
+          batchId: delegation.feedbackBatchId, groupId: delegation.feedbackGroupId });
+      } else if (delegation.pipeline !== 'review' || nativeItem.work_key !== 'delivery:review') {
+        throw new Error(`Review Agent 不支持 pipeline=${delegation.pipeline}`);
+      }
+    } else if (delegation.pipeline === 'review') {
       if (
         task.agile_status !== 'in review'
         || task.current_subagent !== 'review-agent'
@@ -85,7 +121,28 @@ export async function publishReviewReport(input: {
     );
 
     let prospective: TaskState;
-    if (delegation.pipeline === 'feedback-report') {
+    if (native && nativeItem) {
+      // Artifact lineage still uses compare-and-swap. Progress, Agent and Lane
+      // fields are display only and cannot authorize or reject publication.
+      const updated = db.prepare(`UPDATE tasks SET review_revision = ?, review_document_id = ?, closure_acknowledged_at = NULL,
+        next_step = ?, last_actor = 'review-agent', updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ? AND review_revision = ? AND COALESCE(review_document_id, '') = ?`)
+        .run(reviewRevision, documentId, `结卡报告 v${reviewRevision} 已生成`, delegation.taskId, delegation.reviewRevision, delegation.reviewDocumentId);
+      if (updated.changes !== 1) throw new Error('报告产物版本在发布时发生变化');
+      db.prepare(`INSERT INTO execution_receipts(receipt_id, execution_id, kind, receipt_key, payload_json)
+        VALUES(?, ?, 'work_item_artifact', 'review_report', ?)`)
+        .run(randomUUID(), input.executionId, JSON.stringify({ itemId: nativeItem.item_id, revision: nativeItem.revision,
+          documentId, reviewRevision, contentHash: finalDocumentSnapshotInDb(db, delegation.taskId)!.contentHash,
+          resultId: input.resultId, summary: result.summary }));
+      if (delegation.pipeline === 'feedback-report') markFeedbackReportGeneratedInDb(db, {
+        taskId: delegation.taskId, batchId: delegation.feedbackBatchId!, groupId: delegation.feedbackGroupId!, executionId: input.executionId });
+      // Commit the artifact, completion, wake-up and applied result together.
+      // A restart must never leave an applied report on a running Work Item.
+      transitionWorkItemInDb(db, { itemId: nativeItem.item_id, action: 'complete', eventKey: `result:${input.resultId}`,
+        actor: delegation.agent, authority: 'agent', reason: result.summary, executionId: input.executionId });
+      projectNativeWorkflowDisplayInDb(db, delegation.taskId);
+      prospective = db.prepare('SELECT * FROM tasks WHERE task_id = ?').get(delegation.taskId) as TaskState;
+    } else if (delegation.pipeline === 'feedback-report') {
       prospective = {
         ...task,
         current_subagent: 'review-agent',
@@ -185,7 +242,7 @@ export async function publishReviewReport(input: {
     `).run(
       randomUUID(),
       delegation.taskId,
-      prospective.agile_status === 'ready_to_close'
+      (native ? delegation.pipeline === 'review' : prospective.agile_status === 'ready_to_close')
         ? `结卡报告 v${reviewRevision} 已生成，等待用户阅读并关闭需求`
         : `结卡报告 v${reviewRevision} 已按反馈修订，等待独立验证`,
     );
@@ -200,6 +257,7 @@ export async function publishReviewReport(input: {
     if (marked.changes !== 1) {
       throw new Error('Review Agent result 已被其他流程处理');
     }
+    if (native) projectNativeWorkflowDisplayInDb(db, delegation.taskId);
     return 'advanced';
   })();
   if (outcome === 'advanced') refreshPublication(delegation.taskId);

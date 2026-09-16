@@ -23,6 +23,9 @@ import { TaskAutoRefresh } from '../task-auto-refresh';
 import { TaskContextChat } from './task-context-chat';
 import { TaskPriorityControl } from './task-priority-control';
 import { EditTaskInputDialog } from './edit-task-input-dialog';
+import { ArbitrationControl } from './arbitration-control';
+import { listWorkflowItems } from '../../../src/application/work-items';
+import { directWorkItemPresentation } from '../../../src/domain/work-item-presentation';
 import { TaskDetailNavigator, type TaskDetailNavigationItem } from './task-detail-navigator';
 import DecisionsPage from '../../decisions/page';
 import {
@@ -199,6 +202,7 @@ function dispatchReasonLabel(reason: DispatchWaitReason | undefined) {
     'dependencies-pending': '等待前置需求进入结卡',
     'lower-priority': '当前由更高优先级工作先推进',
     'no-runnable-work': '当前没有可派发步骤',
+    'migration-required': '等待启动 Loop 完成历史工作项迁移',
   } as Record<DispatchWaitReason, string>)[reason || 'no-runnable-work'];
 }
 
@@ -213,7 +217,7 @@ export default async function TaskDetail({
   const detailParams = await searchParams;
   const detail = await getTask(taskId);
   if (!detail) notFound();
-  const { task, metadata, dependencies, dependencyGateOpen, lanes, stories, deliverySpecs, acceptances, questions, runtimeInputs, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
+  const { task, metadata, dependencies, dependencyGateOpen, lanes, stories, deliverySpecs, acceptances, questions, runtimeInputs, interventions, documents, documentComments, feedbackBatches, feedbackGroups, closureAcknowledgements, executionAttempts, events } = detail;
   const [contextChat, commandProgress, commandAudit] = await Promise.all([
     getTaskContextChat(taskId),
     getAgentCommandProgress(taskId),
@@ -229,7 +233,7 @@ export default async function TaskDetail({
   const dependencyCandidates = canEditOriginalInput ? await listRequirementDependencyCandidates() : [];
   const pendingDependencies = dependencyGateOpen
     ? []
-    : dependencies.filter((dependency) => !requirementDependencySatisfied(dependency.agile_status));
+    : dependencies.filter((dependency) => !requirementDependencySatisfied(dependency));
   const waitingForDependencies = pendingDependencies.length > 0;
   const {
     isBusinessAnalysis,
@@ -242,6 +246,11 @@ export default async function TaskDetail({
     itemType: task.item_type,
     currentSubagent: task.current_subagent,
   });
+  const directItems = isDirect ? await listWorkflowItems(taskId) : [];
+  const directItem = directItems
+    .filter((item) => item.origin === 'native' && item.work_key === 'direct:execute' && item.status !== 'superseded')
+    .sort((a, b) => b.revision - a.revision)[0];
+  const directPresentation = directWorkItemPresentation(directItem?.status, Boolean(task.is_paused));
   const analysisLane = lanes.find((lane) => lane.lane === 'analysis')!;
   const deliveryLane = lanes.find((lane) => lane.lane === 'delivery')!;
   const dispatch = await progressDispatchInspector.inspect({ requirementId: taskId });
@@ -274,7 +283,7 @@ export default async function TaskDetail({
         : task.agile_status === 'done' ? 'Business Analysis 已完成'
           : `${agentLabel(task.current_subagent)}正在推进当前工作包`
       : isDirect
-        ? task.agile_status === 'done' ? 'Direct Agent 已提交最终结果' : 'Direct Agent 正在执行当前需求'
+        ? directPresentation.detail
         : stepDetail(task, lanes);
   const unansweredRuntimeInputs = runtimeInputs.filter((input) =>
     input.status === 'pending'
@@ -286,6 +295,24 @@ export default async function TaskDetail({
     input.source_agent === 'test-agent'
       && input.status === 'pending'
       && (input.assistance_status === 'pending' || input.assistance_status === 'running'));
+  const operationalInterventions = interventions.filter((intervention) =>
+    !intervention.dedupe_key.startsWith('question:')
+      && !intervention.dedupe_key.startsWith('runtime-input:')
+      && !intervention.dedupe_key.startsWith('verification-assistance:'));
+  const activeOperationalInterventions = operationalInterventions.filter((intervention) =>
+    ['pending', 'running', 'awaiting_human'].includes(intervention.status));
+  const taskHold = activeOperationalInterventions.find(intervention =>
+    intervention.dedupe_key === 'native:adopt:task-blocked' && intervention.resolver_strategy === 'human_only');
+  const systemInterventionActive = interventions.some((intervention) =>
+    intervention.resolver_strategy === 'system_then_human'
+      && ['pending', 'running'].includes(intervention.status));
+  const systemArbitrationActive = interventions.some((intervention) =>
+    intervention.authority === 'arbitration'
+      && ['pending', 'running'].includes(intervention.status));
+  const arbitrationWaitingForHuman = interventions.some((intervention) =>
+    intervention.authority === 'arbitration' && intervention.status === 'awaiting_human');
+  const arbitrationItems = arbitrationWaitingForHuman ? (isDirect ? directItems : await listWorkflowItems(taskId))
+    .filter((item) => item.origin === 'native' && !['superseded', 'cancelled'].includes(item.status)) : [];
   const waitingForVerificationAssistance = waitingRuntimeLanes.some((lane) =>
     lane.current_agent === 'test-agent') && !systemVerificationAssistance;
   const blockedLanes = lanes.filter((lane) => lane.status === 'system_blocked');
@@ -329,7 +356,7 @@ export default async function TaskDetail({
     ...(showDecisionAlignment ? [{ id: 'decisions' as const, label: '决策对齐', description: '任务级决策与处理记录', value: pendingDecisions.length ? `${pendingDecisions.length} 项待处理` : `${alignedDecisions.length} 项`, attention: pendingDecisions.length > 0 }] : []),
     { id: 'deliverables', label: '交付产物', description: '单元、验收契约、文档与规格', value: deliveryFeedbackCount ? `${deliveryFeedbackCount} 条反馈待处理` : `${deliveryDocuments.length + currentSpecs.length + acceptances.length} 项`, attention: deliveryFeedbackCount > 0 },
     { id: 'closure', label: isBusinessAnalysis ? '最终规格' : '结卡报告', description: isBusinessAnalysis ? '审查结果与阅读确认' : '最终报告与阅读确认', value: reviewDocument ? `版本 ${task.review_revision}` : '尚未生成', attention: closureNeedsAttention },
-    { id: 'activity', label: '活动记录', description: '运行协助与推进时间线', value: activeRuntimeInputCount ? `${activeRuntimeInputCount} 项协助中` : `${events.length} 条活动`, attention: unansweredRuntimeInputs.length > 0 },
+    { id: 'activity', label: '活动记录', description: '介入事项、运行协助与推进时间线', value: activeRuntimeInputCount + activeOperationalInterventions.length ? `${activeRuntimeInputCount + activeOperationalInterventions.length} 项介入中` : `${events.length} 条活动`, attention: unansweredRuntimeInputs.length > 0 || arbitrationWaitingForHuman },
     { id: 'actions', label: '推进控制', description: '对话、调度与运行状态', value: pipeline.length ? `${pipeline.length} 个待派发` : '当前状态' },
     { id: 'audit', label: '执行审计', description: 'Agent 命令、输入与验证追溯', value: `${executionAttempts.length} 次 · ${commandAudit.length} 条命令` },
   ];
@@ -343,7 +370,7 @@ export default async function TaskDetail({
           <p className="eyebrow">{task.task_id}</p>
           <h1>{task.title}</h1>
         </div>
-        <span className={`badge ${task.is_paused || waitingForDependencies || task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{task.is_paused ? '已暂停' : waitingForDependencies ? '等待前置需求' : systemVerificationAssistance ? '系统辅助验证中' : waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : isDirect && task.agile_status !== 'done' ? '直接执行' : inBusinessAnalysisStage ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status)}</span>
+        <span className={`badge ${task.is_paused || waitingForDependencies || task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{task.is_paused ? '已暂停' : waitingForDependencies ? '等待前置需求' : systemInterventionActive ? systemArbitrationActive ? '系统仲裁中' : systemVerificationAssistance ? '系统辅助验证中' : '系统辅助处理中' : arbitrationWaitingForHuman ? '等待人工仲裁' : waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : isDirect && task.agile_status !== 'done' ? '直接执行' : inBusinessAnalysisStage ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status)}</span>
       </div>
       <div className="chips" aria-label="需求运行上下文">
         <TaskAutoRefresh taskId={task.task_id}/>
@@ -419,7 +446,7 @@ export default async function TaskDetail({
       </div>
       <div className="card story-list">
         {dependencies.map((dependency) => {
-          const satisfied = requirementDependencySatisfied(dependency.agile_status);
+          const satisfied = requirementDependencySatisfied(dependency);
           return <Link className="story task-dependency-link" href={`/tasks/${encodeURIComponent(dependency.depends_on_task_id)}`} key={dependency.depends_on_task_id}>
             <span className={satisfied ? 'done' : 'active'}>
               {satisfied ? <CheckCircle2 size={16}/> : <Clock3 size={16}/>}
@@ -468,7 +495,7 @@ export default async function TaskDetail({
       {showDeliveryWorkflow && <><div><small>交付分析</small><b>{task.analysis_index} / {task.total_stories}</b></div>
       <div><small>实现</small><b>{task.dev_index} / {task.total_stories}</b></div>
       <div><small>验证</small><b>{task.test_index} / {task.total_stories}</b></div></>}
-      {isDirect && <div><small>执行节点</small><b>{task.agile_status === 'done' ? '已提交' : '运行中'}</b></div>}
+      {isDirect && <div><small>执行节点</small><b>{directPresentation.label}</b></div>}
       {inBusinessAnalysisStage && <div><small>当前阶段</small><b>{businessAnalysisSteps[currentStep]?.label}</b></div>}
       <div><small>待回答决策</small><b>{unansweredQuestions.length}</b></div>
       <div><small>待运行协助</small><b>{unansweredRuntimeInputs.length}</b></div>
@@ -674,6 +701,41 @@ export default async function TaskDetail({
     </div>
 
     <div className="task-detail-panel-stack">
+        {activeOperationalInterventions.length > 0 && <section className="task-section">
+          <div className="section-head">
+            <h2>系统介入与仲裁</h2>
+            <small>{activeOperationalInterventions.length} 项处理中</small>
+          </div>
+          <div className="question-list">
+            {activeOperationalInterventions.map((intervention) => {
+              const running = intervention.status === 'running';
+              const awaitingHuman = intervention.status === 'awaiting_human';
+              const statusText = intervention.resolver_strategy === 'human_only' ? '等待人工确认'
+                : awaitingHuman
+                ? `系统已尝试 ${intervention.system_attempt_count} 次 · 等待人工处理`
+                : running
+                  ? `系统处理中 · ${intervention.system_attempt_count}/${intervention.max_system_attempts}`
+                  : `等待系统处理 · ${intervention.system_attempt_count}/${intervention.max_system_attempts}`;
+              return <article className="question card" key={intervention.intervention_id}>
+                <div className="question-title">
+                  <AlertTriangle size={18}/>
+                  <div>
+                    <p className="eyebrow">{intervention.dedupe_key === 'native:adopt:task-blocked' ? '需求级阻塞' : intervention.authority === 'arbitration' ? '流程仲裁' : '系统介入'}</p>
+                    <h3>{terminologyText(intervention.summary)}</h3>
+                    <small>请求方：{agentLabel(intervention.requested_by)}</small>
+                  </div>
+                  <span className={`badge ${awaitingHuman ? 'amber' : 'blue'}`}>{statusText}</span>
+                </div>
+                {intervention.last_error && <div className="recommendation">上次尝试：{terminologyText(intervention.last_error)}</div>}
+                {awaitingHuman && <p className="muted">系统辅助 Agent 未能安全完成处理。原始失败证据仍保留在执行审计中，请核对证据后处置。</p>}
+                {awaitingHuman && intervention.authority === 'arbitration' && arbitrationItems.length > 0 && !task.is_paused &&
+                  <ArbitrationControl taskId={taskId} interventionId={intervention.intervention_id}
+                    canComplete={arbitrationItems.some((item) => item.item_id === intervention.item_id && ['dev-agent', 'test-agent'].includes(item.agent || ''))}
+                    targets={arbitrationItems.map((item) => ({ key: item.work_key, label: `${item.title} · ${item.work_key} · v${item.revision}` }))}/>}
+              </article>;
+            })}
+          </div>
+        </section>}
         {showDeliveryWorkflow && <section className="task-section">
           <div className="section-head">
             <h2>运行信息与验证协助</h2>
@@ -682,6 +744,7 @@ export default async function TaskDetail({
           <div className="question-list">
             {runtimeInputs.length === 0 ? <div className="card empty">当前没有 Agent 等待补充信息或验证协助。</div> : runtimeInputs.map((input) => {
               const verificationAssistance = input.source_agent === 'test-agent';
+              const resolvedBySystem = input.intervention_resolved_by === 'system-assistance-agent';
               const assistanceActive = verificationAssistance && input.status === 'pending'
                 && (input.assistance_status === 'pending' || input.assistance_status === 'running');
               const assistanceLabel = input.assistance_status === 'running'
@@ -699,14 +762,14 @@ export default async function TaskDetail({
                   <h3>{terminologyText(input.title)}</h3>
                   <small>来源：{agentLabel(input.source_agent)}</small>
                 </div>
-                <span className={`badge ${input.status === 'answered' || input.status === 'resolved' ? 'green' : assistanceActive ? 'blue' : 'amber'}`}>{input.status === 'resolved' ? '已用于恢复' : input.status === 'answered' ? input.assistance_status === 'resolved' ? '系统已解决' : '已回答' : input.status === 'superseded' ? '已失效' : assistanceLabel || '待回答'}</span>
+                <span className={`badge ${input.status === 'answered' || input.status === 'resolved' ? 'green' : assistanceActive ? 'blue' : 'amber'}`}>{input.status === 'resolved' ? '已用于恢复' : input.status === 'answered' ? resolvedBySystem ? '系统已解决' : '已回答' : input.status === 'superseded' ? '已失效' : assistanceLabel || '待回答'}</span>
               </div>
               <p>{terminologyText(input.question)}</p>
               {input.why && <p className="muted">为什么需要：{terminologyText(input.why)}</p>}
               {input.recommendation && <div className="recommendation">建议：{terminologyText(input.recommendation)}</div>}
               {assistanceActive && <div className="recommendation">系统辅助 Agent 正在优先调查。只有连续尝试仍无法解决后，才会转为人工验证协助。{input.assistance_last_reason ? ` 上次尝试：${terminologyText(input.assistance_last_reason)}` : ''}</div>}
               {input.assistance_status === 'escalated' && input.assistance_last_reason && <div className="recommendation">系统辅助结论：{terminologyText(input.assistance_last_reason)}</div>}
-              {input.answer ? <p className="answer"><b>{input.assistance_status === 'resolved' ? '系统辅助答复：' : '你的答复：'}</b>{input.answer}</p> : input.status === 'pending' && !assistanceActive && <form action={answerRuntimeInputAction}>
+              {input.answer ? <p className="answer"><b>{resolvedBySystem ? '系统辅助答复：' : '你的答复：'}</b>{input.answer}</p> : input.status === 'pending' && !assistanceActive && <form action={answerRuntimeInputAction}>
                 <input type="hidden" name="taskId" value={task.task_id}/>
                 <input type="hidden" name="requestId" value={input.request_id}/>
                 <textarea name="answer" required placeholder={verificationAssistance ? '补充依赖或环境；也可以填写你的手测结果、实际观察和证据…' : '填写继续当前执行所需的非敏感运行信息…'}/>
@@ -764,7 +827,7 @@ export default async function TaskDetail({
           <button className="button secondary" type="submit">暂停这个需求</button>
         </form>}
 
-        {lanes.filter((lane) => lane.status === 'system_blocked').map((lane) => <form action={releaseBlockAction} className="card form-panel release-block" key={lane.lane}>
+        {!taskHold && lanes.filter((lane) => lane.status === 'system_blocked').map((lane) => <form action={releaseBlockAction} className="card form-panel release-block" key={lane.lane}>
           <h2><AlertTriangle size={15}/>{lane.lane === 'analysis' ? '交付分析' : '开发验证'}通道阻塞</h2>
           <p className="muted">{terminologyText(lane.blocked_reason) || '本次 Lane 执行被系统暂停。'}</p>
           <input type="hidden" name="taskId" value={task.task_id}/>
@@ -772,11 +835,11 @@ export default async function TaskDetail({
           <button className="button success" type="submit">解除该 Lane 阻塞并继续</button>
         </form>)}
 
-        {task.agile_status === 'blocked' && task.run_state === 'system_blocked' && blockedLanes.length === 0 && <form action={releaseBlockAction} className="card form-panel release-block">
-          <h2><AlertTriangle size={15}/>系统阻塞</h2>
+        {(taskHold || task.agile_status === 'blocked' && task.run_state === 'system_blocked' && blockedLanes.length === 0) && <form action={releaseBlockAction} className="card form-panel release-block">
+          <h2><AlertTriangle size={15}/>{taskHold ? '需求级阻塞 · 人工确认' : '系统阻塞'}</h2>
           <p className="muted">{terminologyText(task.blocked_reason) || '本次执行被系统暂停。解除后将从已保存的执行结果继续。'}</p>
           <input type="hidden" name="taskId" value={task.task_id}/>
-          <button className="button success" type="submit">解除系统阻塞并继续</button>
+          <button className="button success" type="submit">{taskHold ? '确认解除需求级阻塞' : '解除系统阻塞并继续'}</button>
         </form>}
 
         {!['done', 'cancelled'].includes(task.agile_status) && <details className="card danger-card task-danger-zone">
@@ -833,6 +896,7 @@ export default async function TaskDetail({
                 <summary>技术追溯信息</summary>
                 <pre>{[
                   `execution: ${attempt.execution_id}`,
+                  attempt.work_item_id ? `work item: ${attempt.work_item_id} · revision ${attempt.work_item_revision ?? 'unknown'} · execution sequence ${attempt.work_item_attempt ?? 'unknown'}` : '',
                   attempt.dispatch_generation_key ? `reservation: ${attempt.execution_id} · run ${attempt.run_id}` : '',
                   attempt.claimed_resources ? `claimed resources: ${attempt.claimed_resources}` : '',
                   attempt.status === 'planned' ? `preparing since: ${attempt.created_at}` : '',

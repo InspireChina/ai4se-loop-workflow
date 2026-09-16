@@ -138,26 +138,29 @@ function directProgress(row: ActiveExecutionRow): AgentCommandProgress {
   };
 }
 
-function verificationAssistanceProgress(db: Database.Database, row: ActiveExecutionRow): AgentCommandProgress {
-  const job = db.prepare(`
-    SELECT attempt_count, max_attempts, status_viewed_session_id
-    FROM verification_assistance_jobs WHERE current_execution_id = ?
+function interventionProgress(db: Database.Database, row: ActiveExecutionRow): AgentCommandProgress {
+  const intervention = db.prepare(`
+    SELECT max_system_attempts, status_viewed_session_id,
+           (SELECT COUNT(*) FROM intervention_attempts attempt
+            WHERE attempt.intervention_id = interventions.intervention_id
+              AND attempt.status IN ('running', 'deferred', 'failed', 'resolved')) AS attempt_count
+    FROM interventions WHERE current_execution_id = ?
   `).get(row.execution_id) as {
     attempt_count: number;
-    max_attempts: number;
+    max_system_attempts: number;
     status_viewed_session_id: string | null;
   } | undefined;
-  const inspected = Boolean(job?.status_viewed_session_id);
+  const inspected = Boolean(intervention?.status_viewed_session_id);
   return {
     executionId: row.execution_id,
     agent: row.agent,
     pipeline: row.pipeline,
     storyIndex: row.story_index,
     state: 'running',
-    stateLabel: `系统辅助尝试 ${job?.attempt_count || 1}/${job?.max_attempts || 3}`,
+    stateLabel: `系统辅助尝试 ${intervention?.attempt_count || 1}/${intervention?.max_system_attempts || 3}`,
     currentPhase: inspected ? 'investigate' : 'restore',
     stages: [
-      { id: 'restore', label: '读取协助请求', status: inspected ? 'completed' : 'current' },
+      { id: 'restore', label: '读取介入事项', status: inspected ? 'completed' : 'current' },
       { id: 'investigate', label: '自主调查与验证', status: inspected ? 'current' : 'pending' },
       { id: 'submit', label: '提交解决或转交', status: 'pending' },
     ],
@@ -345,8 +348,8 @@ export function agentCommandProgressInDb(db: Database.Database, taskId: string) 
   const progress = drafts.map((draft) => buildDraftProgress(db, draft));
   for (const execution of activeExecutions) {
     if (draftExecutionIds.has(execution.execution_id)) continue;
-    if (execution.pipeline === 'verification-assistance') {
-      progress.push(verificationAssistanceProgress(db, execution));
+    if (execution.pipeline === 'verification-assistance' || execution.pipeline === 'intervention') {
+      progress.push(interventionProgress(db, execution));
       continue;
     }
     const profile = agentCommandProfile(execution.agent, execution.pipeline);

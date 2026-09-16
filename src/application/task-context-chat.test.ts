@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 test('keeps one executor-bound context chat per task and persists its transcript', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { beginTaskContextChatTurn, completeTaskContextChatTurn, getTaskContextChat } = await import('./task-context-chat');
   const taskId = await createTask({ title: 'Context chat isolation' });
 
@@ -40,7 +40,7 @@ test('keeps one executor-bound context chat per task and persists its transcript
 });
 
 test('submits unlimited keyed change requests from one Chat turn into the existing Feedback loop', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const {
     beginTaskContextChatTurn,
@@ -121,7 +121,7 @@ test('submits unlimited keyed change requests from one Chat turn into the existi
 });
 
 test('does not pause the current task Delivery lane while context Chat is running', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const { beginTaskContextChatTurn, completeTaskContextChatTurn } = await import('./task-context-chat');
   const taskId = await createTask({ title: 'Context chat workspace coordination' });
@@ -154,7 +154,7 @@ test('does not pause the current task Delivery lane while context Chat is runnin
 });
 
 test('rejects empty or oversized context chat input', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { beginTaskContextChatTurn } = await import('./task-context-chat');
   const taskId = await createTask({ title: 'Context chat validation' });
   await assert.rejects(() => beginTaskContextChatTurn(taskId, '   ', 'codex'));
@@ -162,7 +162,7 @@ test('rejects empty or oversized context chat input', async () => {
 });
 
 test('records four context Chat retries, rotates the provider session, and releases after exhaustion', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const {
     beginTaskContextChatTurn,

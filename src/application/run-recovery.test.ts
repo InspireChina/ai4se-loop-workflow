@@ -1,8 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { databaseConnection } from '../infrastructure/database';
-import { reconcileInterruptedExecutions, recordCleanExitContinuationActivity } from './executions';
-import { createTask } from './tasks';
+import { reconcileInterruptedExecutions, recordCleanExitContinuationActivity, failExecutionWithRetryPolicy } from './executions';
+import { createTask } from '../test/legacy-task-fixtures';
+import { createTask as createNativeTask } from './tasks';
+import { beginTestExecutionAttempt } from '../test/execution-fixtures';
+import { inspectTaskDispatchEnvelope } from '../test/dispatch-inspection-fixtures';
 import { applyNextQueuedAgentResult } from './agent-results';
 import {
   BROWSER_EXCLUSIVE_RESOURCE,
@@ -193,14 +196,25 @@ test('manual Loop stop defers a running execution without consuming a failure re
 test('routes queued result application failures through the same retry policy and activity log', async () => {
   const db = await databaseConnection();
   const insertFailure = async (suffix: string, attempt: number) => {
-    const taskId = await createTask({ title: `Queued result failure ${suffix}` });
-    const executionId = `execution-queued-failure-${suffix}`;
-    db.prepare(`
-      INSERT INTO execution_attempts(
-        execution_id, run_id, task_id, agent, pipeline, lane, delegation_key,
-        attempt, status, input_hash, input_json, result_json
-      ) VALUES(?, ?, ?, 'backlog-agent', 'backlog', 'control', ?, ?, 'output_received', ?, '{}', 'not-json')
-    `).run(executionId, `run-queued-failure-${suffix}`, taskId, `key-queued-failure-${suffix}`, attempt, `hash-queued-failure-${suffix}`);
+    db.prepare('UPDATE tasks SET is_paused = 1').run();
+    const taskId = await createNativeTask({ title: `Queued result failure ${suffix}` });
+    let executionId = '';
+    for (let index = 1; index <= attempt; index++) {
+      const delegation = (await inspectTaskDispatchEnvelope(taskId))[0];
+      assert.ok(delegation, 'the same native Work Item must be dispatchable at each real retry');
+      const source = await beginTestExecutionAttempt({ runId: `run-queued-failure-${suffix}`, delegation,
+        prompt: 'Native queued application failure domain fixture' });
+      executionId = source.attempt.execution_id;
+      assert.equal(source.attempt.attempt, index);
+      if (index < attempt) {
+        const retry = await failExecutionWithRetryPolicy(executionId, 'Prior actual domain application error',
+          { kind: 'agent-result-application', maxRetries: 4 });
+        assert.equal(retry.willRetry, true);
+      }
+    }
+    // Corrupt only the durable result in this domain fixture, never its frozen
+    // source binding or retry sequence. No smoke database is manipulated.
+    db.prepare("UPDATE execution_attempts SET status = 'output_received', result_json = 'not-json' WHERE execution_id = ?").run(executionId);
     db.prepare(`
       INSERT INTO agent_results(
         result_id, run_id, task_id, agent, pipeline, outcome, result_json,
@@ -233,10 +247,10 @@ test('routes queued result application failures through the same retry policy an
     db.prepare('SELECT status, failure_kind FROM execution_attempts WHERE execution_id = ?').get(exhausted.executionId),
     { status: 'system_blocked', failure_kind: 'agent-result-application' },
   );
-  assert.equal(
-    (db.prepare('SELECT run_state FROM tasks WHERE task_id = ?').get(exhausted.taskId) as { run_state: string }).run_state,
-    'system_blocked',
-  );
+  assert.ok(db.prepare(`SELECT 1 FROM workflow_items item JOIN interventions intervention ON intervention.item_id = item.item_id
+    WHERE item.task_id = ? AND item.status = 'waiting' AND intervention.authority = 'arbitration'
+      AND intervention.status = 'pending' AND intervention.source_execution_id = ?`)
+    .get(exhausted.taskId, exhausted.executionId), 'exhaustion is held by the exact Work Item and source-bound arbitration, not a legacy badge');
   const exhaustedEvent = db.prepare(`
     SELECT summary FROM task_events
     WHERE task_id = ? AND event_type = 'AgentExecutionRetriesExhausted'

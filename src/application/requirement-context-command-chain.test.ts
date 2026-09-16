@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
 import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
-import type { DelegationEnvelope } from './tasks';
+import type { DelegationEnvelope } from '../test/legacy-task-fixtures';
 
 function delegation(taskId: string, itemType = 'feature'): DelegationEnvelope {
   return {
@@ -133,7 +133,7 @@ async function reachFinalize(executionId: string, token: string, includeExpected
 }
 
 test('Backlog Agent uses only the YAML command chain and compiles downstream context', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const taskId = await createTask({ title: '导出筛选结果', description: '管理员可以导出当前筛选结果。' });
   const active = await begin(taskId);
 
@@ -188,7 +188,7 @@ test('Backlog Agent uses only the YAML command chain and compiles downstream con
 });
 
 test('the final builtin gate requires Existing Expected for bug requirements', async () => {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { databaseConnection } = await import('../infrastructure/database');
   const taskId = await createTask({ title: '修复筛选导出', description: '修复下载内容与筛选条件不一致。' });
   const db = await databaseConnection();
@@ -206,7 +206,7 @@ test('a HUMAN decision pauses and resumes the same YAML command-chain draft', as
   const { applyAgentResult } = await import('./agent-results');
   const { readAgentCommandSubmission, issueAgentCommandToken } = await import('./agent-command-drafts');
   const { completeExecution } = await import('./executions');
-  const { answerQuestion, createTask, getTask, submitClarificationAnswers } = await import('./tasks');
+  const { answerQuestion, createTask, getTask, submitClarificationAnswers } = await import('../test/legacy-task-fixtures');
   const taskId = await createTask({
     title: '确认导出用户范围',
     description: '增加筛选结果导出，但目标用户范围尚未冻结。',

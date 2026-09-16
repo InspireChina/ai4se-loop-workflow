@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { parseAgentResult, type AgentResult } from '../domain/agent-result';
+import { parseAgentResult, assertAgentResultRoleContract, type AgentResult } from '../domain/agent-result';
 import type { Actor } from '../domain/task';
 import { resourcesForAgent } from '../domain/resource';
 import { databaseConnection } from '../infrastructure/database';
-import { laneForAgent, settleTaskLaneInDb } from './task-lanes';
+import { laneForAgent, settleTaskLaneInDb, setTaskLaneStateInDb } from './task-lanes';
 import {
   CODE_WORKSPACE_RESOURCE,
   acquireResourceClaimInDb,
@@ -43,6 +43,15 @@ import {
 import { forwardReviewClosureGaps } from './review-closure-gaps';
 import { publishReviewReport } from './review-report-publication';
 import { EXECUTION_FAILURE_MAX_RETRIES, failExecutionWithRetryPolicy } from './executions';
+import { observeWorkflowFailureInDb } from './workflow-failures';
+import { openInterventionInDb } from './interventions';
+import { rewindWorkItemsInDb, transitionWorkItemInDb } from './work-item-transitions';
+import { restoreExecutionDelegationInDb } from './execution-delegation';
+import type { WorkflowItemRow } from './work-items';
+import { projectNativeWorkflowDisplayInDb } from './native-workflow-projection';
+import { finalizeTaskAfterFeedbackInDb } from './feedback';
+import { workflowResultHeldInDb, workflowEndedInDb } from './work-item-controls';
+import { finalDocumentSnapshotInDb } from './work-item-artifacts';
 
 const artifactKinds: Record<string, string> = {
   'direct-agent': 'direct_result',
@@ -236,28 +245,19 @@ function restoreExecutionSnapshot(
   result: AgentResult,
   delegation: DelegationEnvelope,
 ) {
-  let stored: DelegationEnvelope | null = null;
   if (row.execution_id) {
-    const attempt = db.prepare('SELECT input_json FROM execution_attempts WHERE execution_id = ?').get(row.execution_id) as { input_json: string } | undefined;
-    if (attempt?.input_json) {
-      try {
-        const parsed = JSON.parse(attempt.input_json) as { delegation?: DelegationEnvelope };
-        stored = parsed.delegation || null;
-      } catch {
-        throw new Error('排队结果关联的 execution delegation 快照无法读取');
-      }
+    const attempt = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(row.execution_id) as import('./executions').ExecutionAttempt | undefined;
+    if (attempt && (attempt.task_id !== row.task_id || attempt.agent !== row.agent
+      || attempt.pipeline !== row.pipeline || attempt.story_index !== row.story_index)) {
+      throw new Error('排队结果与来源 execution 不一致');
     }
-  }
-  if (stored) {
-    if (
-      stored.taskId !== row.task_id
-      || stored.agent !== row.agent
-      || stored.pipeline !== row.pipeline
-      || stored.storyIndex !== row.story_index
-    ) {
-      throw new Error('排队结果与 execution delegation 快照不一致');
+    // Cancelled historical sources may predate frozen inputs and bindings.
+    // Their task/role identity was checked above; the perimeter only discards.
+    if (attempt && attempt.status !== 'cancelled') delegation = restoreExecutionDelegationInDb(db, attempt, delegation);
+    else if (attempt?.status === 'cancelled') return delegation;
+    else if (db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(row.task_id)) {
+      throw new Error('原生排队结果缺少来源 execution，不得从旧游标重建');
     }
-    delegation = stored;
   }
   if (row.agent !== 'feedback-agent') return delegation;
   if (result.feedback?.mode === 'triage') {
@@ -288,22 +288,51 @@ function requireArtifact(result: AgentResult, agent: string) {
   if (!result.artifact) throw new Error(`${agent} 结果缺少 artifact`);
 }
 
-async function ensureCodeSlotForDelegation(delegation: DelegationEnvelope, result: AgentResult) {
+async function ensureCodeSlotForDelegation(delegation: DelegationEnvelope, result: AgentResult, sourceExecutionId?: string, workItemId?: string) {
   if (result.outcome !== 'completed' || delegation.agent !== 'dev-agent') return;
   const db = await databaseConnection();
   const claim = activeResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, delegation.taskId);
   if (claim && claim.owner_task_id !== delegation.taskId) throw new CodeSlotBusyError(claim.owner_task_id);
-  if (!claim) {
+  if (workItemId && claim && claim.owner_execution_id !== sourceExecutionId) {
+    const owner = claim.owner_execution_id ? db.prepare(`SELECT work_item_id, status FROM execution_attempts
+      WHERE execution_id = ? AND task_id = ?`).get(claim.owner_execution_id, delegation.taskId) as
+      { work_item_id: string | null; status: string } | undefined : undefined;
+    if (!owner || owner.work_item_id !== workItemId || ['planned', 'running', 'output_received', 'verifying', 'applying'].includes(owner.status)) {
+      throw new CodeSlotBusyError(claim.owner_task_id);
+    }
+  }
+  if (!claim || (workItemId && claim.owner_execution_id !== sourceExecutionId)) {
     acquireResourceClaimInDb(db, {
       resourceKey: CODE_WORKSPACE_RESOURCE,
       taskId: delegation.taskId,
       lane: delegation.lane,
       storyIndex: delegation.storyIndex,
+      ...(workItemId ? { executionId: sourceExecutionId } : {}),
     });
   }
 }
 
-export async function blockDelegation(delegation: DelegationEnvelope, reason: string) {
+export async function blockDelegation(delegation: DelegationEnvelope, reason: string, executionId?: string) {
+  const db = await databaseConnection();
+  if (db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(delegation.taskId)) {
+    const item = nativeResultItemInDb(db, delegation, executionId);
+    if (!item || !executionId) throw new Error('原生执行阻塞必须关联确切来源执行');
+    if (!['running', 'waiting'].includes(item.status) || item.source_execution_status === 'cancelled') {
+      throw new Error('原生阻塞来源执行已失效，不能阻塞当前工作项');
+    }
+    db.transaction(() => {
+      openInterventionInDb(db, { taskId: delegation.taskId, itemId: item.item_id,
+        sourceExecutionId: executionId, dedupeKey: `role-block:${executionId}`,
+        requestedBy: delegation.agent, authority: 'arbitration', resolverStrategy: 'system_then_human',
+        summary: reason, context: { purpose: 'execution_block', reason, pipeline: delegation.pipeline,
+          sourceAgent: delegation.agent, storyIndex: delegation.storyIndex } });
+      db.prepare('DELETE FROM resource_claims WHERE owner_execution_id = ?').run(executionId);
+      db.prepare("UPDATE tasks SET next_step = ?, last_actor = 'system', updated_at = CURRENT_TIMESTAMP WHERE task_id = ?")
+        .run(`工作项等待系统介入：${reason}`, delegation.taskId);
+      projectNativeWorkflowDisplayInDb(db, delegation.taskId);
+    })();
+    return;
+  }
   if (delegation.lane === 'analysis' || delegation.lane === 'delivery') {
     await setTaskLaneState({
       taskId: delegation.taskId,
@@ -315,7 +344,6 @@ export async function blockDelegation(delegation: DelegationEnvelope, reason: st
     });
     return;
   }
-  const db = await databaseConnection();
   releaseLaneExecutionResourceClaimsInDb(db, delegation.taskId, delegation.lane);
   await updateTask(delegation.taskId, 'system', {
     agile_status: 'blocked',
@@ -328,8 +356,129 @@ export async function blockDelegation(delegation: DelegationEnvelope, reason: st
 
 type ApplyOutcome = 'advanced' | 'blocked' | 'rewound' | 'discarded';
 
+function nativeResultItemInDb(db: Awaited<ReturnType<typeof databaseConnection>>, delegation: DelegationEnvelope, executionId?: string) {
+  const nativeTask = Boolean(db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(delegation.taskId));
+  if (!executionId) {
+    if (delegation.workItemId || nativeTask) throw new Error('原生工作项结果必须提供来源执行');
+    return null;
+  }
+  const item = db.prepare(`
+    SELECT item.*, execution.pipeline AS source_pipeline, execution.status AS source_execution_status
+    FROM execution_attempts execution JOIN workflow_items item ON item.item_id = execution.work_item_id
+    WHERE execution.execution_id = ? AND execution.task_id = ? AND item.task_id = execution.task_id
+      AND item.agent = execution.agent AND item.origin = 'native'
+  `).get(executionId, delegation.taskId) as (WorkflowItemRow & { source_pipeline: string; source_execution_status: string }) | undefined;
+  if (nativeTask && !item || delegation.workItemId && (!item || item.item_id !== delegation.workItemId)) throw new Error('原生工作项结果缺少有效的执行绑定');
+  if (item && (item.agent !== delegation.agent || item.story_index !== delegation.storyIndex || item.source_pipeline !== delegation.pipeline)) {
+    throw new Error('原生结果角色、单元或 Pipeline 与来源执行不一致');
+  }
+  if (nativeTask && item && item.source_execution_status !== 'cancelled' && !['superseded', 'cancelled'].includes(item.status)) {
+    const source = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(executionId) as import('./executions').ExecutionAttempt;
+    const frozen = restoreExecutionDelegationInDb(db, source);
+    if (delegation.workItemRevision !== undefined && delegation.workItemRevision !== frozen.workItemRevision
+      || delegation.workItemEpoch !== undefined && delegation.workItemEpoch !== frozen.workItemEpoch) {
+      throw new Error('原生结果工作项版本或派发代次与冻结来源不一致');
+    }
+  }
+  return item || null;
+}
+
+async function completeNativeResultWork(delegation: DelegationEnvelope, result: AgentResult, resultId?: string, executionId?: string) {
+  const db = await databaseConnection();
+  const item = nativeResultItemInDb(db, delegation, executionId);
+  if (!item) return;
+  if (!resultId || !executionId) throw new Error('原生工作项完成必须关联结果与执行');
+  transitionWorkItemInDb(db, { itemId: item.item_id, action: 'complete', eventKey: `result:${resultId}`,
+    actor: delegation.agent, authority: 'agent', reason: result.summary, executionId });
+}
+
+async function settleNativeResultWork(delegation: DelegationEnvelope, result: AgentResult, resultId: string, outcome: ApplyOutcome, executionId?: string) {
+  if (delegation.agent === 'direct-agent' || outcome === 'discarded') return;
+  const db = await databaseConnection();
+  const item = nativeResultItemInDb(db, delegation, executionId);
+  if (!item) return;
+  if (outcome === 'advanced' && result.outcome === 'completed' && result.verdict !== 'closure_gap') {
+    await completeNativeResultWork(delegation, result, resultId, executionId);
+    if (delegation.agent === 'test-agent' && delegation.storyIndex) {
+      await recordFeedbackUnitTestPassed({ taskId: delegation.taskId, storyIndex: delegation.storyIndex, executionId });
+    }
+    if (delegation.pipeline === 'feedback-verify' && delegation.feedbackBatchId) {
+      finalizeTaskAfterFeedbackInDb(db, delegation.taskId, delegation.feedbackBatchId);
+    }
+  } else if (outcome === 'rewound' && result.businessAnalysis?.disposition === 'return_revision') {
+    const workKey = result.businessAnalysis.target === 'intent' ? 'ba:intent'
+      : result.businessAnalysis.target === 'business_design' ? 'ba:design' : 'ba:spec';
+    const target = db.prepare(`SELECT item_id FROM workflow_items WHERE task_id = ? AND work_key = ?
+      AND status NOT IN ('superseded', 'cancelled')`).get(delegation.taskId, workKey) as { item_id: string } | undefined;
+    if (!target) throw new Error('规格回流缺少原生工作项目标');
+    rewindWorkItemsInDb(db, { taskId: delegation.taskId, targetItemId: target.item_id, eventKey: `result:${resultId}`,
+      actor: delegation.agent, authority: 'agent', reason: result.businessAnalysis.reason || result.summary });
+  }
+  projectNativeWorkflowDisplayInDb(db, delegation.taskId);
+}
+
 async function applyResultEffects(delegation: DelegationEnvelope, result: AgentResult, sourceResultId?: string, sourceExecutionId?: string): Promise<ApplyOutcome> {
-  await ensureCodeSlotForDelegation(delegation, result);
+  const sourceDb = await databaseConnection();
+  // A cancelled pre-migration attempt may legitimately have no graph binding.
+  // Retain its result as evidence, but never let it use legacy advancement.
+  if (sourceExecutionId && sourceDb.prepare("SELECT 1 FROM execution_attempts WHERE execution_id = ? AND task_id = ? AND status = 'cancelled'")
+    .get(sourceExecutionId, delegation.taskId)) return 'discarded';
+  const sourceItem = nativeResultItemInDb(sourceDb, delegation, sourceExecutionId);
+  if (sourceItem && (sourceItem.source_execution_status === 'cancelled' || ['superseded', 'cancelled'].includes(sourceItem.status))) return 'discarded';
+  if (result.intervention) {
+    assertAgentResultRoleContract(result, delegation.agent);
+    if (!sourceExecutionId) throw new Error('介入请求必须来自已认证的角色终止命令');
+    const db = await databaseConnection();
+    return db.transaction(() => {
+      const execution = db.prepare(`SELECT work_item_id, status FROM execution_attempts
+        WHERE execution_id = ? AND task_id = ? AND agent = ? AND story_index IS ?`)
+        .get(sourceExecutionId, delegation.taskId, delegation.agent, delegation.storyIndex) as {
+          work_item_id: string | null; status: string;
+        } | undefined;
+      const receipt = db.prepare(`SELECT payload_json FROM execution_receipts WHERE execution_id = ?
+        AND kind = 'intervention_submission' AND receipt_key = 'request'`)
+        .get(sourceExecutionId) as { payload_json: string } | undefined;
+      if (!execution || !receipt) throw new Error('介入请求缺少可信的角色提交收据');
+      if (execution.status === 'cancelled') return 'discarded' as const;
+      const submitted = JSON.parse(receipt.payload_json) as { result: AgentResult; draftId: string | null; phase: string };
+      if (JSON.stringify(submitted.result) !== JSON.stringify(result)) throw new Error('介入请求与持久化的终止命令收据不一致');
+      const intervention = openInterventionInDb(db, {
+        taskId: delegation.taskId, itemId: execution.work_item_id,
+        sourceExecutionId, dedupeKey: `role-request:${sourceExecutionId}`,
+        requestedBy: delegation.agent, authority: 'arbitration', resolverStrategy: 'system_then_human',
+        summary: result.summary,
+        context: { reason: result.intervention!.reason, evidence: result.intervention!.evidence,
+          sourceAgent: delegation.agent, pipeline: delegation.pipeline, storyIndex: delegation.storyIndex,
+          draftId: submitted.draftId, phase: submitted.phase },
+      });
+      // Compatibility display only. The Intervention and graph own readiness.
+      if (['pending', 'running', 'awaiting_human'].includes(intervention.status)) {
+        if (sourceItem) {
+          db.prepare('UPDATE tasks SET next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?')
+            .run(`等待系统辅助仲裁：${result.summary}`, delegation.agent, delegation.taskId);
+          projectNativeWorkflowDisplayInDb(db, delegation.taskId);
+        } else if (delegation.lane === 'analysis' || delegation.lane === 'delivery') {
+          setTaskLaneStateInDb(db, { taskId: delegation.taskId, lane: delegation.lane,
+            status: 'waiting_for_runtime_input', currentAgent: delegation.agent,
+            currentStoryIndex: delegation.storyIndex, blockedReason: result.summary });
+        } else {
+          db.prepare(`UPDATE tasks SET run_state = 'waiting_for_runtime_input', blocked_reason = ?,
+            next_step = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?`)
+            .run(result.summary, `等待系统辅助仲裁：${result.summary}`, delegation.taskId);
+        }
+      }
+      db.prepare('UPDATE execution_attempts SET dispatch_retry_consumed = 0 WHERE execution_id = ?').run(sourceExecutionId);
+      if (sourceItem) db.prepare('DELETE FROM resource_claims WHERE owner_execution_id = ?').run(sourceExecutionId);
+      else {
+        releaseLaneExecutionResourceClaimsInDb(db, delegation.taskId, delegation.lane);
+        if (resourcesForAgent(delegation.agent).includes(CODE_WORKSPACE_RESOURCE)) {
+          releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, delegation.taskId);
+        }
+      }
+      return 'blocked' as const;
+    }).immediate();
+  }
+  await ensureCodeSlotForDelegation(delegation, result, sourceExecutionId, sourceItem?.item_id);
 
   if (delegation.agent === 'review-agent') {
     if (result.outcome !== 'completed') throw new Error('Review Agent 必须以 completed 结束事实对账');
@@ -377,7 +526,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
   }
   const hasTestFailureVerdict = delegation.agent === 'test-agent' && result.verdict === 'failed';
   if (result.outcome !== 'completed' && !(canAskAlignmentQuestions && result.questions.length) && !hasTestFailureVerdict) {
-    await blockDelegation(delegation, result.summary);
+    await blockDelegation(delegation, result.summary, sourceExecutionId);
     return 'blocked' as const;
   }
 
@@ -408,7 +557,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     return 'advanced';
   }
 
-  if (delegation.agent === 'review-agent') {
+  if (delegation.agent === 'review-agent' && !sourceItem) {
     const detail = await getTask(delegation.taskId);
     if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
     if (delegation.pipeline === 'review') {
@@ -451,10 +600,41 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
     ? null
     : await saveArtifact(delegation, result);
   const actor = delegation.agent as Actor;
+  // Native workflow advancement is committed by settleNativeResultWork.
+  // Only artifact-head metadata and human-input consumption remain here;
+  // old cursor/Lane validations belong exclusively to compatibility tasks.
+  const publishProgress: typeof updateTask = sourceItem ? async (taskId, actor, changes) => {
+    const db = await databaseConnection();
+    db.transaction(() => {
+      db.prepare(`UPDATE tasks SET next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?`)
+        .run(changes.next_step || result.summary, actor, taskId);
+      if (changes.review_document_id && changes.review_revision !== undefined) {
+        db.prepare('UPDATE tasks SET review_document_id = ?, review_revision = ? WHERE task_id = ?')
+          .run(changes.review_document_id, changes.review_revision, taskId);
+        if (!sourceExecutionId || !sourceResultId) throw new Error('原生最终规格发布缺少来源执行或结果');
+        const finalDocument = finalDocumentSnapshotInDb(db, taskId);
+        if (!finalDocument) throw new Error('原生最终规格发布缺少同需求文档');
+        db.prepare(`INSERT INTO execution_receipts(receipt_id, execution_id, kind, receipt_key, payload_json)
+          VALUES(?, ?, 'work_item_artifact', 'business_analysis_specification', ?)`)
+          .run(randomUUID(), sourceExecutionId, JSON.stringify({ ...finalDocument, itemId: sourceItem.item_id,
+            revision: sourceItem.revision, resultId: sourceResultId }));
+      }
+      if (['backlog-agent', 'repro-agent'].includes(actor) && result.outcome === 'completed' && !result.questions.length) {
+        db.prepare(`UPDATE questions SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+          WHERE task_id = ? AND source_agent = ? AND status = 'answered'
+            AND intervention_id IN (SELECT intervention_id FROM interventions WHERE item_id = ? AND task_id = ?)`)
+          .run(taskId, actor, sourceItem.item_id, taskId);
+      }
+      db.prepare("INSERT INTO task_events(event_id, task_id, actor, event_type, summary) VALUES(?, ?, ?, 'AgentResultRecorded', ?)")
+        .run(randomUUID(), taskId, actor, result.summary);
+    })();
+    projectNativeWorkflowDisplayInDb(db, taskId);
+  } : updateTask;
   switch (delegation.agent) {
     case 'direct-agent': {
       if (!artifactDocumentId) throw new Error('Direct Agent 缺少最终结果文档');
-      await updateTask(delegation.taskId, actor, {
+      await completeNativeResultWork(delegation, result, sourceResultId, sourceExecutionId);
+      await publishProgress(delegation.taskId, actor, {
         agile_status: 'done',
         current_subagent: null,
         run_state: 'idle',
@@ -471,7 +651,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       }
       requireArtifact(result, delegation.agent);
       if (result.businessAnalysis?.disposition !== 'advance') throw new Error('需求意图 Agent 必须完成意图简报或请求澄清');
-      await updateTask(delegation.taskId, actor, {
+      await publishProgress(delegation.taskId, actor, {
         agile_status: 'backlog',
         current_subagent: 'business-design-agent',
         next_step: '需求意图已确认，等待业务方案设计',
@@ -486,7 +666,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       if (result.businessAnalysis?.disposition === 'return_revision') {
         const target = result.businessAnalysis.target;
         if (target !== 'intent') throw new Error('业务方案 Agent 只能把上游缺口返回需求意图');
-        await updateTask(delegation.taskId, actor, {
+        await publishProgress(delegation.taskId, actor, {
           agile_status: 'backlog',
           current_subagent: 'idea-context-agent',
           next_step: result.businessAnalysis.reason || result.summary,
@@ -495,7 +675,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       }
       requireArtifact(result, delegation.agent);
       if (result.businessAnalysis?.disposition !== 'advance') throw new Error('业务方案 Agent 缺少推进结果');
-      await updateTask(delegation.taskId, actor, {
+      await publishProgress(delegation.taskId, actor, {
         agile_status: 'backlog',
         current_subagent: 'requirement-spec-agent',
         next_step: '业务方案已确定，等待编写需求规格说明书',
@@ -510,7 +690,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
             ? 'business-design-agent'
             : null;
         if (!targetAgent) throw new Error('需求规格缺口必须返回需求意图或业务方案');
-        await updateTask(delegation.taskId, actor, {
+        await publishProgress(delegation.taskId, actor, {
           agile_status: 'backlog',
           current_subagent: targetAgent,
           next_step: result.businessAnalysis.reason || result.summary,
@@ -519,7 +699,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       }
       requireArtifact(result, delegation.agent);
       if (result.businessAnalysis?.disposition !== 'advance') throw new Error('需求规格 Agent 缺少推进结果');
-      await updateTask(delegation.taskId, actor, {
+      await publishProgress(delegation.taskId, actor, {
         agile_status: 'backlog',
         current_subagent: 'spec-review-agent',
         next_step: '需求规格草稿已完成，等待独立规格审查',
@@ -536,7 +716,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
               ? 'requirement-spec-agent'
               : null;
         if (!targetAgent) throw new Error('规格审查回流缺少有效目标');
-        await updateTask(delegation.taskId, actor, {
+        await publishProgress(delegation.taskId, actor, {
           agile_status: 'backlog',
           current_subagent: targetAgent,
           next_step: result.businessAnalysis.reason || result.summary,
@@ -549,7 +729,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       const detail = await getTask(delegation.taskId);
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
       if (detail.task.item_type === 'end-to-end') {
-        await updateTask(delegation.taskId, actor, {
+        await publishProgress(delegation.taskId, actor, {
           agile_status: 'backlog',
           current_subagent: 'backlog-agent',
           run_state: 'runnable',
@@ -558,7 +738,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         });
         return 'advanced';
       }
-      await updateTask(delegation.taskId, actor, {
+      await publishProgress(delegation.taskId, actor, {
         agile_status: 'ready_to_close',
         current_subagent: null,
         run_state: 'idle',
@@ -582,7 +762,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
       const retainsCodeSlot = detail.task.agile_status === 'in dev' && detail.task.total_stories === 0;
       const nextRoute = detail.task.item_type === 'bug' ? 'repro' : 'plan';
-      await updateTask(delegation.taskId, actor, {
+      await publishProgress(delegation.taskId, actor, {
         ...(retainsCodeSlot ? {} : { agile_status: nextRoute === 'repro' ? 'in repro' as const : 'in plan' as const }),
         current_subagent: nextRoute === 'repro' ? 'repro-agent' : 'story-splitter-agent',
         next_step: result.summary,
@@ -612,7 +792,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         units: result.deliveryUnits,
         sourceCommandChainDraftId,
       });
-      await updateTask(delegation.taskId, actor, {
+      await publishProgress(delegation.taskId, actor, {
         agile_status: detail.task.agile_status === 'in dev' ? 'in dev' : 'ready for dev',
         current_subagent: 'analyst-agent',
         next_step: `已拆分 ${result.deliveryUnits.length} 个交付单元，等待逐个进行交付分析`,
@@ -649,7 +829,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         spec: result.spec,
         sourceResultId,
       });
-      await updateTask(delegation.taskId, actor, {
+      await publishProgress(delegation.taskId, actor, {
         analysis_index: delegation.storyIndex,
         spec_resolved_index: delegation.storyIndex,
         next_step: delegation.pipeline === 'resume'
@@ -693,7 +873,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       const detail = await getTask(delegation.taskId);
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
       const retainsCodeSlot = detail.task.agile_status === 'in dev' && detail.task.total_stories === 0;
-      await updateTask(delegation.taskId, actor, {
+      await publishProgress(delegation.taskId, actor, {
         ...(retainsCodeSlot ? {} : { agile_status: 'in plan' as const }),
         current_subagent: 'story-splitter-agent',
         next_step: result.summary,
@@ -704,7 +884,7 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
       if (!delegation.storyIndex) throw new Error('开发实现 Agent 缺少交付单元序号');
       const detail = await getTask(delegation.taskId);
       if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
-      await updateTask(delegation.taskId, actor, {
+      await publishProgress(delegation.taskId, actor, {
         agile_status: detail.task.agile_status === 'in feedback' ? 'in feedback' : 'in dev',
         current_subagent: 'dev-agent',
         dev_index: delegation.storyIndex,
@@ -726,13 +906,13 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         if (!detail) throw new Error(`需求不存在：${delegation.taskId}`);
         const complete = delegation.storyIndex === detail.task.total_stories && detail.task.dev_index === detail.task.total_stories && detail.task.analysis_index === detail.task.total_stories;
         const inFeedback = detail.task.agile_status === 'in feedback';
-        await updateTask(delegation.taskId, actor, {
+        await publishProgress(delegation.taskId, actor, {
           agile_status: inFeedback ? 'in feedback' : complete ? 'in review' : 'in dev',
           current_subagent: inFeedback ? 'test-agent' : complete ? 'review-agent' : 'test-agent',
           test_index: delegation.storyIndex,
           next_step: result.summary,
         });
-        if (inFeedback) {
+        if (inFeedback && !sourceItem) {
           await recordFeedbackUnitTestPassed({
             taskId: delegation.taskId,
             storyIndex: delegation.storyIndex,
@@ -748,7 +928,15 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
           summary: result.summary,
         });
         const db = await databaseConnection();
-        releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, delegation.taskId);
+        if (sourceItem) db.prepare(`DELETE FROM resource_claims WHERE owner_execution_id = ? OR (resource_key = 'code:workspace' AND owner_execution_id IN (
+          SELECT execution.execution_id FROM execution_attempts execution
+          JOIN workflow_dependencies dependency ON dependency.depends_on_item_id = execution.work_item_id
+          JOIN workflow_items predecessor ON predecessor.item_id = dependency.depends_on_item_id
+          WHERE dependency.item_id = ? AND predecessor.task_id = ? AND predecessor.agent = 'dev-agent'
+            AND execution.task_id = predecessor.task_id
+            AND execution.status NOT IN ('planned', 'running', 'output_received', 'verifying', 'applying')
+        ))`).run(sourceExecutionId, sourceItem.item_id, delegation.taskId);
+        else releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, delegation.taskId);
         return 'advanced' as const;
       }
       const failureKind = result.failureKind
@@ -757,13 +945,71 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         await blockDelegation(
           delegation,
           `${failureKind === 'environment' ? '验证环境异常' : '验证结论无法确定'}：${result.summary}`,
+          sourceExecutionId,
         );
         return 'blocked' as const;
       }
       const target = failureKind === 'specification' ? 'analysis' : 'dev';
+      const storyIndex = result.rewindDeliveryUnit || delegation.storyIndex;
+      const db = await databaseConnection();
+      const observation = sourceExecutionId
+        ? observeWorkflowFailureInDb(db, {
+          executionId: sourceExecutionId,
+          taskId: delegation.taskId,
+          storyIndex,
+          failureKind,
+          summary: result.summary,
+          tests: result.tests,
+        })
+        : null;
+      if (observation?.shouldArbitrate && observation.stagnationFingerprint) {
+        db.transaction(() => {
+          openInterventionInDb(db, {
+            taskId: delegation.taskId,
+            itemId: observation.workItemId,
+            dedupeKey: `workflow-stagnation:${observation.workItemId}:${observation.stagnationFingerprint}`,
+            summary: `同一验证失败在代码与交付契约均未变化时连续出现 ${observation.stagnantCount} 次，需要仲裁后再推进`,
+            context: {
+              failureKind,
+              deliveryUnit: storyIndex,
+              failedSummary: result.summary,
+              tests: result.tests || [],
+              currentExecutionId: sourceExecutionId,
+              previousExecutionId: observation.previousExecutionId,
+              workItemId: observation.workItemId,
+              repositoryFingerprint: observation.repositoryFingerprint,
+              contractFingerprint: observation.contractFingerprint,
+              failureSignature: observation.failureSignature,
+            },
+            requestedBy: delegation.agent,
+            sourceExecutionId,
+            resolverStrategy: 'system_then_human',
+            authority: 'arbitration',
+            maxSystemAttempts: 3,
+          });
+          db.prepare(`
+            UPDATE tasks
+            SET next_step = ?, blocked_reason = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE task_id = ?
+          `).run(
+            `检测到无进展的重复验证失败，已交给系统仲裁 Agent（最多 3 次）：${result.summary}`,
+            result.summary,
+            delegation.taskId,
+          );
+          setTaskLaneStateInDb(db, {
+            taskId: delegation.taskId,
+            lane: 'delivery',
+            status: 'waiting_for_runtime_input',
+            currentAgent: delegation.agent,
+            currentStoryIndex: storyIndex,
+            blockedReason: result.summary,
+          });
+        }).immediate();
+        return 'blocked' as const;
+      }
       await createOrReopenRecoveryItem({
         taskId: delegation.taskId,
-        storyIndex: result.rewindDeliveryUnit || delegation.storyIndex,
+        storyIndex,
         kind: 'test_failure',
         sourceAgent: delegation.agent,
         targetStage: target,
@@ -778,7 +1024,8 @@ async function applyResultEffects(delegation: DelegationEnvelope, result: AgentR
         },
         sourceExecutionId,
       });
-      await rewindTask({ taskId: delegation.taskId, actor, to: target, story: result.rewindDeliveryUnit || delegation.storyIndex, reason: result.summary });
+      await rewindTask({ taskId: delegation.taskId, actor, to: target, story: storyIndex, reason: result.summary,
+        eventKey: sourceExecutionId ? `test-result:${sourceExecutionId}` : undefined });
       return 'rewound' as const;
     }
     case 'review-agent': {
@@ -816,13 +1063,14 @@ export async function applyAgentResult(runId: string, delegation: DelegationEnve
   if (recorded.applicationStatus === 'failed') throw new Error('该 execution attempt 的 Agent 结果此前应用失败，拒绝重复产生副作用');
   const resultId = recorded.resultId;
   const current = await getTask(delegation.taskId);
-  if (!current || current.task.is_paused || ['done', 'cancelled'].includes(current.task.agile_status)) {
+  const db = await databaseConnection();
+  if (!current || current.task.is_paused || workflowEndedInDb(db, delegation.taskId)) {
     await markApplication(resultId, 'applied', null, 'discarded');
     return 'discarded' as const;
   }
   try {
     const outcome = await applyResultEffects(delegation, result, resultId, options.executionId);
-    if (result.outcome === 'completed') {
+    if (result.outcome === 'completed' && outcome !== 'discarded') {
       await resolveRuntimeInputs({
         taskId: delegation.taskId,
         storyIndex: delegation.storyIndex,
@@ -830,6 +1078,7 @@ export async function applyAgentResult(runId: string, delegation: DelegationEnve
         resolvedExecutionId: options.executionId,
       });
     }
+    await settleNativeResultWork(delegation, result, resultId, outcome, options.executionId);
     await markApplication(resultId, 'applied', null, outcome);
     return outcome;
   } catch (error) {
@@ -848,71 +1097,7 @@ export type QueuedApplicationResult =
   | { status: 'waiting'; resultId: string; taskId: string; storyIndex: number | null; agent: string; ownerTaskId: string }
   | { status: 'failed'; resultId: string; taskId: string; storyIndex: number | null; agent: string; reason: string; willRetry: boolean };
 
-const LEGACY_FEEDBACK_PLAN_REJECTION = '反馈新增范围当前不能追加交付单元';
 const REMOVED_REVIEW_GAPS_TABLE_ERROR = 'no such table: review_gaps';
-
-function requeueLegacyFeedbackPlanResultsInDb(
-  db: Awaited<ReturnType<typeof databaseConnection>>,
-) {
-  const rows = db.prepare(`
-    SELECT result.result_id, result.execution_id, result.task_id
-    FROM agent_results result
-    JOIN tasks task ON task.task_id = result.task_id
-    WHERE result.agent = 'story-splitter-agent'
-      AND result.pipeline = 'feedback-split'
-      AND result.application_status = 'failed'
-      AND result.application_error = ?
-      AND task.agile_status NOT IN ('done', 'cancelled')
-  `).all(LEGACY_FEEDBACK_PLAN_REJECTION) as {
-    result_id: string;
-    execution_id: string | null;
-    task_id: string;
-  }[];
-  if (!rows.length) return 0;
-
-  db.transaction(() => {
-    const updateResult = db.prepare(`
-      UPDATE agent_results
-      SET application_status = 'pending', application_error = NULL,
-          applied_at = NULL, effect_outcome = NULL
-      WHERE result_id = ?
-        AND application_status = 'failed'
-        AND application_error = ?
-    `);
-    const updateExecution = db.prepare(`
-      UPDATE execution_attempts
-      SET status = 'output_received', last_error = NULL, finished_at = NULL,
-          heartbeat_at = CURRENT_TIMESTAMP
-      WHERE execution_id = ?
-    `);
-    const updateTask = db.prepare(`
-      UPDATE tasks
-      SET agile_status = 'in feedback', current_subagent = 'story-splitter-agent',
-          run_state = 'runnable', blocked_reason = NULL, resume_status = NULL,
-          resume_pending = 0,
-          next_step = '检测到旧版反馈交付规划误拒绝，正在重新应用已提交结果',
-          last_actor = 'system', updated_at = CURRENT_TIMESTAMP
-      WHERE task_id = ? AND agile_status NOT IN ('done', 'cancelled')
-    `);
-    const addRecoveryEvent = db.prepare(`
-      INSERT INTO task_events(event_id, task_id, actor, event_type, summary)
-      VALUES(?, ?, 'system', 'LegacyFeedbackPlanResultRequeued',
-        '恢复旧版本误拒绝的反馈交付规划结果，等待新版本重新应用')
-    `);
-    const recoveredTasks = new Set<string>();
-    for (const row of rows) {
-      const updated = updateResult.run(row.result_id, LEGACY_FEEDBACK_PLAN_REJECTION).changes;
-      if (!updated) continue;
-      if (row.execution_id) updateExecution.run(row.execution_id);
-      updateTask.run(row.task_id);
-      if (!recoveredTasks.has(row.task_id)) {
-        addRecoveryEvent.run(randomUUID(), row.task_id);
-        recoveredTasks.add(row.task_id);
-      }
-    }
-  })();
-  return rows.length;
-}
 
 function requeueRemovedReviewGapsTableFailuresInDb(
   db: Awaited<ReturnType<typeof databaseConnection>>,
@@ -926,6 +1111,7 @@ function requeueRemovedReviewGapsTableFailuresInDb(
       AND result.pipeline = 'review'
       AND result.application_status = 'failed'
       AND instr(lower(COALESCE(result.application_error, '')), ?) > 0
+      AND task.workflow_engine = 'native'
       AND task.agile_status NOT IN ('done', 'cancelled')
       AND NOT EXISTS (
         SELECT 1
@@ -984,30 +1170,29 @@ function requeueRemovedReviewGapsTableFailuresInDb(
 
 export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationResult> {
   const db = await databaseConnection();
-  requeueLegacyFeedbackPlanResultsInDb(db);
   requeueRemovedReviewGapsTableFailuresInDb(db);
-  const row = db.prepare(`
+  const rows = db.prepare(`
     SELECT ar.result_id, ar.run_id, ar.task_id, ar.story_index, ar.agent, ar.pipeline, ar.outcome, ar.result_json, ar.execution_id
     FROM agent_results ar
     JOIN tasks t ON t.task_id = ar.task_id
     WHERE ar.application_status = 'pending'
-      AND t.agile_status != 'blocked'
       AND t.is_paused = 0
+      AND t.workflow_engine = 'native'
     ORDER BY ar.created_at, ar.result_id
-    LIMIT 1
-  `).get() as QueuedAgentResult | undefined;
+  `).all() as QueuedAgentResult[];
+  const row = rows.find(candidate => !workflowResultHeldInDb(db, candidate.task_id, candidate.execution_id));
   if (!row) return { status: 'none' };
 
   try {
     const detail = await getTask(row.task_id);
     if (!detail) throw new Error(`需求不存在：${row.task_id}`);
-    if (['done', 'cancelled'].includes(detail.task.agile_status)) {
+    if (workflowEndedInDb(db, row.task_id)) {
       await markApplication(row.result_id, 'applied', null, 'discarded');
       if (row.execution_id) {
         db.prepare(`
           UPDATE execution_attempts
           SET status = 'cancelled', finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
-          WHERE execution_id = ?
+          WHERE execution_id = ? AND status IN ('planned', 'running', 'output_received', 'verifying', 'applying')
         `).run(row.execution_id);
       }
       return { status: 'applied', resultId: row.result_id, taskId: row.task_id, storyIndex: row.story_index, agent: row.agent, outcome: 'discarded' };
@@ -1020,7 +1205,7 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
       envelopeFromTask(row, detail),
     );
     const outcome = await applyResultEffects(delegation, result, row.result_id, row.execution_id || undefined);
-    if (result.outcome === 'completed') {
+    if (result.outcome === 'completed' && outcome !== 'discarded') {
       await resolveRuntimeInputs({
         taskId: row.task_id,
         storyIndex: row.story_index,
@@ -1028,13 +1213,14 @@ export async function applyNextQueuedAgentResult(): Promise<QueuedApplicationRes
         resolvedExecutionId: row.execution_id || undefined,
       });
     }
+    await settleNativeResultWork(delegation, result, row.result_id, outcome, row.execution_id || undefined);
     await markApplication(row.result_id, 'applied', null, outcome);
     const execution = db.prepare('SELECT execution_id FROM agent_results WHERE result_id = ?').get(row.result_id) as { execution_id: string | null } | undefined;
     if (execution?.execution_id) {
       db.prepare(`
         UPDATE execution_attempts
         SET status = 'applied', finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
-        WHERE execution_id = ?
+          WHERE execution_id = ? AND status != 'cancelled'
       `).run(execution.execution_id);
       releaseExecutionResourceClaimsInDb(db, execution.execution_id);
       db.prepare(`

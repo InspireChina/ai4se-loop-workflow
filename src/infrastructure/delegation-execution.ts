@@ -1,378 +1,73 @@
-import type { ChildProcess } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { StringDecoder } from 'node:string_decoder';
-import crossSpawn from 'cross-spawn';
-import { createAgentFinalTextAccumulator, createAgentRunMetricsAccumulator, extractAgentFailureDetail, parseAgentTelemetryStderr, parseAgentTelemetryStdoutEvents, type AgentEnvironment, type AgentExecutionContext, type AgentExecutionOptions, type AgentExecutor, type AgentTelemetryEvent } from './agent-executor';
-import { agentResultChannelEnv, createAgentResultChannel, readAgentResultChannel, removeAgentResultChannel, type AgentResultChannel, type AgentResultKind } from './agent-result-channel';
-import type { LangfuseTelemetry } from './langfuse';
-import { markManagedAgentProcessExited, registerManagedAgentProcess } from './managed-process-registry';
-import { terminateProcessTree } from './process-tree';
-import { sanitizeDiagnosticText } from './diagnostic-text';
+import { executeAgentInvocation, type DelegationExecutionInput } from "./agent-invocation";
+import { databaseConnection,paths } from "./database";
+import {join} from 'node:path';
+import {randomUUID} from 'node:crypto';
+import {AdminManagementStore} from './admin-management-store';
+import {assertRuntimeCliCaller} from './runtime-cli-registry';
+import { markManagedAgentProcessExited, registerManagedAgentProcess } from "./managed-process-registry";
+import { terminateProcessGroup, terminateProcessGroupTree, terminateProcessTree } from "./process-tree";
+import {createBusinessExecutionActivityInDb} from '../application/business-execution-activity';
+import { attachExecutionProcessInDb, finishExecutionProcessInDb, prepareExecutionProcessInDb, requestExecutionProcessTerminationInDb } from "../application/execution-processes";
+export { createTemporaryPrompt, removeTemporaryPrompt, buildAgentProcessLaunch } from "./agent-invocation";
+export type { DelegationExecutionInput, DelegationExecutionResult } from "./agent-invocation";
 
-export type DelegationExecutionInput = {
-  runId: string;
-  prompt: string;
-  workspaceRoot: string;
-  executor: AgentExecutor;
-  executionOptions: AgentExecutionOptions;
-  context: AgentExecutionContext;
-  description: string;
-  telemetry: LangfuseTelemetry;
-  appendLog: (message: string) => Promise<unknown>;
-  recordTelemetryEvent?: (event: AgentTelemetryEvent & { sequence: number }) => Promise<unknown>;
-  maxRuntimeMs: number;
-  startupTimeoutMs: number;
-  idleTimeoutMs: number;
-  resultKind?: AgentResultKind;
-  environment?: AgentEnvironment;
-  cancellationRequested?: () => boolean | Promise<boolean>;
-  cancellationSignal?: AbortSignal;
-  spawn?: typeof crossSpawn;
-};
-
-export type DelegationExecutionResult = {
-  exitCode: number;
-  signal?: string;
-  stderrTail?: string;
-  failureDetail?: string;
-  finalText: string;
-  submittedResult?: string | null;
-  resultSubmissionError?: string | null;
-  evidencePersistenceError?: string | null;
-  terminationReason?: string;
-  cancelled?: true;
-};
-
-type TemporaryPrompt = { directory: string; file: string; reference: string };
-
-export function createTemporaryPrompt(prompt: string): TemporaryPrompt {
-  const directory = mkdtempSync(join(tmpdir(), 'lwp-'));
-  const file = join(directory, 'prompt.md');
-  try {
-    try { chmodSync(directory, 0o700); } catch { /* Windows ACLs are managed by the user profile. */ }
-    writeFileSync(file, prompt, { encoding: 'utf8', mode: 0o600 });
-    const reference = [
-      '本次任务的完整指令保存在一个 UTF-8 文件中。',
-      '你必须先使用文件读取工具完整读取该文件，再严格执行文件中的全部指令。不要只总结文件，也不要修改或删除文件。',
-      `指令文件路径：${file}`,
-      `PROMPT_FILE=${JSON.stringify(file)}`,
-    ].join('\n');
-    return { directory, file, reference };
-  } catch (error) {
-    try { rmSync(directory, { recursive: true, force: true }); } catch { /* preserve the original write failure */ }
-    throw error;
-  }
-}
-
-export function removeTemporaryPrompt(prompt: TemporaryPrompt | null) {
-  if (!prompt) return;
-  try { rmSync(prompt.directory, { recursive: true, force: true }); } catch { /* best-effort cleanup after the CLI exits */ }
-}
-
-export function buildAgentProcessLaunch(executor: AgentExecutor, prompt: string, workspaceRoot: string, executionOptions: AgentExecutionOptions, baseEnv: AgentEnvironment = process.env) {
-  return {
-    command: executor.command,
-    args: [...(executor.prefixArgs || []), ...executor.buildArgs(prompt, workspaceRoot, executionOptions)],
-    env: { ...baseEnv, ...(executor.env || {}) },
+/** Business composition; the invocation core also supports independent management adapters. */
+export async function executeDelegation(input: DelegationExecutionInput) {
+  const activity=input.executionId?createBusinessExecutionActivityInDb(await databaseConnection(),{
+    executionId:input.executionId,runId:input.runId,context:input.context,
+    timeoutMs:input.activityTimeoutMs,pollIntervalMs:input.activityPollIntervalMs,
+  }):undefined;
+  const hostAllocationId=process.env.LOOP_RUNTIME_HOST_ALLOCATION;
+  const management=hostAllocationId?new AdminManagementStore(join(paths.dataDir,'admin-management.db')):undefined;
+  const usesGroup = Boolean(input.executionId || input.isolateProcessGroup || management) && process.platform !== "win32";
+  const baseProcesses = input.processes ?? {
+    register: registerManagedAgentProcess,
+    markExited: markManagedAgentProcessExited,
+    terminate: usesGroup ? terminateProcessGroupTree : terminateProcessTree,
+    ...(usesGroup ? { confirmExit: terminateProcessGroupTree } : {}),
   };
-}
-
-/**
- * Runs one already-dispatched delegation. Telemetry is deliberately best-effort:
- * every client failure is contained by the facade and cannot change this result.
- */
-export async function executeDelegation(input: DelegationExecutionInput): Promise<DelegationExecutionResult> {
-  const {
-    runId,
-    prompt,
-    workspaceRoot,
-    executor,
-    executionOptions,
-    context,
-    description,
-    telemetry,
-    appendLog,
-    maxRuntimeMs,
-    startupTimeoutMs,
-    idleTimeoutMs,
-  } = input;
-  const spawn = input.spawn ?? crossSpawn;
-  const telemetryContext = { ...context, runToken: runId };
-  const trace = await telemetry.startDelegationTrace(telemetryContext, {
-    executor: executor.id,
-    prompt,
-    model: executionOptions.model,
-    reasoningEffort: executionOptions.reasoningEffort,
-  });
-  let timedOut = false;
-  let cancelled = false;
-  let terminationRequested = false;
-  let terminationReason = '';
-  let logQueue = Promise.resolve();
-  let telemetryQueue = Promise.resolve();
-  let telemetrySequence = 0;
-  let traceStatus: 'completed' | 'failed' | 'timed_out' | 'cancelled' | 'execution_error' = 'execution_error';
-  let terminalExitCode: number | null | undefined;
-  let executionFailed = false;
-  let finalText = '';
-  let stderrTail = '';
-  let structuredErrorTail = '';
-  let submittedResult: string | null = null;
-  let resultSubmissionError: string | null = null;
-  let evidencePersistenceError: string | null = null;
-  let temporaryPrompt: TemporaryPrompt | null = null;
-  let resultChannel: AgentResultChannel | null = null;
-  let startupTimer: NodeJS.Timeout | undefined;
-  let idleTimer: NodeJS.Timeout | undefined;
-  let armIdleTimer = () => undefined;
-  let receivedProcessOutput = false;
-  const finalTextAccumulator = createAgentFinalTextAccumulator(executor.id);
-  const metricsAccumulator = createAgentRunMetricsAccumulator(executor.id);
-
-  const enqueueLog = (message: string | null) => {
-    if (!message) return;
-    logQueue = logQueue.catch(() => undefined).then(async () => { await appendLog(message); }).catch(() => undefined);
-  };
-  const enqueueTelemetry = (event: AgentTelemetryEvent | null) => {
-    if (!event) return;
-    const sequenced = { ...event, sequence: ++telemetrySequence };
-    telemetryQueue = telemetryQueue.catch(() => undefined).then(async () => {
-      try {
-        await input.recordTelemetryEvent?.(sequenced);
-      } catch (error) {
-        if (!evidencePersistenceError) {
-          evidencePersistenceError = error instanceof Error ? error.message : String(error);
-          enqueueLog(`[执行器错误] executor=${executor.id} agent=${context.agent} - 本地执行证据写入失败：${evidencePersistenceError}`);
-        }
-      }
-      try { await trace.event(sequenced); } catch { /* telemetry is best-effort and must not block the CLI */ }
-    }).catch(() => undefined);
-  };
-  const captureStructuredError = (line: string) => {
-    const detail = extractAgentFailureDetail(executor.id, line);
-    if (!detail) return;
-    structuredErrorTail = `${structuredErrorTail}${structuredErrorTail ? '\n' : ''}${detail}`.slice(-24_000);
-  };
-
-  try {
-    temporaryPrompt = executor.promptMode === 'file-reference' ? createTemporaryPrompt(prompt) : null;
-    resultChannel = input.resultKind ? createAgentResultChannel(input.resultKind) : null;
-    const invocationPrompt = temporaryPrompt?.reference ?? prompt;
-    const launch = buildAgentProcessLaunch(executor, invocationPrompt, workspaceRoot, executionOptions, {
-      ...process.env,
-      ...(input.environment || {}),
-      ...(resultChannel ? agentResultChannelEnv(resultChannel, context.agent) : {}),
-    });
-    await appendLog(`[Agent] 开始 lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - ${description}`);
-    await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - 启动 ${executor.label} CLI：${executor.formatCommand(workspaceRoot, executionOptions)}`);
-    const child: ChildProcess = spawn(launch.command, launch.args, {
-      cwd: workspaceRoot,
-      env: launch.env as NodeJS.ProcessEnv,
-      stdio: [executor.promptMode === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
-      windowsHide: true,
-    });
-    const spawnOutcome = await new Promise<{ spawned: true } | { spawned: false; error: unknown }>((resolve) => {
-      const onSpawn = () => {
-        cleanup();
-        resolve({ spawned: true });
-      };
-      const onError = (error: unknown) => {
-        cleanup();
-        resolve({ spawned: false, error });
-      };
-      const cleanup = () => {
-        child.removeListener('spawn', onSpawn);
-        child.removeListener('error', onError);
-      };
-      child.once('spawn', onSpawn);
-      child.once('error', onError);
-    });
-    const launchError = spawnOutcome.spawned ? undefined : spawnOutcome.error;
-    let processStartMarker: string | null = null;
-    if (spawnOutcome.spawned) {
-      if (!child.pid) throw new Error('Agent CLI 启动后未获得 PID');
-      try {
-        processStartMarker = await registerManagedAgentProcess(runId, child.pid);
-      } catch (error) {
-        await terminateProcessTree(child.pid, 5_000).catch(() => false);
-        throw error;
-      }
-    }
-    let childExited = child.exitCode !== null;
-    child.once('exit', () => { childExited = true; });
-    if (executor.promptMode === 'stdin') child.stdin?.end(prompt);
-
-    let stdoutBuffer = '';
-    let stderrBuffer = '';
-    const stdoutDecoder = new StringDecoder('utf8');
-    const stderrDecoder = new StringDecoder('utf8');
-    const noteProcessOutput = () => {
-      receivedProcessOutput = true;
-      if (startupTimer) clearTimeout(startupTimer);
-      armIdleTimer();
-    };
-    child.stdout?.on('data', (chunk: Buffer) => {
-      noteProcessOutput();
-      stdoutBuffer += stdoutDecoder.write(chunk);
-      const lines = stdoutBuffer.split(/\r?\n/);
-      stdoutBuffer = lines.pop() || '';
-      for (const line of lines.filter(Boolean)) {
-        const message = executor.parseStdout(line, context);
-        captureStructuredError(line);
-        enqueueLog(message);
-        for (const event of parseAgentTelemetryStdoutEvents(executor.id, line)) enqueueTelemetry(event);
-        finalTextAccumulator.ingest(line);
-        metricsAccumulator.ingest(line);
-      }
-    });
-    child.stderr?.on('data', (chunk: Buffer) => {
-      noteProcessOutput();
-      stderrTail = `${stderrTail}${chunk.toString('utf8')}`.slice(-24_000);
-      stderrBuffer += stderrDecoder.write(chunk);
-      const lines = stderrBuffer.split(/\r?\n/);
-      stderrBuffer = lines.pop() || '';
-      for (const line of lines.filter(Boolean)) {
-        enqueueLog(executor.parseStderr(line, context));
-        enqueueTelemetry(parseAgentTelemetryStderr(executor.id, line));
-      }
-    });
-
-    const terminate = async (reason: string, kind: 'timeout' | 'cancelled') => {
-      if (terminationRequested) return;
-      terminationRequested = true;
-      terminationReason = reason;
-      timedOut = kind === 'timeout';
-      cancelled = kind === 'cancelled';
-      await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - ${reason}，正在终止`);
-      if (child.pid) {
-        const expectedStartMarker = processStartMarker?.startsWith('test-') ? undefined : processStartMarker || undefined;
-        const terminated = await terminateProcessTree(child.pid, 5_000, expectedStartMarker).catch(() => false);
-        if (!terminated && !childExited) child.kill('SIGKILL');
-      } else {
-        child.kill('SIGTERM');
-      }
-    };
-    armIdleTimer = () => {
-      if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => {
-        void terminate(`超过空闲时间 ${Math.ceil(idleTimeoutMs / 1000)} 秒`, 'timeout');
-      }, idleTimeoutMs);
-      idleTimer.unref();
-    };
-    const maxTimer = setTimeout(() => void terminate(`超过最大运行时间 ${Math.round(maxRuntimeMs / 1000)} 秒`, 'timeout'), maxRuntimeMs);
-    if (receivedProcessOutput) {
-      armIdleTimer();
-    } else {
-      startupTimer = setTimeout(() => {
-        void terminate(`启动后 ${Math.ceil(startupTimeoutMs / 1000)} 秒内没有任何输出`, 'timeout');
-      }, startupTimeoutMs);
-      startupTimer.unref();
-    }
-    let cancellationCheckRunning = false;
-    const checkCancellation = async () => {
-      if (!input.cancellationRequested || cancellationCheckRunning || terminationRequested) return;
-      cancellationCheckRunning = true;
-      try {
-        if (await input.cancellationRequested()) await terminate('需求已取消', 'cancelled');
-      } catch {
-        // Cancellation polling is best-effort; execution remains authoritative.
-      } finally {
-        cancellationCheckRunning = false;
-      }
-    };
-    const cancellationTimer = !input.cancellationSignal && input.cancellationRequested
-      ? setInterval(() => void checkCancellation(), 500)
-      : null;
-    if (cancellationTimer) void checkCancellation();
-    const onCancellationSignal = () => void terminate('需求已取消', 'cancelled');
-    input.cancellationSignal?.addEventListener('abort', onCancellationSignal, { once: true });
-    if (input.cancellationSignal?.aborted) onCancellationSignal();
+  // Host-owned POSIX CLI groups need actual OS exit proof even when a caller
+  // overrides the business registry adapter. Root close or custom true is not
+  // enough to settle the independent ledger.
+  const processes=management&&usesGroup?{...baseProcesses,terminate:terminateProcessGroupTree,confirmExit:terminateProcessGroupTree}:baseProcesses;
+  const allocation = input.executionId ? { prepare: async () => {
+    const db = await databaseConnection();
+    const id = prepareExecutionProcessInDb(db, input.executionId!, process.pid,
+      Number(process.env.LOOP_SUPERVISION_TOKEN || 0), { runId: input.runId, taskId: input.context.taskId });
     try {
-      terminalExitCode = await new Promise<number | null>((resolve, reject) => {
-        if (launchError) {
-          reject(launchError);
-          return;
-        }
-        if (child.exitCode !== null) {
-          resolve(child.exitCode);
-          return;
-        }
-        child.once('error', reject);
-        child.once('exit', resolve);
-      });
-    } catch (error) {
-      terminalExitCode = undefined;
-      executionFailed = true;
-      await appendLog(`[执行器错误] executor=${executor.id} agent=${context.agent} - ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      clearTimeout(maxTimer);
-      if (startupTimer) clearTimeout(startupTimer);
-      if (idleTimer) clearTimeout(idleTimer);
-      if (cancellationTimer) clearInterval(cancellationTimer);
-      input.cancellationSignal?.removeEventListener('abort', onCancellationSignal);
-      if (child.pid && processStartMarker) {
-        await markManagedAgentProcessExited(runId, child.pid, processStartMarker).catch(() => undefined);
+      if(management&&hostAllocationId) {
+        await assertRuntimeCliCaller(management,hostAllocationId);
+        management.reserveRuntimeCli(hostAllocationId,id,input.executionId!,process.pid);
       }
-    }
-    stdoutBuffer += stdoutDecoder.end();
-    stderrBuffer += stderrDecoder.end();
-    if (stdoutBuffer.trim()) {
-      const message = executor.parseStdout(stdoutBuffer, context);
-      captureStructuredError(stdoutBuffer);
-      enqueueLog(message);
-      for (const event of parseAgentTelemetryStdoutEvents(executor.id, stdoutBuffer)) enqueueTelemetry(event);
-      finalTextAccumulator.ingest(stdoutBuffer);
-      metricsAccumulator.ingest(stdoutBuffer);
-    }
-    if (stderrBuffer.trim()) {
-      enqueueLog(executor.parseStderr(stderrBuffer, context));
-      enqueueTelemetry(parseAgentTelemetryStderr(executor.id, stderrBuffer));
-    }
-    await logQueue;
-    await telemetryQueue;
-    await logQueue;
-    finalText = finalTextAccumulator.value();
-    if (resultChannel) {
-      try {
-        submittedResult = readAgentResultChannel(resultChannel);
-        if (submittedResult) await appendLog('[结果通道] Agent 已通过 submit-agent-result 提交结构化结果');
-      } catch (error) {
-        resultSubmissionError = error instanceof Error ? error.message : String(error);
-        await appendLog(`[结果通道] 提交内容无效，将尝试兼容最终文本：${resultSubmissionError}`);
-      }
-    }
-    await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - ${executor.label} CLI 已退出 code=${terminalExitCode ?? 'signal'}`);
-    if (cancelled) await appendLog(`[Agent] 已取消 lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId}`);
-    else if (terminalExitCode && terminalExitCode !== 0) await appendLog(`[错误] ${context.agent} 执行失败 code=${terminalExitCode}`);
-    else await appendLog(`[Agent] 完成 lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - 处理完成`);
-    traceStatus = timedOut ? 'timed_out' : executionFailed ? 'execution_error' : terminalExitCode === 0 ? 'completed' : terminalExitCode === null ? 'cancelled' : 'failed';
-    if (evidencePersistenceError) traceStatus = 'execution_error';
-    const failureDetail = [
-      structuredErrorTail.trim(),
-      stderrTail.trim() ? `stderr：${stderrTail.trim()}` : '',
-    ].filter(Boolean).join('\n');
+    }catch(error){finishExecutionProcessInDb(db,id,true);throw error;} // no spawn occurred
     return {
-      exitCode: terminalExitCode ?? 1,
-      ...(child.signalCode ? { signal: child.signalCode } : {}),
-      ...(stderrTail.trim() ? { stderrTail: sanitizeDiagnosticText(stderrTail.trim()) } : {}),
-      ...(failureDetail ? { failureDetail: sanitizeDiagnosticText(failureDetail) } : {}),
-      finalText,
-      ...(input.resultKind ? { submittedResult, resultSubmissionError } : {}),
-      ...(evidencePersistenceError ? { evidencePersistenceError } : {}),
-      ...(terminationReason ? { terminationReason } : {}),
-      ...(cancelled ? { cancelled: true as const } : {}),
+      containment:{dataRoot:paths.dataDir,allocationId:id},
+      attach: (pid: number, marker?: string, groupId?: number) => { management?.attachRuntimeCli(id,pid,marker,groupId);attachExecutionProcessInDb(db, id, pid, marker, groupId); },
+      requestTermination: (reason: string) => { management?.finishRuntimeCli(id,false);requestExecutionProcessTerminationInDb(db, id, reason); },
+      finish: (confirmed: boolean, reason?: string) => { management?.finishRuntimeCli(id,confirmed);finishExecutionProcessInDb(db, id, confirmed, reason); },
     };
-  } finally {
-    try {
-      await telemetryQueue;
-      finalText = finalText || finalTextAccumulator.value();
-      await trace.end({ status: traceStatus, output: submittedResult || finalText, exitCode: terminalExitCode ?? null, timedOut, metrics: metricsAccumulator.value() });
-      await telemetry.flush();
-    } finally {
-      removeTemporaryPrompt(temporaryPrompt);
-      removeAgentResultChannel(resultChannel);
-    }
-  }
+  } } : management&&hostAllocationId?{prepare:async()=>{
+    const prior=await input.allocation?.prepare();const id=randomUUID();
+    try{
+      await assertRuntimeCliCaller(management,hostAllocationId);
+      management.reserveRuntimeCli(hostAllocationId,id,`invocation:${input.runId}:${id}`,process.pid);
+    }catch(error){prior?.finish(true,'独立管理分配拒绝，尚未 spawn');throw error;}
+    return {
+      containment:{dataRoot:paths.dataDir,allocationId:id},
+      attach:(pid:number,marker?:string,groupId?:number)=>{management.attachRuntimeCli(id,pid,marker,groupId);prior?.attach(pid,marker,groupId);},
+      requestTermination:(reason:string)=>{management.finishRuntimeCli(id,false);prior?.requestTermination(reason);},
+      finish:(confirmed:boolean,reason?:string)=>{management.finishRuntimeCli(id,confirmed);prior?.finish(confirmed,reason);},
+    };
+  }}:input.allocation;
+  try{return await executeAgentInvocation({ ...input, processes, allocation,isolateProcessGroup:input.isolateProcessGroup||!!management,
+    ...(activity?{
+      monitor:{intervalMs:Math.min(activity.intervalMs,input.monitor?.intervalMs??activity.intervalMs),
+        get failureKind(){return activity.failure()?activity.failureKind:input.monitor?.failureKind;},
+        begin:()=>{activity.begin();input.monitor?.begin?.();},
+        observe:event=>{activity.observe(event);input.monitor?.observe(event);},
+        failure:()=>activity.failure()??input.monitor?.failure()??null},
+      recordTelemetryEvent:async event=>{await activity.persist();await input.recordTelemetryEvent?.(event);},
+    }:{}),
+  });}
+  finally{management?.close();}
 }

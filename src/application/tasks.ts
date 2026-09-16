@@ -1,5 +1,9 @@
 import { randomUUID } from 'node:crypto';
-import { revalidatePath } from 'next/cache';
+import { getRunStatusFromDb } from './loop-runs';
+import { appendRunLogInDb } from './loop-run-log';
+export { beginRun, endRun, getRunStatus, registerRunProcess, heartbeatRun, startRunHeartbeat, ensureLoopRuntimeFiles, type RunStatus } from './loop-runs';
+export { appendLoopRunLog, readLoopRunLogChunk, recordRuntimeEventWithFallback, type RunLogChunk } from './loop-run-log';
+import { invalidatePage as revalidatePath } from '../infrastructure/page-invalidation';
 import { z } from 'zod';
 import { deliveryUnitContractSchema } from '../domain/delivery-unit';
 import { CODE_WORKSPACE_RESOURCE } from '../domain/resource';
@@ -7,11 +11,7 @@ import { parseRequirementMetadata, type RequirementMetadataKey } from '../domain
 import { DEFAULT_REQUIREMENT_PRIORITY, requirementPriority, requirementPriorityRank } from '../domain/requirement-priority';
 import { AgentResultContractError, assertDeliverySpecDecisionCoverage, deliverySpecSchema } from '../domain/agent-result';
 import { agentCommandProfile } from '../domain/agent-command-profile';
-import { databaseConnection, paths } from '../infrastructure/database';
-import { registerManagedProcessInDb } from '../infrastructure/managed-process-registry';
-import { isProcessAlive, readRunPid } from '../infrastructure/run-process';
-import { toUtcIsoString } from './event-time';
-import { recordLoopLogEventInDb } from './runtime-events';
+import { databaseConnection, hash, paths } from '../infrastructure/database';
 import {
   ensureTaskLanesInDb,
   laneForAgent,
@@ -39,7 +39,10 @@ import {
   type TaskStatus,
 } from '../domain/task';
 import type { RecoveryItem } from './recovery-items';
+import { nativeRecoveryItemsInDb, usesNativeRecoveryInDb } from './work-item-recovery';
 import { cancelFeedbackForTask } from './feedback';
+import { activeWorkflowItemForLegacyExecutionInDb, syncLegacyDeliveryWorkItemsInDb, type WorkflowItemRow, type WorkflowDependencyRow } from './work-items';
+import { interruptTaskInterventionsInDb, openInterventionInDb, type InterventionRow } from './interventions';
 import { advanceAndPublishRuntimeInvalidation, advanceRuntimeEventRevisionInDb, publishRuntimeInvalidation } from './runtime-events';
 import {
   configureRequirementDependenciesInDb,
@@ -50,7 +53,14 @@ import {
   type RequirementDependency,
 } from './task-dependencies';
 import { queueVerificationAssistanceInDb } from './verification-assistance';
+import { appendDeliveryWorkItemsInDb, reconcileNativeWorkItemExecutionsInDb, rewindWorkItemsInDb, transitionWorkItemInDb,
+  initializeNativeWorkflowInDb, replaceUnstartedNativeWorkflowInDb } from './work-item-transitions';
 import { defaultProjectInDb, projectInDb } from './projects';
+import { acknowledgeNativeClosureInDb, submitNativeHumanInputsInDb, releaseNativeWorkItemBlockInDb } from './work-item-human-actions';
+import { projectNativeFeedbackReadModelsInDb } from './native-feedback-projection';
+import { projectNativeWorkflowDisplayInDb } from './native-workflow-projection';
+import { workflowEndedInDb, workflowBlockedInDb } from './work-item-controls';
+import { releaseNativeTaskHoldInDb } from './work-item-task-holds';
 
 export type Task = TaskState & {
   project_id: string;
@@ -85,6 +95,13 @@ export type TaskWithLanes = Task & {
   verification_assistance_escalated_count: number;
   verification_assistance_attempt: number;
   verification_assistance_max_attempts: number;
+  intervention_pending_count: number;
+  intervention_running_count: number;
+  intervention_awaiting_human_count: number;
+  intervention_attempt: number;
+  intervention_max_attempts: number;
+  arbitration_active_count: number;
+  arbitration_awaiting_human_count: number;
 };
 
 export type RequirementMetadata = {
@@ -240,6 +257,7 @@ export type Question = {
   resolved_at: string | null;
   created_at: string;
   updated_at: string;
+  intervention_id: string | null;
 };
 export type RuntimeInputRequest = {
   request_id: string;
@@ -258,6 +276,10 @@ export type RuntimeInputRequest = {
   created_at: string;
   updated_at: string;
   resolved_at: string | null;
+  intervention_id: string | null;
+  intervention_status: InterventionRow['status'] | null;
+  intervention_resolver_strategy: InterventionRow['resolver_strategy'] | null;
+  intervention_resolved_by: string | null;
   assistance_job_id: string | null;
   assistance_status: 'pending' | 'running' | 'resolved' | 'escalated' | 'cancelled' | null;
   assistance_attempt_count: number | null;
@@ -265,26 +287,9 @@ export type RuntimeInputRequest = {
   assistance_last_reason: string | null;
 };
 export type ClosureAcknowledgement = { acknowledgement_id: string; task_id: string; review_document_id: string; review_revision: number; acknowledged_by: string; acknowledged_at: string };
-export type ExecutionAttemptView = { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; lane: string | null; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_template_version: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; executor_id: string | null; configured_model: string | null; reasoning_effort: string | null; result_outcome: string | null; result_verdict: string | null; result_summary: string | null; last_error: string | null; retry_not_before: string | null; dispatch_generation_key: string | null; dispatch_execution_exited_at: string | null; dispatch_settled_at: string | null; claimed_resources: string | null; created_at: string; started_at: string | null; finished_at: string | null };
+type ExecutionWorkItemBindingView = { work_item_id: string | null; work_item_attempt: number | null; work_item_revision: number | null };
+export type ExecutionAttemptView = ExecutionWorkItemBindingView & { execution_id: string; run_id: string; task_id: string; story_index: number | null; agent: string; pipeline: string; lane: string | null; attempt: number; status: string; input_hash: string; base_commit: string | null; code_commit: string | null; verification_id: string | null; prompt_version: number | null; prompt_template_version: number | null; prompt_hash: string | null; memory_revision: number | null; memory_hash: string | null; evolution_candidate_id: string | null; executor_id: string | null; configured_model: string | null; reasoning_effort: string | null; result_outcome: string | null; result_verdict: string | null; result_summary: string | null; last_error: string | null; retry_not_before: string | null; dispatch_generation_key: string | null; dispatch_execution_exited_at: string | null; dispatch_settled_at: string | null; claimed_resources: string | null; created_at: string; started_at: string | null; finished_at: string | null };
 export type Event = { event_id: string; actor: string; event_type: string; summary: string; created_at: string };
-export type RunStatus = {
-  runId: string;
-  owner: string;
-  startedAt: string;
-  heartbeatAt: string | null;
-  processKind: string | null;
-  status: 'starting' | 'running' | 'stopping' | 'stopped' | 'crashed';
-  pid: number | null;
-  active: boolean;
-  health: {
-    starting: boolean;
-    pidAlive: boolean;
-    heartbeatFresh: boolean;
-    heartbeatAgeMs: number | null;
-    generationActive: boolean;
-  };
-} | null;
-export type RunLogChunk = { lastId: number; raw: string };
 export type DelegationEnvelope = Delegation & {
   title: string;
   taskDescription: string | null;
@@ -337,53 +342,6 @@ function addEvent(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: st
   appendActiveRunLog(db, `[事件] ${actor} ${eventType} ${taskId} - ${summary}`);
 }
 
-function loopLogLine(message: string) {
-  return `${toUtcIsoString()} ${message}\n`;
-}
-
-function appendRuntimeEventWarningInDb(db: Awaited<ReturnType<typeof databaseConnection>>, runId: string, message: string) {
-  try {
-    db.prepare('INSERT INTO run_logs(run_id, line) VALUES(?, ?)').run(runId, loopLogLine(`[警告] ${message}`));
-  } catch { /* the primary operation must not depend on its degradation signal */ }
-}
-
-export async function recordRuntimeEventWithFallback(runId: string, warning: string, record: () => Promise<number>) {
-  try {
-    return await record();
-  } catch {
-    try {
-      appendRuntimeEventWarningInDb(await databaseConnection(), runId, warning);
-    } catch { /* the primary operation must not depend on its degradation signal */ }
-    return null;
-  }
-}
-
-function appendRunLogInDb(db: Awaited<ReturnType<typeof databaseConnection>>, runId: string, message: string) {
-  if (!/^[a-zA-Z0-9-]+$/.test(runId)) throw new Error('invalid run id');
-  db.prepare('INSERT INTO run_logs(run_id, line) VALUES(?, ?)').run(runId, loopLogLine(message));
-  try {
-    recordLoopLogEventInDb(db, runId, message);
-  } catch (error) {
-    // The text log is the durable primary record. Do not retry the failed mirror here:
-    // that would recurse when runtime_events is unavailable.
-    appendRuntimeEventWarningInDb(db, runId, '结构化运行时事件写入失败，已保留文本日志');
-  }
-}
-
-export async function appendLoopRunLog(runId: string, message: string) {
-  const db = await databaseConnection();
-  appendRunLogInDb(db, runId, message);
-}
-
-export async function readLoopRunLogChunk(runId: string, afterId = 0): Promise<RunLogChunk> {
-  if (!/^[a-zA-Z0-9-]+$/.test(runId)) throw new Error('invalid run id');
-  const db = await databaseConnection();
-  const rows = db.prepare('SELECT log_id, line FROM run_logs WHERE run_id = ? AND log_id > ? ORDER BY log_id').all(runId, afterId) as { log_id: number; line: string }[];
-  return {
-    lastId: rows.length ? rows[rows.length - 1].log_id : afterId,
-    raw: rows.map((row) => row.line).join(''),
-  };
-}
 
 function appendActiveRunLog(db: Awaited<ReturnType<typeof databaseConnection>>, message: string) {
   const run = getRunStatusFromDb(db);
@@ -408,6 +366,9 @@ async function syncTaskFiles(_db: Awaited<ReturnType<typeof databaseConnection>>
 
 export async function listTasks(options: { includeTerminal?: boolean; projectId?: string } = {}): Promise<TaskWithLanes[]> {
   const db = await databaseConnection();
+  const nativeTasks = db.prepare(`SELECT task_id FROM tasks WHERE workflow_engine = 'native'
+    AND (? IS NULL OR project_id = ?)`).all(options.projectId || null, options.projectId || null) as { task_id: string }[];
+  for (const task of nativeTasks) projectNativeWorkflowDisplayInDb(db, task.task_id);
   const filters = ['projects.deleted_at IS NULL'];
   if (!options.includeTerminal) filters.push("tasks.agile_status NOT IN ('done', 'cancelled')");
   if (options.projectId) filters.push('tasks.project_id = ?');
@@ -423,17 +384,42 @@ export async function listTasks(options: { includeTerminal?: boolean; projectId?
     refreshTaskLaneStatesInDb(db, task);
     const assistance = db.prepare(`
       SELECT
-        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
-        SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS running_count,
-        SUM(CASE WHEN status = 'escalated' THEN 1 ELSE 0 END) AS escalated_count,
-        COALESCE(MAX(attempt_count), 0) AS attempt,
-        COALESCE(MAX(max_attempts), 0) AS max_attempts
-      FROM verification_assistance_jobs
-      WHERE task_id = ? AND status IN ('pending', 'running', 'escalated')
+        SUM(CASE WHEN intervention.status = 'pending' THEN 1 ELSE 0 END) AS pending_count,
+        SUM(CASE WHEN intervention.status = 'running' THEN 1 ELSE 0 END) AS running_count,
+        SUM(CASE WHEN intervention.status = 'awaiting_human' THEN 1 ELSE 0 END) AS escalated_count,
+        COALESCE(MAX(intervention.attempt_count), 0) AS attempt,
+        COALESCE(MAX(intervention.max_system_attempts), 0) AS max_attempts
+      FROM verification_assistance_jobs job
+      JOIN interventions intervention ON intervention.intervention_id = job.intervention_id
+      WHERE job.task_id = ?
+        AND intervention.status IN ('pending', 'running', 'awaiting_human')
     `).get(task.task_id) as {
       pending_count: number | null;
       running_count: number | null;
       escalated_count: number | null;
+      attempt: number;
+      max_attempts: number;
+    };
+    const interventions = db.prepare(`
+      SELECT
+        SUM(CASE WHEN status = 'pending' AND resolver_strategy = 'system_then_human' THEN 1 ELSE 0 END) AS pending_count,
+        SUM(CASE WHEN status = 'running' AND resolver_strategy = 'system_then_human' THEN 1 ELSE 0 END) AS running_count,
+        SUM(CASE WHEN status = 'awaiting_human' THEN 1 ELSE 0 END) AS awaiting_human_count,
+        SUM(CASE WHEN authority = 'arbitration' AND status IN ('pending', 'running') THEN 1 ELSE 0 END) AS arbitration_active_count,
+        SUM(CASE WHEN authority = 'arbitration' AND status = 'awaiting_human' THEN 1 ELSE 0 END) AS arbitration_awaiting_human_count,
+        COALESCE(MAX(CASE WHEN status IN ('pending', 'running') AND resolver_strategy = 'system_then_human' THEN
+          (SELECT COUNT(*) FROM intervention_attempts attempt
+           WHERE attempt.intervention_id = interventions.intervention_id
+             AND attempt.status IN ('running', 'deferred', 'failed', 'resolved')) END), 0) AS attempt,
+        COALESCE(MAX(CASE WHEN status IN ('pending', 'running') AND resolver_strategy = 'system_then_human' THEN max_system_attempts END), 0) AS max_attempts
+      FROM interventions
+      WHERE task_id = ? AND status IN ('pending', 'running', 'awaiting_human')
+    `).get(task.task_id) as {
+      pending_count: number | null;
+      running_count: number | null;
+      awaiting_human_count: number | null;
+      arbitration_active_count: number | null;
+      arbitration_awaiting_human_count: number | null;
       attempt: number;
       max_attempts: number;
     };
@@ -447,6 +433,13 @@ export async function listTasks(options: { includeTerminal?: boolean; projectId?
       verification_assistance_escalated_count: assistance.escalated_count || 0,
       verification_assistance_attempt: assistance.attempt,
       verification_assistance_max_attempts: assistance.max_attempts,
+      intervention_pending_count: interventions.pending_count || 0,
+      intervention_running_count: interventions.running_count || 0,
+      intervention_awaiting_human_count: interventions.awaiting_human_count || 0,
+      intervention_attempt: interventions.attempt,
+      intervention_max_attempts: interventions.max_attempts,
+      arbitration_active_count: interventions.arbitration_active_count || 0,
+      arbitration_awaiting_human_count: interventions.arbitration_awaiting_human_count || 0,
     };
   });
 }
@@ -503,6 +496,7 @@ export async function listRecentEvents(limit = 20, offset = 0): Promise<(Event &
 
 export async function getTask(taskId: string) {
   const db = await databaseConnection();
+  projectNativeWorkflowDisplayInDb(db, taskId);
   const task = fetchTask(db, taskId);
   if (!task) return null;
   const metadata = db.prepare(`
@@ -566,16 +560,33 @@ export async function getTask(taskId: string) {
   const questions = db.prepare('SELECT * FROM questions WHERE task_id = ? ORDER BY created_at').all(taskId) as Question[];
   const runtimeInputs = db.prepare(`
     SELECT request.*,
+           intervention.status AS intervention_status,
+           intervention.resolver_strategy AS intervention_resolver_strategy,
+           intervention.resolved_by AS intervention_resolved_by,
            job.job_id AS assistance_job_id,
-           job.status AS assistance_status,
-           job.attempt_count AS assistance_attempt_count,
-           job.max_attempts AS assistance_max_attempts,
-           job.last_reason AS assistance_last_reason
+           CASE WHEN intervention.resolver_strategy = 'system_then_human' THEN
+             CASE intervention.status WHEN 'awaiting_human' THEN 'escalated' ELSE intervention.status END
+           END AS assistance_status,
+           CASE WHEN intervention.resolver_strategy = 'system_then_human' THEN
+             (SELECT COUNT(*) FROM intervention_attempts attempt
+              WHERE attempt.intervention_id = intervention.intervention_id
+                AND attempt.status IN ('running', 'deferred', 'failed', 'resolved'))
+           END AS assistance_attempt_count,
+           CASE WHEN intervention.resolver_strategy = 'system_then_human' THEN intervention.max_system_attempts END AS assistance_max_attempts,
+           CASE WHEN intervention.resolver_strategy = 'system_then_human' THEN intervention.last_error END AS assistance_last_reason
     FROM runtime_input_requests request
     LEFT JOIN verification_assistance_jobs job ON job.request_id = request.request_id
+    LEFT JOIN interventions intervention ON intervention.intervention_id = request.intervention_id
     WHERE request.task_id = ?
     ORDER BY request.created_at
   `).all(taskId) as RuntimeInputRequest[];
+  const interventions = db.prepare(`
+    SELECT intervention.*,
+           (SELECT COUNT(*) FROM intervention_attempts attempt
+            WHERE attempt.intervention_id = intervention.intervention_id
+              AND attempt.status IN ('running', 'deferred', 'failed', 'resolved')) AS system_attempt_count
+    FROM interventions intervention WHERE task_id = ? ORDER BY created_at, intervention_id
+  `).all(taskId) as (InterventionRow & { system_attempt_count: number })[];
   const documents = db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[];
   const documentComments = db.prepare('SELECT * FROM document_comments WHERE task_id = ? ORDER BY created_at').all(taskId) as DocumentComment[];
   const feedbackBatches = db.prepare(`
@@ -597,6 +608,7 @@ export async function getTask(taskId: string) {
       WHERE group_id = ? AND task_id = ? ORDER BY story_index
     `).all(group.group_id, taskId) as { story_index: number }[]).map((row) => row.story_index);
   }
+  projectNativeFeedbackReadModelsInDb(db, taskId, feedbackBatches, feedbackGroups);
   const closureAcknowledgements = db.prepare('SELECT * FROM closure_acknowledgements WHERE task_id = ? ORDER BY review_revision').all(taskId) as ClosureAcknowledgement[];
   refreshTaskLaneStatesInDb(db, task);
   const lanes = taskLanesInDb(db, task);
@@ -606,8 +618,11 @@ export async function getTask(taskId: string) {
            prompt_version, prompt_template_version, prompt_hash, memory_revision, memory_hash, evolution_candidate_id,
            executor_id, configured_model, reasoning_effort, last_error, retry_not_before,
            dispatch_generation_key, dispatch_execution_exited_at, dispatch_settled_at,
+           work_item_id, work_item_attempt,
+           (SELECT revision FROM workflow_items WHERE item_id = execution_attempts.work_item_id) AS work_item_revision,
            (SELECT GROUP_CONCAT(value, ', ')
-            FROM json_each(execution_attempts.dispatch_reservation_json, '$.claimedResources')) AS claimed_resources,
+            FROM json_each(CASE WHEN json_valid(execution_attempts.dispatch_reservation_json)
+              THEN execution_attempts.dispatch_reservation_json ELSE NULL END, '$.claimedResources')) AS claimed_resources,
            json_extract(result_json, '$.outcome') AS result_outcome,
            json_extract(result_json, '$.verdict') AS result_verdict,
            json_extract(result_json, '$.summary') AS result_summary,
@@ -616,7 +631,7 @@ export async function getTask(taskId: string) {
     WHERE task_id = ?
     ORDER BY created_at, execution_id
   `).all(taskId) as ExecutionAttemptView[];
-  const recoveryItems = db.prepare(`
+  const recoveryItems = usesNativeRecoveryInDb(db, taskId) ? nativeRecoveryItemsInDb(db, taskId) : db.prepare(`
     SELECT * FROM recovery_items
     WHERE task_id = ?
     ORDER BY created_at, recovery_id
@@ -633,6 +648,7 @@ export async function getTask(taskId: string) {
     acceptances,
     questions,
     runtimeInputs,
+    interventions,
     documents,
     documentComments,
     feedbackBatches,
@@ -648,7 +664,17 @@ export async function getTaskContext(taskId: string) {
   const detail = await getTask(taskId);
   if (!detail) throw new Error(`需求不存在：${taskId}`);
   const questions = detail.questions.map(({ relative_path: _relativePath, ...question }) => question);
-  return { ...detail, questions };
+  const db = await databaseConnection();
+  const nativeWorkflow = db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(taskId)
+    ? {
+      items: db.prepare(`SELECT * FROM workflow_items WHERE task_id = ? AND origin = 'native' AND status != 'superseded'
+        ORDER BY work_key, revision`).all(taskId) as WorkflowItemRow[],
+      dependencies: db.prepare(`SELECT dependency.* FROM workflow_dependencies dependency
+        JOIN workflow_items item ON item.item_id = dependency.item_id
+        WHERE item.task_id = ? AND item.origin = 'native' AND item.status != 'superseded'
+        ORDER BY dependency.item_id, dependency.depends_on_item_id`).all(taskId) as WorkflowDependencyRow[],
+    } : null;
+  return { ...detail, questions, nativeWorkflow };
 }
 
 const documentSchema = z.object({
@@ -666,7 +692,11 @@ export async function upsertDocument(input: unknown) {
   const db = await databaseConnection();
   const task = fetchTask(db, value.taskId);
   if (!task) throw new Error('需求不存在');
-  if (value.storyIndex && value.storyIndex > task.total_stories) throw new Error(`交付单元 ${value.storyIndex} 不存在`);
+  if (value.storyIndex) {
+    const native = db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(value.taskId);
+    if (native ? !db.prepare('SELECT 1 FROM stories WHERE task_id = ? AND story_index = ?').get(value.taskId, value.storyIndex)
+      : value.storyIndex > task.total_stories) throw new Error(`交付单元 ${value.storyIndex} 不存在`);
+  }
   const title = value.title || `${value.kind}${value.storyIndex ? ` · 交付单元 ${value.storyIndex}` : ''}`;
   db.exec('BEGIN');
   try {
@@ -755,6 +785,10 @@ export async function addDocumentComment(input: unknown) {
       value.intent,
     );
     if (revisesBusinessAnalysisSpecification) {
+      const nativeSpec = db.prepare(`SELECT item_id FROM workflow_items WHERE task_id = ? AND work_key = 'ba:spec'
+        AND origin = 'native' AND status NOT IN ('superseded', 'cancelled')`).get(value.taskId) as { item_id: string } | undefined;
+      if (nativeSpec) rewindWorkItemsInDb(db, { taskId: value.taskId, targetItemId: nativeSpec.item_id,
+        eventKey: `comment:${commentId}`, actor: 'human', authority: 'human', reason: value.content });
       db.prepare(`
         UPDATE document_comments
         SET feedback_status = 'in_progress', disposition = 'revise',
@@ -875,6 +909,9 @@ export function createTaskInDb(
   const project = value.projectId ? projectInDb(db, value.projectId) : defaultProjectInDb(db);
   if (!project) throw new Error('指定项目不存在');
   assertActorCanCreate(value.actor, value.status, requestedSubagent);
+  if (value.status !== 'backlog' || requestedSubagent) {
+    throw new Error('原生新建需求只能从 Pipeline 首项开始；历史状态必须通过迁移采纳');
+  }
   const currentSubagent = requestedSubagent
     || (value.itemType === 'direct'
       ? 'direct-agent'
@@ -896,7 +933,7 @@ export function createTaskInDb(
     closure_acknowledged_at: null,
     resume_status: null,
     resume_pending: 0,
-    blocked_reason: value.status === 'blocked' ? '系统异常暂停' : null,
+    blocked_reason: null,
   };
   assertState(state);
   db.prepare(`
@@ -904,9 +941,9 @@ export function createTaskInDb(
       task_id, project_id, title, description, link, external_id, external_status, item_type, priority,
       agile_status, current_subagent, analysis_index, dev_index, test_index,
       total_stories, spec_resolved_index, next_step,
-      work_dir, blocked_reason, last_actor
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, ?, ?, ?)
-  `).run(taskId, project.project_id, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, priority, value.status, currentSubagent, value.itemType === 'direct' ? '新建需求，等待直接执行' : '新建需求，等待 Loop 梳理', project.workspace_root, state.blocked_reason, value.actor);
+      work_dir, blocked_reason, last_actor, workflow_engine
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, 0, 0, ?, ?, ?, ?, ?)
+  `).run(taskId, project.project_id, value.title, description, link, value.externalId || null, value.externalStatus || null, value.itemType, priority, value.status, currentSubagent, value.itemType === 'direct' ? '新建需求，等待直接执行' : '新建需求，等待 Loop 梳理', project.workspace_root, state.blocked_reason, value.actor, 'native');
   const insertMetadata = db.prepare(`
     INSERT INTO requirement_metadata(task_id, metadata_key, metadata_value)
     VALUES (?, ?, ?)
@@ -916,9 +953,10 @@ export function createTaskInDb(
   const task = fetchTask(db, taskId);
   if (!task) throw new Error('需求创建失败');
   ensureTaskLanesInDb(db, task);
+  initializeNativeWorkflowInDb(db, { taskId, eventKey: 'task:create', actor: value.actor, reason: '按需求 Pipeline 建立原生工作图' });
   addEvent(db, task.task_id, value.actor, 'TaskCreated', `创建需求：${task.title}`);
   if (dependencies.length) {
-    const waiting = dependencies.filter((dependency) => !requirementDependencySatisfied(dependency.agile_status));
+    const waiting = dependencies.filter((dependency) => !requirementDependencySatisfied(dependency));
     addEvent(
       db,
       task.task_id,
@@ -1009,10 +1047,12 @@ export async function updateUnstartedTaskInput(input: unknown) {
     for (const item of metadata) insertMetadata.run(value.taskId, item.key, item.value);
     db.prepare('DELETE FROM task_dependencies WHERE task_id = ?').run(value.taskId);
     configureRequirementDependenciesInDb(db, value.taskId, value.dependsOnTaskIds);
+    if (before.item_type !== value.itemType) replaceUnstartedNativeWorkflowInDb(db, value.taskId);
     db.prepare('DELETE FROM task_lanes WHERE task_id = ?').run(value.taskId);
     const after = fetchTask(db, value.taskId);
     if (!after) throw new Error('需求输入更新失败');
     ensureTaskLanesInDb(db, after);
+    syncLegacyDeliveryWorkItemsInDb(db, value.taskId);
     addEvent(
       db,
       value.taskId,
@@ -1046,6 +1086,9 @@ const contextSchema = z.object({
 export async function initializeTaskContext(input: unknown) {
   const value = contextSchema.parse(input);
   const db = await databaseConnection();
+  if (db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(value.taskId)) {
+    throw new Error('原生需求不能通过旧上下文初始化接口改变流程；开始前请编辑需求输入，开始后请使用工作项命令');
+  }
   const before = fetchTask(db, value.taskId);
   if (!before) throw new Error('需求不存在');
   if (value.actor !== 'human' && value.actor !== 'backlog-agent') throw new Error(`${value.actor} cannot initialize context`);
@@ -1071,6 +1114,7 @@ export async function initializeTaskContext(input: unknown) {
     `).run(value.kind, changes.agile_status, changes.current_subagent, changes.next_step, changes.blocked_reason, value.actor, changes.agile_status, changes.agile_status, value.taskId);
     const after = fetchTask(db, value.taskId);
     if (after) refreshTaskLaneStatesInDb(db, after);
+    syncLegacyDeliveryWorkItemsInDb(db, value.taskId);
     addEvent(db, value.taskId, value.actor, 'ContextInitialized', '初始化数据库上下文');
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId);
@@ -1101,6 +1145,8 @@ export async function addStory(input: unknown) {
   try {
     db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, ?, ?, ?)').run(value.taskId, nextIndex, value.title, directory);
     db.prepare('UPDATE tasks SET total_stories = ?, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?').run(prospective.total_stories, `已新增交付单元 ${nextIndex}，等待交付分析`, value.actor, value.taskId);
+    appendDeliveryWorkItemsInDb(db, { taskId: value.taskId, units: [{ storyIndex: nextIndex, title: value.title }],
+      eventKey: `unit:${nextIndex}`, actor: value.actor, reason: '新增交付单元并扩展工作图' });
     const after = fetchTask(db, value.taskId);
     if (after) refreshTaskLaneStatesInDb(db, after);
     addEvent(db, value.taskId, value.actor, 'StoryAdded', `新增交付单元 ${nextIndex}：${value.title}`);
@@ -1128,7 +1174,8 @@ export async function addPlannedDeliveryUnits(input: unknown) {
   `).get(value.taskId) as { value: number }).value;
   if (existingCount) throw new Error('当前需求已存在交付单元，拒绝重复拆分');
   const prospective = { ...task, total_stories: value.units.length };
-  assertState(prospective);
+  const native = Boolean(db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(value.taskId));
+  if (!native) assertState(prospective);
   db.exec('BEGIN');
   try {
     const inserted = insertDeliveryUnitContractsInDb(db, {
@@ -1158,6 +1205,8 @@ export async function addPlannedDeliveryUnits(input: unknown) {
         `新增交付单元 ${unit.storyIndex}：${unit.title}（${unit.key}）`,
       );
     }
+    appendDeliveryWorkItemsInDb(db, { taskId: value.taskId, units: inserted,
+      eventKey: `plan:${value.sourceCommandChainDraftId}`, actor: value.actor, reason: '根据冻结交付计划创建分析、开发与验证工作项' });
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId);
     refreshPages(`/tasks/${value.taskId}`);
@@ -1181,7 +1230,9 @@ export async function saveDeliverySpec(input: unknown) {
   if (value.status === 'waiting_for_answers' && !unresolvedDecisions.length) throw new Error('等待回答的交付规格必须列出待确认决策');
   const db = await databaseConnection();
   const task = fetchTask(db, value.taskId);
-  if (!task || value.storyIndex > task.total_stories) throw new Error('交付单元不存在');
+  const native = Boolean(db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(value.taskId));
+  if (!task || (native ? !db.prepare('SELECT 1 FROM stories WHERE task_id = ? AND story_index = ?').get(value.taskId, value.storyIndex)
+    : value.storyIndex > task.total_stories)) throw new Error('交付单元不存在');
   if (value.status === 'resolved') {
     const pending = (db.prepare(`
       SELECT COUNT(*) AS count FROM questions
@@ -1242,6 +1293,42 @@ const answerSchema = z.object({
 
 type QuestionActivation = { decisionKey: string; optionId: string };
 
+function mirrorHumanInterventionStatusInDb(
+  db: Awaited<ReturnType<typeof databaseConnection>>,
+  interventionId: string | null,
+  sourceStatus: string,
+  resolution?: string | null,
+) {
+  if (!interventionId) return;
+  const status = sourceStatus === 'pending'
+    ? 'awaiting_human'
+    : sourceStatus === 'conditional'
+      ? 'pending'
+      : sourceStatus === 'not_applicable' || sourceStatus === 'superseded'
+        ? 'superseded'
+        : sourceStatus === 'answered' || sourceStatus === 'resolved'
+          ? 'resolved'
+          : null;
+  if (!status) return;
+  if (status === 'resolved') {
+    db.prepare(`
+      UPDATE interventions
+      SET status = 'resolved', resolution = COALESCE(?, resolution),
+          resolved_by = COALESCE(resolved_by, 'human'),
+          resolved_at = COALESCE(resolved_at, CURRENT_TIMESTAMP),
+          updated_at = CURRENT_TIMESTAMP
+      WHERE intervention_id = ? AND resolver_strategy = 'human_only'
+    `).run(resolution || null, interventionId);
+    return;
+  }
+  db.prepare(`
+    UPDATE interventions
+    SET status = ?, resolution = NULL, resolved_by = NULL, resolved_at = NULL,
+        updated_at = CURRENT_TIMESTAMP
+    WHERE intervention_id = ? AND resolver_strategy = 'human_only'
+  `).run(status, interventionId);
+}
+
 function parseQuestionActivations(value: string | null): QuestionActivation[] {
   if (!value) return [];
   try {
@@ -1265,7 +1352,7 @@ export function recomputeTaskQuestionApplicabilityInDb(
 ) {
   const rows = db.prepare(`
     SELECT question_id, decision_key, title, answer, selected_option_id,
-           alternatives_json, activation_json, status
+           alternatives_json, activation_json, status, intervention_id
     FROM questions
     WHERE task_id = ? AND story_index IS ? AND source_agent = ?
       AND decision_key IS NOT NULL
@@ -1279,6 +1366,7 @@ export function recomputeTaskQuestionApplicabilityInDb(
     alternatives_json: string | null;
     activation_json: string | null;
     status: string;
+    intervention_id: string | null;
   }[];
   const byKey = new Map(rows.map((row) => [row.decision_key, row]));
   const optionLabel = (row: typeof rows[number] | undefined, optionId: string) => {
@@ -1334,6 +1422,7 @@ export function recomputeTaskQuestionApplicabilityInDb(
         UPDATE questions SET status = ?, status_reason = ?, updated_at = CURRENT_TIMESTAMP
         WHERE question_id = ?
       `).run(nextStatus, reason, row.question_id);
+      mirrorHumanInterventionStatusInDb(db, row.intervention_id, nextStatus, row.answer);
     }
     if (!changed) break;
   }
@@ -1368,6 +1457,7 @@ export async function answerQuestion(input: unknown) {
           updated_at = CURRENT_TIMESTAMP
       WHERE question_id = ?
     `).run(normalizedAnswer, selectedOptionId || null, questionId);
+    mirrorHumanInterventionStatusInDb(db, question.intervention_id, 'answered', normalizedAnswer);
     if (question.source_agent === 'backlog-agent') {
       recomputeBacklogQuestionApplicabilityInDb(db, taskId);
     } else if (question.source_agent === 'analyst-agent') {
@@ -1447,14 +1537,58 @@ export async function addRuntimeInputRequest(input: unknown) {
         currentStoryIndex: value.storyIndex || null,
         blockedReason: value.title,
       });
+    } else {
+      syncLegacyDeliveryWorkItemsInDb(db, value.taskId);
     }
+    const sourceExecution = value.sourceExecutionId
+      ? db.prepare(`
+          SELECT work_item_id FROM execution_attempts
+          WHERE execution_id = ? AND task_id = ?
+        `).get(value.sourceExecutionId, value.taskId) as { work_item_id: string | null } | undefined
+      : undefined;
+    const activeItem = activeWorkflowItemForLegacyExecutionInDb(db, {
+      taskId: value.taskId,
+      agent: value.sourceAgent,
+      pipeline: 'resume',
+      storyIndex: value.storyIndex || null,
+    });
+    const itemId = activeItem?.item_id || sourceExecution?.work_item_id || null;
     if (value.sourceAgent === 'test-agent') {
       queueVerificationAssistanceInDb(db, {
         requestId,
         taskId: value.taskId,
         storyIndex: value.storyIndex || null,
         title: value.title,
+        itemId,
       });
+      db.prepare(`
+        UPDATE runtime_input_requests
+        SET intervention_id = (
+          SELECT intervention_id FROM verification_assistance_jobs WHERE request_id = ?
+        )
+        WHERE request_id = ?
+      `).run(requestId, requestId);
+    } else {
+      const intervention = openInterventionInDb(db, {
+        taskId: value.taskId,
+        itemId,
+        dedupeKey: `runtime-input:${requestId}`,
+        summary: value.title,
+        context: {
+          runtimeInputRequestId: requestId,
+          storyIndex: value.storyIndex || null,
+          question: value.question,
+          why: value.why || null,
+          recommendation: value.recommendation || null,
+        },
+        requestedBy: value.sourceAgent,
+        sourceExecutionId: value.sourceExecutionId || null,
+        resolverStrategy: 'human_only',
+        authority: 'standard',
+      });
+      db.prepare(`
+        UPDATE runtime_input_requests SET intervention_id = ? WHERE request_id = ?
+      `).run(intervention.intervention_id, requestId);
     }
     addEvent(db, value.taskId, value.sourceAgent, 'RuntimeInputRequested', `请求运行信息：${value.title}`);
     db.exec('COMMIT');
@@ -1481,10 +1615,13 @@ export async function answerRuntimeInput(input: unknown) {
   `).get(value.requestId, value.taskId) as RuntimeInputRequest | undefined;
   if (!request) throw new Error('运行信息请求不存在');
   if (request.status !== 'pending') throw new Error('运行信息请求已经处理');
-  const assistance = db.prepare(`
-    SELECT status FROM verification_assistance_jobs WHERE request_id = ?
-  `).get(value.requestId) as { status: string } | undefined;
-  if (assistance && ['pending', 'running'].includes(assistance.status)) {
+  const intervention = request.intervention_id
+    ? db.prepare(`
+        SELECT status, resolver_strategy FROM interventions WHERE intervention_id = ?
+      `).get(request.intervention_id) as { status: string; resolver_strategy: string } | undefined
+    : undefined;
+  if (intervention?.resolver_strategy === 'system_then_human'
+    && ['pending', 'running'].includes(intervention.status)) {
     throw new Error('系统辅助 Agent 正在处理该验证协助；连续尝试后仍无法解决时才会转交人工');
   }
   db.exec('BEGIN');
@@ -1496,9 +1633,18 @@ export async function answerRuntimeInput(input: unknown) {
     `).run(value.answer, value.requestId);
     db.prepare(`
       UPDATE verification_assistance_jobs
-      SET status = 'cancelled', updated_at = CURRENT_TIMESTAMP
+      SET status = 'resolved', answer = ?, resolved_at = CURRENT_TIMESTAMP,
+          updated_at = CURRENT_TIMESTAMP
       WHERE request_id = ? AND status = 'escalated'
-    `).run(value.requestId);
+    `).run(value.answer, value.requestId);
+    if (request.intervention_id) {
+      db.prepare(`
+        UPDATE interventions
+        SET status = 'resolved', resolution = ?, resolved_by = 'human',
+            resolved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+        WHERE intervention_id = ? AND status IN ('pending', 'awaiting_human')
+      `).run(value.answer, request.intervention_id);
+    }
     addEvent(db, value.taskId, 'human', 'RuntimeInputAnswered', `回答了运行信息「${request.title}」。`);
     db.exec('COMMIT');
   } catch (error) {
@@ -1508,8 +1654,22 @@ export async function answerRuntimeInput(input: unknown) {
   refreshPages('/', `/tasks/${value.taskId}`);
 }
 
+function resumeNativeInputWorkInDb(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: string, agent: string, storyIndex: number | null, reason: string) {
+  const item = activeWorkflowItemForLegacyExecutionInDb(db, { taskId, agent, storyIndex, pipeline: 'resume' });
+  if (item?.origin !== 'native' || item.status !== 'waiting') return;
+  const submittedInputs = db.prepare(`
+    SELECT intervention_id FROM interventions WHERE item_id = ? AND status = 'resolved' ORDER BY intervention_id
+  `).all(item.item_id);
+  transitionWorkItemInDb(db, { itemId: item.item_id, action: 'resume', eventKey: `inputs:${hash(JSON.stringify(submittedInputs))}`,
+    actor: 'human', authority: 'human', reason });
+}
+
 export async function submitRuntimeInputs(taskId: string, requestedLane?: TaskLaneKind) {
   const db = await databaseConnection();
+  if (submitNativeHumanInputsInDb(db, { taskId, kind: 'runtime', lane: requestedLane })) {
+    refreshPages('/', `/tasks/${taskId}`, '/decisions');
+    return;
+  }
   const task = fetchTask(db, taskId);
   if (!task) throw new Error('需求不存在');
   const lanes = taskLanesInDb(db, task);
@@ -1544,6 +1704,8 @@ export async function submitRuntimeInputs(taskId: string, requestedLane?: TaskLa
             next_step = ?, last_actor = 'human', updated_at = CURRENT_TIMESTAMP
         WHERE task_id = ?
       `).run(`运行信息已补充，交回 ${controlAgent} 从当前阶段继续`, taskId);
+      syncLegacyDeliveryWorkItemsInDb(db, taskId);
+      resumeNativeInputWorkInDb(db, taskId, controlAgent, null, '人工运行信息回答已提交');
       addEvent(db, taskId, 'human', 'RuntimeInputsSubmitted', `提交需求级运行信息回答，交回 ${controlAgent}。`);
       db.exec('COMMIT');
     } catch (error) {
@@ -1582,6 +1744,7 @@ export async function submitRuntimeInputs(taskId: string, requestedLane?: TaskLa
       currentStoryIndex: lane.current_story_index,
       resumePending: 1,
     });
+    resumeNativeInputWorkInDb(db, taskId, lane.current_agent, lane.current_story_index, '人工运行信息回答已提交');
     addEvent(db, taskId, 'human', 'RuntimeInputsSubmitted', `提交 ${lane.lane} Lane 运行信息回答，交回 ${lane.current_agent}。`);
     db.exec('COMMIT');
   } catch (error) {
@@ -1598,12 +1761,24 @@ export async function resolveRuntimeInputs(input: {
   resolvedExecutionId?: string;
 }) {
   const db = await databaseConnection();
+  const native = db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(input.taskId);
+  // A role and unit are not an execution identity. A late result from an old
+  // revision must not consume answers belonging to its replacement.
+  const source = native && input.resolvedExecutionId ? db.prepare(`SELECT execution.work_item_id
+    FROM execution_attempts execution JOIN workflow_items item ON item.item_id = execution.work_item_id
+    WHERE execution.execution_id = ? AND execution.task_id = ? AND item.task_id = execution.task_id
+      AND execution.agent = ? AND item.agent = execution.agent AND execution.status != 'cancelled'
+      AND item.status NOT IN ('cancelled', 'superseded')`)
+    .get(input.resolvedExecutionId, input.taskId, input.sourceAgent) as { work_item_id: string } | undefined : undefined;
+  if (native && !source) return 0;
   const result = db.prepare(`
     UPDATE runtime_input_requests
     SET status = 'resolved', resolved_execution_id = ?, resolved_at = CURRENT_TIMESTAMP,
         updated_at = CURRENT_TIMESTAMP
     WHERE task_id = ? AND story_index IS ? AND source_agent = ? AND status = 'answered'
-  `).run(input.resolvedExecutionId || null, input.taskId, input.storyIndex, input.sourceAgent);
+      AND (? = 0 OR EXISTS (SELECT 1 FROM interventions intervention
+        WHERE intervention.intervention_id = runtime_input_requests.intervention_id AND intervention.item_id = ?))
+  `).run(input.resolvedExecutionId || null, input.taskId, input.storyIndex, input.sourceAgent, native ? 1 : 0, source?.work_item_id || null);
   if (result.changes) {
     addEvent(db, input.taskId, input.sourceAgent as Actor, 'RuntimeInputsResolved', `已使用 ${result.changes} 条运行信息继续执行。`);
     refreshPages('/', `/tasks/${input.taskId}`);
@@ -1656,6 +1831,11 @@ export async function addQuestion(input: unknown) {
     if (!story && storyIndex > task.total_stories) throw new Error(`交付单元 ${storyIndex} 不存在`);
   }
   const relativePath = null;
+  const blockingAgent = value.kind === 'analysis'
+    ? 'analyst-agent'
+    : value.actor !== 'human'
+      ? value.actor
+      : task.current_subagent || 'backlog-agent';
 
   db.exec('BEGIN');
   try {
@@ -1676,25 +1856,60 @@ export async function addQuestion(input: unknown) {
       value.initialStatus === 'conditional' ? '等待上游决策' : value.initialStatus === 'not_applicable' ? '上游路径未命中' : null,
     );
     if (value.blockTask) {
-      const agent = value.kind === 'analysis' ? 'analyst-agent' : value.actor !== 'human' ? value.actor : task.current_subagent || 'backlog-agent';
       db.prepare(`
         UPDATE tasks
         SET run_state = 'waiting_for_answers', current_subagent = ?,
             resume_pending = 0, blocked_reason = ?, next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP
         WHERE task_id = ?
-      `).run(agent, value.blockedReason || value.title, `等待人工回答：${value.title}`, value.actor, value.taskId);
-      const lane = laneForAgent(agent);
+      `).run(blockingAgent, value.blockedReason || value.title, `等待人工回答：${value.title}`, value.actor, value.taskId);
+      const lane = laneForAgent(blockingAgent);
       if (lane !== 'control') {
         setTaskLaneStateInDb(db, {
           taskId: value.taskId,
           lane,
           status: 'waiting_for_answers',
-          currentAgent: agent,
+          currentAgent: blockingAgent,
           currentStoryIndex: storyIndex || null,
           blockedReason: value.blockedReason || value.title,
         });
+      } else {
+        syncLegacyDeliveryWorkItemsInDb(db, value.taskId);
       }
     }
+    const questionItem = value.blockTask && value.initialStatus === 'pending'
+      ? activeWorkflowItemForLegacyExecutionInDb(db, {
+          taskId: value.taskId,
+          agent: blockingAgent,
+          pipeline: 'resume',
+          storyIndex: storyIndex || null,
+        })
+      : null;
+    const intervention = openInterventionInDb(db, {
+      taskId: value.taskId,
+      itemId: questionItem?.item_id || null,
+      dedupeKey: `question:${questionId}`,
+      summary: value.title,
+      context: {
+        questionId,
+        kind: value.kind,
+        question: value.question,
+        why: value.why || null,
+        recommendation: value.recommendation || null,
+        decisionKey: value.decisionKey || null,
+        storyIndex: storyIndex || null,
+      },
+      requestedBy: value.actor,
+      resolverStrategy: 'human_only',
+      authority: 'standard',
+    });
+    db.prepare(`
+      UPDATE questions SET intervention_id = ? WHERE question_id = ?
+    `).run(intervention.intervention_id, questionId);
+    mirrorHumanInterventionStatusInDb(
+      db,
+      intervention.intervention_id,
+      value.initialStatus,
+    );
     addEvent(db, value.taskId, value.actor, 'ClarificationRequested', `请求澄清：${value.title}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId);
@@ -1708,6 +1923,10 @@ export async function addQuestion(input: unknown) {
 
 export async function submitClarificationAnswers(taskId: string) {
   const db = await databaseConnection();
+  if (submitNativeHumanInputsInDb(db, { taskId, kind: 'questions' })) {
+    refreshPages('/', `/tasks/${taskId}`, '/decisions');
+    return;
+  }
   const task = fetchTask(db, taskId);
   if (!task) throw new Error('需求不存在');
   const lane = taskLaneInDb(db, task, 'analysis');
@@ -1759,7 +1978,10 @@ export async function submitClarificationAnswers(taskId: string) {
         currentStoryIndex: lane.current_story_index || task.analysis_index + 1,
         resumePending: 1,
       });
+    } else {
+      syncLegacyDeliveryWorkItemsInDb(db, taskId);
     }
+    resumeNativeInputWorkInDb(db, taskId, controlAgent || 'analyst-agent', controlAgent ? null : lane.current_story_index, '人工澄清回答已提交');
     addEvent(
       db,
       taskId,
@@ -1785,8 +2007,28 @@ export async function submitClarificationAnswers(taskId: string) {
   refreshPages('/', `/tasks/${taskId}`, '/decisions');
 }
 
+function resumeNativeBlockedWorkInDb(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: string, agent: string | null, storyIndex: number | null) {
+  if (!agent) return;
+  const item = activeWorkflowItemForLegacyExecutionInDb(db, { taskId, agent, storyIndex, pipeline: 'resume' });
+  if (item?.origin !== 'native' || item.status !== 'waiting') return;
+  const failure = db.prepare(`SELECT execution_id FROM execution_attempts WHERE work_item_id = ? AND status = 'system_blocked'
+    ORDER BY rowid DESC LIMIT 1`).get(item.item_id) as { execution_id: string } | undefined;
+  if (!failure) return;
+  transitionWorkItemInDb(db, { itemId: item.item_id, action: 'resume', eventKey: `unblock:${failure.execution_id}`,
+    actor: 'human', authority: 'human', resetRetryBudget: true, reason: '人工解除系统阻塞，重新开始当前工作项的重试额度' });
+}
+
 export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind) {
   const db = await databaseConnection();
+  if (releaseNativeTaskHoldInDb(db, taskId)) {
+    projectNativeWorkflowDisplayInDb(db, taskId);
+    refreshPages('/', `/tasks/${taskId}`);
+    return;
+  }
+  if (releaseNativeWorkItemBlockInDb(db, { taskId, lane: requestedLane })) {
+    refreshPages('/', `/tasks/${taskId}`);
+    return;
+  }
   const task = fetchTask(db, taskId);
   if (!task) throw new Error('需求不存在');
   const lane = taskLanesInDb(db, task).find((item) => item.status === 'system_blocked' && (!requestedLane || item.lane === requestedLane));
@@ -1825,6 +2067,7 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
           WHERE task_id = ?
         `).run(`${lane.lane} Lane 阻塞已解除，等待继续调度`, taskId);
       }
+      resumeNativeBlockedWorkInDb(db, taskId, lane.current_agent, lane.current_story_index);
       addEvent(db, taskId, 'system', 'LaneBlockRecovered', `恢复 ${lane.lane} Lane，交回 ${lane.current_agent || '对应 Agent'}。`);
       db.exec('COMMIT');
     } catch (error) {
@@ -1860,6 +2103,7 @@ export async function releaseBlock(taskId: string, requestedLane?: TaskLaneKind)
         : `系统阻塞已解除，重新派发 ${task.current_subagent} 负责的当前步骤`,
       taskId,
     );
+    resumeNativeBlockedWorkInDb(db, taskId, task.current_subagent, null);
     addEvent(
       db,
       taskId,
@@ -1896,6 +2140,10 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
   if (!before) throw new Error('需求不存在');
   changes = Object.fromEntries(Object.entries(changes).filter(([, item]) => item !== undefined)) as typeof changes;
   const changed = Object.keys(changes);
+  if (db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(taskId)) {
+    const forbidden = changed.filter((key) => !['priority', 'title', 'next_step'].includes(key));
+    if (forbidden.length) throw new Error(`原生流程不能通过旧任务状态接口修改 ${forbidden.join('、')}，请使用工作项转移、介入或专用人工操作`);
+  }
   assertUpdate(before, actor, changes, changed);
   if (changes.agile_status === 'blocked' && before.agile_status !== 'blocked') changes.resume_status = before.agile_status;
   const prospective = { ...before, ...changes } as TaskState;
@@ -1982,6 +2230,7 @@ export async function updateTask(taskId: string, actor: Actor, changes: Partial<
     }
     const after = fetchTask(db, taskId);
     if (after) refreshTaskLaneStatesInDb(db, after);
+    syncLegacyDeliveryWorkItemsInDb(db, taskId);
     const updateSummary = changes.next_step
       || (changes.priority ? `调整优先级：${before.priority || '未设置'} → ${changes.priority}` : `更新状态：${changes.agile_status || before.agile_status}`);
     addEvent(db, taskId, actor, 'TaskUpdated', updateSummary);
@@ -2038,6 +2287,10 @@ export async function acknowledgeClosure(input: unknown) {
     actor: z.enum(['human']).default('human'),
   }).parse(input);
   const db = await databaseConnection();
+  if (acknowledgeNativeClosureInDb(db, value)) {
+    refreshPages('/', '/tasks', `/tasks/${value.taskId}`);
+    return;
+  }
   const task = fetchTask(db, value.taskId);
   if (!task || task.agile_status !== 'ready_to_close' || task.closure_status !== 'awaiting_read') throw new Error('需求当前没有等待阅读的结卡报告');
   if (task.review_revision !== value.reviewRevision || !task.review_document_id) throw new Error('结卡报告版本已变化，请阅读最新版本');
@@ -2053,6 +2306,10 @@ export async function acknowledgeClosure(input: unknown) {
   if (activeFeedbackBatches) throw new Error('当前反馈批次尚未完成，不能关闭需求');
   db.exec('BEGIN');
   try {
+    const closure = db.prepare(`SELECT item_id FROM workflow_items WHERE task_id = ? AND kind = 'closure'
+      AND origin = 'native' AND status = 'waiting'`).get(value.taskId) as { item_id: string } | undefined;
+    if (closure) transitionWorkItemInDb(db, { itemId: closure.item_id, action: 'complete',
+      eventKey: `closure:${value.reviewRevision}`, actor: value.actor, authority: 'human', reason: `已阅读并确认结卡报告 v${value.reviewRevision}` });
     db.prepare(`
       INSERT INTO closure_acknowledgements(
         acknowledgement_id, task_id, review_document_id, review_revision, acknowledged_by
@@ -2082,6 +2339,8 @@ const rewindSchema = z.object({
   story: z.coerce.number().int().positive().optional().nullable(),
   reason: z.string().trim().optional().nullable(),
   actor: z.enum(['human', 'system', 'analyst-agent', 'dev-agent', 'test-agent', 'review-agent']).default('human'),
+  eventKey: z.string().min(1).optional(),
+  preserveInterventionId: z.string().min(1).optional(),
 });
 
 const REWIND_STAGE_AGENTS = {
@@ -2096,10 +2355,11 @@ const REWIND_STAGE_AGENTS = {
 export async function rewindTask(input: unknown) {
   const value = rewindSchema.parse(input);
   const db = await databaseConnection();
+  projectNativeWorkflowDisplayInDb(db, value.taskId);
   const task = fetchTask(db, value.taskId);
   if (!task) throw new Error('需求不存在');
-  if (task.agile_status === 'blocked') throw new Error('请先完成确认再执行回退');
-  if (task.agile_status === 'done' || task.agile_status === 'cancelled') throw new Error('已结束需求不能直接回退');
+  if (workflowBlockedInDb(db, value.taskId)) throw new Error('请先完成确认再执行回退');
+  if (workflowEndedInDb(db, value.taskId)) throw new Error('已结束需求不能直接回退');
   const permissions: Record<string, string[]> = {
     'analyst-agent': ['plan'],
     'dev-agent': ['analysis'],
@@ -2107,6 +2367,40 @@ export async function rewindTask(input: unknown) {
   };
   if (value.actor !== 'human' && value.actor !== 'system' && !permissions[value.actor]?.includes(value.to)) throw new Error(`${value.actor} 无权 rewind 到 ${value.to}`);
   const targetAgent = REWIND_STAGE_AGENTS[value.to];
+  const nativeWorkKey = ['context', 'repro', 'plan'].includes(value.to)
+    ? `delivery:${value.to}` : `delivery:${value.to}:${value.story}`;
+  const nativeTarget = db.prepare(`SELECT item_id FROM workflow_items WHERE task_id = ? AND work_key = ?
+    AND origin = 'native' AND status NOT IN ('superseded', 'cancelled')`).get(value.taskId, nativeWorkKey) as { item_id: string } | undefined;
+  if (value.preserveInterventionId && (value.actor !== 'system' || !db.prepare(`
+    SELECT 1 FROM interventions WHERE intervention_id = ? AND task_id = ? AND authority = 'arbitration' AND status = 'running'
+  `).get(value.preserveInterventionId, value.taskId))) throw new Error('回退不能保留无效或不属于当前仲裁的介入事项');
+  if (nativeTarget && value.eventKey) {
+    const replay = db.prepare(`SELECT event.actor, event.reason FROM workflow_item_events event
+      JOIN workflow_items item ON item.item_id = event.item_id
+      WHERE item.task_id = ? AND item.work_key = ? AND event.event_key = ? AND event.event_type = 'rewind'`)
+      .get(value.taskId, nativeWorkKey, value.eventKey) as { actor: string; reason: string } | undefined;
+    if (replay) {
+      if (replay.actor !== value.actor || replay.reason !== (value.reason || `回退到 ${value.to}`)) throw new Error('回退事件幂等键冲突');
+      return;
+    }
+  }
+  if (db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(value.taskId)) {
+    if (!nativeTarget) throw new Error('回退目标必须是当前需求中仍有效的原生工作项');
+    db.transaction(() => {
+      rewindWorkItemsInDb(db, { taskId: value.taskId, targetItemId: nativeTarget.item_id,
+        eventKey: value.eventKey || `task-rewind:${randomUUID()}`, actor: value.actor,
+        authority: value.preserveInterventionId ? 'arbitration' : value.actor === 'human' ? 'human' : value.actor === 'system' ? 'system' : 'agent',
+        reason: value.reason || `回退到 ${value.to}`, preserveInterventionId: value.preserveInterventionId });
+      db.prepare('UPDATE tasks SET next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?')
+        .run(value.reason || `回退到 ${value.to}`, value.actor, value.taskId);
+      projectNativeWorkflowDisplayInDb(db, value.taskId);
+      addEvent(db, value.taskId, value.actor, 'TaskRewound', `回退工作项 ${nativeWorkKey} 到新版本`);
+    }).immediate();
+    await advanceAndPublishRuntimeInvalidation('execution.cancel-requested', value.taskId);
+    await syncTaskFiles(db, value.taskId, { createClearedBlock: true });
+    refreshPages('/', `/tasks/${value.taskId}`);
+    return;
+  }
   let analysisIndex = task.analysis_index;
   let devIndex = task.dev_index;
   let testIndex = task.test_index;
@@ -2151,6 +2445,20 @@ export async function rewindTask(input: unknown) {
     if (taskLevelRewind) {
       releaseResourceClaimInDb(db, CODE_WORKSPACE_RESOURCE, value.taskId);
       db.prepare(`
+        UPDATE interventions
+        SET status = 'superseded', active_session_id = NULL, command_token_hash = NULL,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ? AND status IN ('pending', 'running', 'awaiting_human')
+          AND intervention_id IN (
+            SELECT intervention_id FROM questions WHERE task_id = ?
+            UNION SELECT intervention_id FROM runtime_input_requests WHERE task_id = ?
+          )
+      `).run(value.taskId, value.taskId, value.taskId);
+      db.prepare(`
+        UPDATE runtime_input_requests SET status = 'superseded', updated_at = CURRENT_TIMESTAMP
+        WHERE task_id = ? AND status = 'pending'
+      `).run(value.taskId);
+      db.prepare(`
         UPDATE questions
         SET status = 'superseded', updated_at = CURRENT_TIMESTAMP
         WHERE task_id = ? AND status IN ('pending', 'answered', 'resolved')
@@ -2186,6 +2494,7 @@ export async function rewindTask(input: unknown) {
       const nextTask = fetchTask(db, value.taskId);
       if (nextTask) refreshTaskLaneStatesInDb(db, nextTask);
     }
+    syncLegacyDeliveryWorkItemsInDb(db, value.taskId);
     addEvent(db, value.taskId, value.actor, 'TaskRewound', `回退 ${storyLabel} 到 ${value.to}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId, { createClearedBlock: true });
@@ -2201,13 +2510,17 @@ const cancelSchema = z.object({ taskId: z.string().min(1), reason: z.string().mi
 export async function cancelTask(input: unknown) {
   const value = cancelSchema.parse(input);
   const db = await databaseConnection();
+  projectNativeWorkflowDisplayInDb(db, value.taskId);
   const task = fetchTask(db, value.taskId);
   if (!task) throw new Error('需求不存在');
   if (task.agile_status === 'done') throw new Error('已完成需求不能取消');
   if (task.agile_status === 'cancelled') return;
+  const native = Boolean(db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(value.taskId));
   db.exec('BEGIN');
   try {
-    db.prepare(`
+    if (native) db.prepare('UPDATE tasks SET next_step = ?, last_actor = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?')
+      .run(`已取消：${value.reason}`, 'human', value.taskId);
+    else db.prepare(`
       UPDATE tasks
       SET agile_status = 'cancelled', current_subagent = NULL, next_step = ?,
           blocked_reason = NULL, resume_status = NULL, resume_pending = 0,
@@ -2215,8 +2528,16 @@ export async function cancelTask(input: unknown) {
           completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(`已取消：${value.reason}`, value.taskId);
-    setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'analysis', status: 'completed' });
-    setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'delivery', status: 'completed' });
+    const remainingWork = db.prepare(`SELECT item_id FROM workflow_items WHERE task_id = ? AND origin = 'native'
+      AND status NOT IN ('completed', 'superseded', 'cancelled')`).all(value.taskId) as { item_id: string }[];
+    for (const item of remainingWork) transitionWorkItemInDb(db, { itemId: item.item_id, action: 'cancel',
+      eventKey: 'task:cancelled', actor: 'human', authority: 'human', reason: value.reason });
+    interruptTaskInterventionsInDb(db, value.taskId, '需求已取消，系统介入停止');
+    if (!native) {
+      setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'analysis', status: 'completed' });
+      setTaskLaneStateInDb(db, { taskId: value.taskId, lane: 'delivery', status: 'completed' });
+      syncLegacyDeliveryWorkItemsInDb(db, value.taskId);
+    }
     db.prepare(`
       UPDATE agent_results
       SET application_status = 'applied', application_error = NULL,
@@ -2226,19 +2547,23 @@ export async function cancelTask(input: unknown) {
     db.prepare(`
       UPDATE execution_attempts
       SET status = 'cancelled', last_error = '需求已取消',
+          dispatch_retry_consumed = CASE WHEN status IN ('planned', 'running', 'output_received', 'verifying', 'applying') THEN 0 ELSE dispatch_retry_consumed END,
+          failure_kind = CASE WHEN status IN ('planned', 'running', 'output_received', 'verifying', 'applying') THEN NULL ELSE failure_kind END,
           finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
-        AND status IN ('planned', 'output_received', 'verifying', 'applying', 'retryable_failed', 'system_blocked')
-    `).run(value.taskId);
+        AND (status IN ('planned', 'running', 'output_received', 'verifying', 'applying')
+          OR (? = 0 AND status IN ('retryable_failed', 'system_blocked')))
+    `).run(value.taskId, native ? 1 : 0);
     releaseTaskResourceClaimsInDb(db, value.taskId);
     addEvent(db, value.taskId, 'human', 'TaskCancelled', value.reason);
+    if (native) projectNativeWorkflowDisplayInDb(db, value.taskId);
     db.exec('COMMIT');
-    await cancelFeedbackForTask(value.taskId);
-    await syncTaskFiles(db, value.taskId, { createClearedBlock: true });
   } catch (error) {
     db.exec('ROLLBACK');
     throw error;
   }
+  await cancelFeedbackForTask(value.taskId);
+  await syncTaskFiles(db, value.taskId, { createClearedBlock: true });
   await advanceAndPublishRuntimeInvalidation('execution.cancel-requested', value.taskId);
   refreshPages('/', `/tasks/${value.taskId}`);
 }
@@ -2253,7 +2578,7 @@ export async function pauseTask(input: unknown) {
   const db = await databaseConnection();
   const task = fetchTask(db, value.taskId);
   if (!task) throw new Error('需求不存在');
-  if (['done', 'cancelled'].includes(task.agile_status)) throw new Error('已结束需求不能暂停');
+  if (workflowEndedInDb(db, value.taskId)) throw new Error('已结束需求不能暂停');
   const reason = value.reason || '暂缓推进';
   db.transaction(() => {
     if (!task.is_paused) {
@@ -2270,6 +2595,8 @@ export async function pauseTask(input: unknown) {
           finished_at = CURRENT_TIMESTAMP, heartbeat_at = CURRENT_TIMESTAMP
       WHERE task_id = ? AND status IN ('planned', 'running')
     `).run(value.taskId);
+    interruptTaskInterventionsInDb(db, value.taskId, '需求已暂停，系统介入中断');
+    reconcileNativeWorkItemExecutionsInDb(db, value.taskId);
     const resources = (db.prepare(`
       SELECT resource_key FROM resource_claims
       WHERE owner_task_id = ? ORDER BY resource_key
@@ -2295,7 +2622,7 @@ export async function resumeTask(input: unknown) {
   const task = fetchTask(db, taskId);
   if (!task) throw new Error('需求不存在');
   if (!task.is_paused) return;
-  if (['done', 'cancelled'].includes(task.agile_status)) throw new Error('已结束需求不能恢复推进');
+  if (workflowEndedInDb(db, taskId)) throw new Error('已结束需求不能恢复推进');
   db.transaction(() => {
     db.prepare(`
       UPDATE tasks
@@ -2320,6 +2647,9 @@ export async function setTaskLaneState(input: {
   const db = await databaseConnection();
   const task = fetchTask(db, input.taskId);
   if (!task) throw new Error('需求不存在');
+  if (db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(input.taskId)) {
+    throw new Error('原生 Lane 仅是工作图的显示投影，不能通过 Lane 状态接口控制流程');
+  }
   db.transaction(() => {
     setTaskLaneStateInDb(db, input);
     if (input.status === 'system_blocked') {
@@ -2343,223 +2673,6 @@ export async function setTaskLaneState(input: {
   refreshPages('/', `/tasks/${input.taskId}`);
 }
 
-type BeginRunOptions = { preserveRunIntent?: boolean };
-
-async function reconcileDispatchLanes() {
-  const { progressDispatcher } = await import('./progress-dispatch');
-  return progressDispatcher.reconcileStaleLanes();
-}
-
-function interruptedExecutionRecoveryLog(recovered: Awaited<ReturnType<typeof import('./executions')['reconcileInterruptedExecutions']>>) {
-  return `${recovered.deferredCount} 个执行因正常停止而延期且不计失败，`
-    + `${recovered.retryableCount} 个无结果执行转为可重试，`
-    + `${recovered.blockedCount} 个无结果执行因重试耗尽而阻塞，`
-    + `${recovered.cancelledReservationCount} 个未启动派发已取消，`
-    + `${recovered.recoverableCount + recovered.pendingResultCount} 个已有结果执行等待恢复`;
-}
-
-export async function beginRun(owner = 'ui', options: BeginRunOptions = {}) {
-  const { ensureAgentRuntimeWorkspace } = await import('./agent-profiles');
-  await ensureAgentRuntimeWorkspace();
-  const db = await databaseConnection();
-  const current = getRunStatusFromDb(db);
-  if (current?.active) {
-    throw new Error(`已有本地 loop 正在运行 pid=${current.pid ?? 'starting'}`);
-  }
-  if (current?.runId) {
-    const { stopAgentRun } = await import('../infrastructure/agent-runner');
-    const { reconcileInterruptedExecutions } = await import('./executions');
-    await stopAgentRun(current.runId);
-    const recovered = await reconcileInterruptedExecutions(current.runId, 'Runner 异常退出，执行尚未返回结构化结果');
-    db.prepare(`
-      UPDATE loop_runs
-      SET status = 'crashed', finished_at = CURRENT_TIMESTAMP,
-          failure_reason = COALESCE(failure_reason, '启动新一轮时检测到 Runner 已退出')
-      WHERE run_id = ? AND status IN ('starting', 'running', 'stopping')
-    `).run(current.runId);
-    db.prepare("DELETE FROM loop_meta WHERE key = 'active_run'").run();
-    await reconcileDispatchLanes();
-    await appendLoopRunLog(current.runId, `[恢复] 检测到旧 Runner 已退出：${interruptedExecutionRecoveryLog(recovered)}`);
-  } else {
-    const { reconcileInterruptedExecutions } = await import('./executions');
-    const recovered = await reconcileInterruptedExecutions(null, '未找到所属 Runner，执行尚未返回结构化结果');
-    if (recovered.failedCount) await reconcileDispatchLanes();
-  }
-  const runId = randomUUID();
-  const startedAt = new Date();
-  db.transaction(() => {
-    if (!options.preserveRunIntent) {
-      db.prepare(`
-        INSERT INTO loop_meta(key, value) VALUES('loop_run_intent', ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
-      `).run(JSON.stringify({ enabledAt: toUtcIsoString(startedAt), restartCount: 0 }));
-    }
-    db.prepare(`
-      INSERT INTO loop_runs(run_id, owner, status, started_at)
-      VALUES(?, ?, 'starting', ?)
-    `).run(runId, owner, toUtcIsoString(startedAt));
-    db.prepare(`
-      INSERT INTO loop_meta(key, value) VALUES('active_run', ?)
-      ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP
-    `).run(JSON.stringify({ runId, owner, startedAt: toUtcIsoString(startedAt) }));
-  })();
-  await appendLoopRunLog(runId, `[运行] 开始运行 run=${runId}`);
-  await appendLoopRunLog(runId, `[运行] 工作区=${paths.root}`);
-  await appendLoopRunLog(runId, `[运行] 数据目录=${paths.dataDir}`);
-  return runId;
-}
-
-export async function endRun(runId: string, force = false, options: { stopRunner?: boolean; reason?: string; preserveRunIntent?: boolean } = {}) {
-  const db = await databaseConnection();
-  const current = getRunStatusFromDb(db);
-  if (current?.runId && current.runId !== runId) {
-    if (force) return;
-    throw new Error('运行 ID 不匹配');
-  }
-  // Clear the durable intent before stopping the process so the desktop
-  // supervisor cannot race a deliberate user stop and start a replacement.
-  if (!options.preserveRunIntent) db.prepare("DELETE FROM loop_meta WHERE key = 'loop_run_intent'").run();
-  if (current?.runId && options.stopRunner !== false) {
-    db.prepare("UPDATE loop_runs SET status = 'stopping', stop_requested_at = CURRENT_TIMESTAMP WHERE run_id = ?").run(current.runId);
-    const { stopAgentRun } = await import('../infrastructure/agent-runner');
-    await stopAgentRun(current.runId);
-  }
-  if (current?.runId) {
-    const reason = options.reason || (force ? '异常终止' : '用户停止');
-    const { reconcileInterruptedExecutions } = await import('./executions');
-    const recovered = await reconcileInterruptedExecutions(
-      current.runId,
-      `Loop 已停止（${reason}），执行尚未返回结构化结果`,
-      { countAsFailure: force },
-    );
-    await reconcileDispatchLanes();
-    await appendLoopRunLog(current.runId, `[运行] Loop 已停止：${reason}`);
-    await appendLoopRunLog(current.runId, `[恢复] ${interruptedExecutionRecoveryLog(recovered)}，将在下次运行继续`);
-    db.prepare(`
-      UPDATE loop_runs
-      SET status = ?, finished_at = CURRENT_TIMESTAMP, failure_reason = ?
-      WHERE run_id = ?
-    `).run(force ? 'crashed' : 'stopped', force ? reason : null, current.runId);
-  }
-  db.prepare("DELETE FROM loop_meta WHERE key = 'active_run'").run();
-}
-
-type LoopRunRow = {
-  run_id: string;
-  owner: string;
-  status: 'starting' | 'running' | 'stopping' | 'stopped' | 'crashed';
-  process_kind: string | null;
-  runner_pid: number | null;
-  started_at: string;
-  heartbeat_at: string | null;
-  supervision_token: number | null;
-};
-
-const RUN_HEARTBEAT_TIMEOUT_MS = 45_000;
-
-function databaseTimestampMs(value: string | null | undefined) {
-  if (!value) return 0;
-  return new Date(value.includes('T') ? value : `${value.replace(' ', 'T')}Z`).getTime();
-}
-
-function getRunStatusFromDb(
-  db: Awaited<ReturnType<typeof databaseConnection>>,
-  expectedSupervisionToken = Number(process.env.LOOP_SUPERVISION_TOKEN || 0),
-) {
-  const row = db.prepare("SELECT value FROM loop_meta WHERE key = 'active_run'").get() as { value: string } | undefined;
-  if (!row) return null;
-  try {
-    const parsed = JSON.parse(row.value) as { runId: string; owner: string; startedAt: string };
-    const persisted = db.prepare('SELECT * FROM loop_runs WHERE run_id = ?').get(parsed.runId) as LoopRunRow | undefined;
-    const pid = persisted?.runner_pid || readRunPid(parsed.runId);
-    const startedAt = persisted?.started_at || parsed.startedAt;
-    const heartbeatAt = persisted?.heartbeat_at || null;
-    const starting = !heartbeatAt && Date.now() - databaseTimestampMs(startedAt) < 15_000;
-    const heartbeatAgeMs = heartbeatAt ? Math.max(0, Date.now() - databaseTimestampMs(heartbeatAt)) : null;
-    const heartbeatFresh = heartbeatAgeMs !== null && heartbeatAgeMs <= RUN_HEARTBEAT_TIMEOUT_MS;
-    const pidAlive = isProcessAlive(pid);
-    let generationActive = true;
-    const runnerToken = expectedSupervisionToken;
-    if (runnerToken > 0) {
-      const lifecycle = db.prepare(`SELECT desired_intent, mode FROM loop_lifecycle_state WHERE singleton = 1`).get() as { desired_intent: string; mode: string } | undefined;
-      const lease = db.prepare(`SELECT fencing_token, expires_at FROM loop_supervisor_lease WHERE singleton = 1`).get() as { fencing_token: number; expires_at: string } | undefined;
-      generationActive = lifecycle?.desired_intent === 'running'
-        && lifecycle.mode === 'normal'
-        && persisted?.supervision_token === runnerToken
-        && lease?.fencing_token === runnerToken
-        && databaseTimestampMs(lease.expires_at) + 15_000 > Date.now();
-    }
-    const active = generationActive && persisted?.status !== 'stopped' && persisted?.status !== 'crashed'
-      && (starting || (pidAlive && heartbeatFresh));
-    return {
-      runId: parsed.runId,
-      owner: persisted?.owner || parsed.owner,
-      startedAt,
-      heartbeatAt,
-      processKind: persisted?.process_kind || null,
-      status: persisted?.status || 'starting',
-      pid,
-      active,
-      health: { starting, pidAlive, heartbeatFresh, heartbeatAgeMs, generationActive },
-    } satisfies NonNullable<RunStatus>;
-  } catch {
-    return null;
-  }
-}
-
-export async function getRunStatus(expectedSupervisionToken?: number): Promise<RunStatus> {
-  const db = await databaseConnection();
-  return getRunStatusFromDb(db, expectedSupervisionToken);
-}
-
-export async function registerRunProcess(runId: string, processKind: 'agent-runner', pid: number, supervisionToken: number, processStartMarker: string) {
-  const db = await databaseConnection();
-  db.transaction(() => {
-    const lease = db.prepare(`SELECT fencing_token, expires_at FROM loop_supervisor_lease WHERE singleton = 1`).get() as { fencing_token: number; expires_at: string } | undefined;
-    const lifecycle = db.prepare(`SELECT desired_intent, mode FROM loop_lifecycle_state WHERE singleton = 1`).get() as { desired_intent: string; mode: string } | undefined;
-    if (!lease || lease.fencing_token !== supervisionToken || databaseTimestampMs(lease.expires_at) <= Date.now()
-      || lifecycle?.desired_intent !== 'running' || lifecycle.mode !== 'normal') {
-      throw new Error('Runner 登记被拒绝：监督代次已经失效');
-    }
-    const updated = db.prepare(`
-      UPDATE loop_runs
-      SET status = 'running', process_kind = ?, runner_pid = ?, supervision_token = ?, heartbeat_at = CURRENT_TIMESTAMP
-      WHERE run_id = ? AND status IN ('starting', 'running')
-    `).run(processKind, pid, supervisionToken, runId);
-    if (updated.changes !== 1) throw new Error('Runner 登记被拒绝：运行状态已经变化');
-    registerManagedProcessInDb(db, {
-      processId: randomUUID(),
-      supervisionToken,
-      processKind: 'agent-runner',
-      pid,
-      processStartMarker,
-      runId,
-    });
-  }).immediate();
-}
-
-export async function heartbeatRun(runId: string, processKind: 'agent-runner') {
-  const db = await databaseConnection();
-  const supervisionToken = Number(process.env.LOOP_SUPERVISION_TOKEN || 0);
-  db.prepare(`
-    UPDATE loop_runs
-    SET status = 'running', process_kind = ?, heartbeat_at = CURRENT_TIMESTAMP
-    WHERE run_id = ? AND supervision_token = ? AND status IN ('starting', 'running')
-  `).run(processKind, runId, supervisionToken);
-}
-
-export async function startRunHeartbeat(runId: string, processKind: 'agent-runner') {
-  await heartbeatRun(runId, processKind);
-  const timer = setInterval(() => {
-    void heartbeatRun(runId, processKind).catch(() => { /* main runner owns error reporting */ });
-  }, 10_000);
-  timer.unref();
-  return () => clearInterval(timer);
-}
-
-export async function ensureLoopRuntimeFiles() {
-  await databaseConnection();
-}
 
 export function toPipeEnvelope(item: DelegationEnvelope) {
   const clean = (value: unknown) => String(value ?? '').replaceAll('|', '／').replaceAll('\n', ' ').trim();

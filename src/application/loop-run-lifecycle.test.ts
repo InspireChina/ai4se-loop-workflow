@@ -28,6 +28,20 @@ test('uses the agreed bounded Runner restart backoff', () => {
   assert.equal(lifecycleRestartDelayMs(40), 300_000);
 });
 
+test('released business supervision keeps its fencing generation across repeated host restart',async()=>{
+  const db=await databaseConnection();db.prepare('DELETE FROM loop_supervisor_lease').run();
+  db.prepare("UPDATE loop_lifecycle_state SET desired_intent='stopped',mode='normal',active_run_id=NULL WHERE singleton=1").run();
+  const ownerId=`test-${randomUUID()}`;
+  for(let generation=1;generation<=3;generation++){
+    const lifecycle=createLoopRunLifecycle({ownerId,adapter:'cli',dependencies:{database:async()=>db,
+      createEventHub:(_owner,token)=>({token,start:async()=>{},close:async()=>{}})}});
+    try{await lifecycle.start();assert.equal((await lifecycle.status()).supervision.token,generation);}
+    finally{await lifecycle.shutdown(false);}
+    const lease=db.prepare('SELECT owner_id,fencing_token,expires_at FROM loop_supervisor_lease WHERE singleton=1').get() as {owner_id:string;fencing_token:number;expires_at:string};
+    assert.equal(lease.owner_id,'');assert.equal(lease.fencing_token,generation);assert.equal(Date.parse(lease.expires_at),0);
+  }
+});
+
 test('graces a live Runner with a stale heartbeat before declaring it failed', () => {
   const now = Date.now();
   const stale = {
@@ -45,6 +59,30 @@ test('graces a live Runner with a stale heartbeat before declaring it failed', (
   assert.equal(runnerHealthDisposition(stale, new Date(now - RUNNER_STALE_GRACE_MS).toISOString(), now).kind, 'failed');
   assert.match(runnerHealthReason(stale), /pid_alive=true.*heartbeat_age_ms=50000.*generation_active=true/);
   assert.equal(runnerHealthDisposition({ ...stale, health: { ...stale.health, pidAlive: false } }, null, now).kind, 'failed');
+});
+
+test('a successfully started Runner clears the provisional missing-run failure before host readiness', async () => {
+  const db = await databaseConnection();
+  db.prepare('DELETE FROM loop_supervisor_lease').run();
+  db.prepare("UPDATE loop_lifecycle_state SET desired_intent='running',mode='normal',actual_phase='stopped',active_run_id=NULL,retry_at=NULL,last_error='old failure' WHERE singleton=1").run();
+  let active = false; const runId = randomUUID();
+  const status = async () => active ? {
+    runId, owner: 'fixture', startedAt: new Date().toISOString(), heartbeatAt: new Date().toISOString(),
+    processKind: 'agent-runner', status: 'running' as const, pid: 12345, active: true,
+    health: { starting: false, pidAlive: true, heartbeatFresh: true, heartbeatAgeMs: 0, generationActive: true },
+  } : null;
+  const lifecycle = createLoopRunLifecycle({ ownerId: `test-${randomUUID()}`, adapter: 'cli', dependencies: {
+    database: async () => db, appendLog: async () => undefined,
+    runs: { status, begin: async () => runId, start: async () => { active = true; }, end: async () => { active = false; } },
+    createEventHub: (_owner, token) => ({ token, start: async () => undefined, close: async () => undefined }),
+  } });
+  try {
+    await lifecycle.start();
+    const snapshot = await lifecycle.status();
+    assert.equal(snapshot.run.phase, 'running'); assert.equal(snapshot.run.runId, runId); assert.equal(snapshot.lastError, null);
+    const state = db.prepare('SELECT last_error,retry_at FROM loop_lifecycle_state WHERE singleton=1').get();
+    assert.deepEqual(state, { last_error: null, retry_at: null });
+  } finally { await lifecycle.shutdown(false); }
 });
 
 test('reclaims an unexpired lease only when the previous local supervisor is provably gone', () => {
@@ -192,4 +230,84 @@ test('desktop restart clears update silence after skipping past the recorded tar
   assert.equal(recovered.update_target_version, null);
   assert.equal(recovered.last_error, null);
   await lifecycle.shutdown(false);
+});
+
+test('renews supervision independently while initial cleanup blocks longer than the lease', async () => {
+  const db = await databaseConnection();
+  db.prepare('DELETE FROM loop_supervisor_lease').run();
+  db.prepare("UPDATE loop_lifecycle_state SET desired_intent = 'stopped', mode = 'normal', active_run_id = NULL WHERE singleton = 1").run();
+  const ownerId = `test-${randomUUID()}`;
+  let now = Date.now();
+  let tick: (() => void) | undefined;
+  let releaseCleanup!: () => void;
+  let enteredCleanup!: () => void;
+  const entered = new Promise<void>((resolve) => { enteredCleanup = resolve; });
+  const cleanup = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+  let hasRun = true;
+  let stopCalls = 0;
+  let hubStarts = 0;
+  let hubCloses = 0;
+  const lifecycle = createLoopRunLifecycle({
+    ownerId, adapter: 'cli',
+    dependencies: {
+      database: async () => db,
+      clock: {
+        now: () => now,
+        scheduleInterval: (callback) => {
+          tick = callback;
+          return setInterval(() => undefined, 100_000);
+        },
+        cancelInterval: (timer) => { clearInterval(timer); tick = undefined; },
+      },
+      processes: { isAlive: () => false, inspectIdentity: async () => null },
+      createEventHub: (_owner, token) => ({
+        token,
+        start: async () => { hubStarts += 1; },
+        close: async () => { hubCloses += 1; },
+      }),
+      runs: {
+        status: async () => hasRun ? {
+          runId: 'RUN-injected-cleanup', owner: 'test', startedAt: new Date(now).toISOString(),
+          heartbeatAt: new Date(now).toISOString(), processKind: 'agent-runner',
+          status: 'running', pid: null, active: false,
+          health: { starting: false, pidAlive: false, heartbeatFresh: false, heartbeatAgeMs: 0, generationActive: true },
+        } : null,
+        end: async () => {
+          stopCalls += 1;
+          enteredCleanup();
+          await cleanup;
+          hasRun = false;
+        },
+      },
+    },
+  });
+  const starting = lifecycle.start();
+  try {
+    await entered;
+    for (let index = 0; index < 4; index += 1) {
+      now += 10_000;
+      assert.ok(tick);
+      tick();
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      const lease = db.prepare('SELECT owner_id, fencing_token, expires_at FROM loop_supervisor_lease WHERE singleton = 1').get() as {
+        owner_id: string; fencing_token: number; expires_at: string;
+      };
+      assert.equal(lease.owner_id, ownerId);
+      assert.equal(lease.fencing_token, 1);
+      assert.equal(Date.parse(lease.expires_at), now + 30_000);
+      assert.equal(stopCalls, 1, 'periodic reconciliation must not overlap cleanup');
+    }
+    releaseCleanup();
+    await starting;
+    await lifecycle.shutdown(false);
+    assert.equal(tick, undefined);
+    assert.equal(hubStarts, 1);
+    assert.equal(hubCloses, 1);
+    const released=db.prepare('SELECT owner_id,fencing_token,expires_at FROM loop_supervisor_lease WHERE singleton = 1').get() as {owner_id:string;fencing_token:number;expires_at:string};
+    assert.equal(released.owner_id,'');assert.equal(released.fencing_token,1);assert.equal(Date.parse(released.expires_at),0);
+  } finally {
+    releaseCleanup();
+    await starting;
+    await lifecycle.shutdown(false);
+  }
 });

@@ -13,7 +13,7 @@ export const agentContextProtocol = 'loop-agent-context/v2';
 
 export type AgentContextResource = {
   ref: string;
-  kind: 'document' | 'delivery_spec' | 'decision' | 'runtime_input' | 'feedback' | 'execution' | 'recovery';
+  kind: 'document' | 'delivery_spec' | 'decision' | 'runtime_input' | 'feedback' | 'execution' | 'recovery' | 'work_item' | 'intervention';
   title: string;
   scope: 'task' | `unit:${number}`;
   deliveryUnit: number | null;
@@ -67,9 +67,15 @@ export type AgentContextSnapshot = {
       link: string | null;
     };
     lifecycle: {
+      authority?: 'display_only';
       agileStatus: string;
       lanes: unknown[];
       progress: { analysis: number; development: number; verification: number; total: number };
+    };
+    workflow?: {
+      model: 'work-item/intervention';
+      currentItemRef: string | null;
+      items: { ref: string; workKey: string; revision: number; dispatchEpoch: number; status: string; completionAuthority: string | null }[];
     };
     currentDeliveryUnit: DeliveryUnitContextValue | null;
     deliveryUnits: DeliveryUnitContextValue[];
@@ -83,6 +89,7 @@ export type AgentContextSnapshot = {
     runtimeInputs: unknown[];
     feedback: unknown[];
     recovery: unknown[];
+    interventions?: unknown[];
   };
   recentExecutionEvidence: unknown[];
   requiredContextRefs: string[];
@@ -436,6 +443,44 @@ export function buildAgentContextSnapshot(input: {
     || input.activeFeedback.some((active) => active.comment_id === comment.comment_id));
 
   const allResources: AgentContextResource[] = [];
+  const workflowItems = full.nativeWorkflow?.items || [];
+  const currentItemIds = new Set(workflowItems.map(item => item.item_id));
+  const workItemRef = (item: typeof workflowItems[number]) => `WORKITEM:${item.item_id}:r${item.revision}`;
+  for (const item of workflowItems) {
+    allResources.push({
+      ref: workItemRef(item), kind: 'work_item', title: item.title, scope: scope(item.story_index),
+      deliveryUnit: item.story_index, revision: item.revision, status: item.status, authority: 'authoritative',
+      updatedAt: item.updated_at,
+      summary: `${item.work_key}@${item.revision} · ${item.status} · ${item.completion_authority || '未完成'}`,
+      content: {
+        itemId: item.item_id, workKey: item.work_key, revision: item.revision, dispatchEpoch: item.dispatch_epoch,
+        agent: item.agent, flow: item.pipeline, deliveryUnit: item.story_index, status: item.status,
+        completionAuthority: item.completion_authority,
+        // An Agent completion summary is not independent Test evidence.
+        ...(item.completion_authority === 'arbitration' ? { arbitrationReason: item.completion_reason } : {}),
+        dependencies: (full.nativeWorkflow?.dependencies || []).filter(edge => edge.item_id === item.item_id)
+          .map(edge => ({ itemId: edge.depends_on_item_id, kind: edge.dependency_kind })),
+      },
+    });
+  }
+  const workflowInterventions = full.nativeWorkflow ? full.interventions
+    .filter(item => (!item.item_id || currentItemIds.has(item.item_id)) && !['superseded', 'cancelled'].includes(item.status))
+    .map(item => ({
+      interventionId: item.intervention_id, itemId: item.item_id, authority: item.authority,
+      status: item.status, summary: item.summary, sourceExecutionId: item.source_execution_id,
+      attemptCount: item.attempt_count, maxSystemAttempts: item.max_system_attempts,
+      ...(item.authority === 'arbitration' ? { resolution: item.resolution, resolvedBy: item.resolved_by } : {}),
+    })) : [];
+  for (const item of workflowInterventions) {
+    const owner = workflowItems.find(owner => owner.item_id === item.itemId);
+    allResources.push({
+      ref: `INTERVENTION:${item.interventionId}`, kind: 'intervention', title: item.summary,
+      scope: scope(owner?.story_index ?? null), deliveryUnit: owner?.story_index ?? null,
+      revision: owner?.revision ?? null, status: item.status,
+      authority: item.status === 'resolved' ? 'execution_evidence' : 'active_obligation',
+      updatedAt: null, summary: `${item.authority} · ${item.status} · ${item.summary}`, content: item,
+    });
+  }
   if (activeAgentConfigurationContextAdapter(delegation.agent) === 'openspec') {
     for (const repositoryDocument of repositoryOpenSpecDocuments(input.workspaceRoot || paths.root)) {
       allResources.push(repositoryDocumentResource(repositoryDocument, delegation.taskId));
@@ -592,6 +637,19 @@ export function buildAgentContextSnapshot(input: {
     resourceVisibleToAgent(resource, delegation.agent, delegation.storyIndex));
 
   const required = new Set<string>();
+  const currentWorkflowItem = workflowItems.find(item => item.item_id === delegation.workItemId);
+  if (currentWorkflowItem) required.add(workItemRef(currentWorkflowItem));
+  for (const item of workflowItems) {
+    if (item.completion_authority === 'arbitration'
+      && (delegation.agent === 'review-agent' || relevantToExecution(delegation.storyIndex, item.story_index))) required.add(workItemRef(item));
+  }
+  for (const item of workflowInterventions) {
+    const owner = workflowItems.find(owner => owner.item_id === item.itemId);
+    if (item.authority === 'arbitration' && item.status === 'resolved'
+      && (delegation.agent === 'review-agent' || relevantToExecution(delegation.storyIndex, owner?.story_index ?? null))) {
+      required.add(`INTERVENTION:${item.interventionId}`);
+    }
+  }
   if (currentSpec) required.add(`SPEC:${currentSpec.spec_id}:r${currentSpec.revision}`);
   if (delegation.agent === 'analyst-agent' && currentStory) {
     for (const dependencyIndex of currentStory.depends_on_story_indexes) {
@@ -674,6 +732,7 @@ export function buildAgentContextSnapshot(input: {
         link: full.task.link,
       },
       lifecycle: {
+        ...(full.nativeWorkflow ? { authority: 'display_only' as const } : {}),
         agileStatus: full.task.agile_status,
         lanes: full.lanes,
         progress: {
@@ -683,6 +742,12 @@ export function buildAgentContextSnapshot(input: {
           total: full.task.total_stories,
         },
       },
+      ...(full.nativeWorkflow ? { workflow: {
+        model: 'work-item/intervention' as const,
+        currentItemRef: currentWorkflowItem ? workItemRef(currentWorkflowItem) : null,
+        items: workflowItems.map(item => ({ ref: workItemRef(item), workKey: item.work_key, revision: item.revision,
+          dispatchEpoch: item.dispatch_epoch, status: item.status, completionAuthority: item.completion_authority })),
+      } } : {}),
       currentDeliveryUnit: currentStory ? deliveryUnitContextValue(currentStory) : null,
       deliveryUnits: full.stories.map(deliveryUnitContextValue),
       currentDeliverySpec: currentSpec ? deliverySpecValue(currentSpec, delegation.agent) : null,
@@ -714,6 +779,7 @@ export function buildAgentContextSnapshot(input: {
       recovery: input.activeRecovery.map((recovery) => recoveryItemForPrompt(recovery, {
         includeResolution: delegation.agent !== 'test-agent',
       })),
+      ...(full.nativeWorkflow ? { interventions: workflowInterventions.filter(item => item.status !== 'resolved') } : {}),
     },
     recentExecutionEvidence: recentExecutionEvidence(
       delegation.agent,
@@ -791,8 +857,13 @@ function renderReducedRecoveryContextPack(
     '## Durable Checkpoint',
     '',
     `- Requirement: ${compact(authoritativeFacts.requirement.title, 300)}`,
-    `- Lifecycle: ${authoritativeFacts.lifecycle.agileStatus}`,
-    `- Progress: analysis=${authoritativeFacts.lifecycle.progress.analysis}, development=${authoritativeFacts.lifecycle.progress.development}, verification=${authoritativeFacts.lifecycle.progress.verification}, total=${authoritativeFacts.lifecycle.progress.total}`,
+    ...(authoritativeFacts.workflow ? [
+      `- Work Item: ${authoritativeFacts.workflow.currentItemRef || 'unbound; do not infer from legacy cursors'}`,
+      '- 编排由 Work Item 与 Intervention 决定；旧游标只供展示，不授权完成或重试。',
+    ] : [
+      `- Lifecycle: ${authoritativeFacts.lifecycle.agileStatus}`,
+      `- Progress: analysis=${authoritativeFacts.lifecycle.progress.analysis}, development=${authoritativeFacts.lifecycle.progress.development}, verification=${authoritativeFacts.lifecycle.progress.verification}, total=${authoritativeFacts.lifecycle.progress.total}`,
+    ]),
     `- Active obligation counts: ${JSON.stringify(obligations)}`,
   );
   if (snapshot.recentExecutionEvidence.length) {
@@ -830,6 +901,21 @@ export function renderAgentWorkingContextPack(
   ];
   if (work.deliveryUnit != null) lines.push(`- Delivery Unit: ${work.deliveryUnit}`);
   if (work.repositoryBaseCommit) lines.push(`- Repository Base Commit: \`${work.repositoryBaseCommit}\``);
+
+  if (authoritativeFacts.workflow) {
+    const workflow = authoritativeFacts.workflow;
+    appendJsonSection(lines, 'Current Workflow Authority', {
+      model: workflow.model, currentItemRef: workflow.currentItemRef,
+      currentItem: workflow.items.find(item => item.ref === workflow.currentItemRef) || null,
+      stateCounts: Object.fromEntries([...new Set(workflow.items.map(item => item.status))]
+        .map(status => [status, workflow.items.filter(item => item.status === status).length])),
+    });
+    lines.push('- Work Item/Intervention 是编排依据，Lifecycle/Progress 只是兼容展示。',
+      '- 仲裁完成不等于独立测试通过。阅读对应 WORKITEM/INTERVENTION ref，保留原失败、裁决理由和未验证限制，不伪造通过或代码提交。');
+    if (work.agent === 'review-agent') lines.push(
+      '- Review 复用现有对账命令处理仲裁：同范围 reconciliation.evidenceRefs 同时引用 WORKITEM 与已解决的 INTERVENTION，result 说明当前事实和未验证限制，无需重抄裁决全文；Harness 校验权威记录并自动在报告中保留完整原裁决。只有 Test 仲裁可作为该范围缺少 Test 通过证据的明确例外，Dev 仲裁不能替代 Test。',
+      '- assessment.evidenceBoundary 同时列出仲裁 WORKITEM/INTERVENTION 引用；报告 verification 与 risks 章节保留 WORKITEM 引用、裁决原因和未验证边界。不要把仲裁放行写为全部测试通过。');
+  }
 
   const requirement = authoritativeFacts.requirement;
   lines.push('', '## Requirement Input', '', `- Title: ${requirement.title}`);

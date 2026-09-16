@@ -1,5 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+
+test('structured Test failures immediately reach workflow application without consuming CLI retry budget', () => {
+  for (let attempt = 1; attempt <= 8; attempt++) {
+    assert.equal(shouldRetryReportedFailure({ outcome: 'completed', verdict: 'failed' }, attempt, 'test-agent'), false);
+  }
+  assert.equal(shouldRetryReportedFailure({ outcome: 'failed' }, 1, 'test-agent'), true,
+    'an execution failure without a Test verdict still uses the universal retry policy');
+  assert.equal(shouldRetryReportedFailure({ outcome: 'completed', verdict: 'passed' }, 1, 'test-agent'), false);
+  assert.equal(shouldRetryReportedFailure({ verdict: 'failed' }, 1, 'dev-agent'), true);
+  assert.equal(shouldRetryReportedFailure({ verdict: 'failed' }, 1), true,
+    'the caller must supply the actual authenticated role, not guess it from the verdict');
+});
 import {
   executionRetryBackoffMs,
   executionRecoveryModeForAttempt,
@@ -10,7 +22,7 @@ import {
 } from './execution-retry-policy';
 
 test('uses bounded universal retry backoff for every failure kind', () => {
-  const env = { LOOP_RETRY_BACKOFF_SCALE: '1' } as NodeJS.ProcessEnv;
+  const env: NodeJS.ProcessEnv = { NODE_ENV: 'test', LOOP_RETRY_BACKOFF_SCALE: '1' };
   assert.equal(executionRetryBackoffMs(1, env), 10_000);
   assert.equal(executionRetryBackoffMs(2, env), 30_000);
   assert.equal(executionRetryBackoffMs(3, env), 120_000);
@@ -26,7 +38,7 @@ test('retries structured failure results four times before applying the final ne
   assert.equal(shouldRetryReportedFailure({ outcome: 'completed', verdict: 'passed' }, 1), false);
 });
 
-test('applies classified Test failures immediately without retrying the unchanged implementation', () => {
+test('applies submitted Test verdicts immediately without retrying the unchanged implementation', () => {
   for (const failureKind of ['implementation', 'specification']) {
     for (const outcome of ['completed', 'failed']) {
       const result = { outcome, verdict: 'failed', failureKind };
@@ -40,11 +52,10 @@ test('applies classified Test failures immediately without retrying the unchange
     assert.equal(shouldRetryReportedFailure({ outcome: 'failed', verdict: 'failed', rewindTo }, 1, 'test-agent'), false);
   }
   for (const failureKind of [undefined, 'environment', 'inconclusive']) {
-    assert.equal(shouldRetryReportedFailure({ outcome: 'failed', verdict: 'failed', failureKind }, 1, 'test-agent'), true);
+    assert.equal(shouldRetryReportedFailure({ outcome: 'failed', verdict: 'failed', failureKind }, 1, 'test-agent'), false);
   }
   assert.equal(shouldRetryReportedFailure({ outcome: 'failed' }, 1, 'test-agent'), true);
-  // Explicit responsibility takes priority over a contradictory legacy rewind hint.
-  assert.equal(shouldRetryReportedFailure({ outcome: 'failed', verdict: 'failed', failureKind: 'environment', rewindTo: 'dev' }, 1, 'test-agent'), true);
+  assert.equal(shouldRetryReportedFailure({ outcome: 'failed', verdict: 'failed', failureKind: 'environment', rewindTo: 'dev' }, 1, 'test-agent'), false);
 });
 
 test('reports remaining retries after the current execution attempt', () => {

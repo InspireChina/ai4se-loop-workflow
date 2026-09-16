@@ -29,6 +29,7 @@ test('normalizes Codex tool completion and Claude tool results', () => {
   assert.equal(codex?.toolClass, 'shell');
   assert.equal(codex?.success, true);
   assert.equal(codex?.exitCode, 0);
+  assert.equal(codex?.input,'npm test','completed-only Codex events retain operation identity for activity deduplication');
   assert.deepEqual(codex?.output, { result: 'passed', exitCode: 0, status: null });
   assert.equal(claude?.phase, 'completed');
   assert.equal(claude?.tool, 'tool');

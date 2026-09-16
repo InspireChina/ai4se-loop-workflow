@@ -4,6 +4,7 @@ import { agentResultSchema, deliverySpecSchema, type AgentResult, type DeliveryS
 import { AgentCommandValidationError, type AgentCommandValidationIssue } from '../domain/agent-command-rejection';
 import { loopAgentCommandPrefix } from '../domain/agent-command-profile';
 import { loadCommandChainDefinition, type CommandChainBlockDefinition, type CommandChainDefinition } from '../domain/command-chain-definition';
+import { commandChainRegistry } from '../domain/command-chain-registry';
 import { deliveryUnitContractSchema, type DeliveryUnitContract } from '../domain/delivery-unit';
 import {
   analysisDecisionMode,
@@ -12,6 +13,13 @@ import {
   requirementMetadataValueLabel,
 } from '../domain/requirement-metadata';
 import { databaseConnection } from '../infrastructure/database';
+import { interventionRequestHelp } from './agent-intervention-request';
+import { nativeRecoveryItemsInDb, usesNativeRecoveryInDb } from './work-item-recovery';
+import { restoreExecutionDelegationInDb } from './execution-delegation';
+import type { ExecutionAttempt } from './executions';
+import { workflowResultHeldInDb, workflowEndedInDb } from './work-item-controls';
+import type { WorkflowItemRow } from './work-items';
+import { nativeWorkflowDisplay } from './native-workflow-projection';
 
 type Db = Awaited<ReturnType<typeof databaseConnection>>;
 type FlagMap = Map<string, string>;
@@ -342,12 +350,19 @@ function runtimeInputRows(db: Db, draft: CommandChainDraftRow): RuntimeInputRow[
     WHERE draft_id = ? ORDER BY ordinal, request_key
   `).all(draft.draft_id) as Omit<RuntimeInputRow, 'answer' | 'answer_status'>[];
   const answers = db.prepare(`
-    SELECT request_key, answer, status
-    FROM runtime_input_requests
-    WHERE task_id = ? AND story_index IS ? AND source_agent = ?
-      AND request_key IS NOT NULL
-    ORDER BY created_at, request_id
-  `).all(draft.task_id, draft.story_index, definition.agent) as {
+    SELECT request.request_key, request.answer, request.status
+    FROM runtime_input_requests request
+    WHERE request.task_id = ? AND request.story_index IS ? AND request.source_agent = ?
+      AND request.request_key IS NOT NULL
+      AND (? = 0 OR EXISTS (
+        SELECT 1 FROM interventions intervention JOIN execution_attempts owner
+          ON owner.work_item_id = intervention.item_id AND owner.task_id = intervention.task_id
+        WHERE intervention.intervention_id = request.intervention_id AND intervention.task_id = request.task_id
+          AND owner.execution_id = ?
+      ))
+    ORDER BY request.created_at, request.request_id
+  `).all(draft.task_id, draft.story_index, definition.agent,
+    Number(usesNativeRecoveryInDb(db, draft.task_id)), draft.status_viewed_execution_id || draft.last_execution_id) as {
     request_key: string;
     answer: string | null;
     status: string;
@@ -361,6 +376,9 @@ function runtimeInputRows(db: Db, draft: CommandChainDraftRow): RuntimeInputRow[
 }
 
 function activeRecoveries(db: Db, draft: CommandChainDraftRow) {
+  if (usesNativeRecoveryInDb(db, draft.task_id)) return nativeRecoveryItemsInDb(db, draft.task_id)
+    .filter((item) => item.story_index === draft.story_index && ['pending', 'claimed'].includes(item.status))
+    .map((item) => ({ recovery_id: item.recovery_id, summary: item.summary }));
   return db.prepare(`
     SELECT recovery_id, summary
     FROM recovery_items
@@ -697,11 +715,18 @@ function reviewTaskHeader(db: Db, taskId: string) {
     review_revision: number;
   } | undefined;
   if (!task) throw new Error('当前需求不存在');
+  if (db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(taskId)) {
+    const items = db.prepare("SELECT * FROM workflow_items WHERE task_id = ? AND origin = 'native'").all(taskId) as WorkflowItemRow[];
+    task.total_stories = nativeWorkflowDisplay(items, false).total_stories;
+  }
   return task;
 }
 
-function reviewMode(execution: CommandChainExecutionRow): ReviewMode {
-  return execution.pipeline === 'feedback-report' ? 'report_correction' : 'closure';
+function reviewMode(execution: CommandChainExecutionRow, db: Db): ReviewMode {
+  const bound = db.prepare(`SELECT item.pipeline FROM execution_attempts source JOIN workflow_items item ON item.item_id = source.work_item_id
+    WHERE source.execution_id = ? AND item.task_id = source.task_id AND item.origin = 'native'`)
+    .get(execution.execution_id) as { pipeline: string } | undefined;
+  return (bound?.pipeline || execution.pipeline) === 'feedback-report' ? 'report_correction' : 'closure';
 }
 
 function reviewResourceFingerprint(resource: ReviewContextResource) {
@@ -858,7 +883,25 @@ function reviewCorrectionSubjects(db: Db, draft: CommandChainDraftRow, execution
 function assertReviewExecutionCurrent(db: Db, draft: CommandChainDraftRow, execution: CommandChainExecutionRow) {
   const task = reviewTaskHeader(db, draft.task_id);
   const input = reviewExecutionInput(execution).delegation || {};
-  const mode = reviewMode(execution);
+  const mode = reviewMode(execution, db);
+  if (db.prepare("SELECT 1 FROM tasks WHERE task_id = ? AND workflow_engine = 'native'").get(draft.task_id)) {
+    const source = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ? AND task_id = ?')
+      .get(execution.execution_id, draft.task_id) as ExecutionAttempt | undefined;
+    if (!source || source.agent !== 'review-agent' || source.status === 'cancelled') throw new Error('原生 Review 来源已取消或不存在');
+    const frozen = restoreExecutionDelegationInDb(db, source);
+    const item = db.prepare("SELECT * FROM workflow_items WHERE item_id = ? AND task_id = ? AND origin = 'native'")
+      .get(source.work_item_id, draft.task_id) as WorkflowItemRow | undefined;
+    if (!item || item.agent !== 'review-agent' || item.status !== 'running'
+      || (mode === 'closure' ? item.work_key !== 'delivery:review' : item.pipeline !== 'feedback-report')
+      || workflowEndedInDb(db, draft.task_id) || workflowResultHeldInDb(db, draft.task_id, source.execution_id)) {
+      throw new Error('原生 Review 工作项、依赖或介入门禁不允许继续');
+    }
+    if (frozen.reviewRevision !== task.review_revision || frozen.reviewDocumentId !== (task.review_document_id || '')) {
+      throw new Error('结卡报告基线已变化，当前 Review execution 已过期，请重新派发');
+    }
+    if (frozen.totalStories !== task.total_stories) throw new Error('当前原生交付单元已变化，请重新派发');
+    return task;
+  }
   if (mode === 'closure') {
     if (task.agile_status !== 'in review' || task.current_subagent !== 'review-agent' || task.closure_status !== 'none') {
       throw new Error('需求已离开普通结卡状态，请结束本轮并等待重新派发');
@@ -937,7 +980,7 @@ function cloneReviewReportBaseline(db: Db, draft: CommandChainDraftRow, document
 
 function initializeReviewInputs(db: Db, execution: CommandChainExecutionRow, draft: CommandChainDraftRow) {
   const task = assertReviewExecutionCurrent(db, draft, execution);
-  const mode = reviewMode(execution);
+  const mode = reviewMode(execution, db);
   const input = reviewExecutionInput(execution);
   const resources = input.contextSnapshot?.resources || [];
   const subjects = mode === 'closure'
@@ -1366,8 +1409,11 @@ function phaseIdForBuiltin(definition: CommandChainDefinition, builtin: string) 
 }
 
 function commandAllowed(definition: CommandChainDefinition, phase: string, command: string) {
-  const operation = command.split(' ').slice(0, 2).join(' ');
-  return definition.phases[phase].commands.some((candidate) => candidate.startsWith(operation));
+  const requested = commandChainRegistry.resolveCommand(command.trim().split(/\s+/));
+  if (!requested) return false;
+  return definition.phases[phase].commands.some((candidate) => (
+    commandChainRegistry.resolveCommand(candidate.trim().split(/\s+/))?.id === requested.id
+  ));
 }
 
 function assertViewed(draft: CommandChainDraftRow, executionId: string) {
@@ -1779,7 +1825,7 @@ function verificationExecutionErrors(
     }
   }
   if (state.results.some((result) => result.status === 'blocked') && !inputs.some((input) => !input.answer)) {
-    errors.push('存在 blocked 场景时必须登记未回答的 runtime input；获得回答后应重新执行并更新结果');
+    errors.push('存在 blocked 场景时必须登记未回答的 runtime input；获得回答后应重新执行并更新结果。若输入已明确回答而阻塞无法在当前任务范围内解决，可使用 intervention request --summary-file <摘要> --reason-file <原因> --evidence-file <调查证据> 交出执行；不要重复索取已确认不存在的材料、改写 Oracle 或伪造通过。');
   }
   return errors;
 }
@@ -1869,7 +1915,7 @@ function reviewInputErrors(db: Db, draft: CommandChainDraftRow, artifacts: Retur
     const task = assertReviewExecutionCurrent(db, draft, execution);
     if (!state.meta) errors.push('Review 缺少冻结元数据');
     else {
-      if (state.meta.mode !== reviewMode(execution)) errors.push('Review 冻结模式与当前 pipeline 不一致');
+      if (state.meta.mode !== reviewMode(execution, db)) errors.push('Review 冻结模式与当前 pipeline 不一致');
       if (state.meta.totalStories !== String(task.total_stories)) errors.push('Review 冻结的交付单元数量已过期');
       if (state.meta.reviewRevision !== String(task.review_revision)) errors.push('Review 冻结的报告版本已过期');
       if (state.meta.reviewDocumentId !== (task.review_document_id || '')) errors.push('Review 冻结的报告文档已过期');
@@ -1888,7 +1934,7 @@ function reviewInputErrors(db: Db, draft: CommandChainDraftRow, artifacts: Retur
         errors.push(`冻结证据已不在当前 Context Snapshot：${frozen.ref}`);
       }
     }
-    const expectedSubjects = reviewMode(execution) === 'closure'
+    const expectedSubjects = reviewMode(execution, db) === 'closure'
       ? reviewClosureSubjects(db, draft)
       : reviewCorrectionSubjects(db, draft, execution);
     if (JSON.stringify(state.subjects) !== JSON.stringify(expectedSubjects)) {
@@ -1902,8 +1948,65 @@ function reviewInputErrors(db: Db, draft: CommandChainDraftRow, artifacts: Retur
   return [...new Set(errors)];
 }
 
-function reviewReconciliationErrors(artifacts: ReturnType<typeof decodedArtifacts>) {
+/** Arbitration is an explicit exception, never independent Test evidence.
+ * Only a current native node, its immutable completion event and the resolved
+ * intervention may authorize the exception already frozen into this Review. */
+function reviewArbitrationEvidence(db: Db, draft: CommandChainDraftRow) {
+  const execution = reviewExecutionForDraft(db, draft);
+  const native = db.prepare(`SELECT 1 FROM execution_attempts source JOIN workflow_items item ON item.item_id = source.work_item_id
+    WHERE source.execution_id = ? AND item.task_id = ? AND item.origin = 'native'`).get(execution.execution_id, draft.task_id);
+  if (!native) return { native: false, resources: [], proofs: [], tests: [] } as {
+    native: boolean; resources: ReviewContextResource[];
+    proofs: { itemRef: string; interventionRef: string; reason: string; storyIndex: number; agent: string }[];
+    tests: WorkflowItemRow[];
+  };
+  assertReviewExecutionCurrent(db, draft, execution);
+  const items = db.prepare(`SELECT * FROM workflow_items WHERE task_id = ? AND origin = 'native'
+    AND status NOT IN ('superseded','cancelled') AND agent IN ('dev-agent','test-agent')`).all(draft.task_id) as WorkflowItemRow[];
+  const resources = reviewExecutionInput(execution).contextSnapshot?.resources || [];
+  const proofs = items.filter(item => item.status === 'completed' && item.completion_authority === 'arbitration').map(item => {
+    const itemRef = `WORKITEM:${item.item_id}:r${item.revision}`;
+    const resource = resources.find(resource => resource.ref === itemRef && resource.kind === 'work_item');
+    const content = resource?.content as Record<string, unknown> | undefined;
+    const intervention = db.prepare(`SELECT intervention_id, resolution FROM interventions
+      WHERE task_id = ? AND item_id = ? AND authority = 'arbitration' AND status = 'resolved'
+        AND resolution = ? AND EXISTS (SELECT 1 FROM workflow_item_events event
+          WHERE event.item_id = interventions.item_id AND event.event_key = 'intervention:' || interventions.intervention_id || ':complete'
+            AND event.event_type = 'complete' AND event.to_status = 'completed' AND event.authority = 'arbitration'
+            AND event.reason = interventions.resolution AND event.actor = interventions.resolved_by)`).get(draft.task_id, item.item_id, item.completion_reason) as
+      { intervention_id: string; resolution: string } | undefined;
+    const interventionRef = `INTERVENTION:${intervention?.intervention_id}`;
+    const resolution = resources.find(resource => resource.ref === interventionRef && resource.kind === 'intervention');
+    const resolutionContent = resolution?.content as Record<string, unknown> | undefined;
+    if (!item.story_index || !item.completion_reason || !intervention || resource?.status !== 'completed'
+      || resource.revision !== item.revision || content?.itemId !== item.item_id || content.revision !== item.revision
+      || content.dispatchEpoch !== item.dispatch_epoch || content.completionAuthority !== 'arbitration'
+      || content.agent !== item.agent || content.workKey !== item.work_key || content.deliveryUnit !== item.story_index
+      || content.arbitrationReason !== intervention.resolution || resolution?.status !== 'resolved'
+      || resolutionContent?.itemId !== item.item_id || resolutionContent.authority !== 'arbitration'
+      || resolutionContent.resolution !== intervention.resolution) {
+      throw new Error(`仲裁证据未完整冻结或已失效：${itemRef}；必须重新派发 Review，不能当作 Test 通过`);
+    }
+    return { itemRef, interventionRef, reason: intervention.resolution, storyIndex: item.story_index, agent: item.agent! };
+  });
+  return { native: true, resources, proofs, tests: items.filter(item => item.agent === 'test-agent') };
+}
+
+function reviewSubjectStoryIndex(db: Db, taskId: string, subject: ReviewSubject | undefined) {
+  if (subject?.storyIndex) return Number(subject.storyIndex);
+  if (subject?.kind === 'acceptance') {
+    // Acceptance identifiers can contain colons; use the exact frozen ref,
+    // never parse identifiers to infer task or unit ownership.
+    const row = db.prepare(`SELECT story_index FROM acceptances WHERE task_id = ? AND 'ACCEPTANCE:' || acceptance_id || ':r' || revision = ?
+      AND scope_type = 'delivery_unit'`).get(taskId, subject.key) as { story_index: number } | undefined;
+    return row?.story_index ?? null;
+  }
+  return null;
+}
+
+function reviewReconciliationErrors(db: Db, draft: CommandChainDraftRow, artifacts: ReturnType<typeof decodedArtifacts>) {
   const state = reviewState(artifacts);
+  const arbitration = reviewArbitrationEvidence(db, draft);
   const errors: string[] = [];
   const subjectKeys = new Set(state.subjects.map((subject) => subject.key));
   const evidenceByRef = new Map(state.evidenceSources.map((source) => [source.ref, source]));
@@ -1918,9 +2021,26 @@ function reviewReconciliationErrors(artifacts: ReturnType<typeof decodedArtifact
     }
     const unknown = reconciliation.evidenceRefs.filter((ref) => !evidenceByRef.has(ref));
     if (unknown.length) errors.push(`对账 ${reconciliation.key} 引用了未冻结证据：${unknown.join('、')}`);
-    if (state.meta?.mode === 'closure'
-      && !reconciliation.evidenceRefs.some((ref) => evidenceByRef.get(ref)?.independentTest)) {
-      errors.push(`对账 ${reconciliation.key} 缺少独立 Test 通过证据`);
+    if (state.meta?.mode === 'closure') {
+      const storyIndex = reviewSubjectStoryIndex(db, draft.task_id, state.subjects.find(subject => subject.key === reconciliation.subjectRef));
+      const relevant = arbitration.proofs.filter(proof => storyIndex === null || proof.storyIndex === storyIndex);
+      for (const proof of relevant) {
+        if (![proof.itemRef, proof.interventionRef].every(ref => reconciliation.evidenceRefs.includes(ref))) {
+          errors.push(`对账 ${reconciliation.key} 必须引用仲裁工作项 ${proof.itemRef} 与 ${proof.interventionRef}；完整裁决由 Harness 保留，仲裁不是测试通过`);
+        }
+      }
+      const tests = arbitration.tests.filter(item => storyIndex === null || item.story_index === storyIndex);
+      const testArbitrated = (item: WorkflowItemRow) => relevant.some(proof => proof.agent === 'test-agent'
+        && proof.itemRef === `WORKITEM:${item.item_id}:r${item.revision}`
+        && [proof.itemRef, proof.interventionRef].every(ref => reconciliation.evidenceRefs.includes(ref)));
+      const passedRefs = reconciliation.evidenceRefs.filter(ref => evidenceByRef.get(ref)?.independentTest);
+      const covered = arbitration.native
+        ? tests.length > 0 && tests.every(item => testArbitrated(item) || passedRefs.some(ref =>
+          arbitration.resources.find(resource => resource.ref === ref)?.deliveryUnit === item.story_index))
+        : passedRefs.length > 0;
+      if (!covered) {
+        errors.push(`对账 ${reconciliation.key} 缺少独立 Test 通过证据（或同范围的明确 Test 仲裁裁决）`);
+      }
     }
   }
   for (const gap of state.gaps) {
@@ -2544,13 +2664,25 @@ function validatorErrors(db: Db, draft: CommandChainDraftRow, names: string[]) {
     errors.push(...reviewInputErrors(db, draft, artifacts));
   }
   if (names.includes('review-reconciliation')) {
-    errors.push(...reviewReconciliationErrors(artifacts));
+    errors.push(...reviewReconciliationErrors(db, draft, artifacts));
   }
   if (names.includes('review-assessment')) {
     errors.push(...reviewAssessmentErrors(artifacts));
+    const state = reviewState(artifacts);
+    for (const proof of reviewArbitrationEvidence(db, draft).proofs) {
+      if (![proof.itemRef, proof.interventionRef].every(ref => state.assessment?.evidenceBoundary.includes(ref))) {
+        errors.push(`结卡评估必须说明仲裁证据边界：${proof.itemRef}、${proof.interventionRef}`);
+      }
+    }
   }
   if (names.includes('review-output')) {
     errors.push(...reviewOutputErrors(artifacts));
+    const state = reviewState(artifacts);
+    if (!state.gaps.length) for (const proof of reviewArbitrationEvidence(db, draft).proofs) {
+      for (const kind of ['verification', 'risks']) if (!state.sections.some(section => section.kind === kind && section.content.includes(proof.itemRef))) {
+        errors.push(`报告 ${kind} 章节必须保留仲裁放行及未验证边界：${proof.itemRef}`);
+      }
+    }
   }
   if (names.includes('feedback-triage-inputs')) {
     errors.push(...feedbackTriageInputErrors(db, draft, artifacts));
@@ -2815,6 +2947,7 @@ function renderWorkPacket(db: Db, draft: CommandChainDraftRow) {
     `- Runtime Inputs: ${runtimeInputRows(db, draft).length}`,
     ...runtimeInputRows(db, draft).map((input) =>
       `  - ${input.request_key}: ${input.answer ? `answered=${input.answer}` : 'waiting'}`),
+    '', interventionRequestHelp,
   ].join('\n');
 }
 
@@ -3440,6 +3573,10 @@ const REVIEW_SECTION_HEADINGS: Record<string, string> = {
 
 function renderReviewArtifact(db: Db, draft: CommandChainDraftRow) {
   const state = reviewState(decodedArtifacts(artifactRows(db, draft.draft_id)));
+  // The decision belongs to the immutable completion event and its frozen
+  // Intervention, not to an LLM's transcription. Revalidate those identities
+  // and retain their complete text deterministically in the published report.
+  const arbitration = reviewArbitrationEvidence(db, draft);
   const order = Object.keys(REVIEW_SECTION_HEADINGS);
   const sections = [...state.sections].sort((left, right) => order.indexOf(left.kind) - order.indexOf(right.kind));
   return [
@@ -3453,6 +3590,15 @@ function renderReviewArtifact(db: Db, draft: CommandChainDraftRow) {
       reconciliation.result, '',
       `证据边界：已绑定 ${reconciliation.evidenceRefs.length} 项冻结证据。`, '',
     ]),
+    ...(arbitration.proofs.length ? [
+      '## 仲裁处置记录（Harness 权威证据）', '',
+      '仲裁放行不等于独立测试通过，也不证明原失败已修复。以下完整裁决来自当前工作项完成事件与已解决介入，并与本次冻结输入逐值核对。', '',
+      ...arbitration.proofs.flatMap(proof => [
+        `### 交付单元 ${proof.storyIndex} · ${proof.agent}`, '',
+        `工作项：${proof.itemRef}`, `介入：${proof.interventionRef}`, '',
+        proof.reason, '',
+      ]),
+    ] : []),
   ].join('\n').trim();
 }
 

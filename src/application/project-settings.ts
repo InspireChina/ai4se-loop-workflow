@@ -1,8 +1,9 @@
-import { revalidatePath } from 'next/cache';
+import { invalidatePage as revalidatePath } from '../infrastructure/page-invalidation';
 import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
+import { agentConcurrencyInDb, agentConcurrencySchema } from './agent-concurrency-query';
 import { AGENT_EXECUTORS, type AgentExecutorId } from '../domain/agent-executor';
 import { FLOW_AGENT_IDS, isFlowAgentId, type FlowAgentId } from '../domain/agent-profile';
 import type { AgentExecutionOptions } from '../infrastructure/agent-executor';
@@ -41,11 +42,7 @@ const claudeModelSchema = z.string().trim().max(200, 'Claude 模型名称不能�
 const ompModelSchema = z.string().trim().max(200, 'OMP 模型名称不能超过 200 个字符').regex(/^[^\u0000-\u001f\u007f]*$/, 'OMP 模型名称包含无效控制字符');
 const ompThinkingSchema = z.enum(OMP_THINKING_LEVELS);
 const langfuseSampleRateSchema = z.coerce.number().min(0, '采样率不能小于 0').max(1, '采样率不能大于 1');
-export const DEFAULT_AGENT_CONCURRENCY = 4;
-export const MAX_AGENT_CONCURRENCY = 32;
-const agentConcurrencySchema = z.coerce.number().int('Agent 并发数必须是整数')
-  .min(1, 'Agent 并发数不能小于 1')
-  .max(MAX_AGENT_CONCURRENCY, `Agent 并发数不能大于 ${MAX_AGENT_CONCURRENCY}`);
+export { DEFAULT_AGENT_CONCURRENCY, MAX_AGENT_CONCURRENCY, agentConcurrencyInDb } from './agent-concurrency-query';
 
 const LANGFUSE_SETTING_KEYS = [
   'langfuse_enabled',
@@ -147,13 +144,7 @@ async function readProjectSettings(keys: readonly string[]) {
   return Object.fromEntries(rows.map((row) => [row.setting_key, row.setting_value]));
 }
 
-export function agentConcurrencyInDb(db: Awaited<ReturnType<typeof databaseConnection>>) {
-  const row = db.prepare(`
-    SELECT setting_value FROM project_settings WHERE setting_key = 'agent_concurrency'
-  `).get() as { setting_value: string } | undefined;
-  const parsed = agentConcurrencySchema.safeParse(row?.setting_value);
-  return parsed.success ? parsed.data : DEFAULT_AGENT_CONCURRENCY;
-}
+
 
 export async function getAgentConcurrency() {
   const db = await databaseConnection();
@@ -390,10 +381,16 @@ export async function getAgentExecutorId(): Promise<AgentExecutorId> {
   return (await getAgentExecutorSettings()).executorId;
 }
 
-export async function getAgentExecutorSettings(): Promise<AgentExecutorSettings> {
+export async function getAgentExecutorSettings(): Promise<GlobalRuntimeConfiguration> {
   const active = activeRuntimeConfiguration('system', null);
   if (!active) throw new Error('系统辅助 Runtime 配置不存在');
   return active;
+}
+
+/** Recovery may select only saved system Runtime choices, never a model or
+ * executor inferred from defaults or a business Agent's private configuration. */
+export function listSystemRuntimeConfigurations() {
+  return runtimeConfigurations('system', null);
 }
 
 export async function getFlowAgentDefaultRuntimeSettings(): Promise<GlobalRuntimeConfiguration> {

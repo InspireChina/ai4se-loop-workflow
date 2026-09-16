@@ -1,4 +1,7 @@
 import type Database from 'better-sqlite3';
+import { nativeCancellationInDb } from './work-item-controls';
+import { requirementDeliveryReadyInDb } from './task-dependency-query';
+import { projectNativeWorkflowDisplayInDb } from './native-workflow-projection';
 
 export type RequirementDependency = {
   task_id: string;
@@ -6,6 +9,7 @@ export type RequirementDependency = {
   title: string;
   agile_status: string;
   completed_at: string | null;
+  delivery_ready: boolean;
 };
 
 export type RequirementDependencyCandidate = {
@@ -16,8 +20,12 @@ export type RequirementDependencyCandidate = {
   updated_at: string;
 };
 
-export function requirementDependencySatisfied(agileStatus: string) {
-  return agileStatus === 'ready_to_close' || agileStatus === 'done';
+export { requirementDependencySatisfied, requirementDeliveryReadyInDb, requirementDependencyGateOpenInDb } from './task-dependency-query';
+
+function requirementCancelledInDb(db: Database.Database, taskId: string) {
+  const task = db.prepare('SELECT workflow_engine, agile_status FROM tasks WHERE task_id = ?').get(taskId) as
+    { workflow_engine: string; agile_status: string } | undefined;
+  return task?.workflow_engine === 'native' ? Boolean(nativeCancellationInDb(db, taskId)) : task?.agile_status === 'cancelled';
 }
 
 export function requirementDependenciesInDb(db: Database.Database, taskId: string) {
@@ -28,35 +36,30 @@ export function requirementDependenciesInDb(db: Database.Database, taskId: strin
     JOIN tasks upstream ON upstream.task_id = dependency.depends_on_task_id
     WHERE dependency.task_id = ?
     ORDER BY dependency.created_at, upstream.title, upstream.task_id
-  `).all(taskId) as RequirementDependency[];
+  `).all(taskId).map(row => {
+    const dependency = row as Omit<RequirementDependency, 'delivery_ready'>;
+    projectNativeWorkflowDisplayInDb(db, dependency.depends_on_task_id);
+    const display = db.prepare('SELECT agile_status, completed_at FROM tasks WHERE task_id = ?').get(dependency.depends_on_task_id) as
+      Pick<RequirementDependency, 'agile_status' | 'completed_at'>;
+    return { ...dependency, ...display, delivery_ready: requirementDeliveryReadyInDb(db, dependency.depends_on_task_id) };
+  });
 }
 
 /**
- * Dependencies gate only the first dispatch and are satisfied once upstream
- * delivery is ready for human reading. Once an execution has been reserved,
- * later upstream feedback must not interrupt this requirement.
+ * Configure and validate the requirement dependency graph. Read-only first
+ * admission and delivery proof queries live in task-dependency-query.
  */
-export function requirementDependencyGateOpenInDb(db: Database.Database, taskId: string) {
-  const started = db.prepare(`
-    SELECT 1 FROM execution_attempts WHERE task_id = ? LIMIT 1
-  `).get(taskId);
-  if (started) return true;
-  const unmet = db.prepare(`
-    SELECT 1
-    FROM task_dependencies dependency
-    JOIN tasks upstream ON upstream.task_id = dependency.depends_on_task_id
-    WHERE dependency.task_id = ?
-      AND upstream.agile_status NOT IN ('ready_to_close', 'done')
-    LIMIT 1
-  `).get(taskId);
-  return !unmet;
-}
+
 
 export function configureRequirementDependenciesInDb(
   db: Database.Database,
   taskId: string,
   dependencyTaskIds: readonly string[],
 ) {
+  return db.transaction(() => configureDependenciesInDb(db, taskId, dependencyTaskIds))();
+}
+
+function configureDependenciesInDb(db: Database.Database, taskId: string, dependencyTaskIds: readonly string[]) {
   const uniqueIds = [...new Set(dependencyTaskIds.map((item) => item.trim()).filter(Boolean))];
   if (uniqueIds.length > 50) throw new Error('一个需求最多配置 50 个前置需求');
   const insert = db.prepare(`
@@ -72,7 +75,7 @@ export function configureRequirementDependenciesInDb(
     `).get(dependencyTaskId) as { task_id: string; project_id: string | null; agile_status: string } | undefined;
     if (!upstream) throw new Error(`前置需求不存在：${dependencyTaskId}`);
     if (upstream.project_id !== task.project_id) throw new Error(`前置需求必须属于同一项目：${dependencyTaskId}`);
-    if (upstream.agile_status === 'cancelled') throw new Error(`不能依赖已取消的需求：${dependencyTaskId}`);
+    if (requirementCancelledInDb(db, dependencyTaskId)) throw new Error(`不能依赖已取消的需求：${dependencyTaskId}`);
     const createsCycle = db.prepare(`
       WITH RECURSIVE ancestors(task_id) AS (
         SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?
@@ -95,7 +98,15 @@ export function requirementDependencyCandidatesInDb(db: Database.Database) {
     FROM tasks
     JOIN projects ON projects.project_id = tasks.project_id
     WHERE projects.deleted_at IS NULL
-      AND tasks.agile_status NOT IN ('ready_to_close', 'done', 'cancelled')
     ORDER BY tasks.updated_at DESC, tasks.task_id DESC
-  `).all() as RequirementDependencyCandidate[];
+  `).all().filter(row => {
+    const candidate = row as RequirementDependencyCandidate;
+    return !requirementCancelledInDb(db, candidate.task_id) && !requirementDeliveryReadyInDb(db, candidate.task_id);
+  }).map(row => {
+    const candidate = row as RequirementDependencyCandidate;
+    projectNativeWorkflowDisplayInDb(db, candidate.task_id);
+    const display = db.prepare('SELECT agile_status, updated_at FROM tasks WHERE task_id = ?').get(candidate.task_id) as
+      Pick<RequirementDependencyCandidate, 'agile_status' | 'updated_at'>;
+    return { ...candidate, ...display };
+  });
 }

@@ -178,6 +178,9 @@ export type Delegation = {
   feedbackIds?: string[] | null;
   feedbackBatchId?: string | null;
   feedbackGroupId?: string | null;
+  workItemId?: string;
+  workItemRevision?: number;
+  workItemEpoch?: number;
 };
 
 export function nextDelegation(task: TaskState, codeSlotAvailable: boolean): Delegation | null {

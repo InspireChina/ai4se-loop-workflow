@@ -99,6 +99,8 @@ test('merges a migrated single-project database into an existing global database
       BEGIN
         SELECT RAISE(ABORT, 'Agent 演化运行必须属于 execution 对应项目');
       END;
+      CREATE TABLE execution_processes(allocation_id TEXT PRIMARY KEY,status TEXT);
+      CREATE TABLE execution_process_barriers(allocation_id TEXT PRIMARY KEY,resource_key TEXT);
     `;
     const source = new Database(sourcePath);
     source.exec(schema);
@@ -109,6 +111,8 @@ test('merges a migrated single-project database into an existing global database
     source.prepare(`INSERT INTO agent_profiles(agent_id) VALUES('dev-agent')`).run();
     source.prepare(`INSERT INTO project_agent_overlays(project_id, agent_id, revision, content) VALUES('PRJ-default', 'dev-agent', 3, '历史 Overlay')`).run();
     source.prepare(`INSERT INTO project_agent_memory_versions(project_id, agent_id, revision, content) VALUES('PRJ-default', 'dev-agent', 4, '历史 Memory')`).run();
+    source.exec(`INSERT INTO execution_processes VALUES('foreign-live-process','running');
+      INSERT INTO execution_process_barriers VALUES('foreign-live-process','code:workspace');`);
     source.close();
 
     const target = new Database(targetPath);
@@ -148,6 +152,8 @@ test('merges a migrated single-project database into an existing global database
     });
     assert.equal(mergeLegacyProjectDatabase({ target, sourcePath, workspaceRoot }).status, 'already-imported');
     assert.equal((target.prepare('SELECT COUNT(*) AS count FROM tasks').get() as { count: number }).count, 1);
+    assert.equal((target.prepare('SELECT COUNT(*) AS count FROM execution_processes').get() as { count: number }).count, 0);
+    assert.equal((target.prepare('SELECT COUNT(*) AS count FROM execution_process_barriers').get() as { count: number }).count, 0);
     target.close();
 
     const unchanged = new Database(sourcePath, { readonly: true });

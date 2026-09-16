@@ -1,19 +1,21 @@
 import { randomUUID } from 'node:crypto';
 import { readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
-import { appendLoopRunLog, beginRun, endRun, getRunStatus } from './tasks';
-import { databaseConnection, paths } from '../infrastructure/database';
-import { startAgentRun } from '../infrastructure/agent-runner';
+import { appendLoopRunLog as defaultAppendLoopRunLog } from './loop-run-log';
+import { beginRun as defaultBeginRun, endRun as defaultEndRun, getRunStatus as defaultGetRunStatus } from './loop-runs';
+import { databaseConnection as defaultDatabaseConnection, paths } from '../infrastructure/database';
+import { startAgentRun as defaultStartAgentRun } from '../infrastructure/agent-runner';
 import {
-  inspectProcessCommand,
-  inspectProcessIdentity,
+  inspectProcessCommand as defaultInspectProcessCommand,
+  inspectProcessIdentity as defaultInspectProcessIdentity,
   processIdentityMatches,
-  terminateProcessTree,
-  waitForProcessIdentity,
+  terminateProcessTree as defaultTerminateProcessTree,
+  waitForProcessIdentity as defaultWaitForProcessIdentity,
 } from '../infrastructure/process-tree';
-import { isProcessAlive } from '../infrastructure/run-process';
+import { isProcessAlive as defaultIsProcessAlive } from '../infrastructure/run-process';
 import { RuntimeEventHub } from '../infrastructure/runtime-event-hub';
 import { registerManagedProcessInDb } from '../infrastructure/managed-process-registry';
+import { stopExecutionProcessesInDb } from '../infrastructure/execution-process-control';
 
 export type LifecycleSource = {
   adapter: 'ui' | 'electron' | 'cli';
@@ -109,7 +111,7 @@ export function installedVersionReachedTarget(installedVersion: string, targetVe
   return true;
 }
 
-type ObservedRun = NonNullable<Awaited<ReturnType<typeof getRunStatus>>>;
+type ObservedRun = NonNullable<Awaited<ReturnType<typeof defaultGetRunStatus>>>;
 
 export function runnerHealthReason(run: ObservedRun | null) {
   if (!run) return 'active_run 记录不存在';
@@ -143,11 +145,11 @@ export function runnerHealthDisposition(
   return { kind: 'failed' as const, reason };
 }
 
-function stateRow(db: Awaited<ReturnType<typeof databaseConnection>>) {
+function stateRow(db: Awaited<ReturnType<typeof defaultDatabaseConnection>>) {
   return db.prepare('SELECT * FROM loop_lifecycle_state WHERE singleton = 1').get() as LifecycleStateRow;
 }
 
-function leaseRow(db: Awaited<ReturnType<typeof databaseConnection>>) {
+function leaseRow(db: Awaited<ReturnType<typeof defaultDatabaseConnection>>) {
   return db.prepare('SELECT owner_id, fencing_token, expires_at FROM loop_supervisor_lease WHERE singleton = 1').get() as LeaseRow | undefined;
 }
 
@@ -157,25 +159,65 @@ function supervisorOwnerPid(ownerId: string) {
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
 
-export function canReclaimSupervisorLease(previousOwnerId: string, currentOwnerId: string, isAlive = isProcessAlive) {
+export function canReclaimSupervisorLease(previousOwnerId: string, currentOwnerId: string, isAlive = defaultIsProcessAlive) {
   const previousPid = supervisorOwnerPid(previousOwnerId);
   if (!previousPid) return false;
   const currentPid = supervisorOwnerPid(currentOwnerId);
   return previousPid === currentPid || !isAlive(previousPid);
 }
 
+type LifecycleEventHub = Pick<RuntimeEventHub, 'token' | 'start' | 'close'>;
+export type LifecycleDependencies = {
+  database?: typeof defaultDatabaseConnection;
+  appendLog?: typeof defaultAppendLoopRunLog;
+  clock?: { now: () => number; scheduleInterval?: (callback: () => void, ms: number) => NodeJS.Timeout; cancelInterval?: (timer: NodeJS.Timeout) => void };
+  processes?: Partial<{ inspectCommand: typeof defaultInspectProcessCommand; inspectIdentity: typeof defaultInspectProcessIdentity;
+    terminate: typeof defaultTerminateProcessTree; waitIdentity: typeof defaultWaitForProcessIdentity; isAlive: typeof defaultIsProcessAlive }>;
+  runs?: Partial<{ begin: typeof defaultBeginRun; end: typeof defaultEndRun; status: typeof defaultGetRunStatus; start: typeof defaultStartAgentRun }>;
+  createEventHub?: (ownerId: string, token: number) => LifecycleEventHub;
+};
+
 export type LoopRunLifecycleOptions = {
   ownerId: string;
   adapter: 'electron' | 'cli';
   installedVersion?: string;
   setLoginStartup?: (enabled: boolean) => Promise<boolean> | boolean;
+  /** Supplied by the shared management host, never a business Runner. */
+  readManagedIntent?: () => 'running' | 'stopped';
+  isManagedSuspended?: () => boolean;
+  isExternalUpdatePending?: () => boolean;
+  dependencies?: LifecycleDependencies;
 };
 
 export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
+  const dependencies = options.dependencies || {};
+  const databaseConnection = dependencies.database || defaultDatabaseConnection;
+  const appendLoopRunLog = dependencies.appendLog || defaultAppendLoopRunLog;
+  const beginRun = dependencies.runs?.begin || defaultBeginRun;
+  const endRun = dependencies.runs?.end || defaultEndRun;
+  const getRunStatus = dependencies.runs?.status || defaultGetRunStatus;
+  const startAgentRun = dependencies.runs?.start || defaultStartAgentRun;
+  const inspectProcessCommand = dependencies.processes?.inspectCommand || defaultInspectProcessCommand;
+  const inspectProcessIdentity = dependencies.processes?.inspectIdentity || defaultInspectProcessIdentity;
+  const terminateProcessTree = dependencies.processes?.terminate || defaultTerminateProcessTree;
+  const waitForProcessIdentity = dependencies.processes?.waitIdentity || defaultWaitForProcessIdentity;
+  const isProcessAlive = dependencies.processes?.isAlive || defaultIsProcessAlive;
+  const currentTimeMs = dependencies.clock?.now || Date.now;
+  const scheduleInterval = dependencies.clock?.scheduleInterval || setInterval;
+  const cancelInterval = dependencies.clock?.cancelInterval || clearInterval;
+  let periodicReconcilePending = false;
   let currentToken: number | null = null;
   let renewalTimer: NodeJS.Timeout | undefined;
-  let runtimeEventHub: RuntimeEventHub | undefined;
+  let runtimeEventHub: LifecycleEventHub | undefined;
   let operation = Promise.resolve<unknown>(undefined);
+
+  async function synchronizeManagedIntent() {
+    if (!options.readManagedIntent) return;
+    const db = await databaseConnection();
+    const desired = options.readManagedIntent();
+    db.prepare(`UPDATE loop_lifecycle_state SET desired_intent=?,intent_revision=intent_revision+1,
+      retry_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE singleton=1 AND desired_intent<>?`).run(desired, desired);
+  }
 
   const serialize = <T>(work: () => Promise<T>) => {
     const next = operation.catch(() => undefined).then(work);
@@ -185,7 +227,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
 
   async function acquireLease() {
     const db = await databaseConnection();
-    const now = new Date();
+    const now = new Date(currentTimeMs());
     const expiresAt = new Date(now.getTime() + LEASE_MS).toISOString();
     const token = db.transaction(() => {
       const lease = leaseRow(db);
@@ -195,13 +237,13 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
         const created = leaseRow(db);
         return created?.owner_id === options.ownerId ? created.fencing_token : null;
       }
-      if (lease.owner_id === options.ownerId) {
+      if (lease.owner_id === options.ownerId && timestamp(lease.expires_at) > now.getTime()) {
         const renewed = db.prepare(`UPDATE loop_supervisor_lease SET expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1 AND owner_id = ? AND fencing_token = ?`)
           .run(expiresAt, options.ownerId, lease.fencing_token);
         return renewed.changes === 1 ? lease.fencing_token : null;
       }
       if (timestamp(lease.expires_at) > now.getTime()
-        && !canReclaimSupervisorLease(lease.owner_id, options.ownerId)) return null;
+        && !canReclaimSupervisorLease(lease.owner_id, options.ownerId, isProcessAlive)) return null;
       const nextToken = lease.fencing_token + 1;
       const claimed = db.prepare(`UPDATE loop_supervisor_lease SET owner_id = ?, fencing_token = ?, expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1 AND owner_id = ? AND fencing_token = ? AND expires_at = ?`)
         .run(options.ownerId, nextToken, expiresAt, lease.owner_id, lease.fencing_token, lease.expires_at);
@@ -211,10 +253,19 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     return token;
   }
 
+  async function renewOwnedLease() {
+    if (currentToken === null) return;
+    const token = currentToken;
+    const db = await databaseConnection();
+    const renewed = db.prepare("UPDATE loop_supervisor_lease SET expires_at = ?, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1 AND owner_id = ? AND fencing_token = ? AND expires_at > ?")
+      .run(new Date(currentTimeMs() + LEASE_MS).toISOString(), options.ownerId, token, new Date(currentTimeMs()).toISOString());
+    if (!renewed.changes && currentToken === token) currentToken = null;
+  }
+
   async function ensureRuntimeEventHub(token: number) {
     if (runtimeEventHub?.token === token) return;
     if (runtimeEventHub) await runtimeEventHub.close();
-    const hub = new RuntimeEventHub(options.ownerId, token);
+    const hub = dependencies.createEventHub?.(options.ownerId, token) ?? new RuntimeEventHub(options.ownerId, token);
     await hub.start();
     runtimeEventHub = hub;
   }
@@ -243,7 +294,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
         heartbeatAt: run?.heartbeatAt || null,
       },
       supervision: {
-        owner: Boolean(lease && lease.owner_id === options.ownerId && timestamp(lease.expires_at) > Date.now()),
+        owner: Boolean(lease && lease.owner_id === options.ownerId && timestamp(lease.expires_at) > currentTimeMs()),
         token: lease?.fencing_token ?? null,
         restartCount: state.restart_count,
         retryAt: state.retry_at,
@@ -291,18 +342,23 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
       }
       residual.push({ kind: row.process_kind, pid: row.pid });
     }
+    const executionProcesses = db.prepare("SELECT pid FROM execution_processes WHERE status <> 'exited'").all() as { pid: number | null }[];
+    for (const row of executionProcesses) {
+      if (!residual.some((entry) => entry.pid === row.pid)) residual.push({ kind: 'agent-cli-exit-barrier', pid: row.pid || 0 });
+    }
     return residual;
   }
 
   async function cleanupSupersededProcesses(token: number) {
     const db = await databaseConnection();
+    const physicalResidual = await stopExecutionProcessesInDb(db, { supersededToken: token });
     const rows = db.prepare(`
       SELECT process_id, supervision_token, process_kind, pid, process_start_marker
       FROM loop_managed_processes
       WHERE status = 'running' AND supervision_token != ?
       ORDER BY CASE process_kind WHEN 'agent-cli' THEN 0 WHEN 'agent-runner' THEN 1 ELSE 2 END
     `).all(token) as ManagedProcessRow[];
-    const residual: Array<{ kind: string; pid: number }> = [];
+    const residual: Array<{ kind: string; pid: number }> = [...physicalResidual];
     for (const row of rows) {
       const identity = await inspectProcessIdentity(row.pid);
       if (!identity && isProcessAlive(row.pid)) {
@@ -400,6 +456,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
   }
 
   async function reconcileOwned(): Promise<LifecycleReceipt> {
+    await synchronizeManagedIntent();
     const token = await acquireLease();
     if (token === null) {
       await closeRuntimeEventHub();
@@ -420,8 +477,9 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
         .run(`blocked-by-legacy-process: ${legacyResidual.kind} pid=${legacyResidual.pid}`);
       return { outcome: 'blocked', residualProcesses: [legacyResidual], snapshot: await snapshot() };
     }
+    await synchronizeManagedIntent();
     let state = stateRow(db);
-    if (state.mode === 'update-silence') {
+    if (state.mode === 'update-silence' || options.isManagedSuspended?.()) {
       await stopCurrent('应用更新静默', true);
       return { outcome: 'stopped', snapshot: await snapshot() };
     }
@@ -445,10 +503,10 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
         }
       }
     }
-    let health = runnerHealthDisposition(run, state.runner_suspect_since);
+    let health = runnerHealthDisposition(run, state.runner_suspect_since, currentTimeMs());
     if (health.kind === 'healthy' && run) {
-      const healthySince = state.healthy_since || new Date().toISOString();
-      const reset = Date.now() - timestamp(healthySince) >= HEALTHY_RESET_MS;
+      const healthySince = state.healthy_since || new Date(currentTimeMs()).toISOString();
+      const reset = currentTimeMs() - timestamp(healthySince) >= HEALTHY_RESET_MS;
       db.prepare(`
         UPDATE loop_lifecycle_state
         SET actual_phase = 'running', active_run_id = ?, healthy_since = ?,
@@ -477,14 +535,19 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
       return { outcome: 'backoff', warning: `Runner 心跳暂时过期，正在宽限观察：${health.reason}`, snapshot: await snapshot() };
     }
 
-    if (state.retry_at && timestamp(state.retry_at) > Date.now()) {
+    if (state.retry_at && timestamp(state.retry_at) > currentTimeMs()) {
       return { outcome: 'backoff', snapshot: await snapshot() };
     }
     const failureReason = `Runner 健康检查失败：${health.reason}`;
     if (run?.runId) await endRun(run.runId, true, { preserveRunIntent: true, reason: failureReason });
+    await synchronizeManagedIntent();
     state = stateRow(db);
+    if (state.desired_intent !== 'running' || options.isManagedSuspended?.()) {
+      await stopCurrent('管理宿主已停止或暂停运行', Boolean(options.isManagedSuspended?.()));
+      return { outcome: 'stopped', snapshot: await snapshot() };
+    }
     const restartCount = state.restart_count + 1;
-    const retryAt = new Date(Date.now() + lifecycleRestartDelayMs(restartCount)).toISOString();
+    const retryAt = new Date(currentTimeMs() + lifecycleRestartDelayMs(restartCount)).toISOString();
     db.prepare(`
       UPDATE loop_lifecycle_state
       SET actual_phase = 'starting', restart_count = ?, retry_at = ?, healthy_since = NULL,
@@ -494,8 +557,14 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     let runId: string | undefined;
     try {
       runId = await beginRun(`${options.adapter}-supervisor`, { preserveRunIntent: true });
+      await synchronizeManagedIntent();
+      if (stateRow(db).desired_intent !== 'running' || options.isManagedSuspended?.()) {
+        await endRun(runId, true, { stopRunner: false, preserveRunIntent: Boolean(options.isManagedSuspended?.()), reason: '启动期间用户停止或进入更新静默' });
+        return { outcome: 'stopped', snapshot: await snapshot() };
+      }
       await startAgentRun(runId, token);
-      db.prepare(`UPDATE loop_lifecycle_state SET actual_phase = 'running', active_run_id = ?, healthy_since = CURRENT_TIMESTAMP, runner_suspect_since = NULL, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1`)
+      db.prepare(`UPDATE loop_lifecycle_state SET actual_phase = 'running', active_run_id = ?, healthy_since = CURRENT_TIMESTAMP,
+        runner_suspect_since = NULL, retry_at = NULL, last_error = NULL, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1`)
         .run(runId);
       await appendLoopRunLog(runId, `[生命周期] supervision=${token} 已启动受管 Runner`);
       return { outcome: 'started', snapshot: await snapshot() };
@@ -513,7 +582,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     const existing = db.prepare('SELECT receipt_json FROM loop_lifecycle_commands WHERE request_id = ?').get(input.requestId) as { receipt_json: string } | undefined;
     if (existing) return JSON.parse(existing.receipt_json) as LifecycleReceipt;
     const current = stateRow(db);
-    if (current.mode === 'update-silence' && !['resume-after-update', 'prepare-update'].includes(input.action.kind)) {
+    if (current.mode === 'update-silence' && !['resume-after-update', 'prepare-update', 'stop'].includes(input.action.kind)) {
       const receipt: LifecycleReceipt = { requestId: input.requestId, outcome: 'update-in-progress', snapshot: await snapshot() };
       db.prepare(`INSERT INTO loop_lifecycle_commands(request_id, source_adapter, action_kind, receipt_json) VALUES(?, ?, ?, ?)`)
         .run(input.requestId, input.source.adapter, input.action.kind, JSON.stringify(receipt));
@@ -577,7 +646,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
   }
 
   async function recoverUpdateSilenceAfterRestart() {
-    if (!options.installedVersion) return;
+    if (!options.installedVersion || options.isExternalUpdatePending?.()) return;
     const db = await databaseConnection();
     const state = stateRow(db);
     if (state.mode !== 'update-silence') return;
@@ -604,6 +673,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     markHostProcessExited: (processId: string) => serialize(() => markHostProcessExited(processId)),
     verifyUpdateReadiness: () => serialize(() => verifyUpdateReadiness()),
     async start() {
+      await synchronizeManagedIntent();
       // update-silence is only valid while the old desktop host is shutting
       // down. Reaching a new host process means installation either completed
       // or failed; both outcomes must restore lifecycle controls.
@@ -612,21 +682,30 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
         const db = await databaseConnection();
         try { await options.setLoginStartup(stateRow(db).desired_intent === 'running'); } catch { /* surfaced on the next user command */ }
       }
+      if (!renewalTimer) {
+        renewalTimer = scheduleInterval(() => {
+          // Lease renewal bypasses the serialized cleanup/command queue.
+          void renewOwnedLease().catch(() => undefined);
+          if (periodicReconcilePending) return;
+          periodicReconcilePending = true;
+          void serialize(() => reconcileOwned()).catch(() => undefined)
+            .finally(() => { periodicReconcilePending = false; });
+        }, 10_000);
+        renewalTimer.unref();
+      }
       await serialize(() => reconcileOwned());
-      renewalTimer = setInterval(() => {
-        void serialize(() => reconcileOwned()).catch(() => undefined);
-      }, 10_000);
-      renewalTimer.unref();
     },
     async shutdown(preserveIntent = true) {
-      if (renewalTimer) clearInterval(renewalTimer);
+      if (renewalTimer) cancelInterval(renewalTimer);
       renewalTimer = undefined;
       await serialize(async () => {
         if (preserveIntent) await stopCurrent('监督宿主退出', true);
         await closeRuntimeEventHub();
         const db = await databaseConnection();
         if (currentToken !== null) {
-          db.prepare('DELETE FROM loop_supervisor_lease WHERE singleton = 1 AND owner_id = ? AND fencing_token = ?')
+          // Keep the fencing counter after physical shutdown. Deleting this
+          // row made unrelated successor hosts reuse generation 1.
+          db.prepare("UPDATE loop_supervisor_lease SET owner_id = '', expires_at = '1970-01-01T00:00:00.000Z', updated_at = CURRENT_TIMESTAMP WHERE singleton = 1 AND owner_id = ? AND fencing_token = ?")
             .run(options.ownerId, currentToken);
         }
         currentToken = null;
@@ -635,7 +714,8 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
   };
 }
 
-type WebLoopRunLifecycle = ReturnType<typeof createLoopRunLifecycle>;
+type WebLoopRunLifecycle = Pick<ReturnType<typeof import('../infrastructure/runtime-supervision').createManagedLoopRunLifecycle>,'status'|'command'>
+  |ReturnType<typeof import('../infrastructure/external-ui-lifecycle-client').createExternalUiLifecycleClient>;
 type LoopWorkGlobal = typeof globalThis & {
   __loopworkWebHost?: Promise<WebLoopRunLifecycle>;
 };
@@ -645,7 +725,12 @@ const loopWorkGlobal = globalThis as LoopWorkGlobal;
 export async function webLoopRunLifecycle() {
   if (!loopWorkGlobal.__loopworkWebHost) {
     loopWorkGlobal.__loopworkWebHost = (async () => {
-      const host = createLoopRunLifecycle({ ownerId: `web-${process.pid}-${randomUUID()}`, adapter: 'cli' });
+      if(process.env.LOOP_EXTERNAL_UI_ALLOCATION){
+        const {createExternalUiLifecycleClient}=await import('../infrastructure/external-ui-lifecycle-client');
+        return createExternalUiLifecycleClient();
+      }
+      const { createManagedLoopRunLifecycle } = await import('../infrastructure/runtime-supervision');
+      const host = createManagedLoopRunLifecycle({ ownerId: `web-${process.pid}-${randomUUID()}`, adapter: 'cli' });
       await host.start();
       return host;
     })();

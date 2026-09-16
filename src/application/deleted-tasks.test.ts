@@ -3,7 +3,7 @@ import test from 'node:test';
 
 test('lists only deleted requirements in deletion order and supports project filtering', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { listDeletedTasks } = await import('./tasks');
+  const { listDeletedTasks } = await import('../test/legacy-task-fixtures');
   const db = await databaseConnection();
   const defaultProject = db.prepare('SELECT project_id FROM projects WHERE is_default = 1').get() as { project_id: string };
   db.prepare(`

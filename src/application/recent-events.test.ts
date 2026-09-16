@@ -3,7 +3,7 @@ import test from 'node:test';
 
 test('counts recent events and returns a stable page by offset', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { countRecentEvents, listRecentEvents } = await import('./tasks');
+  const { countRecentEvents, listRecentEvents } = await import('../test/legacy-task-fixtures');
   const db = await databaseConnection();
   const baseline = await countRecentEvents();
 

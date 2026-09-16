@@ -1,6 +1,6 @@
 {
   "name": "loopwork-desktop",
-  "version": "0.1.30",
+  "version": "0.2.0",
   "description": "LoopWork desktop application",
   "homepage": "https://github.com/InspireChina/ai4se-loop-workflow",
   "repository": {
@@ -25,6 +25,8 @@
     },
     "files": [
       "main.mjs",
+      "runtime-fallback.mjs",
+      "runtime-host.mjs",
       "preload.cjs",
       "updater.mjs",
       "assets/**/*",

@@ -18,7 +18,7 @@ export async function POST(request: NextRequest) {
       source: { adapter: 'ui', instanceId: `web-${process.pid}`, actor: 'human' },
       action: safeAction,
     });
-    return NextResponse.json(receipt, { status: receipt.outcome === 'failed' || receipt.outcome === 'blocked' ? 409 : 200 });
+    return NextResponse.json(receipt, { status: ['failed','blocked','cleanup-pending','superseded'].includes(receipt.outcome) ? 409 : 200 });
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : String(error) }, { status: 500 });
   }

@@ -4,6 +4,7 @@ import { runAgentCommand } from '../../src/application/agent-command-drafts';
 import { runInternalAgentCommand } from '../../src/application/internal-agent-command-drafts';
 import { runVerificationAssistanceCommand } from '../../src/application/verification-assistance';
 import { rejectionFromError, renderAgentCommandRejection } from '../../src/domain/agent-command-rejection';
+import { runInterventionCommand } from '../../src/application/interventions';
 
 function fail(message: string): never {
   process.stderr.write(`loop-agent: ${message}\n`);
@@ -19,10 +20,14 @@ const internalToken = process.env.LOOP_INTERNAL_COMMAND_TOKEN;
 const assistanceJobId = process.env.LOOP_VERIFICATION_ASSISTANCE_JOB_ID;
 const assistanceSessionId = process.env.LOOP_VERIFICATION_ASSISTANCE_SESSION_ID;
 const assistanceToken = process.env.LOOP_VERIFICATION_ASSISTANCE_COMMAND_TOKEN;
+const interventionId = process.env.LOOP_INTERVENTION_ID;
+const interventionSessionId = process.env.LOOP_INTERVENTION_SESSION_ID;
+const interventionToken = process.env.LOOP_INTERVENTION_COMMAND_TOKEN;
 const hasFlowContext = Boolean(executionId && token);
 const hasInternalContext = Boolean(internalWorkType && internalWorkId && internalSessionId && internalToken);
 const hasAssistanceContext = Boolean(assistanceJobId && assistanceSessionId && assistanceToken);
-if (!hasFlowContext && !hasInternalContext && !hasAssistanceContext) fail('命令只能在活动 Agent execution 内使用');
+const hasInterventionContext = Boolean(interventionId && interventionSessionId && interventionToken);
+if (!hasFlowContext && !hasInternalContext && !hasAssistanceContext && !hasInterventionContext) fail('命令只能在活动 Agent execution 内使用');
 
 const rawArgs = process.argv.slice(2);
 
@@ -54,8 +59,12 @@ try {
     args.push(argument.slice(0, -5), content);
     index += 1;
   }
-  const output = hasAssistanceContext
-    ? await runVerificationAssistanceCommand({
+  const output = hasInterventionContext
+    ? await runInterventionCommand({
+        interventionId: interventionId!, sessionId: interventionSessionId!, token: interventionToken!, args,
+      })
+    : hasAssistanceContext
+      ? await runVerificationAssistanceCommand({
         jobId: assistanceJobId!, sessionId: assistanceSessionId!, token: assistanceToken!, args,
       })
     : hasInternalContext
@@ -65,12 +74,14 @@ try {
     : await runAgentCommand({ executionId: executionId!, token: token!, args });
   process.stdout.write(`${output}\n`);
 } catch (error) {
-  if (hasFlowContext || hasInternalContext || hasAssistanceContext) {
+  if (hasFlowContext || hasInternalContext || hasAssistanceContext || hasInterventionContext) {
     const firstFlag = rawArgs.findIndex((argument) => argument.startsWith('--'));
     const command = rawArgs.slice(0, firstFlag < 0 ? rawArgs.length : firstFlag).join(' ');
     const rejection = rejectionFromError(error);
     if (rawArgs[0] === 'direct') rejection.refreshCommand = 'direct run';
-    else if (hasInternalContext || hasAssistanceContext) rejection.refreshCommand = `${rawArgs[0] || 'verification-assistance'} status`;
+    else if (hasInternalContext || hasAssistanceContext || hasInterventionContext) {
+      rejection.refreshCommand = `${rawArgs[0] || 'verification-assistance'} status`;
+    }
     process.stderr.write(renderAgentCommandRejection(command, rejection));
     process.exit(1);
   }

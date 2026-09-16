@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { revalidatePath } from 'next/cache';
+import { invalidatePage as revalidatePath } from '../infrastructure/page-invalidation';
 import { z } from 'zod';
 import { databaseConnection, paths, setConfiguredWorkspaceRoot } from '../infrastructure/database';
 import { normalizeWorkspaceRoot } from './project-settings';
@@ -35,6 +35,14 @@ function refreshProjectPages() {
     revalidatePath('/agents');
     revalidatePath('/settings');
   } catch { /* CLI usage has no request context. */ }
+}
+
+function assertWorkspaceNotHeldInDb(db: Db, projectId: string) {
+  if (db.prepare("SELECT 1 FROM repair_resource_claims WHERE resource_scope = ? LIMIT 1").get(`project:${projectId}`)
+    || db.prepare(`SELECT 1 FROM execution_processes process JOIN tasks task ON task.task_id = process.task_id
+      WHERE task.project_id = ? AND process.status <> 'exited' LIMIT 1`).get(projectId)) {
+    throw new Error('该项目仍有物理执行或修复接管，不能修改工作目录或删除项目');
+  }
 }
 
 export function listProjectsInDb(db: Db): Project[] {
@@ -149,6 +157,7 @@ export async function updateProject(input: unknown) {
     if (running) throw new Error('该项目仍有 Agent 正在运行，暂时不能修改工作目录');
   }
   db.transaction(() => {
+    if (current.workspace_root !== workspaceRoot) assertWorkspaceNotHeldInDb(db, value.projectId);
     db.prepare(`
       UPDATE projects
       SET name = ?, workspace_root = ?, description = ?, updated_at = CURRENT_TIMESTAMP
@@ -183,6 +192,7 @@ export async function deleteProject(projectIdInput: unknown) {
   const nextDefaultRoot = db.transaction(() => {
     const project = projectInDb(db, projectId);
     if (!project) return null;
+    assertWorkspaceNotHeldInDb(db, projectId);
     const replacement = db.prepare(`
       SELECT project_id, workspace_root
       FROM projects

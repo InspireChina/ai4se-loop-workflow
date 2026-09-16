@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
 import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
-import type { DelegationEnvelope } from './tasks';
+import type { DelegationEnvelope } from '../test/legacy-task-fixtures';
 
 function backlogDelegation(taskId: string): DelegationEnvelope {
   return {
@@ -34,7 +34,7 @@ async function begin(delegation: DelegationEnvelope, suffix: string) {
 }
 
 async function taskReadyForSplit(title: string) {
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { applyAgentResult } = await import('./agent-results');
   const { databaseConnection } = await import('../infrastructure/database');
   const taskId = await createTask({ title, description: '管理员可以导出当前筛选结果。' });
@@ -98,7 +98,7 @@ async function put(executionId: string, token: string, block: string, content: s
 test('Story Splitter uses only the YAML command chain and compiles delivery units', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
-  const { getTask } = await import('./tasks');
+  const { getTask } = await import('../test/legacy-task-fixtures');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { databaseConnection } = await import('../infrastructure/database');
   const { taskId, delegation } = await taskReadyForSplit('YAML 交付拆分');

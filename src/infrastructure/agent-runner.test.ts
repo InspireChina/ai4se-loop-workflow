@@ -2,8 +2,15 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
-import { shouldRecordDevCodeCommit } from '../application/executions';
 import { resolveRunnerCommand, runnerDiagnosticPath } from './agent-runner';
+
+test('uses one Intervention runner for assistance and arbitration and cancels without spending retry budget', () => {
+  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+  assert.match(source, /claimNextIntervention\(/);
+  assert.match(source, /runInterventionAttempt\(/);
+  assert.match(source, /cancelInterventionAttempt\(/);
+  assert.doesNotMatch(source, /claimNextVerificationAssistance|runVerificationAssistanceAttempt/);
+});
 
 test('starts the TypeScript Runner through Node and the local tsx CLI', () => {
   const launch = resolveRunnerCommand('RUN-123', 'agent-runner.ts');
@@ -39,6 +46,13 @@ test('starts bundled desktop runners through Electron in Node mode', () => {
   }
 });
 
+test('the standalone Electron host marks its selected child as a bundled runtime', () => {
+  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/host-service-entry.ts'), 'utf8');
+  assert.match(source, /process\.env\.LOOP_DESKTOP = '1'/);
+  assert.match(source, /process\.env\.LOOP_DESKTOP_NODE = args\.get\('--electron-node'\)/);
+  assert.match(source, /process\.env\.ELECTRON_RUN_AS_NODE = '1'/);
+});
+
 test('routes Runner stderr to a run-owned diagnostic file and installs fatal handlers', () => {
   assert.match(runnerDiagnosticPath('RUN-123'), /run-diagnostics[/\\]RUN-123[/\\]runner\.stderr\.log$/);
   assert.throws(() => runnerDiagnosticPath('../escape'), /invalid run id/);
@@ -68,53 +82,36 @@ test('persists normalized business execution events as ordered execution receipt
   assert.match(source, /exitCode:\s*event\.exitCode \?\? null/);
   assert.match(source, /createHash\('sha256'\)\.update\(command\)\.digest\('hex'\)/);
   assert.match(source, /originalLength:\s*command\.length/);
-  assert.match(source, /本地执行证据写入失败，将自动重试/);
+  const coordinator = readFileSync(resolve(process.cwd(), 'src/application/execution-coordinator.ts'), 'utf8');
+  assert.match(coordinator, /本地执行证据写入失败，将自动重试/);
 });
 
 test('core contract constrains flow writes without prohibiting target database operations', () => {
-  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+  const source = readFileSync(resolve(process.cwd(), 'src/application/delegation-prompt.ts'), 'utf8');
 
   assert.match(source, /只使用下方声明的上下文与草稿命令读取和提交流程数据。/);
   assert.doesNotMatch(source, /不要直接写数据库/);
   assert.doesNotMatch(source, /`Loop App Root:/);
 });
 
-test('records a Dev code commit only for a completed result that declares changed files', () => {
-  assert.equal(shouldRecordDevCodeCommit('dev-agent', {
-    outcome: 'completed',
-    changedFiles: ['src/example.ts'],
-  }), true);
-  assert.equal(shouldRecordDevCodeCommit('dev-agent', {
-    outcome: 'completed',
-    changedFiles: [],
-  }), false);
-  assert.equal(shouldRecordDevCodeCommit('dev-agent', {
-    outcome: 'completed',
-  }), false);
-  assert.equal(shouldRecordDevCodeCommit('test-agent', {
-    outcome: 'completed',
-    changedFiles: ['src/example.ts'],
-  }), false);
-  assert.equal(shouldRecordDevCodeCommit('dev-agent', {
-    outcome: 'failed',
-    changedFiles: ['src/example.ts'],
-  }), false);
-});
+test('runner records owned Git evidence rather than inferring changes from model declarations', () => {
+  const source = readFileSync(resolve(process.cwd(), 'src/application/execution-coordinator.ts'), 'utf8');
 
-test('runner records the current HEAD without inferring a Dev commit from base_commit', () => {
-  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
-
-  assert.match(source, /shouldRecordDevCodeCommit\(delegation\.agent,\s*result\)/);
-  assert.match(source, /const currentHead = gitHead\(current\?\.task\.work_dir \|\| paths\.root\)/);
-  assert.doesNotMatch(source, /currentHead\s*!==\s*attempt\.base_commit/);
+  assert.match(source, /collectDevCodeEvidence\(attempt\.execution_id\)/);
+  assert.match(source, /'code_baseline', 'execution-start', codeBaseline/);
+  assert.match(source, /'code_evidence', codeEvidenceKey, evidence/);
+  assert.match(source, /codeCommit = evidence\.commit/);
+  assert.match(source, /changedFiles: evidence\.changedFiles/);
+  assert.doesNotMatch(source, /shouldRecordDevCodeCommit|走查确认无需代码变更/);
 });
 
 test('runner resolves runtime settings for each delegated agent instead of once per run', () => {
   const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+  const coordinator = readFileSync(resolve(process.cwd(), 'src/application/execution-coordinator.ts'), 'utf8');
 
-  assert.match(source, /getAgentRuntimeSettings\(delegation\.agent\)/);
-  assert.match(source, /executeDelegationStep\(reservation\)/);
-  assert.match(source, /progressDispatcher\.activate/);
+  assert.match(coordinator, /getAgentRuntimeSettings\(delegation\.agent\)/);
+  assert.match(source, /executionCoordinator\.execute\(reservation\)/);
+  assert.match(coordinator, /progressDispatcher\.activate/);
   assert.doesNotMatch(source, /const settings = await getAgentExecutorSettings\(\)/);
 });
 
@@ -141,31 +138,44 @@ test('keeps the Runner behind its start gate until process registration complete
   assert.ok(heartbeat < dispatch);
 });
 
+test('Runner delegates execution and recovery without owning concrete failure classification or recovery selection', () => {
+  const runner = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+  assert.match(runner, /createExecutionCoordinator\(/);
+  assert.match(runner, /executionCoordinator\.execute\(reservation\)/);
+  assert.match(runner, /executionCoordinator\.recover\(recovery\.attempt, recovery\.work\)/);
+  assert.doesNotMatch(runner, /agent-cli-exit|agent-timeout|agent-missing-terminal-command|agent-result-contract|agent-result-application/);
+  assert.doesNotMatch(runner, /failExecutionWithRetryPolicy|retryRecoveryPlanForFailure|shouldRetryReportedFailure|EXECUTION_FAILURE_MAX_RETRIES/);
+});
+
 test('retries every Agent execution failure four times with progressively reduced recovery packs', () => {
-  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
+  const source = readFileSync(resolve(process.cwd(), 'src/application/execution-coordinator.ts'), 'utf8');
+  const prompt = readFileSync(resolve(process.cwd(), 'src/application/delegation-prompt.ts'), 'utf8');
 
   assert.match(source, /EXECUTION_FAILURE_MAX_RETRIES/);
   assert.match(source, /failExecutionWithRetryPolicy\(attempt\.execution_id, reason/);
   assert.match(source, /execution\.terminationReason \? 'agent-timeout' : 'agent-cli-exit'/);
   assert.match(source, /shouldRetryReportedFailure\(result, attempt\.attempt, delegation\.agent\)/);
-  assert.match(source, /executionRecoveryModeForAttempt\(attemptNumber\)/);
+  assert.match(prompt, /executionRecoveryModeForAttempt\(attemptNumber\)/);
   assert.match(source, /retryRecoveryPlanForFailure\(retry\.failureAttempt\)/);
-  assert.match(source, /Error Recovery · retry/);
+  assert.match(prompt, /Error Recovery · retry/);
   assert.match(source, /execution\.failureDetail/);
   assert.doesNotMatch(source, /maxRetries:\s*[12]\b/);
   assert.doesNotMatch(source, /if \(!retryPolicy\).*failExecution/s);
 });
 
 test('continues every clean exit without a terminal submission before releasing resources', () => {
-  const source = readFileSync(resolve(process.cwd(), 'scripts/loop/agent-runner.ts'), 'utf8');
-  const continuation = source.indexOf('shouldContinueAfterCleanExit({');
+  const source = readFileSync(resolve(process.cwd(), 'src/application/execution-coordinator.ts'), 'utf8');
+  const coordinator = readFileSync(resolve(process.cwd(), 'src/application/execution-invocation.ts'), 'utf8');
+  const continuation = source.indexOf('await coordinateExecutionInvocations({');
   const release = source.indexOf('await progressDispatcher.executionExited({ reservationId: reservation.reservationId });', continuation);
   assert.ok(continuation >= 0);
   assert.ok(release > continuation);
-  assert.match(source, /while \(true\)/);
-  assert.match(source, /resetAgentCommandStatusForContinuation\(attempt\.execution_id\)/);
-  assert.match(source, /recordCleanExitContinuationActivity\(attempt\.execution_id, 'scheduled', continuationCount\)/);
-  assert.match(source, /recordCleanExitContinuationActivity\(attempt\.execution_id, 'succeeded', continuationCount\)/);
+  assert.match(coordinator, /shouldContinueAfterCleanExit\(/);
+  assert.match(coordinator, /while \(true\)/);
+  assert.match(source, /resetStatus: .*resetAgentCommandStatusForContinuation\(/);
+  assert.match(source, /recordActivity: .*recordCleanExitContinuationActivity\(/);
+  assert.match(coordinator, /recordActivity\('scheduled', count\)/);
+  assert.match(coordinator, /recordActivity\('succeeded', count\)/);
   assert.match(source, /不消耗失败重试额度/);
   assert.doesNotMatch(source, /TERMINAL_RECOVERY_MAX_RUNTIME_MS|启动一次仅限提交的补交/);
 });
@@ -182,7 +192,8 @@ test('uses Event Hub revisions and schedule deadlines instead of fixed business 
   assert.match(source, /materializeDueScheduledRequirements\(\)/);
   assert.match(source, /nextScheduledRequirementWakeAt\(\)/);
   assert.match(source, /runnerWake\.wait\(/);
-  assert.match(source, /executionOptions,\s*cancellation\.signal/);
+  const coordinator = readFileSync(resolve(process.cwd(), 'src/application/execution-coordinator.ts'), 'utf8');
+  assert.match(coordinator, /executionOptions,\s*cancellation\.signal/);
   assert.doesNotMatch(source, /LOOP_EMPTY_DISPATCH_RETRY_MS/);
   assert.doesNotMatch(source, /sleepWhileRunActive/);
 });

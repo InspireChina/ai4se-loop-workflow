@@ -89,12 +89,16 @@ test('materializes persistent task lanes and execution lane correlation', async 
   const executionColumns = db.prepare('PRAGMA table_info(execution_attempts)').all() as { name: string }[];
   const recoveryColumns = db.prepare('PRAGMA table_info(recovery_items)').all() as { name: string }[];
   const runColumns = db.prepare('PRAGMA table_info(loop_runs)').all() as { name: string }[];
+  const questionColumns = db.prepare('PRAGMA table_info(questions)').all() as { name: string }[];
+  const runtimeInputColumns = db.prepare('PRAGMA table_info(runtime_input_requests)').all() as { name: string }[];
   assert.deepEqual(laneColumns.map((column) => column.name), [
     'task_id', 'lane', 'status', 'current_agent', 'current_story_index',
     'blocked_reason', 'resume_pending', 'ready_at', 'updated_at', 'retry_cycle',
   ]);
   assert.equal(executionColumns.some((column) => column.name === 'lane'), true);
   assert.equal(executionColumns.some((column) => column.name === 'retry_not_before'), true);
+  assert.equal(executionColumns.some((column) => column.name === 'work_item_id'), true);
+  assert.equal(executionColumns.some((column) => column.name === 'work_item_attempt'), true);
   const taskColumns = db.prepare('PRAGMA table_info(tasks)').all() as { name: string }[];
   assert.equal(taskColumns.some((column) => column.name === 'retry_cycle'), true);
   assert.equal(executionColumns.some((column) => column.name === 'lease_owner'), false);
@@ -102,6 +106,8 @@ test('materializes persistent task lanes and execution lane correlation', async 
   assert.equal(runColumns.some((column) => column.name === 'heartbeat_at'), true);
   assert.equal(recoveryColumns.some((column) => column.name === 'resolution_json'), true);
   assert.equal(recoveryColumns.some((column) => column.name === 'failure_count'), true);
+  assert.equal(questionColumns.some((column) => column.name === 'intervention_id'), true);
+  assert.equal(runtimeInputColumns.some((column) => column.name === 'intervention_id'), true);
 });
 
 test('stores one project-owned Current Prompt and one ephemeral Canary without Prompt layers or history', async () => {

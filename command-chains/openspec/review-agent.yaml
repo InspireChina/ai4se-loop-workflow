@@ -95,7 +95,7 @@ phases:
     type: builtin
     builtin: review-inputs
 
-  # 内置事实门禁：每个冻结对象必须恰好登记一项最终对账，或登记一个可前向补齐的结卡缺口；普通结卡的对账必须绑定独立 Test 通过证据。
+  # 内置事实门禁：逐项对账或登记 gap；Test 仲裁是明确的同范围例外，不是假造的 Test 通过。
   fact_reconciliation:
     type: builtin
     builtin: review-reconciliation
@@ -105,7 +105,7 @@ phases:
   closure_assessment:
     type: artifact
     artifacts: [review.assessment]
-    instructions: 综合全部最终事实，判断原始需求是否已闭环。说明结论覆盖的冻结证据边界；仍会否定结卡的事项必须回退 fact_reconciliation 登记 gap，不能只写成残余风险。
+    instructions: 综合全部最终事实，判断原始需求是否已闭环。说明结论覆盖的冻结证据边界；存在仲裁时 evidenceBoundary 同时列出 WORKITEM 与 INTERVENTION 引用，保留未验证限制。仍会否定结卡的事项必须回退 fact_reconciliation 登记 gap，不能只写成残余风险。
 
   # 内置输出门禁：无 gap 时维护核心报告章节；有 gap 时维护完整前向交付单元，每个 gap 必须恰好覆盖一次且依赖无环。
   closure_output:

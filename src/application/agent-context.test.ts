@@ -4,7 +4,34 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { deliverySpecFixture } from '../test/delivery-spec-fixture';
-import type { DelegationEnvelope } from './tasks';
+import type { DelegationEnvelope } from '../test/legacy-task-fixtures';
+
+test('native launch and reduced recovery use the frozen current work item, never legacy cursor authority', async () => {
+  const { createTask, getTaskContext } = await import('./tasks');
+  const { toEnvelope } = await import('./dispatch-planner');
+  const { buildAgentContextSnapshot, renderAgentWorkingContextPack } = await import('./agent-context');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const taskId = await createTask({ title: 'Native context graph', itemType: 'direct', description: 'Read-only context fixture' });
+  const db = await databaseConnection();
+  const readEvents = () => db.prepare(`SELECT event.* FROM workflow_item_events event
+    JOIN workflow_items item ON item.item_id = event.item_id WHERE item.task_id = ? ORDER BY event.rowid`).all(taskId);
+  const events = readEvents();
+  const full = await getTaskContext(taskId);
+  const current = full.nativeWorkflow!.items.find(item => item.work_key === 'direct:execute')!;
+  const snapshot = buildAgentContextSnapshot({ full, activeFeedback: [], activeRecovery: [],
+    delegation: toEnvelope(full.task, { taskId, lane: 'control', pipeline: 'direct', agent: 'direct-agent',
+      storyIndex: null, resources: [], description: 'Read only', workItemId: current.item_id,
+      workItemRevision: current.revision, workItemEpoch: current.dispatch_epoch }) });
+  assert.equal(snapshot.authoritativeFacts.lifecycle.authority, 'display_only');
+  assert.equal(snapshot.authoritativeFacts.workflow?.currentItemRef, `WORKITEM:${current.item_id}:r1`);
+  assert.equal(snapshot.resources.find(resource => resource.kind === 'work_item')?.status, 'ready');
+  for (const mode of ['initial', 'compact', 'minimal'] as const) {
+    const pack = renderAgentWorkingContextPack(snapshot, mode);
+    assert.match(pack, new RegExp(current.item_id));
+    assert.doesNotMatch(pack, /- Lifecycle:|- Progress: analysis=/);
+  }
+  assert.deepEqual(readEvents(), events);
+});
 
 function delegation(taskId: string, overrides: Partial<DelegationEnvelope> = {}): DelegationEnvelope {
   return {
@@ -45,7 +72,7 @@ function delegation(taskId: string, overrides: Partial<DelegationEnvelope> = {})
 }
 
 test('renders only the hot Backlog context in the launch Prompt while retaining the full snapshot', async () => {
-  const { createTask, getTaskContext } = await import('./tasks');
+  const { createTask, getTaskContext } = await import('../test/legacy-task-fixtures');
   const { buildAgentContextSnapshot, renderAgentWorkingContextPack } = await import('./agent-context');
   const taskId = await createTask({
     title: 'Borrowing reminder',
@@ -94,7 +121,7 @@ test('renders only the hot Backlog context in the launch Prompt while retaining 
 
 test('exposes active OpenSpec changes when the current Agent uses an OpenSpec configuration', async () => {
   const { activateAgentConfiguration, listAgentConfigurations } = await import('./agent-configurations');
-  const { createTask, getTaskContext } = await import('./tasks');
+  const { createTask, getTaskContext } = await import('../test/legacy-task-fixtures');
   const { buildAgentContextSnapshot, renderAgentContextList, renderAgentContextResource } = await import('./agent-context');
   const { paths } = await import('../infrastructure/database');
   const changeRoot = join(paths.root, 'openspec', 'changes', 'add-context');
@@ -141,7 +168,7 @@ test('builds a compact execution snapshot while preserving full context for just
     createTask,
     getTaskContext,
     upsertDocument,
-  } = await import('./tasks');
+  } = await import('../test/legacy-task-fixtures');
   const {
     buildAgentContextSnapshot,
     getExecutionAgentContextSnapshot,
@@ -286,7 +313,7 @@ test('builds a compact execution snapshot while preserving full context for just
 
 test('injects a semantic backlog resume packet while excluding pruned decision branches', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { addQuestion, answerQuestion, createTask, getTaskContext, upsertDocument } = await import('./tasks');
+  const { addQuestion, answerQuestion, createTask, getTaskContext, upsertDocument } = await import('../test/legacy-task-fixtures');
   const { buildAgentContextSnapshot, renderAgentWorkingContextPack } = await import('./agent-context');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Conditional export', description: 'Align the export decision tree.' });
@@ -381,7 +408,7 @@ test('hard-isolates Test context from Dev narratives while preserving the frozen
     getTaskContext,
     saveDeliverySpec,
     upsertDocument,
-  } = await import('./tasks');
+  } = await import('../test/legacy-task-fixtures');
   const {
     agentContextProtocol,
     buildAgentContextSnapshot,
@@ -670,7 +697,7 @@ test('prioritizes the latest forward feedback group while keeping old documents 
     createTask,
     getTaskContext,
     upsertDocument,
-  } = await import('./tasks');
+  } = await import('../test/legacy-task-fixtures');
   const { buildAgentContextSnapshot } = await import('./agent-context');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Forward feedback context priority' });

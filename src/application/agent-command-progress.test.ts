@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 
 test('projects the current structured phase and latest Agent domain command', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { agentCommandProgressInDb } = await import('./agent-command-progress');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Command chain progress projection' });
@@ -56,7 +56,7 @@ test('projects the current structured phase and latest Agent domain command', as
 
 test('does not expose a historical draft after its Agent has stopped running', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { agentCommandProgressInDb } = await import('./agent-command-progress');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Waiting command chain progress' });
@@ -85,7 +85,7 @@ test('does not expose a historical draft after its Agent has stopped running', a
 
 test('keeps every Agent domain command as one lifecycle record in execution audit', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
-  const { createTask } = await import('./tasks');
+  const { createTask } = await import('../test/legacy-task-fixtures');
   const { agentCommandAuditInDb } = await import('./agent-command-progress');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Command audit projection' });

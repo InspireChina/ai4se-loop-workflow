@@ -6,6 +6,7 @@ import { requirementDependencySatisfied } from '../src/application/task-dependen
 import { agentLabel, statusLabel, terminologyText } from '../src/domain/terminology';
 import { requirementPriorityLabel } from '../src/domain/requirement-priority';
 import { listProjects } from '../src/application/projects';
+import { TaskAutoRefresh } from './tasks/task-auto-refresh';
 
 export const dynamic = 'force-dynamic';
 
@@ -36,9 +37,8 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ p
   const waitingForAnswers = [...requirementWaitingForAnswers, ...laneWaitingForAnswers];
   const waitingForRuntimeInput = activeTasks.flatMap((task) => task.lanes.filter((lane) =>
     lane.status === 'waiting_for_runtime_input'
-      && (lane.current_agent !== 'test-agent'
-        || task.verification_assistance_escalated_count > 0
-        || (task.verification_assistance_pending_count === 0 && task.verification_assistance_running_count === 0)),
+      && (task.intervention_awaiting_human_count > 0
+        || task.intervention_pending_count + task.intervention_running_count === 0),
   ).map((lane) => ({ task, lane })));
   const readyToClose = activeTasks.filter((task) => task.agile_status === 'ready_to_close');
   const needsHuman = [
@@ -46,19 +46,17 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ p
     ...waitingForRuntimeInput.map((item) => ({ ...item, kind: 'runtime' as const })),
     ...readyToClose.map((task) => ({ task, lane: null, kind: 'closure' as const })),
   ];
-  return <><header><div><p className="eyebrow">LOOP WORKBENCH</p><h1>工作台</h1><p className="muted">AI 自主推进；需要时补充设计决策、运行信息或验证协助，并阅读最终结卡报告。</p></div></header>
+  return <><header className="page-header"><div><p className="eyebrow">LOOP WORKBENCH</p><h1>工作台</h1><p className="muted">AI 自主推进；需要时补充设计决策、运行信息或验证协助，并阅读最终结卡报告。</p></div><TaskAutoRefresh/></header>
     <section className="metrics"><div><b>{waitingForAnswers.length + waitingForRuntimeInput.length}</b><span>待处理信息</span></div><div><b>{readyToClose.length}</b><span>待阅读产物</span></div><div><b>{visiblePipeline.length}</b><span>可执行步骤</span></div></section>
-    <section className="attention-section"><div className="section-title-with-tags"><h2>需要我处理</h2><nav className="project-filter-tags" aria-label="按项目筛选工作台"><Link href="/" aria-current={!projectId ? 'page' : undefined}>全部</Link>{projects.map((project) => <Link href={`/?project=${encodeURIComponent(project.project_id)}`} aria-current={projectId === project.project_id ? 'page' : undefined} key={project.project_id}>{project.name}</Link>)}</nav></div>{needsHuman.length === 0 ? <div className="empty">当前没有需要你处理的信息或最终产物。</div> : <div className="card attention-list">{needsHuman.map(({ task, lane, kind }) => <article className={`attention ${kind}`} key={`${task.task_id}-${lane?.lane || kind}`}><span className="attention-icon">{kind === 'closure' ? <FileCheck2 size={18}/> : <AlertTriangle size={18}/>}</span><div className="attention-body"><div className="attention-meta"><span className="attention-kind">{kind === 'closure' ? task.item_type === 'business-analysis' ? '待阅读需求规格说明书' : '待阅读结卡报告' : kind === 'runtime' ? `${lane!.current_agent === 'test-agent' ? '待验证协助' : '待补充运行信息'} · ${lane!.lane === 'analysis' ? '交付分析' : '开发验证'} · ${agentLabel(lane!.current_agent)}` : lane ? `待回答关键决策 · 交付分析 · ${agentLabel(lane.current_agent)}` : `待回答需求澄清 · 需求级 · ${agentLabel(task.current_subagent)}`}</span><span className="attention-project">{task.project_name}</span></div><h3>{task.title}</h3><p className="attention-reason">{terminologyText(lane?.blocked_reason || task.blocked_reason)}</p><small className="attention-next">{terminologyText(task.next_step)}</small></div><Link href={`/tasks/${task.task_id}`} className="button secondary">去处理 <ArrowRight size={14}/></Link></article>)}</div>}</section>
+    <section className="attention-section"><div className="section-title-with-tags"><h2>需要我处理</h2><nav className="project-filter-tags" aria-label="按项目筛选工作台"><Link href="/" aria-current={!projectId ? 'page' : undefined}>全部</Link>{projects.map((project) => <Link href={`/?project=${encodeURIComponent(project.project_id)}`} aria-current={projectId === project.project_id ? 'page' : undefined} key={project.project_id}>{project.name}</Link>)}</nav></div>{needsHuman.length === 0 ? <div className="empty">当前没有需要你处理的信息或最终产物。</div> : <div className="card attention-list">{needsHuman.map(({ task, lane, kind }) => <article className={`attention ${kind}`} key={`${task.task_id}-${lane?.lane || kind}`}><span className="attention-icon">{kind === 'closure' ? <FileCheck2 size={18}/> : <AlertTriangle size={18}/>}</span><div className="attention-body"><div className="attention-meta"><span className="attention-kind">{kind === 'closure' ? task.item_type === 'business-analysis' ? '待阅读需求规格说明书' : '待阅读结卡报告' : kind === 'runtime' ? `${task.arbitration_awaiting_human_count ? '待人工仲裁' : lane!.current_agent === 'test-agent' ? '待验证协助' : '待补充运行信息'} · ${lane!.lane === 'analysis' ? '交付分析' : '开发验证'} · ${agentLabel(lane!.current_agent)}` : lane ? `待回答关键决策 · 交付分析 · ${agentLabel(lane.current_agent)}` : `待回答需求澄清 · 需求级 · ${agentLabel(task.current_subagent)}`}</span><span className="attention-project">{task.project_name}</span></div><h3>{task.title}</h3><p className="attention-reason">{terminologyText(lane?.blocked_reason || task.blocked_reason)}</p><small className="attention-next">{terminologyText(task.next_step)}</small></div><Link href={`/tasks/${task.task_id}`} className="button secondary">去处理 <ArrowRight size={14}/></Link></article>)}</div>}</section>
     <section><h2>正在推进</h2><div className="card table"><div className="row heading"><span>需求</span><span>状态</span><span>交付进度</span><span>下一步</span></div>{tasks.map((task) => {
       const runtimeLane = task.lanes.find((lane) => lane.status === 'waiting_for_runtime_input');
-      const systemAssisting = runtimeLane?.current_agent === 'test-agent'
-        && task.verification_assistance_escalated_count === 0
-        && task.verification_assistance_pending_count + task.verification_assistance_running_count > 0;
+      const systemAssisting = task.intervention_pending_count + task.intervention_running_count > 0;
       const answerLane = task.lanes.find((lane) => lane.status === 'waiting_for_answers');
       const blockedLane = task.lanes.find((lane) => lane.status === 'system_blocked');
       const pendingDependencies = task.dependency_gate_open
         ? []
-        : task.dependencies.filter((dependency) => !requirementDependencySatisfied(dependency.agile_status));
+        : task.dependencies.filter((dependency) => !requirementDependencySatisfied(dependency));
       const waitingForDependencies = pendingDependencies.length > 0;
       const requirementAnswers = task.run_state === 'waiting_for_answers'
         && ['idea-context-agent', 'business-design-agent', 'backlog-agent'].includes(task.current_subagent || '');
@@ -69,8 +67,8 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ p
         ? task.current_subagent === 'idea-context-agent' ? '等待需求意图确认'
           : task.current_subagent === 'business-design-agent' ? '等待业务方案决策'
             : '等待需求澄清'
-        : systemAssisting ? `系统辅助验证中 ${task.verification_assistance_attempt}/${task.verification_assistance_max_attempts}`
-        : runtimeLane ? runtimeLane.current_agent === 'test-agent' ? '等待验证协助' : '等待运行信息' : answerLane ? '等待关键决策' : blockedLane ? `${blockedLane.lane === 'analysis' ? '交付分析' : '开发验证'}阻塞`
+        : systemAssisting ? `${task.arbitration_active_count ? '系统仲裁中' : '系统辅助处理中'} ${task.intervention_attempt}/${task.intervention_max_attempts}`
+        : runtimeLane ? task.arbitration_awaiting_human_count ? '等待人工仲裁' : runtimeLane.current_agent === 'test-agent' ? '等待验证协助' : '等待运行信息' : answerLane ? '等待关键决策' : blockedLane ? `${blockedLane.lane === 'analysis' ? '交付分析' : '开发验证'}阻塞`
           : inBusinessAnalysis(task)
             ? task.agile_status === 'ready_to_close' ? '等待阅读需求规格' : task.current_subagent ? agentLabel(task.current_subagent).replace(' Agent', '') : statusLabel(task.agile_status)
             : statusLabel(task.agile_status);

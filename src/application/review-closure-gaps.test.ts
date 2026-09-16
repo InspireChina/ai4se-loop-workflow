@@ -1,5 +1,5 @@
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
-import { inspectAllDispatch, inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
+import { inspectAllDispatch, inspectTaskDispatchEnvelope as inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import test from 'node:test';
@@ -7,9 +7,9 @@ import { assertAgentResultRoleContract, parseAgentResult } from '../domain/agent
 import { databaseConnection } from '../infrastructure/database';
 import { applyAgentResult, applyNextQueuedAgentResult } from './agent-results';
 import { forwardReviewClosureGaps } from './review-closure-gaps';
-import { createTask, getTask, type DelegationEnvelope } from './tasks';
+import { createTask, getTask, type DelegationEnvelope } from '../test/legacy-task-fixtures';
 
-async function reviewReadyRequirement(label: string) {
+async function reviewReadyRequirement(label: string, native = false) {
   const taskId = await createTask({ title: `Review closure gap · ${label} · ${randomUUID()}` });
   const db = await databaseConnection();
   db.prepare(`
@@ -33,6 +33,10 @@ async function reviewReadyRequirement(label: string) {
         next_step = '等待最终事实对账'
     WHERE task_id = ?
   `).run(taskId);
+  if (native) {
+    const { adoptNativeWorkflowInDb } = await import('./work-item-transitions');
+    adoptNativeWorkflowInDb(db, taskId);
+  }
   const delegation = (await inspectTaskDispatch(taskId))
     .find((item) => item.agent === 'review-agent' && item.pipeline === 'review');
   assert.ok(delegation);
@@ -111,12 +115,14 @@ test('Review forward delivery units reject cyclic dependencies at the Harness bo
   );
 });
 
-test('Review closure gaps become idempotent forward delivery units', async () => {
-  const { taskId, delegation } = await reviewReadyRequirement('forward');
+for (const native of [false, true]) test(`Review closure gaps become idempotent forward delivery units (${native ? 'native' : 'legacy'})`, async () => {
+  const { taskId, delegation } = await reviewReadyRequirement('forward', native);
   const result = closureGapResult();
   assert.doesNotThrow(() => assertAgentResultRoleContract(result, 'review-agent'));
 
-  const outcome = await applyAgentResult(`RUN-review-gap-${randomUUID()}`, delegation, result);
+  const runId = `RUN-review-gap-${randomUUID()}`;
+  const source = native ? await beginTestExecutionAttempt({ runId, delegation, prompt: 'Review native graph frontier' }) : null;
+  const outcome = await applyAgentResult(runId, delegation, result, source ? { executionId: source.attempt.execution_id } : {});
   assert.equal(outcome, 'advanced');
 
   const detail = await getTask(taskId);
@@ -187,15 +193,25 @@ test('Review closure gaps become idempotent forward delivery units', async () =>
     WHERE result_id = ?
   `).run(mappings[0].source_result_id);
   const reapplied = await applyNextQueuedAgentResult();
-  assert.equal(reapplied.status, 'applied');
+  assert.equal(reapplied.status, native ? 'applied' : 'none');
   if (reapplied.status === 'applied') {
     assert.equal(reapplied.resultId, mappings[0].source_result_id);
-    assert.equal(reapplied.outcome, 'advanced');
+    assert.equal(reapplied.outcome, native ? 'discarded' : 'advanced');
   }
+  if (!native) assert.equal((db.prepare('SELECT application_status FROM agent_results WHERE result_id = ?')
+    .get(mappings[0].source_result_id) as { application_status: string }).application_status, 'pending',
+    'unadopted historical replay remains pending until the explicit startup boundary');
   assert.equal(
     (db.prepare('SELECT COUNT(*) AS count FROM stories WHERE task_id = ?').get(taskId) as { count: number }).count,
     2,
   );
+  if (native) {
+    const { listWorkflowItems } = await import('./work-items');
+    const items = await listWorkflowItems(taskId);
+    assert.deepEqual(items.filter((item) => item.work_key === 'delivery:review').map((item) => [item.revision, item.status]),
+      [[1, 'superseded'], [2, 'pending']]);
+    assert.equal((await inspectTaskDispatch(taskId))[0].agent, 'analyst-agent');
+  }
 });
 
 test('feedback-report rejects closure gaps instead of creating forward work', async () => {
@@ -247,7 +263,7 @@ test('a stale ordinary Review result is discarded without publishing or forwardi
 });
 
 test('queued Review replay uses the original execution frontier instead of the current task', async () => {
-  const { taskId, delegation } = await reviewReadyRequirement('queued-stale');
+  const { taskId, delegation } = await reviewReadyRequirement('queued-stale', true);
   const result = closureGapResult();
   const started = await beginTestExecutionAttempt({
     runId: `RUN-review-queued-${randomUUID()}`,
@@ -276,6 +292,9 @@ test('queued Review replay uses the original execution frontier instead of the c
     ) VALUES(?, 2, '新一轮已有交付单元', 'story-002',
       'new-cycle-unit', '用户', '新一轮流程', '新结果', '新结果已验证')
   `).run(taskId);
+  const { appendDeliveryWorkItemsInDb } = await import('./work-item-transitions');
+  appendDeliveryWorkItemsInDb(db, { taskId, units: [{ storyIndex: 2, title: '新一轮已有交付单元' }],
+    eventKey: 'fixture:queued-review-new-unit', actor: 'human', reason: 'A new current obligation supersedes the frozen Review frontier' });
   db.prepare(`
     UPDATE tasks
     SET total_stories = 2, analysis_index = 2, dev_index = 2,

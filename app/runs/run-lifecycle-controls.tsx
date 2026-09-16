@@ -58,7 +58,7 @@ export function RunLifecycleControls({ active, detail }: { active: boolean; deta
         setUpdateSilence(true);
         throw new Error('检测到上次更新遗留的静默状态，请先恢复运行控制');
       }
-      if (receipt.outcome === 'failed' || receipt.outcome === 'blocked') throw new Error(receipt.error || '生命周期操作失败');
+      if (['failed','blocked','cleanup-pending','superseded'].includes(receipt.outcome)) throw new Error(receipt.error || '生命周期操作未完成，请刷新状态');
       if (action.kind === 'resume-after-update') setUpdateSilence(false);
       if (receipt.warning) setError(receipt.warning);
       router.refresh();
