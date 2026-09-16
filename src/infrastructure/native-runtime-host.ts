@@ -40,10 +40,10 @@ export function createNativeRuntimeHost(ports:{
     let latest=record;
     try{const found=current(record.allocationId);if(!found)throw new Error('捕获宿主分配记录缺失');latest=found;}
     catch(error){report(error);} // storage failure cannot suppress the captured physical kill
-    if(!latest.pid)return !!handle?.noPidFailure();
     if(process.platform==='win32')return ports.confirmContainmentExit
       ? !!await ports.confirmContainmentExit(latest)
       : confirmWindowsJobContainmentExit({dataRoot:ports.dataRoot,process:latest});
+    if(!latest.pid)return !!handle?.noPidFailure();
     if(!latest.groupId)return false;
     const exited=latest.marker?await terminateProcessGroup(latest.groupId,5000,latest.marker):
       await inspectProcessGroup(latest.groupId).then(members=>!!members&&members.length===0);

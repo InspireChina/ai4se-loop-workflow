@@ -28,11 +28,11 @@ export function createRuntimeDatabaseCompatibility(ports:{dataRoot:string;execut
   const draining=new Map<string,Promise<boolean>>();const completed=new Set<string>();
   async function drainImpl(path:string) {
     const record=readAllocation(path);
-    if(!record.pid)return false;
     let exited=false;
     if(process.platform==='win32')exited=ports.confirmContainmentExit
-      ? !!await ports.confirmContainmentExit(record.pid,record.marker)
+      ? record.pid!==null&&!!await ports.confirmContainmentExit(record.pid,record.marker)
       : await confirmWindowsJobContainmentExit({dataRoot:ports.dataRoot,process:{allocationId:record.allocationId,pid:record.pid,marker:record.marker}});
+    else if(!record.pid)return false;
     else if(record.groupId) {
       if(record.marker)exited=await terminateProcessGroup(record.groupId,5000,record.marker);
       else {const members=await inspectProcessGroup(record.groupId);exited=!!members&&!members.length;}

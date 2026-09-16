@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import {createHash} from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
+import {uptime} from 'node:os';
 import { join } from 'node:path';
 import { inspectProcessIdentity, processIdentityMatches, terminateProcessTree } from './process-tree';
 
@@ -65,7 +66,8 @@ function readWindowsBootMarker() {
   return new Promise<string|null>(resolve=>{
     const child=spawn(command.command,command.args,{windowsHide:true,stdio:['ignore','pipe','ignore']});
     let output='',settled=false;let timer:NodeJS.Timeout|undefined;
-    const finish=(value:string|null)=>{if(settled)return;settled=true;if(timer)clearTimeout(timer);resolve(value);};
+    const fallback=()=>new Date(Date.now()-uptime()*1000).toISOString();
+    const finish=(value:string|null)=>{if(settled)return;settled=true;if(timer)clearTimeout(timer);resolve(value||fallback());};
     child.stdout?.on('data',bytes=>{output=(output+bytes.toString('utf8')).slice(-1024);});
     child.once('error',()=>finish(null));child.once('close',code=>finish(code===0&&output.trim()?output.trim():null));
     timer=setTimeout(()=>{child.kill('SIGKILL');finish(null);},5_000);timer.unref();
@@ -90,6 +92,14 @@ function windowsTimestamp(value:string) {
 export function processPredatesWindowsBoot(startMarker:string,bootMarker:string) {
   const started=windowsTimestamp(startMarker),booted=windowsTimestamp(bootMarker);
   return started!==null&&booted!==null&&started<booted;
+}
+
+function differentWindowsBoot(prior:string,current:string) {
+  const before=windowsTimestamp(prior),now=windowsTimestamp(current);
+  // os.uptime() is the fallback when CIM is unavailable. Its independently
+  // sampled boot estimate can drift by milliseconds, so only a material gap
+  // may fence off an earlier OS generation.
+  return before!==null&&now!==null&&now-before>30_000;
 }
 
 /** The target entrypoint waits on the ready receipt before it can create a
@@ -224,28 +234,32 @@ export async function confirmWindowsJobContainmentExit(input: {
 }) {
   if ((input.platform ?? process.platform) !== 'win32') return false;
   const record = input.process;
-  if (!record.pid) return false;
   const paths = windowsJobPaths(input.dataRoot, record.allocationId);
+  const admission=readReceipt(paths.ready);
+  const pid=record.pid??(admission?.assigned&&admission.allocationId===record.allocationId?admission.pid:null);
+  if (!pid) return false;
   const proven = () => {
     const receipt = readReceipt(paths.outcome);
-    return Boolean(receipt?.assigned && receipt.allocationId === record.allocationId && receipt.pid === record.pid && receipt.activeProcesses === 0);
+    return Boolean(receipt?.assigned && receipt.allocationId === record.allocationId && receipt.pid === pid && receipt.activeProcesses === 0);
   };
   if (proven()) return true;
-  if(record.marker){
-    const bootMarker=await (input.inspectBootMarker??inspectWindowsBootMarker)();
-    const admission=readReceipt(paths.ready);
-    if(bootMarker&&processPredatesWindowsBoot(record.marker,bootMarker)
-      &&(!admission?.bootMarker||admission.assigned&&admission.allocationId===record.allocationId
-        &&admission.pid===record.pid&&admission.bootMarker!==bootMarker))return true;
-  }
-  let mayTerminate=true;
+  const bootMarker=await (input.inspectBootMarker??inspectWindowsBootMarker)();
+  const admitted=admission?.assigned&&admission.allocationId===record.allocationId&&admission.pid===pid;
+  // The Job receipt is written only after the root is inside a kill-on-close
+  // Job and before that root may execute application code. A different OS boot
+  // is therefore whole-container exit proof even when the desktop disappeared
+  // before it persisted the PID/start marker in SQLite.
+  if(bootMarker&&admitted&&admission.bootMarker&&differentWindowsBoot(admission.bootMarker,bootMarker))return true;
+  if(bootMarker&&record.marker&&processPredatesWindowsBoot(record.marker,bootMarker)
+    &&(!admission?.bootMarker||admitted&&admission.bootMarker!==bootMarker))return true;
+  let mayTerminate=record.pid!==null;
   if (record.marker) {
-    const identity = await inspectProcessIdentity(record.pid);
+    const identity = await inspectProcessIdentity(pid);
     if (identity && !processIdentityMatches(identity, record.marker)) mayTerminate=false;
   }
-  if(mayTerminate)await terminateProcessTree(record.pid, Math.min(5_000, input.timeoutMs ?? 15_000), record.marker ?? undefined);
+  if(mayTerminate)await terminateProcessTree(pid, Math.min(5_000, input.timeoutMs ?? 15_000), record.marker ?? undefined);
   const receipt = await waitForReceipt(paths.outcome, value => value.assigned && value.allocationId === record.allocationId
-    && value.pid === record.pid && value.activeProcesses === 0, input.timeoutMs ?? 15_000);
+    && value.pid === pid && value.activeProcesses === 0, input.timeoutMs ?? 15_000);
   return Boolean(receipt);
 }
 

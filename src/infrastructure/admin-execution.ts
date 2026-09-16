@@ -48,9 +48,9 @@ export function adminBusinessEnvironmentBoundary(environment: Record<string, str
 }
 
 export async function confirmAdminAttemptStopped(attempt: RepairAttempt,containment?:{dataRoot:string;allocationId?:string}) {
-  if (!attempt.pid || !attempt.startMarker) return false;
   if(process.platform==='win32'&&containment)return confirmWindowsJobContainmentExit({dataRoot:containment.dataRoot,
     process:{allocationId:containment.allocationId??`admin-${attempt.attemptId}`,pid:attempt.pid,marker:attempt.startMarker}});
+  if (!attempt.pid || !attempt.startMarker) return false;
   if (attempt.processGroupId && process.platform !== 'win32') {
     return terminateProcessGroup(attempt.processGroupId, 5000, attempt.startMarker);
   }

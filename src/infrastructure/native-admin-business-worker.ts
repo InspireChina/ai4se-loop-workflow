@@ -38,10 +38,10 @@ export function createNativeAdminBusinessWorker(ports:{
       const handle=owned.get(captured.allocationId);let record=handle?.record??captured;
       if(!handle)try{record=current(captured.allocationId);}catch{/* storage cannot suppress physical cleanup */}
       let stopped=false;
-      if(!record.pid)stopped=!!handle?.noSpawn;
-      else if(process.platform==='win32')stopped=ports.confirmContainmentExit
+      if(process.platform==='win32')stopped=ports.confirmContainmentExit
         ? !!await ports.confirmContainmentExit(record)
         : await confirmWindowsJobContainmentExit({dataRoot:ports.dataRoot,process:record});
+      else if(!record.pid)stopped=!!handle?.noSpawn;
       else if(record.groupId)stopped=record.marker?await terminateProcessGroup(record.groupId,5000,record.marker):
         await inspectProcessGroup(record.groupId).then(members=>!!members&&members.length===0);
       if(!stopped)return false;

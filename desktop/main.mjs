@@ -72,7 +72,7 @@ async function createLifecycle(root) {
     app.setLoginItemSettings({ openAtLogin: desired === 'running', openAsHidden: desired === 'running', args: desired === 'running' ? ['--hidden'] : [] });
   };
   const pending=createDesktopRuntimeHost({createService:()=>createNativeExternalService(options),setStartup,
-    onCreated:host=>{lifecycle=host;},isQuitting:()=>quitting,onError:error=>console.error('[startup]',error)});
+    onCreated:host=>{lifecycle=host;},isQuitting:()=>quitting,deferStartup:true,onError:error=>console.error('[startup]',error)});
   startupPromise=pending;
   try{return await pending;}finally{if(startupPromise===pending){startupPromise=undefined;startupStore=undefined;}}
 }
@@ -256,9 +256,7 @@ function createTray() {
 }
 
 async function createWindow() {
-  let url;
-  try { ({url}=await startServer()); }
-  catch(error) { url=`data:text/html;charset=utf-8,${encodeURIComponent(runtimeFallbackDocument(error instanceof Error?error.message:String(error)))}`; }
+  const initialUrl=`data:text/html;charset=utf-8,${encodeURIComponent(runtimeFallbackDocument('运行宿主正在初始化，业务界面准备完成后会自动加载。'))}`;
   const window = new BrowserWindow({
     width: 1440,
     height: 960,
@@ -297,8 +295,15 @@ async function createWindow() {
   window.once('ready-to-show', () => {
     if (!process.argv.includes('--hidden')) window.show();
   });
-  acceptedRendererUrl=url;await window.loadURL(url);
-  if(url.startsWith('data:'))scheduleUiRecovery();
+  acceptedRendererUrl=initialUrl;await window.loadURL(initialUrl);
+  void startServer().then(async({url})=>{
+    if(mainWindow!==window||window.isDestroyed()||quitting)return;
+    acceptedRendererUrl=url;await window.loadURL(url);cancelUiRecovery();
+  }).catch(async error=>{
+    if(mainWindow!==window||window.isDestroyed()||quitting)return;
+    acceptedRendererUrl=`data:text/html;charset=utf-8,${encodeURIComponent(runtimeFallbackDocument(error instanceof Error?error.message:String(error)))}`;
+    await window.loadURL(acceptedRendererUrl);scheduleUiRecovery();
+  }).catch(error=>console.error('[control-page]',error));
 }
 
 const hasLock = app.requestSingleInstanceLock();

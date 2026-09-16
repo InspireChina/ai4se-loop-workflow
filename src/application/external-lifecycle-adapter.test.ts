@@ -61,6 +61,16 @@ test('desktop waits through stale-owner and update handoff states before exposin
   assert.equal(reconciles,3);assert.equal(waits,3);
 });
 
+test('desktop may publish immediately while first-start handoff continues in the background',async()=>{
+  let resolveStart!:(state:string)=>void;const started=new Promise<string>(resolve=>{resolveStart=resolve;});const errors:unknown[]=[];
+  const service={start:()=>started,shutdown:async()=>undefined,store:{control:()=>({desired_intent:'stopped'})},
+    lifecycle:{status:async()=>({}),command:async()=>({snapshot:{intent:{desired:'stopped'}}})},ui:{},reconcile:async()=> 'hosting'};
+  const host=await createDesktopRuntimeHost({createService:async()=>service,onCreated:()=>{},isQuitting:()=>false,deferStartup:true,
+    onError:(error:unknown)=>errors.push(error),startupHandoffTimeoutMs:0});
+  assert.equal(host.service,service);resolveStart('observer');await new Promise(resolve=>setImmediate(resolve));
+  assert.match(String(errors[0]),/observer/);
+});
+
 test('desktop update handoff releases the external root only after UI and update barriers are ready',async()=>{
   const order:string[]=[];
   const lifecycle={service:{assertUpdateReady:async()=>{order.push('ready');}},shutdown:async()=>{order.push('shutdown');}};

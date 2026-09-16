@@ -61,7 +61,6 @@ export function createNativeRuntimeUpdate(ports: {
       if(!await handle.stop())return false;
       ports.store.confirmRuntimeUpdateProcessExit(currentProcess(record.allocationId,record.authority.updateId));owned.delete(record.allocationId);return true;
     }
-    if(!record.pid||!record.marker)return false;
     if(process.platform==='win32') {
       const exited=ports.confirmContainmentExit
         ? await ports.confirmContainmentExit(record)
@@ -69,6 +68,7 @@ export function createNativeRuntimeUpdate(ports: {
       if(!exited)return false;
       ports.store.confirmRuntimeUpdateProcessExit(record);return true;
     }
+    if(!record.pid||!record.marker)return false;
     const exited=record.groupId
       ? await terminateProcessGroup(record.groupId,5000,record.marker)
       : await terminateProcessTree(record.pid,5000,record.marker);

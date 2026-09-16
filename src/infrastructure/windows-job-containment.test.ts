@@ -48,7 +48,27 @@ test('a reboot is positive exit proof for a prior Windows Job even without its f
     assigned:true,bootMarker:'2026-09-15T01:00:00.0000000Z'}));
   assert.equal(processPredatesWindowsBoot('2026-09-15T02:00:00.1234567Z','2026-09-16T03:00:00.0000000Z'),true);
   assert.equal(await confirmWindowsJobContainmentExit({dataRoot:root,process:{allocationId,pid,
-    marker:'2026-09-15T02:00:00.1234567Z'},platform:'win32',inspectBootMarker:async()=> '2026-09-16T03:00:00.0000000Z'}),true);
+      marker:'2026-09-15T02:00:00.1234567Z'},platform:'win32',inspectBootMarker:async()=> '2026-09-16T03:00:00.0000000Z'}),true);
+});
+
+test('a prior-boot admission recovers an allocation that crashed before SQLite PID binding',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'loop-windows-unbound-reboot-'));
+  const allocationId='unbound-prior-boot-job',pid=9876,paths=windowsJobPaths(root,allocationId);
+  await mkdir(paths.directory,{recursive:true});
+  await writeFile(paths.ready,JSON.stringify({schema:'loop-windows-job/v1',allocationId,pid,jobName:paths.jobName,
+    assigned:true,bootMarker:'2026-09-15T01:00:00.0000000Z'}));
+  assert.equal(await confirmWindowsJobContainmentExit({dataRoot:root,process:{allocationId,pid:null,marker:null},
+    platform:'win32',inspectBootMarker:async()=> '2026-09-16T03:00:00.0000000Z'}),true);
+});
+
+test('nearby same-boot estimates do not release an unbound Windows allocation',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'loop-windows-same-boot-'));
+  const allocationId='same-boot-unbound-job',pid=9877,paths=windowsJobPaths(root,allocationId);
+  await mkdir(paths.directory,{recursive:true});
+  await writeFile(paths.ready,JSON.stringify({schema:'loop-windows-job/v1',allocationId,pid,jobName:paths.jobName,
+    assigned:true,bootMarker:'2026-09-16T03:00:00.0000000Z'}));
+  assert.equal(await confirmWindowsJobContainmentExit({dataRoot:root,process:{allocationId,pid:null,marker:null},timeoutMs:1,
+    platform:'win32',inspectBootMarker:async()=> '2026-09-16T03:00:00.0100000Z'}),false);
 });
 
 test('same-boot PID replacement is not enough to waive a Windows descendant barrier',()=>{
