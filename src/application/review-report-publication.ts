@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { revalidatePath } from 'next/cache';
+import { invalidatePage as revalidatePath } from '../infrastructure/page-invalidation';
 import type { AgentResult } from '../domain/agent-result';
 import { assertState, type TaskState } from '../domain/task';
 import { databaseConnection } from '../infrastructure/database';

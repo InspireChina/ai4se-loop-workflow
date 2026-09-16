@@ -1,8 +1,8 @@
 import Database from 'better-sqlite3';
-import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { isAbsolute, basename, dirname, join, relative, resolve } from 'node:path';
 import { Umzug } from 'umzug';
+import { assertKnownMigrationHistory } from './database-reader-compatibility';
 import {
   backupLegacyDatabase,
   importLegacyProjectDatabase,
@@ -34,10 +34,12 @@ const businessDatabases = new Map<string, Database.Database>();
 const businessMigrations = new Map<string, Promise<Database.Database>>();
 
 function migrateAppDatabase(database: Database.Database) {
+  const directory = join(/* turbopackIgnore: true */ appRoot, 'app-migrations');
+  const knownNames = readdirSync(directory).filter(item => item.endsWith('.sql')).sort();
+  assertKnownMigrationHistory(database, knownNames, 'application');
   database.pragma('busy_timeout = 15000');
   database.exec('CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, executed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)');
-  const directory = join(/* turbopackIgnore: true */ appRoot, 'app-migrations');
-  for (const name of readdirSync(directory).filter((item) => item.endsWith('.sql')).sort()) {
+  for (const name of knownNames) {
     database.transaction(() => {
       const applied = database.prepare('SELECT 1 FROM schema_migrations WHERE name = ?').get(name);
       if (applied) return;
@@ -51,6 +53,8 @@ export function appDatabaseConnection() {
   if (!appDb) {
     mkdirSync(dataRoot, { recursive: true });
     appDb = new Database(appDbPath);
+    try { assertKnownMigrationHistory(appDb, readdirSync(join(/* turbopackIgnore: true */ appRoot, 'app-migrations')).filter(item=>item.endsWith('.sql')), 'application'); }
+    catch (error) { appDb.close(); appDb = undefined; throw error; }
     appDb.pragma('busy_timeout = 15000');
     appDb.pragma('journal_mode = WAL');
     appDb.pragma('synchronous = NORMAL');
@@ -94,6 +98,8 @@ function getBusinessDatabase(dbPath: string) {
   if (!database) {
     mkdirSync(dirname(dbPath), { recursive: true });
     database = new Database(dbPath);
+    try { assertKnownMigrationHistory(database, readdirSync(join(/* turbopackIgnore: true */ appRoot, 'migrations')).filter(item=>item.endsWith('.sql')), 'business'); }
+    catch (error) { database.close(); throw error; }
     database.pragma('busy_timeout = 15000');
     database.pragma('journal_mode = WAL');
     database.pragma('synchronous = NORMAL');
@@ -182,6 +188,7 @@ function executeBusinessMigration(database: Database.Database, sql: string) {
 }
 
 async function migrateBusinessSchema(database: Database.Database, workspaceRoot: string) {
+  assertKnownMigrationHistory(database, readdirSync(join(/* turbopackIgnore: true */ appRoot, 'migrations')).filter(item=>item.endsWith('.sql')), 'business');
   database.exec('CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, executed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)');
   const migrator = new Umzug({
     migrations: {
@@ -324,4 +331,4 @@ export const paths = {
   },
 };
 
-export function hash(content: string) { return createHash('sha256').update(content).digest('hex'); }
+export { hash } from '../domain/content-hash';

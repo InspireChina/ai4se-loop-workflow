@@ -3,7 +3,8 @@ import { closeSync, mkdirSync, openSync } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import * as nodeModule from 'node:module';
 import { dirname, join } from 'node:path';
-import { appendLoopRunLog, registerRunProcess } from '../application/tasks';
+import { appendLoopRunLog } from '../application/loop-run-log';
+import { registerRunProcess } from '../application/loop-runs';
 import { databaseConnection, paths } from './database';
 import { inspectProcessCommand, terminateProcessTree, waitForProcessIdentity } from './process-tree';
 import {
@@ -16,6 +17,7 @@ import {
 } from './run-process';
 import { isDesktopRuntime, runtimeNodeEnvironment, runtimeNodeExecutable, runtimeScript } from './runtime-entry';
 import { upgradeWorkflowAtStartupInDb } from '../application/workflow-upgrade';
+import { stopExecutionProcessesInDb } from './execution-process-control';
 
 export function resolveRunnerCommand(runId: string, scriptName: string) {
   const name = scriptName.replace(/\.ts$/, '');
@@ -133,8 +135,18 @@ export async function startAgentRun(runId: string, supervisionToken = Number(pro
   await appendLoopRunLog(runId, `[运行] 已启动工作流调度 runner pid=${pid}`);
 }
 
-export async function stopAgentRun(runId: string) {
+export async function stopAgentRun(runId: string, control: {
+  terminate: typeof terminateProcessTree;
+  inspectCommand: typeof inspectProcessCommand;
+} = { terminate: terminateProcessTree, inspectCommand: inspectProcessCommand }) {
   const db = await databaseConnection();
+  const residual = await stopExecutionProcessesInDb(db, { runId });
+  const failures: string[] = [];
+  const assertStopped = () => {
+    const unresolved = db.prepare("SELECT 1 FROM execution_processes WHERE run_id = ? AND status <> 'exited' LIMIT 1").get(runId);
+    if (unresolved) failures.push(`执行进程树退出未确认：${residual.map((row) => `${row.kind} pid=${row.pid}`).join('、')}`);
+    if (failures.length) throw new Error(failures.join('；'));
+  };
   const registered = db.prepare(`
     SELECT process_id, process_kind, pid, process_start_marker
     FROM loop_managed_processes
@@ -148,10 +160,12 @@ export async function stopAgentRun(runId: string) {
   }>;
   for (const managedProcess of registered) {
     if (managedProcess.pid === process.pid) {
-      throw new Error(`拒绝停止当前宿主进程 pid=${managedProcess.pid}`);
+      failures.push(`拒绝停止当前宿主进程 pid=${managedProcess.pid}`);
+      continue;
     }
-    if (!await terminateProcessTree(managedProcess.pid, 10_000, managedProcess.process_start_marker)) {
-      throw new Error(`无法停止 ${managedProcess.process_kind} 进程树 pid=${managedProcess.pid}`);
+    if (!await control.terminate(managedProcess.pid, 10_000, managedProcess.process_start_marker).catch(() => false)) {
+      failures.push(`无法停止 ${managedProcess.process_kind} 进程树 pid=${managedProcess.pid}`);
+      continue;
     }
     db.prepare(`
       UPDATE loop_managed_processes SET status = 'exited', exited_at = CURRENT_TIMESTAMP
@@ -159,20 +173,24 @@ export async function stopAgentRun(runId: string) {
     `).run(managedProcess.process_id);
   }
 
-  if (registered.some((process) => process.process_kind === 'agent-runner')) return;
+  // An uncertain child must not prevent attempts to stop other children or the
+  // Runner. Report residual ownership only after all known targets were handled.
+  if (registered.some((process) => process.process_kind === 'agent-runner')) { assertStopped(); return; }
   const pid = readRunPid(runId) || 0;
-  if (!pid || pid === process.pid) return;
+  if (!pid || pid === process.pid) { assertStopped(); return; }
   if (process.platform === 'win32') {
-    if (!await terminateProcessTree(pid, 10_000)) throw new Error(`无法停止旧 Runner 进程树 pid=${pid}`);
+    if (!await control.terminate(pid, 10_000)) throw new Error(`无法停止旧 Runner 进程树 pid=${pid}`);
+    assertStopped();
     return;
   }
-  const command = await inspectProcessCommand(pid);
-  if (!command && !isProcessAlive(pid)) return;
+  const command = await control.inspectCommand(pid);
+  if (!command && !isProcessAlive(pid)) { assertStopped(); return; }
   const knownLegacyRunner = command.includes('agent-runner') || command.includes('dispatch-waiter');
   if (!knownLegacyRunner || !command.includes(runId)) {
     throw new Error(`无法验证旧 Runner 进程身份 pid=${pid}`);
   }
-  if (!await terminateProcessTree(pid, 10_000)) {
+  if (!await control.terminate(pid, 10_000)) {
     throw new Error(`无法停止旧 Runner 进程树 pid=${pid}`);
   }
+  assertStopped();
 }

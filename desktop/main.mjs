@@ -1,25 +1,34 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerMonitor, shell, Tray } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, powerMonitor, powerSaveBlocker, shell, Tray } from 'electron';
 import { createServer } from 'node:net';
-import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { configureUpdater, detachUpdaterWindow } from './updater.mjs';
+import { runtimeFallbackDocument } from './runtime-fallback.mjs';
+import {createDesktopRuntimeHost} from './runtime-host.mjs';
 
 let mainWindow;
-let serverProcess;
-let serverRegistration;
 let lifecycle;
 let tray;
 let quitting = false;
 let quitPrepared = false;
 let systemShutdown = false;
 let updatePreparation;
+let selectedRuntimeRoot;
+let acceptedRendererUrl;
+let startupStore;
+let startupPromise;
+const startupCancellation=new AbortController();
 
 function runtimeRoot() {
-  return app.isPackaged
+  return selectedRuntimeRoot || (app.isPackaged
     ? join(process.resourcesPath, 'app-server')
+    : join(app.getAppPath(), '..', 'desktop-runtime'));
+}
+
+function managementRuntimeRoot() {
+  return app.isPackaged
+    ? join(process.resourcesPath, 'management-bootstrap')
     : join(app.getAppPath(), '..', 'desktop-runtime');
 }
 
@@ -31,20 +40,39 @@ function configureRuntimeEnvironment(root) {
 }
 
 async function createLifecycle(root) {
-  const requireFromRuntime = createRequire(join(root, 'package.json'));
-  const { createLoopRunLifecycle } = requireFromRuntime(join(root, 'desktop-runners', 'lifecycle-host.cjs'));
-  const host = createLoopRunLifecycle({
+  // Load recovery code and its native dependencies from an independently
+  // packaged image. The mutable/selected business image is only data passed
+  // to that root and may already be damaged before any capability starts.
+  const managementRoot=managementRuntimeRoot();
+  const requireFromRuntime = createRequire(join(managementRoot, 'package.json'));
+  const { createNativeExternalService } = requireFromRuntime(join(managementRoot, 'desktop-runners', 'external-runtime.cjs'));
+  const options = {
+    appRoot: root, managementRoot, dataRoot: join(app.getPath('userData'), 'data'),
+    executable: process.execPath, electronNode: true,
+    signal:startupCancellation.signal,onStoreReady:store=>{startupStore=store;},
     ownerId: `electron-${process.pid}-${randomUUID()}`,
-    adapter: 'electron',
-    installedVersion: app.getVersion(),
-    setLoginStartup: async (enabled) => {
-      if (!app.isPackaged) return true;
-      app.setLoginItemSettings({ openAtLogin: enabled, openAsHidden: enabled, args: enabled ? ['--hidden'] : [] });
-      return app.getLoginItemSettings().openAtLogin === enabled;
+    onError: (error) => console.error('[runtime]', error),
+    onUiUnavailable:(error)=>{
+      if(mainWindow&&!mainWindow.isDestroyed()&&!quitting){
+        acceptedRendererUrl=`data:text/html;charset=utf-8,${encodeURIComponent(runtimeFallbackDocument(error.message))}`;
+        void mainWindow.loadURL(acceptedRendererUrl).catch(reason=>console.error('[control-page]',reason));
+      }
     },
-  });
-  await host.start();
-  return host;
+    inhibitIdleSleep: async (signal) => {
+      signal.throwIfAborted();
+      const blocker = powerSaveBlocker.start('prevent-app-suspension');
+      return { isActive: () => powerSaveBlocker.isStarted(blocker),
+        release: async () => { if (powerSaveBlocker.isStarted(blocker)) powerSaveBlocker.stop(blocker); } };
+    },
+  };
+  const setStartup = (desired) => {
+    if (!app.isPackaged) return;
+    app.setLoginItemSettings({ openAtLogin: desired === 'running', openAsHidden: desired === 'running', args: desired === 'running' ? ['--hidden'] : [] });
+  };
+  const pending=createDesktopRuntimeHost({createService:()=>createNativeExternalService(options),setStartup,
+    onCreated:host=>{lifecycle=host;},isQuitting:()=>quitting,onError:error=>console.error('[startup]',error)});
+  startupPromise=pending;
+  try{return await pending;}finally{if(startupPromise===pending){startupPromise=undefined;startupStore=undefined;}}
 }
 
 function availablePort() {
@@ -60,137 +88,13 @@ function availablePort() {
   });
 }
 
-function waitForServer(url, child, timeoutMs = 30_000) {
-  const deadline = Date.now() + timeoutMs;
-  return new Promise((resolve, reject) => {
-    const poll = async () => {
-      if (child.exitCode !== null) {
-        reject(new Error(`LoopWork server exited with code ${child.exitCode}`));
-        return;
-      }
-      try {
-        const response = await fetch(url);
-        if (response.ok || response.status < 500) {
-          resolve();
-          return;
-        }
-      } catch { /* server is still starting */ }
-      if (Date.now() >= deadline) {
-        reject(new Error('Timed out while starting the LoopWork server'));
-        return;
-      }
-      setTimeout(poll, 150);
-    };
-    void poll();
-  });
-}
-
 async function startServer() {
-  const root = runtimeRoot();
-  const entry = join(root, 'server.js');
-  if (!existsSync(entry)) {
-    throw new Error(`Desktop runtime is missing: ${entry}\nRun npm run desktop:prepare first.`);
-  }
-  const port = await availablePort();
-  const url = `http://127.0.0.1:${port}`;
-  serverProcess = spawn(process.execPath, [entry], {
-    cwd: root,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    windowsHide: true,
-    env: {
-      ...process.env,
-      ELECTRON_RUN_AS_NODE: '1',
-      NODE_ENV: 'production',
-      HOSTNAME: '127.0.0.1',
-      PORT: String(port),
-      LOOP_DESKTOP: '1',
-      LOOP_DESKTOP_NODE: process.execPath,
-      LOOP_APP_ROOT: root,
-      LOOP_DATA_ROOT: join(app.getPath('userData'), 'data'),
-    },
-  });
-  try {
-    if (!serverProcess.pid) throw new Error('LoopWork server started without a PID');
-    serverRegistration = await lifecycle.registerHostProcess('ui-server', serverProcess.pid);
-    const registeredProcessId = serverRegistration.processId;
-    serverProcess.once('exit', () => {
-      if (serverRegistration?.processId === registeredProcessId) serverRegistration = undefined;
-      void lifecycle?.markHostProcessExited(registeredProcessId);
-    });
-    serverProcess.stdout?.on('data', (chunk) => console.log(`[server] ${chunk.toString().trimEnd()}`));
-    serverProcess.stderr?.on('data', (chunk) => console.error(`[server] ${chunk.toString().trimEnd()}`));
-    await waitForServer(url, serverProcess);
-    return { url };
-  } catch (error) {
-    await stopServer().catch(() => undefined);
-    throw error;
-  }
-}
-
-function waitForChildExit(child, timeoutMs) {
-  if (child.exitCode !== null) return Promise.resolve();
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      cleanup();
-      reject(new Error(`Timed out waiting for child process ${child.pid} to exit`));
-    }, timeoutMs);
-    const onExit = () => {
-      cleanup();
-      resolve();
-    };
-    const cleanup = () => {
-      clearTimeout(timer);
-      child.removeListener('exit', onExit);
-    };
-    child.once('exit', onExit);
-  });
+  if (!lifecycle) throw new Error('独立运行宿主尚未初始化');
+  return lifecycle.ui.start(await availablePort());
 }
 
 async function stopServer() {
-  const child = serverProcess;
-  if (!child || child.exitCode !== null) {
-    serverProcess = undefined;
-    if (serverRegistration) {
-      await lifecycle?.markHostProcessExited(serverRegistration.processId);
-      serverRegistration = undefined;
-    }
-    return;
-  }
-  if (process.platform === 'win32' && child.pid) {
-    await new Promise((resolve, reject) => {
-      const killer = spawn('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], {
-        stdio: 'ignore',
-        windowsHide: true,
-      });
-      // A non-zero status can simply mean the server exited between our
-      // snapshot and taskkill. The child exit check below is authoritative.
-      killer.once('close', () => resolve());
-      killer.once('error', reject);
-    });
-  } else {
-    child.kill('SIGTERM');
-  }
-  try {
-    await waitForChildExit(child, 10_000);
-  } catch (error) {
-    if (process.platform !== 'win32') {
-      child.kill('SIGKILL');
-      await waitForChildExit(child, 5_000);
-    } else {
-      throw error;
-    }
-  }
-  if (serverRegistration) {
-    await lifecycle.markHostProcessExited(serverRegistration.processId);
-    serverRegistration = undefined;
-  }
-  if (serverProcess === child) serverProcess = undefined;
-}
-
-function stopServerOnQuit() {
-  if (!serverProcess || serverProcess.exitCode !== null) return;
-  serverProcess.kill('SIGTERM');
-  serverProcess = undefined;
+  if (lifecycle && !await lifecycle.ui.stop()) throw new Error('界面服务实际退出未确认');
 }
 
 function prepareForUpdate(targetVersion) {
@@ -207,19 +111,19 @@ function prepareForUpdate(targetVersion) {
       throw new Error(receipt.error || `后台进程尚未清理：${JSON.stringify(receipt.residualProcesses || [])}`);
     }
     await stopServer();
-    const gate = await lifecycle.verifyUpdateReadiness();
-    if (gate.outcome !== 'ready-for-update') {
-      throw new Error(gate.error || `后台进程尚未清理：${JSON.stringify(gate.residualProcesses || [])}`);
-    }
+    await lifecycle.service.assertUpdateReady();
   })().catch(async (error) => {
     quitting = false;
     updatePreparation = undefined;
-    if (!serverProcess && mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
       try {
         const { url } = await startServer();
+        acceptedRendererUrl=url;
         await mainWindow.loadURL(url);
       } catch (restartError) {
         const detail = restartError instanceof Error ? restartError.message : String(restartError);
+        acceptedRendererUrl=`data:text/html;charset=utf-8,${encodeURIComponent(runtimeFallbackDocument(detail))}`;
+        await mainWindow.loadURL(acceptedRendererUrl);
         throw new Error(`${error instanceof Error ? error.message : String(error)}；恢复控制界面失败：${detail}`);
       }
     }
@@ -230,9 +134,16 @@ function prepareForUpdate(targetVersion) {
 
 function trustedRenderer(event) {
   if (!mainWindow || event.sender !== mainWindow.webContents) throw new Error('Lifecycle request rejected');
+  const current=event.sender.getURL();
+  if(!acceptedRendererUrl)throw new Error('Lifecycle request rejected');
+  if(acceptedRendererUrl.startsWith('data:')){if(current!==acceptedRendererUrl)throw new Error('Lifecycle request rejected');}
+  else if(new URL(current).origin!==new URL(acceptedRendererUrl).origin)throw new Error('Lifecycle request rejected');
 }
 
 function installLifecycleHandlers() {
+  ipcMain.handle('loopwork:lifecycle:retry-ui',async(event)=>{
+    trustedRenderer(event);const {url}=await startServer();acceptedRendererUrl=url;await mainWindow.loadURL(url);
+  });
   ipcMain.handle('loopwork:lifecycle:status', async (event) => {
     trustedRenderer(event);
     return lifecycle.status();
@@ -262,17 +173,35 @@ function showMainWindow() {
   mainWindow.focus();
 }
 
+function reportShutdownFailure(error){
+  quitting=false;console.error('[shutdown]',error);
+  if(mainWindow&&!mainWindow.isDestroyed()){
+    acceptedRendererUrl=`data:text/html;charset=utf-8,${encodeURIComponent(runtimeFallbackDocument(error instanceof Error?error.message:String(error)))}`;
+    void mainWindow.loadURL(acceptedRendererUrl).catch(reason=>console.error('[control-page]',reason));
+  }
+}
+
 async function requestExplicitQuit() {
   if (quitPrepared) return;
   quitting = true;
+  let commandError;
+  if(!lifecycle&&startupPromise){
+    try{startupStore?.setIntent('stopped',randomUUID());}catch(error){commandError=error;}
+    startupCancellation.abort(new Error('user-stop-during-startup'));
+    await startupPromise.catch(()=>undefined);
+  }
   if (lifecycle) {
-    await lifecycle.command({
+    try { const receipt=await lifecycle.command({
       requestId: randomUUID(),
       source: { adapter: 'electron', instanceId: `electron-${process.pid}`, actor: 'human' },
       action: { kind: 'stop', reason: 'application-exit' },
     });
+      if(receipt.outcome==='cleanup-pending')commandError=new Error(receipt.error||'停止清理尚未完成');
+    } catch(error) { commandError=error; }
   }
-  await stopServer();
+  const cleanup=await Promise.allSettled([lifecycle?.shutdown()]);
+  const failures=cleanup.flatMap(result=>result.status==='rejected'?[result.reason]:[]);
+  if(failures.length||commandError){quitting=false;throw new AggregateError([...failures,...(commandError?[commandError]:[])],'退出尚未完成，进程屏障保留');}
   quitPrepared = true;
   app.quit();
 }
@@ -282,7 +211,6 @@ async function requestSystemShutdown() {
   systemShutdown = true;
   quitting = true;
   await lifecycle?.shutdown(true);
-  await stopServer();
   quitPrepared = true;
   app.quit();
 }
@@ -294,13 +222,15 @@ function createTray() {
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开 LoopWork', click: showMainWindow },
     { type: 'separator' },
-    { label: '退出 LoopWork', click: () => void requestExplicitQuit() },
+    { label: '退出 LoopWork', click: () => void requestExplicitQuit().catch(reportShutdownFailure) },
   ]));
   tray.on('click', showMainWindow);
 }
 
 async function createWindow() {
-  const { url } = await startServer();
+  let url;
+  try { ({url}=await startServer()); }
+  catch(error) { url=`data:text/html;charset=utf-8,${encodeURIComponent(runtimeFallbackDocument(error instanceof Error?error.message:String(error)))}`; }
   const window = new BrowserWindow({
     width: 1440,
     height: 960,
@@ -326,7 +256,7 @@ async function createWindow() {
   window.on('query-session-end', (event) => {
     if (quitPrepared) return;
     event.preventDefault();
-    void requestSystemShutdown();
+    void requestSystemShutdown().catch(reportShutdownFailure);
   });
   window.once('closed', () => {
     detachUpdaterWindow(window);
@@ -339,7 +269,7 @@ async function createWindow() {
   window.once('ready-to-show', () => {
     if (!process.argv.includes('--hidden')) window.show();
   });
-  await window.loadURL(url);
+  acceptedRendererUrl=url;await window.loadURL(url);
 }
 
 const hasLock = app.requestSingleInstanceLock();
@@ -349,15 +279,18 @@ else {
     showMainWindow();
   });
   app.whenReady().then(async () => {
-    const root = runtimeRoot();
-    configureRuntimeEnvironment(root);
-    lifecycle = await createLifecycle(root);
+    const bootstrap = runtimeRoot();
+    configureRuntimeEnvironment(bootstrap);
+    lifecycle = await createLifecycle(bootstrap);
+    if(quitting)return;
+    selectedRuntimeRoot=lifecycle.service.store.runtimeInstallation()?.artifact.root||lifecycle.service.bootstrap.root;
+    configureRuntimeEnvironment(runtimeRoot());
     installLifecycleHandlers();
     createTray();
     powerMonitor.on('shutdown', (event) => {
       if (quitPrepared) return;
       event.preventDefault();
-      void requestSystemShutdown();
+      void requestSystemShutdown().catch(reportShutdownFailure);
     });
     powerMonitor.on('resume', () => {
       void lifecycle.reconcile({
@@ -367,6 +300,7 @@ else {
     });
     await createWindow();
   }).catch(async (error) => {
+    if(quitting)return;
     console.error(error);
     await dialog.showMessageBox({
       type: 'error',
@@ -375,8 +309,8 @@ else {
       detail: error instanceof Error ? error.stack || error.message : String(error),
     });
     quitting = true;
-    await lifecycle?.shutdown(true).catch(() => undefined);
     await stopServer().catch(() => undefined);
+    await lifecycle?.shutdown(true).catch(() => undefined);
     quitPrepared = true;
     app.quit();
   });
@@ -390,11 +324,10 @@ app.on('activate', () => {
 app.on('before-quit', (event) => {
   if (!quitting && !quitPrepared) {
     event.preventDefault();
-    void requestExplicitQuit();
+    void requestExplicitQuit().catch(reportShutdownFailure);
     return;
   }
   quitting = true;
-  stopServerOnQuit();
   if (!quitPrepared && !updatePreparation && !systemShutdown) void lifecycle?.shutdown(true);
 });
 

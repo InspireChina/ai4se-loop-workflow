@@ -144,7 +144,7 @@ test('system assistance uses native lifecycle facts rather than stale terminal l
   const { db, taskId, items } = await fixture();
   db.prepare("UPDATE tasks SET agile_status = 'cancelled' WHERE task_id = ?").run(taskId);
   const intervention = await openIntervention({ taskId, itemId: items.find((item) => item.work_key === 'delivery:context')!.item_id,
-    dedupeKey: 'native-assistance-controls', summary: 'Actual unresolved work needs assistance', requestedBy: 'backlog-agent', authority: 'arbitration' });
+    dedupeKey: 'native-assistance-controls', summary: 'Actual unresolved work needs assistance', requestedBy: 'backlog-agent', authority: 'standard' });
   const claim = await claimNextIntervention({ runId: 'RUN-native-assistance-controls', executorId: 'claude', executionOptions: {} });
   assert.equal(claim?.interventionId, intervention.intervention_id);
   db.prepare("UPDATE tasks SET agile_status = 'done' WHERE task_id = ?").run(taskId);

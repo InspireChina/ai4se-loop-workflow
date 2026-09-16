@@ -45,6 +45,11 @@ const MERGE_EXCLUDED_TABLES = new Set([
   'agent_observation_occurrences',
   'agent_observation_comment_evidence',
   'resource_claims',
+  'execution_processes',
+  'execution_process_barriers',
+  'repair_observation_outbox',
+  'repair_resource_claims',
+  'repair_takeover_events',
   'loop_meta',
   'loop_lifecycle_commands',
   'loop_lifecycle_state',
@@ -127,6 +132,7 @@ export function mergeLegacyProjectDatabase(input: {
         const select = columns.map((column) => {
           if (column.name === 'project_id') return '?';
           if (name === 'tasks' && column.name === 'work_dir') return '?';
+          if (name === 'interventions' && column.name === 'repair_case_id') return 'NULL';
           return `source.${identifier(column.name)}`;
         }).join(', ');
         const params: string[] = [];

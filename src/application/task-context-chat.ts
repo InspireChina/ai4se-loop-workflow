@@ -5,6 +5,8 @@ import { databaseConnection, hash } from '../infrastructure/database';
 import { EXECUTION_FAILURE_MAX_RETRIES } from './executions';
 import { retryRecoveryPlanForFailure, retryNotBeforeForFailure } from './execution-retry-policy';
 import { workflowEndedInDb } from './work-item-controls';
+import { taskContextChatTurnIsRunning } from './task-context-chat-query';
+export { taskContextChatTurnIsRunning } from './task-context-chat-query';
 
 const messageSchema = z.string().trim().min(1, '请输入问题').max(20_000, '单条消息不能超过 20000 个字符');
 
@@ -50,15 +52,7 @@ function mapSession(row: SessionRow): TaskContextChatSession {
   };
 }
 
-export function taskContextChatTurnIsRunning(db: Awaited<ReturnType<typeof databaseConnection>>, taskId: string) {
-  return Boolean(db.prepare(`
-    SELECT 1 FROM task_context_chat_sessions
-    WHERE task_id = ?
-      AND state = 'running'
-      AND datetime(updated_at) >= datetime('now', '-30 minutes')
-    LIMIT 1
-  `).get(taskId));
-}
+
 
 export async function getTaskContextChat(taskId: string) {
   const db = await databaseConnection();

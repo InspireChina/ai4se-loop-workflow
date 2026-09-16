@@ -589,6 +589,7 @@ export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: strin
         const completed = type === 'item.completed';
         const tool = itemType === 'command_execution' ? 'shell' : stringifyValue(item.name || itemType);
         const toolClass = itemType === 'command_execution' ? 'shell' : classifyAgentTool(tool);
+        const toolInput=item.arguments??item.command??item.changes??item.query;
         const detail = itemType === 'command_execution' ? summarizeCommand(stringifyValue(item.command)) : stringifyValue(item.arguments || item.changes || item.query);
         const exitCode = completed ? numericExitCode(item.exit_code) : undefined;
         const status = stringifyValue(item.status).toLowerCase();
@@ -606,6 +607,7 @@ export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: strin
           phase: completed ? 'completed' : 'started',
           summary: completed ? compact(stringifyValue(item.aggregated_output || item.result || item.exit_code), 500) : compact(detail, 500),
           level: failed ? 'ERROR' : 'DEFAULT',
+          ...(toolInput!==undefined&&toolInput!==null?{input:toolInput}:{}),
           ...(completed ? { success: explicitSuccess, exitCode } : {}),
           ...(completed ? {
             output: {
@@ -613,7 +615,7 @@ export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: strin
               exitCode: item.exit_code ?? null,
               status: item.status ?? null,
             },
-          } : { input: item.arguments || item.command || item.changes || item.query }),
+          } : {}),
         };
       }
       if (type === 'error' || type === 'turn.failed') return telemetryDiagnostic(executor, stringifyValue(event.message || event.error || line));

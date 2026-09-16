@@ -446,7 +446,7 @@ test('resolves an intervention atomically and returns its waiting item to readin
   );
 });
 
-for (const native of [false, true]) test(`lets arbitration complete the current Test Work Item while preserving audited authority (${native ? 'native' : 'legacy'})`, async () => {
+for (const native of [false, true]) test(`new Agent faults cannot be claimed or completed by ordinary arbitration before Admin linkage (${native ? 'native' : 'legacy'})`, async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { createTask, getTask } = await import('../test/legacy-task-fixtures');
   const { listWorkflowItems, syncLegacyDeliveryWorkItems } = await import('./work-items');
@@ -501,38 +501,26 @@ for (const native of [false, true]) test(`lets arbitration complete the current 
     executorId: 'codex',
     executionOptions: {},
   });
-  assert.equal(claimed?.interventionId, opened.intervention_id);
-  await runInterventionCommand({
-    interventionId: opened.intervention_id,
-    sessionId: claimed!.sessionId,
-    token: claimed!.token,
-    args: ['intervention', 'status'],
-  });
-  await runInterventionCommand({
-    interventionId: opened.intervention_id,
-    sessionId: claimed!.sessionId,
-    token: claimed!.token,
-    args: ['intervention', 'work-item-complete', '--reason', 'The acceptance is owned and verified by delivery unit 2; unit 1 has no remaining Test obligation.'],
-  });
-
+  assert.equal(claimed, null);
+  assert.equal(opened.source_kind, 'agent-fault');
+  assert.equal(opened.repair_case_id, null, 'ownership begins before asynchronous linkage');
+  assert.ok(db.prepare('SELECT 1 FROM repair_observation_outbox WHERE intervention_id=?').get(opened.intervention_id));
   const detail = await getTask(taskId);
-  assert.equal(detail?.task.test_index, 1);
-  assert.equal(detail?.task.agile_status, 'in review');
+  assert.equal(detail?.task.test_index, 0);
   const completed = (await listWorkflowItems(taskId)).find((item) => item.item_id === testItem.item_id);
-  assert.equal(completed?.status, 'completed');
-  assert.equal(completed?.completion_authority, 'arbitration');
-  assert.match(completed?.completion_reason || '', /delivery unit 2/);
+  assert.equal(completed?.status, 'waiting');
+  assert.equal(completed?.completion_reason, null);
   assert.equal(
     (db.prepare('SELECT status FROM interventions WHERE intervention_id = ?').get(opened.intervention_id) as { status: string }).status,
-    'resolved',
+    'pending',
   );
 });
 
-for (const native of [false, true]) test(`lets arbitration invoke the existing task rewind semantics (${native ? 'native' : 'legacy'})`, async () => {
+for (const native of [false, true]) test(`explicit human arbitration retains scoped rewind semantics without an automatic Agent claim (${native ? 'native' : 'legacy'})`, async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { createTask, getTask } = await import('../test/legacy-task-fixtures');
   const { listWorkflowItems, syncLegacyDeliveryWorkItems } = await import('./work-items');
-  const { claimNextIntervention, openIntervention, runInterventionCommand } = await import('./interventions');
+  const { claimNextIntervention, openIntervention, runHumanArbitrationCommand } = await import('./interventions');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Arbitrated specification rewind' });
   db.prepare(`
@@ -559,24 +547,24 @@ for (const native of [false, true]) test(`lets arbitration invoke the existing t
     taskId,
     itemId: testItem.item_id,
     dedupeKey: 'arbitrate-spec-rewind',
+    resolverStrategy: 'human_only',
     summary: 'The frozen unit boundary conflicts with the observable acceptance.',
     context: {},
     requestedBy: 'dev-agent',
     authority: 'arbitration',
   });
   const claimed = await claimNextIntervention({ runId: 'RUN-arbitration-rewind', executorId: 'codex', executionOptions: {} });
-  await runInterventionCommand({
-    interventionId: opened.intervention_id,
-    sessionId: claimed!.sessionId,
-    token: claimed!.token,
-    args: ['intervention', 'status'],
-  });
-  await runInterventionCommand({
-    interventionId: opened.intervention_id,
-    sessionId: claimed!.sessionId,
-    token: claimed!.token,
+  assert.equal(claimed, null);
+  const rewind = () => runHumanArbitrationCommand({
+    taskId, interventionId: opened.intervention_id,
     args: ['intervention', 'task-rewind', '--to', 'analysis', '--reason', 'Rebuild the delivery-unit boundary from the frozen acceptance ownership.'],
   });
+  if (!native) {
+    await assert.rejects(rewind(), /仅适用于原生工作图/);
+    assert.equal((await getTask(taskId))?.task.test_index, 0);
+    return;
+  }
+  await rewind();
   const detail = await getTask(taskId);
   assert.equal(detail?.task.analysis_index, 0);
   assert.equal(detail?.task.dev_index, 0);
@@ -588,11 +576,11 @@ for (const native of [false, true]) test(`lets arbitration invoke the existing t
   );
 });
 
-test('arbitration can rewind a non-Dev/Test native Work Item and continue at its new revision', async () => {
+test('explicit human arbitration can rewind a non-Dev/Test native Work Item and continue at its new revision', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { createTask } = await import('../test/legacy-task-fixtures');
   const { adoptNativeWorkflowInDb } = await import('./work-item-transitions');
-  const { claimNextIntervention, openIntervention, runInterventionCommand } = await import('./interventions');
+  const { claimNextIntervention, openIntervention, runHumanArbitrationCommand } = await import('./interventions');
   const { inspectTaskDispatchEnvelope } = await import('../test/dispatch-inspection-fixtures');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Business outcome arbitration', itemType: 'business-analysis' });
@@ -602,11 +590,11 @@ test('arbitration can rewind a non-Dev/Test native Work Item and continue at its
   const otherTaskId = await createTask({ title: 'Unrelated Direct', itemType: 'direct' });
   adoptNativeWorkflowInDb(db, otherTaskId);
   const opened = await openIntervention({ taskId, itemId: source.item_id, dedupeKey: 'generic-ba-rewind',
+    resolverStrategy: 'human_only',
     summary: 'The review cannot reconcile the business outcome', requestedBy: 'spec-review-agent', authority: 'arbitration' });
   const claim = await claimNextIntervention({ runId: 'RUN-generic-BA', executorId: 'codex', executionOptions: {} });
-  assert.equal(claim?.interventionId, opened.intervention_id);
-  const run = (args: string[]) => runInterventionCommand({ interventionId: opened.intervention_id,
-    sessionId: claim!.sessionId, token: claim!.token, args });
+  assert.equal(claim, null);
+  const run = (args: string[]) => runHumanArbitrationCommand({ taskId, interventionId: opened.intervention_id, args });
   assert.match(await run(['intervention', 'status']), /ba:design/);
   await assert.rejects(run(['intervention', 'task-rewind', '--to', 'direct:execute', '--reason', 'Wrong task']), /当前需求/);
   await run(['intervention', 'task-rewind', '--to', 'ba:design', '--reason', 'Reconcile the observable business outcome']);
@@ -619,28 +607,27 @@ test('arbitration can rewind a non-Dev/Test native Work Item and continue at its
   assert.equal((db.prepare('SELECT current_subagent FROM tasks WHERE task_id = ?').get(taskId) as { current_subagent: string }).current_subagent, 'business-design-agent');
 });
 
-test('an interrupted arbitration replays its existing graph rewind instead of creating a third revision', async () => {
+test('an interrupted explicit human arbitration replays its existing graph rewind instead of creating a third revision', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { createTask } = await import('../test/legacy-task-fixtures');
   const { adoptNativeWorkflowInDb, rewindWorkItemsInDb } = await import('./work-item-transitions');
-  const { claimNextIntervention, openIntervention, runInterventionCommand, finishInterventionAttempt } = await import('./interventions');
+  const { claimNextIntervention, openIntervention, runHumanArbitrationCommand } = await import('./interventions');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Restarted arbitration', itemType: 'business-analysis' });
   db.prepare("UPDATE tasks SET current_subagent = 'spec-review-agent' WHERE task_id = ?").run(taskId);
   const nodes = adoptNativeWorkflowInDb(db, taskId);
   const opened = await openIntervention({ taskId, itemId: nodes.find((item) => item.work_key === 'ba:review')!.item_id,
+    resolverStrategy: 'human_only',
     dedupeKey: 'recover-arbitration-decision', summary: 'Reconsider design', requestedBy: 'spec-review-agent', authority: 'arbitration' });
   const first = await claimNextIntervention({ runId: 'RUN-before-crash', executorId: 'codex', executionOptions: {} });
-  assert.equal(first?.interventionId, opened.intervention_id);
+  assert.equal(first, null);
   const reason = 'Reconcile business outcome';
   rewindWorkItemsInDb(db, { taskId, targetItemId: nodes.find((item) => item.work_key === 'ba:design')!.item_id,
-    eventKey: `intervention:${opened.intervention_id}:rewind`, actor: 'system-assistance-agent', authority: 'arbitration',
+    eventKey: `intervention:${opened.intervention_id}:rewind`, actor: 'human', authority: 'arbitration',
     reason, preserveInterventionId: opened.intervention_id });
-  await finishInterventionAttempt({ interventionId: opened.intervention_id, outcome: 'failed', reason: 'Runner interrupted after durable decision' });
   const second = await claimNextIntervention({ runId: 'RUN-after-crash', executorId: 'codex', executionOptions: {} });
-  assert.equal(second?.interventionId, opened.intervention_id);
-  const run = (args: string[]) => runInterventionCommand({ interventionId: opened.intervention_id,
-    sessionId: second!.sessionId, token: second!.token, args });
+  assert.equal(second, null);
+  const run = (args: string[]) => runHumanArbitrationCommand({ taskId, interventionId: opened.intervention_id, args });
   await run(['intervention', 'status']);
   await assert.rejects(run(['intervention', 'task-rewind', '--to', 'ba:intent', '--reason', reason]), /不能改写目标/);
   await assert.rejects(run(['intervention', 'task-rewind', '--to', 'ba:design', '--reason', 'Changed decision']), /幂等键冲突/);
@@ -649,11 +636,11 @@ test('an interrupted arbitration replays its existing graph rewind instead of cr
     .get(taskId) as { revision: number }).revision, 2);
 });
 
-test('native arbitration plan reset removes old units from dispatch before a replacement plan is submitted', async () => {
+test('explicit human arbitration plan reset atomically removes old units before replacement without consuming system attempts', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { createTask, addStory } = await import('../test/legacy-task-fixtures');
   const { adoptNativeWorkflowInDb } = await import('./work-item-transitions');
-  const { claimNextIntervention, openIntervention, runInterventionCommand } = await import('./interventions');
+  const { claimNextIntervention, openIntervention, runHumanArbitrationCommand } = await import('./interventions');
   const { inspectTaskDispatchEnvelope } = await import('../test/dispatch-inspection-fixtures');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Arbitration replans units' });
@@ -662,11 +649,11 @@ test('native arbitration plan reset removes old units from dispatch before a rep
   db.prepare("INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, 'Old unit', 'old-unit')").run(taskId);
   const nodes = adoptNativeWorkflowInDb(db, taskId);
   const opened = await openIntervention({ taskId, itemId: nodes.find((item) => item.work_key === 'delivery:test:1')!.item_id,
+    resolverStrategy: 'human_only',
     dedupeKey: 'replan-units', summary: 'Unit boundary contradiction', requestedBy: 'test-agent', authority: 'arbitration' });
   const claim = await claimNextIntervention({ runId: 'RUN-replan-units', executorId: 'codex', executionOptions: {} });
-  assert.equal(claim?.interventionId, opened.intervention_id);
-  const run = (args: string[]) => runInterventionCommand({ interventionId: opened.intervention_id,
-    sessionId: claim!.sessionId, token: claim!.token, args });
+  assert.equal(claim, null);
+  const run = (args: string[]) => runHumanArbitrationCommand({ taskId, interventionId: opened.intervention_id, args });
   await run(['intervention', 'status']);
   const graphBeforeDecision = db.prepare('SELECT * FROM workflow_items WHERE task_id = ? ORDER BY item_id').all(taskId);
   const storiesBeforeDecision = db.prepare('SELECT * FROM stories WHERE task_id = ?').all(taskId);
@@ -678,7 +665,7 @@ test('native arbitration plan reset removes old units from dispatch before a rep
       (error) => /arbitration receipt rejected/.test(String((error as { message: string }).message)));
     assert.deepEqual(db.prepare('SELECT * FROM workflow_items WHERE task_id = ? ORDER BY item_id').all(taskId), graphBeforeDecision);
     assert.deepEqual(db.prepare('SELECT * FROM stories WHERE task_id = ?').all(taskId), storiesBeforeDecision);
-    assert.equal((db.prepare('SELECT status FROM interventions WHERE intervention_id = ?').get(opened.intervention_id) as { status: string }).status, 'running');
+    assert.equal((db.prepare('SELECT status FROM interventions WHERE intervention_id = ?').get(opened.intervention_id) as { status: string }).status, 'awaiting_human');
   } finally { db.exec('DROP TRIGGER reject_plan_arbitration_resolution'); }
   await run(['intervention', 'task-rewind', '--to', 'delivery:plan', '--reason', 'Reassign UI acceptance to a UI unit']);
   assert.equal((db.prepare("SELECT MAX(revision) AS revision FROM workflow_items WHERE task_id = ? AND work_key = 'delivery:plan'").get(taskId) as { revision: number }).revision, 2);

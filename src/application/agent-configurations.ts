@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { revalidatePath } from 'next/cache';
+import { invalidatePage as revalidatePath } from '../infrastructure/page-invalidation';
 import { z } from 'zod';
 import { agentCommandChainCatalog, commandChainCatalogItem, COMMAND_CHAIN_CATALOG } from '../domain/command-chain-catalog';
 import { parseCommandChainDefinition } from '../domain/command-chain-definition';

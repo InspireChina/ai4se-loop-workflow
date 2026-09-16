@@ -28,9 +28,15 @@ type StoredObservation = WorkflowFailureObservation & {
 function normalizedFailureText(value: string | undefined) {
   return (value || '')
     .trim()
+    // The next Test run is given the previous recovery obligation as context.
+    // That bookkeeping annotation is expected to change after every rewind and
+    // must not turn the same observed product failure into a new failure.
+    .replace(/(?:活动恢复事项|active recovery item)\s+(?:INT|REC)-[0-9a-f-]{8,}[^。\n]*(?:。|$)/gi, ' ')
+    .replace(/\b(?:INT|REC|REQ)-[0-9a-f-]{8,}\b/gi, '<id>')
     .replace(/\s+/g, ' ')
     .replace(/[0-9a-f]{8}-[0-9a-f-]{27,}/gi, '<uuid>')
-    .replace(/\b(?:0x)?[0-9a-f]{12,}\b/gi, '<id>');
+    .replace(/\b(?:0x)?[0-9a-f]{12,}\b/gi, '<id>')
+    .trim();
 }
 
 function contractContentFingerprint(specJson: string) {

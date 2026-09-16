@@ -1,9 +1,9 @@
 import type Database from 'better-sqlite3';
-import { agentCommandProfile } from '../domain/agent-command-profile';
+import { agentCommandProfile } from '../domain/agent-command-profile-catalog';
 import type { DelegationEnvelope } from './tasks';
 import type { WorkflowItemRow } from './work-items';
 import type { ExecutionAttempt } from './executions';
-import { hash } from '../infrastructure/database';
+import { hash } from '../domain/content-hash';
 
 /** Read frozen input; translate ONLY the identity explicitly adopted on the
  * source execution. Never reconstruct native work from task/lane cursors. */

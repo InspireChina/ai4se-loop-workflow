@@ -1,12 +1,17 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { databaseConnection } from '../infrastructure/database';
 import { createTask, beginRun, endRun, cancelTask, releaseBlock, getTask } from './tasks';
 import { progressDispatcher } from './progress-dispatch';
 import { settleNativeExecutionFailureInDb } from './executions';
 import { planDispatchInDb } from './dispatch-planner';
-import { openInterventionInDb, claimNextIntervention, runInterventionCommand, finishInterventionAttempt } from './interventions';
+import { openInterventionInDb, claimNextIntervention } from './interventions';
+import { pendingRepairObservationsInDb, acknowledgeRepairObservationInDb } from './repair-observation-outbox';
+import { createRepairObservationBridge } from './repair-observation-bridge';
+import { createAdminController } from './admin-controller';
+import { AdminManagementStore } from '../infrastructure/admin-management-store';
 
 async function fixture(itemType: 'feature' | 'bug' | 'business-analysis' | 'end-to-end' | 'direct' = 'direct') {
   const db = await databaseConnection();
@@ -83,7 +88,7 @@ test('human retry cannot close failure recovery when an independent Intervention
   } finally { await cleanup(); }
 });
 
-test('a task-wide binding failure holds the graph but its own system arbitrator can rewind and resume it', async () => {
+test('a task-wide binding failure holds the graph and routes immutable source evidence to Admin, not ordinary arbitration', async () => {
   const { db, taskId, runId, reservation, cleanup } = await fixture();
   try {
     db.prepare("UPDATE execution_attempts SET work_item_id = NULL, status = 'system_blocked', last_error = 'Lost source binding' WHERE execution_id = ?").run(reservation.executionId);
@@ -92,13 +97,14 @@ test('a task-wide binding failure holds the graph but its own system arbitrator 
     assert.equal(intervention.item_id, null);
     assert.deepEqual(planDispatchInDb(db).filter(work => work.taskId === taskId), []);
     const claimed = await claimNextIntervention({ runId, executorId: 'claude', executionOptions: {} });
-    assert.equal(claimed?.interventionId, intervention.intervention_id);
-    assert.ok(claimed);
-    await runInterventionCommand({ ...claimed, args: ['intervention', 'status'] });
-    await runInterventionCommand({ ...claimed, args: ['intervention', 'task-rewind', '--to', 'direct:execute', '--reason', 'Recover missing binding from the immutable dispatch evidence'] });
-    const resumed = planDispatchInDb(db).find(work => work.taskId === taskId)!;
-    assert.ok(resumed);
-    assert.equal(resumed.workItemRevision, 2);
+    assert.equal(claimed, null);
+    const pending = pendingRepairObservationsInDb(db).map(row => JSON.parse(row.observation_json));
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0].scope, 'execution');
+    assert.equal(pending[0].evidence.execution.execution_id, reservation.executionId);
+    assert.equal(pending[0].evidence.execution.dispatch_reservation_json,
+      (db.prepare('SELECT dispatch_reservation_json FROM execution_attempts WHERE execution_id=?').get(reservation.executionId) as { dispatch_reservation_json: string }).dispatch_reservation_json);
+    assert.deepEqual(planDispatchInDb(db).filter(work => work.taskId === taskId), []);
     assert.equal((db.prepare('SELECT status FROM execution_attempts WHERE execution_id = ?').get(reservation.executionId) as { status: string }).status, 'system_blocked');
   } finally { await cleanup(); }
 });
@@ -114,23 +120,39 @@ test('a generic task-wide human Intervention cannot be released by the historica
   } finally { await cleanup(); }
 });
 
-test('native execution recovery gets three distinct system attempts before human fallback', async () => {
+test('native Agent failures retain a single independent RepairCase and continue beyond three attempts without human fallback', async () => {
   const { db, taskId, runId, reservation, cleanup } = await fixture();
   try {
     db.prepare("UPDATE execution_attempts SET status = 'system_blocked', last_error = 'Provider failure' WHERE execution_id = ?").run(reservation.executionId);
     settleNativeExecutionFailureInDb(db, reservation.executionId);
     const source = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(reservation.executionId);
+    const store = new AdminManagementStore(join(process.env.LOOP_DATA_ROOT!, randomUUID(), 'management.db'));
+    store.setIntent('running', 'start');
+    const bridge = createRepairObservationBridge({
+      pending: async () => pendingRepairObservationsInDb(db).map(row => JSON.parse(row.observation_json)),
+      observe: observation => store.observe(observation),
+      acknowledge: async (id, caseId) => acknowledgeRepairObservationInDb(db, id, caseId),
+    });
     const ids = new Set<string>();
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const claimed = await claimNextIntervention({ runId, executorId: 'claude', executionOptions: {} });
-      assert.ok(claimed);
-      ids.add(claimed.executionId);
-      const result = await finishInterventionAttempt({ interventionId: claimed.interventionId, outcome: 'deferred', reason: `Cannot safely recover ${attempt}` });
-      assert.equal(result.escalated, attempt === 3);
-    }
-    assert.equal(ids.size, 3);
-    assert.equal(await claimNextIntervention({ runId, executorId: 'claude', executionOptions: {} }), null);
+    const controller = createAdminController({ store, ownerId: 'independent-recovery', discover: bridge, confirmStopped: async () => true,
+      launch: async claim => {
+        ids.add(claim.attempt.attemptId);
+        store.recordEvidence(claim, 'investigation', 'hypothesis', { generation: claim.attempt.generation });
+        return { completion: Promise.resolve({ outcome: 'failed', exitConfirmed: true, reason: 'Continue investigation' }), stop: async () => true };
+      } });
+    try {
+      for (let attempt = 1; attempt <= 5; attempt++) {
+        assert.equal(await controller.reconcile(), 'launched');
+        await controller.waitForSettlements();
+      }
+      assert.equal(ids.size, 5);
+      const linked = db.prepare('SELECT repair_case_id FROM interventions WHERE task_id=?').get(taskId) as { repair_case_id: string };
+      assert.equal(store.attempts(linked.repair_case_id).length, 5);
+      assert.equal(store.observations(linked.repair_case_id).length, 1);
+      assert.equal(store.getCase(linked.repair_case_id)?.status, 'queued');
+      assert.equal(await claimNextIntervention({ runId, executorId: 'claude', executionOptions: {} }), null);
+    } finally { await controller.shutdown(); store.close(); }
     assert.deepEqual(db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(reservation.executionId), source);
-    assert.equal((db.prepare('SELECT status FROM interventions WHERE task_id = ?').get(taskId) as { status: string }).status, 'awaiting_human');
+    assert.equal((db.prepare('SELECT status FROM interventions WHERE task_id = ?').get(taskId) as { status: string }).status, 'pending');
   } finally { await cleanup(); }
 });

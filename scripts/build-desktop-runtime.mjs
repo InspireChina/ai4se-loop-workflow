@@ -1,14 +1,19 @@
 import { build } from 'esbuild';
 import { rebuild } from '@electron/rebuild';
-import { copyFile, cp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
+import { copyFile, cp, mkdir, readFile, readdir, rm,writeFile } from 'node:fs/promises';
 import { builtinModules, createRequire } from 'node:module';
 import { isAbsolute, join, relative, resolve } from 'node:path';
+import { assertDesktopArtifactBoundary } from './desktop-artifact-boundary.mjs';
+import { assertHarnessBuildSource } from './harness-source.mjs';
+import { writeHarnessArtifact } from './harness-artifact.mjs';
 
 const projectRoot = resolve(import.meta.dirname, '..');
 const outputRoot = join(projectRoot, 'desktop-runtime');
 const standaloneRoot = join(projectRoot, '.next', 'standalone');
 const runnerOutput = join(outputRoot, 'desktop-runners');
 
+await assertDesktopArtifactBoundary(standaloneRoot);
+const sourceBuild = await assertHarnessBuildSource(projectRoot);
 await rm(outputRoot, { recursive: true, force: true });
 await cp(standaloneRoot, outputRoot, { recursive: true, verbatimSymlinks: true });
 // Next's standalone trace only keeps the installed native binary. Restore the
@@ -58,9 +63,21 @@ await cp(join(projectRoot, 'node_modules', 'picomatch'), join(outputRoot, 'node_
 await mkdir(runnerOutput, { recursive: true });
 
 const runnerEntries = {
+  'ui-server':join(projectRoot,'scripts','loop','ui-server-entry.ts'),
   'agent-runner': join(projectRoot, 'scripts', 'loop', 'agent-runner.ts'),
-  'lifecycle-host': join(projectRoot, 'src', 'application', 'loop-run-lifecycle.ts'),
+  'lifecycle-host': join(projectRoot, 'src', 'infrastructure', 'runtime-supervision.ts'),
+  'runtime-selection': join(projectRoot, 'src', 'infrastructure', 'runtime-selection.ts'),
+  'external-runtime': join(projectRoot, 'src', 'infrastructure', 'native-external-runtime.ts'),
+  'external-host': join(projectRoot, 'scripts', 'loop', 'external-host-entry.ts'),
+  'windows-contained-command': join(projectRoot, 'scripts', 'loop', 'windows-contained-command-entry.ts'),
   'loop-agent': join(projectRoot, 'scripts', 'loop', 'loop-agent-entry.ts'),
+  'loop-admin': join(projectRoot, 'scripts', 'loop', 'loop-admin-entry.ts'),
+  'admin-business-worker': join(projectRoot, 'scripts', 'loop', 'admin-business-worker-entry.ts'),
+  'verification-worker': join(projectRoot, 'scripts', 'loop', 'verification-worker-entry.ts'),
+  'workspace-version': join(projectRoot, 'scripts', 'loop', 'workspace-version-entry.ts'),
+  'database-reader': join(projectRoot, 'scripts', 'loop', 'database-reader-entry.ts'),
+  'host-service': join(projectRoot, 'scripts', 'loop', 'host-service-entry.ts'),
+  'host-configure': join(projectRoot, 'scripts', 'host-service.ts'),
   loopctl: join(projectRoot, 'scripts', 'loop', 'loopctl.ts'),
 };
 
@@ -95,4 +112,15 @@ for (const [output, metadata] of Object.entries(runnerBuild.metafile.outputs)) {
   }
 }
 
+const finalSource = await assertHarnessBuildSource(projectRoot);
+if (finalSource.source.sourceId !== sourceBuild.source.sourceId) throw new Error('Harness source changed during Desktop build');
+await copyFile(join(projectRoot, '.next', 'harness-source.json.gz'), join(outputRoot, 'harness-source.json.gz'));
+await writeFile(join(outputRoot,'external-ui-protocol.json'),JSON.stringify({version:1,sourceId:finalSource.source.sourceId}));
+await mkdir(join(outputRoot, 'harness-tools'), { recursive: true });
+for (const file of ['harness-source.mjs', 'harness-source-cli.mjs', 'harness-artifact.mjs']) {
+  await copyFile(join(projectRoot, 'scripts', file), join(outputRoot, 'harness-tools', file));
+}
+await assertDesktopArtifactBoundary(outputRoot);
+const artifact = await writeHarnessArtifact(outputRoot);
+console.log(`Installed Harness artifact identity: ${artifact.artifactId}`);
 console.log(`Desktop runtime created at ${outputRoot}`);

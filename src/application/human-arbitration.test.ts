@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { databaseConnection } from '../infrastructure/database';
 import { createTask, pauseTask } from '../test/legacy-task-fixtures';
 import { adoptNativeWorkflowInDb } from './work-item-transitions';
-import { openIntervention, claimNextIntervention, finishInterventionAttempt, runHumanArbitrationCommand } from './interventions';
+import { openIntervention, claimNextIntervention, runHumanArbitrationCommand } from './interventions';
 import { acquireResourceClaimInDb, BROWSER_EXCLUSIVE_RESOURCE, CODE_WORKSPACE_RESOURCE } from './resource-claims';
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
 import { toEnvelope } from './dispatch-planner';
@@ -35,14 +35,11 @@ async function setup(agent: 'dev-agent' | 'test-agent' | 'business-design-agent'
     delegation: toEnvelope((await getTask(taskId))!.task, { taskId, lane: agent === 'business-design-agent' ? 'control' : 'delivery', pipeline: item.pipeline!, agent,
       storyIndex: item.story_index, resources: [], description: 'Active primary before an external arbitration',
       workItemId: item.item_id, workItemRevision: item.revision, workItemEpoch: item.dispatch_epoch }) }) : null;
-  const intervention = await openIntervention({ taskId, itemId: item.item_id, requestedBy: agent, sourceExecutionId: executionId,
+  const intervention = await openIntervention({ taskId, itemId: item.item_id, requestedBy: human ? 'human' : agent, sourceExecutionId: executionId,
     dedupeKey: `arbitration:${executionId}`, summary: 'Resolve a contract conflict using existing commands', authority: 'arbitration',
-    resolverStrategy: 'system_then_human', maxSystemAttempts: 3 });
-  if (human) for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const claimed = await claimNextIntervention({ runId: 'RUN-system-arbitration', executorId: 'claude', executionOptions: {} });
-    assert.equal(claimed?.interventionId, intervention.intervention_id);
-    await finishInterventionAttempt({ interventionId: intervention.intervention_id, reason: `Cannot safely resolve ${attempt}`, outcome: 'deferred' });
-  }
+    resolverStrategy: human ? 'human_only' : 'system_then_human', maxSystemAttempts: 3 });
+  assert.equal(await claimNextIntervention({ runId: 'RUN-system-arbitration', executorId: 'claude', executionOptions: {} }), null);
+  assert.equal(intervention.source_kind, human ? 'human-input' : 'agent-fault');
   return { db, taskId, item, executionId, primaryExecutionId: primary?.attempt.execution_id, interventionId: intervention.intervention_id };
 }
 
@@ -74,7 +71,7 @@ test('downstream native context freezes arbitration reasons without turning an o
   assert.equal((control.content as { arbitrationReason: string }).arbitrationReason, reason);
 });
 
-for (const agent of ['dev-agent', 'test-agent'] as const) test(`human completes the linked native ${agent} after three system attempts without falsifying evidence or consuming quota`, async () => {
+for (const agent of ['dev-agent', 'test-agent'] as const) test(`explicit human completes the linked native ${agent} without Agent failure exhaustion, falsified evidence or quota consumption`, async () => {
   const { db, taskId, item, executionId, interventionId } = await setup(agent);
   const evidence = db.prepare('SELECT * FROM execution_attempts WHERE execution_id = ?').get(executionId);
   const attempts = db.prepare('SELECT * FROM intervention_attempts WHERE intervention_id = ? ORDER BY attempt').all(interventionId);

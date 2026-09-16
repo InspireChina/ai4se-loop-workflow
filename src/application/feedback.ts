@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
-import { revalidatePath } from 'next/cache';
+import { invalidatePage as revalidatePath } from '../infrastructure/page-invalidation';
 import { databaseConnection } from '../infrastructure/database';
 import type { AgentResult } from '../domain/agent-result';
 import type { DeliveryUnitContract } from '../domain/delivery-unit';

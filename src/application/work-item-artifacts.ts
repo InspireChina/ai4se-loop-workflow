@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3';
-import { hash } from '../infrastructure/database';
+import { hash } from '../domain/content-hash';
 import { restoreExecutionDelegationInDb } from './execution-delegation';
 import type { ExecutionAttempt } from './executions';
 

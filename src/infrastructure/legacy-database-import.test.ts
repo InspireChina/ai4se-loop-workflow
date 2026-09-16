@@ -63,11 +63,15 @@ test('merges a migrated single-project database into an existing global database
         work_dir TEXT NOT NULL DEFAULT '',
         project_id TEXT REFERENCES projects(project_id) ON DELETE RESTRICT
       );
+      CREATE TABLE execution_processes(allocation_id TEXT PRIMARY KEY,status TEXT);
+      CREATE TABLE execution_process_barriers(allocation_id TEXT PRIMARY KEY,resource_key TEXT);
     `;
     const source = new Database(sourcePath);
     source.exec(schema);
     source.prepare(`INSERT INTO projects(project_id, name, workspace_root, is_default) VALUES('PRJ-default', 'old', '/old/path', 1)`).run();
     source.prepare(`INSERT INTO tasks(task_id, title, work_dir, project_id) VALUES('REQ-old', 'historical', '/old/path', 'PRJ-default')`).run();
+    source.exec(`INSERT INTO execution_processes VALUES('foreign-live-process','running');
+      INSERT INTO execution_process_barriers VALUES('foreign-live-process','code:workspace');`);
     source.close();
 
     const target = new Database(targetPath);
@@ -93,6 +97,8 @@ test('merges a migrated single-project database into an existing global database
     });
     assert.equal(mergeLegacyProjectDatabase({ target, sourcePath, workspaceRoot }).status, 'already-imported');
     assert.equal((target.prepare('SELECT COUNT(*) AS count FROM tasks').get() as { count: number }).count, 1);
+    assert.equal((target.prepare('SELECT COUNT(*) AS count FROM execution_processes').get() as { count: number }).count, 0);
+    assert.equal((target.prepare('SELECT COUNT(*) AS count FROM execution_process_barriers').get() as { count: number }).count, 0);
     target.close();
 
     const unchanged = new Database(sourcePath, { readonly: true });

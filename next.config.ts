@@ -8,6 +8,10 @@ const nextConfig: NextConfig = {
       './desktop-runtime/**/*',
       './dist-desktop/**/*',
       './tmp/**/*',
+      './src/test/**/*',
+      './src/**/*.test.ts',
+      './src/**/*.test.tsx',
+      './src/**/*.spec.ts',
     ],
   },
   outputFileTracingIncludes: {

@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3';
-import { nativeCancellationInDb, nativeDeliveryReadyInDb } from './work-item-controls';
+import { nativeCancellationInDb } from './work-item-controls';
+import { requirementDeliveryReadyInDb } from './task-dependency-query';
 import { projectNativeWorkflowDisplayInDb } from './native-workflow-projection';
 
 export type RequirementDependency = {
@@ -19,16 +20,7 @@ export type RequirementDependencyCandidate = {
   updated_at: string;
 };
 
-export function requirementDependencySatisfied(value: string | Pick<RequirementDependency, 'delivery_ready'>) {
-  return typeof value === 'string' ? value === 'ready_to_close' || value === 'done' : value.delivery_ready;
-}
-
-export function requirementDeliveryReadyInDb(db: Database.Database, taskId: string) {
-  const task = db.prepare('SELECT workflow_engine, agile_status FROM tasks WHERE task_id = ?').get(taskId) as
-    { workflow_engine: string; agile_status: string } | undefined;
-  return task?.workflow_engine === 'native' ? nativeDeliveryReadyInDb(db, taskId)
-    : Boolean(task && requirementDependencySatisfied(task.agile_status));
-}
+export { requirementDependencySatisfied, requirementDeliveryReadyInDb, requirementDependencyGateOpenInDb } from './task-dependency-query';
 
 function requirementCancelledInDb(db: Database.Database, taskId: string) {
   const task = db.prepare('SELECT workflow_engine, agile_status FROM tasks WHERE task_id = ?').get(taskId) as
@@ -54,19 +46,10 @@ export function requirementDependenciesInDb(db: Database.Database, taskId: strin
 }
 
 /**
- * Dependencies gate only the first dispatch and are satisfied once upstream
- * delivery is ready for human reading. Once an execution has been reserved,
- * later upstream feedback must not interrupt this requirement.
+ * Configure and validate the requirement dependency graph. Read-only first
+ * admission and delivery proof queries live in task-dependency-query.
  */
-export function requirementDependencyGateOpenInDb(db: Database.Database, taskId: string) {
-  const started = db.prepare(`
-    SELECT 1 FROM execution_attempts WHERE task_id = ? LIMIT 1
-  `).get(taskId);
-  if (started) return true;
-  const dependencies = db.prepare('SELECT depends_on_task_id FROM task_dependencies WHERE task_id = ?')
-    .all(taskId) as { depends_on_task_id: string }[];
-  return dependencies.every(dependency => requirementDeliveryReadyInDb(db, dependency.depends_on_task_id));
-}
+
 
 export function configureRequirementDependenciesInDb(
   db: Database.Database,

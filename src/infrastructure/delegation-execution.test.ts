@@ -4,6 +4,8 @@ import test from 'node:test';
 import { createLangfuseTelemetry, type LangfuseClient } from './langfuse';
 import { buildAgentProcessLaunch, createTemporaryPrompt, executeDelegation, removeTemporaryPrompt } from './delegation-execution';
 import { getAgentExecutor, type AgentExecutor } from './agent-executor';
+import { markManagedAgentProcessExited } from './managed-process-registry';
+import { terminateProcessTree } from './process-tree';
 
 const credentials = { LANGFUSE_ENABLED: 'true', LANGFUSE_PUBLIC_KEY: 'pk-test', LANGFUSE_SECRET_KEY: 'sk-test', LANGFUSE_BASE_URL: 'https://langfuse.invalid', LANGFUSE_CAPTURE_PROMPTS: 'true' };
 const context = { agent: 'dev-agent', taskId: 'TASK-4', storyIndex: 4, pipeline: 'resume' };
@@ -15,6 +17,41 @@ function fixtureExecutor(id: AgentExecutor['id'], program: string): AgentExecuto
     parseStdout: (line) => `stdout:${line}`, parseStderr: (line) => `stderr:${line}`,
   };
 }
+
+test('a permanently hung log sink cannot block startup, physical termination or execution settlement', async () => {
+  let cliPid = 0;
+  const started = Date.now();
+  const result = await executeDelegation({
+    runId: 'hung-log-fixture', workspaceRoot: process.cwd(), prompt: 'fixture',
+    executor: fixtureExecutor('claude', 'setInterval(() => {}, 1000)'), executionOptions: {}, context,
+    description: 'Hung logging', telemetry: createLangfuseTelemetry({ env: { LANGFUSE_ENABLED: 'false' } }),
+    appendLog: () => new Promise(() => undefined), persistenceTimeoutMs: 15,
+    maxRuntimeMs: 2000, startupTimeoutMs: 80, idleTimeoutMs: 2000,
+    processes: {
+      register: async (_run, pid) => { cliPid = pid; return 'fixture-marker'; },
+      terminate: (pid, timeout) => terminateProcessTree(pid, timeout), markExited: async () => undefined,
+    },
+  });
+  assert.match(result.terminationReason || '', /没有任何输出/);
+  assert.match(result.logPersistenceError || '', /timeout/);
+  assert.ok(Date.now() - started < 2000);
+  assert.throws(() => process.kill(cliPid, 0));
+});
+
+test('hung durable evidence returns an explicit persistence failure without hanging completed CLI settlement', async () => {
+  let calls = 0;
+  const result = await executeDelegation({
+    runId: 'hung-evidence-fixture', workspaceRoot: process.cwd(), prompt: 'fixture',
+    executor: fixtureExecutor('codex', 'for(let i=0;i<100;i++) console.log(JSON.stringify({type:"item.completed",item:{id:"call-"+i,type:"command_execution",command:"fixture",exit_code:0,aggregated_output:"done"}}))'), executionOptions: {}, context,
+    description: 'Hung evidence', telemetry: createLangfuseTelemetry({ env: { LANGFUSE_ENABLED: 'false' } }),
+    appendLog: async () => undefined, recordTelemetryEvent: () => { calls++; return new Promise(() => undefined); }, persistenceTimeoutMs: 15,
+    maxRuntimeMs: 2000, startupTimeoutMs: 500, idleTimeoutMs: 1000,
+    processes: { register: async () => 'fixture-marker', terminate: (pid, timeout) => terminateProcessTree(pid, timeout), markExited: async () => undefined },
+  });
+  assert.equal(result.exitCode, 0);
+  assert.match(result.evidencePersistenceError || '', /timeout/);
+  assert.equal(calls, 1, 'a hung evidence sink must not multiply settlement wait by the number of tool events');
+});
 
 test('prepends executor launch arguments and merges executor environment', () => {
   const executor: AgentExecutor = {
@@ -124,6 +161,75 @@ async function run(executor: AgentExecutor, telemetry = recordedTelemetry().tele
   return { result, logs };
 }
 
+for (const timeoutKind of ['startup', 'idle', 'maximum'] as const) {
+  test(`${timeoutKind} timeout still terminates the real CLI when termination logging rejects`, { timeout: 15_000 }, async () => {
+    const limits = { startupTimeoutMs: 2_000, idleTimeoutMs: 2_000, maxRuntimeMs: 2_000 };
+    if (timeoutKind === 'startup') limits.startupTimeoutMs = 80;
+    if (timeoutKind === 'idle') limits.idleTimeoutMs = 80;
+    if (timeoutKind === 'maximum') limits.maxRuntimeMs = 80;
+    const program = `${timeoutKind === 'idle' ? 'console.log("ready");' : ''}setInterval(() => {}, 1000);`;
+    let pid = 0;
+    try {
+      const { result } = await run(fixtureExecutor('codex', program), recordedTelemetry().telemetry, {
+        ...limits,
+        processes: {
+          register: async (_runId, childPid) => { pid = childPid; return `test-${childPid}`; },
+          markExited: markManagedAgentProcessExited,
+          terminate: terminateProcessTree,
+        },
+        appendLog: async (message) => {
+          if (message.includes('正在终止')) throw new Error('injected log store failure');
+        },
+      });
+      assert.ok(result.terminationReason);
+      assert.notEqual(result.exitCode, 0);
+      assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+    } finally {
+      if (pid) { try { process.kill(pid, 'SIGKILL'); } catch { /* already exited */ } }
+    }
+  });
+}
+
+test('signal exit during identity registration is observed and the final stderr chunk is preserved', { timeout: 5_000 }, async () => {
+  const { result } = await run(fixtureExecutor('codex', 'process.stderr.write("final diagnostic without newline");process.kill(process.pid,"SIGTERM");'), recordedTelemetry().telemetry, {
+    processes: {
+      register: async (_runId, pid) => {
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        return `test-${pid}`;
+      },
+      markExited: markManagedAgentProcessExited,
+      terminate: terminateProcessTree,
+    },
+  });
+  assert.equal(result.signal, 'SIGTERM');
+  assert.match(result.failureDetail || '', /final diagnostic without newline/);
+});
+
+test('duplicate cancellation signals terminate once and process cleanup precedes managed exit settlement', { timeout: 5_000 }, async () => {
+  const cancellation = new AbortController();
+  const sequence: string[] = [];
+  const { result } = await run(fixtureExecutor('codex', 'setInterval(() => {},1000)'), recordedTelemetry().telemetry, {
+    cancellationSignal: cancellation.signal,
+    processes: {
+      register: async (_runId, pid) => {
+        cancellation.abort();
+        cancellation.abort();
+        return `test-${pid}`;
+      },
+      terminate: async (pid, timeoutMs, marker) => {
+        sequence.push('terminate');
+        const stopped = await terminateProcessTree(pid, timeoutMs, marker);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        sequence.push('tree-exited');
+        return stopped;
+      },
+      markExited: async () => { sequence.push('settled'); },
+    },
+  });
+  assert.equal(result.cancelled, true);
+  assert.deepEqual(sequence, ['terminate', 'tree-exited', 'settled']);
+});
+
 test('uses and cleans a prompt file during file-reference execution', async () => {
   let referencedFile = '';
   const program = [
@@ -168,6 +274,34 @@ test('captures a CLI-submitted result independently from the Agent final message
   assert.equal(result.submittedResult, JSON.stringify({ outcome: 'completed', summary: 'tool receipt' }));
   assert.equal(result.resultSubmissionError, null);
   assert.equal(existsSync(result.finalText), false);
+});
+
+test('a durable result submission physically stops an Agent that keeps working after its terminal command', { timeout: 10_000 }, async () => {
+  const completedEvents: Array<Record<string, unknown>> = [];
+  const program = [
+    'const fs = require("node:fs");',
+    'const resultPath = process.env.LOOP_AGENT_RESULT_PATH;',
+    'const protocol = process.env.LOOP_AGENT_RESULT_PROTOCOL;',
+    'const kind = process.env.LOOP_AGENT_RESULT_KIND;',
+    'fs.writeFileSync(resultPath, JSON.stringify({protocol,kind,result:{outcome:"completed",summary:"terminal receipt"}}));',
+    'console.log(JSON.stringify({type:"tool_call",subtype:"completed",call_id:"terminal",tool_call:{ShellToolCall:{result:{success:{exitCode:0,stdout:"submitted"}}}}}));',
+    'setInterval(() => console.log(JSON.stringify({type:"assistant",message:{content:[{type:"text",text:"still working"}]}})), 20);',
+  ].join('');
+  const started = Date.now();
+
+  const { result } = await run(fixtureExecutor('cursor', program), recordedTelemetry().telemetry, {
+    resultKind: 'flow',
+    maxRuntimeMs: 8_000,
+    startupTimeoutMs: 2_000,
+    idleTimeoutMs: 8_000,
+    recordTelemetryEvent: async (event) => { if (event.phase === 'completed') completedEvents.push(event); },
+  });
+
+  assert.ok(Date.now() - started < 3_000, 'terminal submission must not wait for the Agent runtime limit');
+  assert.equal(result.terminationKind, 'submitted');
+  assert.match(result.terminationReason || '', /结构化结果/);
+  assert.equal(result.submittedResult, JSON.stringify({ outcome: 'completed', summary: 'terminal receipt' }));
+  assert.equal(completedEvents.length, 1, 'the terminal tool completion remains durable before shutdown');
 });
 
 test('records one safe delegation trace and normalized Cursor, Codex, and Claude events while preserving local logs', async () => {

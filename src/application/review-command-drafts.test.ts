@@ -88,7 +88,7 @@ for (const { agent, otherUnit } of [
   const { getTaskContext } = await import('./tasks');
   const { toEnvelope } = await import('./dispatch-planner');
   const { buildAgentContextSnapshot } = await import('./agent-context');
-  const { openIntervention, claimNextIntervention, finishInterventionAttempt, runHumanArbitrationCommand } = await import('./interventions');
+  const { openIntervention, claimNextIntervention, runHumanArbitrationCommand } = await import('./interventions');
   const { issueAgentCommandToken, readAgentCommandSubmission } = await import('./agent-command-drafts');
   const fixture = await reviewFixture(`Native ${agent} arbitration closure`);
   const db = await databaseConnection();
@@ -107,11 +107,9 @@ for (const { agent, otherUnit } of [
     && !['superseded','cancelled'].includes(item.status)).sort((a, b) => b.revision - a.revision)[0]!;
   const intervention = await openIntervention({ taskId: fixture.taskId, itemId: target.item_id,
     requestedBy: agent, dedupeKey: `closure:${fixture.taskId}`, summary: 'Resolve a frozen unit contract conflict',
-    authority: 'arbitration', resolverStrategy: 'system_then_human', maxSystemAttempts: 3 });
-  for (let index = 0; index < 3; index++) {
-    assert.equal((await claimNextIntervention({ runId: 'RUN-review-arbitration', executorId: 'claude', executionOptions: {} }))?.interventionId, intervention.intervention_id);
-    await finishInterventionAttempt({ interventionId: intervention.intervention_id, reason: 'Cannot safely resolve this contract conflict', outcome: 'deferred' });
-  }
+    authority: 'arbitration', resolverStrategy: 'human_only', maxSystemAttempts: 3 });
+  assert.equal(await claimNextIntervention({ runId: 'RUN-review-arbitration', executorId: 'claude', executionOptions: {} }), null);
+  assert.equal(intervention.source_kind, 'human-input');
   const reason = 'This unit acceptance is explicitly waived after reviewing the conflicting ownership;\n\nthe original failure remains unverified.';
   // Reproduce a real Agent's folded YAML result: the full decision survives,
   // but the original paragraph breaks are folded into presentation whitespace.

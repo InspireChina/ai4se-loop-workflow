@@ -99,6 +99,15 @@ test('detects the same semantic Test failure only when code and contract are unc
       tests: [{ command: 'npm   test -- admin-tab', passed: false, summary: 'Scenario run 92d6b157-acde-4e3a-9104-10e995f1e1f7 still shows placeholder.' }],
     }),
   );
+  assert.equal(
+    workflowFailureSignature(failure),
+    workflowFailureSignature({
+      ...failure,
+      tests: [{ command: 'npm test -- admin-tab', passed: false,
+        summary: 'Scenario run c5a44f0d-b231-4c53-b437-bcc9603bb6f8 still shows placeholder.\n活动恢复事项 INT-931ed3f9 原始反例仍复现，未消失。' }],
+    }),
+    'a changing recovery-obligation annotation is not product progress',
+  );
 });
 
 test('opens arbitration instead of rewinding a second unchanged Test failure', async () => {
@@ -171,17 +180,21 @@ test('opens arbitration instead of rewinding a second unchanged Test failure', a
   assert.equal(detail?.task.test_index, 0);
   assert.equal(detail?.lanes.find((lane) => lane.lane === 'delivery')?.status, 'waiting_for_runtime_input');
   const arbitration = db.prepare(`
-    SELECT status, authority, item_id, attempt_count, max_system_attempts, context_json
+    SELECT status, authority, source_kind, item_id, attempt_count, max_system_attempts, context_json, repair_case_id
     FROM interventions WHERE task_id = ? AND authority = 'arbitration'
   `).get(taskId) as {
     status: string;
     authority: string;
+    source_kind: string;
     item_id: string;
     attempt_count: number;
     max_system_attempts: number;
     context_json: string;
+    repair_case_id: string | null;
   };
   assert.equal(arbitration.status, 'pending');
+  assert.equal(arbitration.source_kind, 'agent-fault');
+  assert.equal(arbitration.repair_case_id, null, 'the business outbox is linked asynchronously by the independent Admin root');
   assert.equal(arbitration.item_id, testItem.item_id);
   assert.equal(arbitration.max_system_attempts, 3);
   assert.match(arbitration.context_json, /EXEC-arbitration-failure-1/);

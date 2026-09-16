@@ -11,6 +11,8 @@ import { syncLegacyDeliveryWorkItemsInDb } from './work-items';
 import { promoteReadyWorkItemsInDb, rewindWorkItemsInDb, transitionWorkItemInDb } from './work-item-transitions';
 import { projectNativeWorkflowDisplayInDb } from './native-workflow-projection';
 import { workflowEndedInDb, nativeTaskHoldInDb } from './work-item-controls';
+import { enqueueInterventionFaultInDb } from './repair-observation-outbox';
+import { version as harnessVersion } from '../../package.json';
 
 type Db = Awaited<ReturnType<typeof databaseConnection>>;
 
@@ -24,6 +26,8 @@ export type InterventionStatus =
 
 export type InterventionRow = {
   intervention_id: string;
+  source_kind: 'legacy-unknown' | 'human-input' | 'assistance-request' | 'agent-fault';
+  repair_case_id: string | null;
   task_id: string;
   item_id: string | null;
   dedupe_key: string;
@@ -81,6 +85,7 @@ const openInterventionSchema = z.object({
   authority: z.enum(['standard', 'arbitration']).default('standard'),
   maxSystemAttempts: z.number().int().min(3).max(20).default(3),
   emitEvent: z.boolean().default(true),
+  sourceKind: z.enum(['human-input', 'assistance-request', 'agent-fault']).optional(),
 });
 
 function addEvent(db: Db, taskId: string, actor: string, eventType: string, summary: string) {
@@ -112,6 +117,9 @@ function legacyVerificationJobInDb(db: Db, interventionId: string) {
 
 export function openInterventionInDb(db: Db, input: unknown) {
   const value = openInterventionSchema.parse(input);
+  const sourceKind = value.sourceKind || (value.resolverStrategy === 'human_only' ? 'human-input'
+    : value.authority === 'arbitration' ? 'agent-fault' : 'assistance-request');
+  if (sourceKind === 'agent-fault' && value.resolverStrategy === 'human_only') throw new Error('人工输入不能声明为自动修复故障');
   const task = db.prepare(`
     SELECT task_id, agile_status FROM tasks WHERE task_id = ?
   `).get(value.taskId) as { task_id: string; agile_status: string } | undefined;
@@ -135,7 +143,8 @@ export function openInterventionInDb(db: Db, input: unknown) {
     SELECT * FROM interventions WHERE task_id = ? AND dedupe_key = ?
   `).get(value.taskId, value.dedupeKey) as InterventionRow | undefined;
   if (existing) {
-    if (existing.context_hash !== contextHash || existing.summary !== value.summary) {
+    if (existing.context_hash !== contextHash || existing.summary !== value.summary
+      || existing.source_kind !== 'legacy-unknown' && existing.source_kind !== sourceKind) {
       throw new Error(`介入事项幂等键冲突：${value.dedupeKey}`);
     }
     return existing;
@@ -146,8 +155,8 @@ export function openInterventionInDb(db: Db, input: unknown) {
     INSERT INTO interventions(
       intervention_id, task_id, item_id, dedupe_key, status, resolver_strategy,
       authority, requested_by, source_execution_id, summary,
-      context_json, context_hash, max_system_attempts
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      context_json, context_hash, max_system_attempts, source_kind
+    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     interventionId,
     value.taskId,
@@ -162,6 +171,7 @@ export function openInterventionInDb(db: Db, input: unknown) {
     contextJson,
     contextHash,
     value.maxSystemAttempts,
+    sourceKind,
   );
   if (value.itemId) {
     const item = db.prepare('SELECT origin, status FROM workflow_items WHERE item_id = ?').get(value.itemId) as { origin: string; status: string };
@@ -183,8 +193,10 @@ export function openInterventionInDb(db: Db, input: unknown) {
       value.summary,
     );
   }
-  return db.prepare('SELECT * FROM interventions WHERE intervention_id = ?')
+  const created = db.prepare('SELECT * FROM interventions WHERE intervention_id = ?')
     .get(interventionId) as InterventionRow;
+  enqueueInterventionFaultInDb(db, created, `v${harnessVersion}`);
+  return created;
 }
 
 export async function openIntervention(input: unknown) {
@@ -214,6 +226,8 @@ export async function claimNextIntervention(input: {
       JOIN tasks task ON task.task_id = intervention.task_id
       JOIN projects project ON project.project_id = task.project_id
       WHERE intervention.status = 'pending'
+        AND intervention.repair_case_id IS NULL
+        AND intervention.source_kind <> 'agent-fault'
         AND intervention.resolver_strategy = 'system_then_human'
         AND (? = 0 OR EXISTS (
           SELECT 1 FROM verification_assistance_jobs legacy_job
@@ -363,7 +377,8 @@ export async function finishInterventionAttempt(input: {
       return { ignored: true as const, willRetry: false, escalated: false };
     }
     const unsuccessfulAttempts = unsuccessfulSystemAttemptsInDb(db, row.intervention_id) + 1;
-    const escalated = unsuccessfulAttempts >= row.max_system_attempts;
+    const managedFault = row.source_kind === 'agent-fault';
+    const escalated = !managedFault && unsuccessfulAttempts >= row.max_system_attempts;
     db.prepare(`
       UPDATE interventions
       SET status = ?, last_error = ?, current_execution_id = NULL,
@@ -402,7 +417,7 @@ export async function finishInterventionAttempt(input: {
     db.prepare(`
       UPDATE tasks SET next_step = ?, updated_at = CURRENT_TIMESTAMP WHERE task_id = ?
     `).run(
-      escalated
+      managedFault ? `Agent 故障已交独立 Admin 继续调查与修复：${row.summary}` : escalated
         ? `系统辅助 Agent 已尝试 ${unsuccessfulAttempts} 次仍无法解决，等待人工${row.authority === 'arbitration' ? '仲裁' : legacyJob ? '验证协助' : '介入'}：${row.summary}`
         : `系统辅助 Agent 第 ${unsuccessfulAttempts}/${row.max_system_attempts} 次未解决，将继续自动尝试：${row.summary}`,
       row.task_id,
@@ -411,8 +426,8 @@ export async function finishInterventionAttempt(input: {
       db,
       row.task_id,
       'system-assistance-agent',
-      escalated ? 'InterventionEscalated' : 'InterventionAttemptDeferred',
-      escalated
+      managedFault ? 'InterventionRepairHandoff' : escalated ? 'InterventionEscalated' : 'InterventionAttemptDeferred',
+      managedFault ? `旧介入执行未解决，独立 Admin 保留历史继续修复：${reason}` : escalated
         ? `系统辅助 Agent 已尝试 ${unsuccessfulAttempts} 次，介入事项转交人工：${reason}`
         : `系统辅助 Agent 第 ${unsuccessfulAttempts}/${row.max_system_attempts} 次未解决，将继续尝试：${reason}`,
     );
@@ -695,6 +710,7 @@ function authorizedIntervention(db: Db, input: {
 }) {
   const row = interventionCommandScopeInDb(db, input.interventionId);
   if (!row || row.status !== 'running') throw new Error('当前介入事项不存在、已经结束或不再需要处理');
+  if (row.repair_case_id || row.source_kind === 'agent-fault') throw new Error('该故障已由独立 Admin 接管，旧介入命令不能修改业务状态');
   if (row.active_session_id !== input.sessionId) throw new Error('当前介入会话已经失效');
   if (!row.command_token_hash || hash(input.token) !== row.command_token_hash) {
     throw new Error('当前介入命令凭证无效');
@@ -702,7 +718,7 @@ function authorizedIntervention(db: Db, input: {
   return row;
 }
 
-function renderInterventionStatus(row: ReturnType<typeof authorizedIntervention>) {
+function renderInterventionStatus(row: ReturnType<typeof authorizedIntervention>, actor: 'human' | 'system-assistance-agent' = 'system-assistance-agent') {
   return [
     '# INTERVENTION',
     '',
@@ -722,10 +738,10 @@ function renderInterventionStatus(row: ReturnType<typeof authorizedIntervention>
     '',
     '# TERMINAL COMMANDS',
     ...(row.authority === 'standard' ? ['- `intervention resolve --resolution-file <结论文件>`'] : []),
-    '- `intervention defer --reason-file <原因文件>`',
+    ...(actor === 'human' ? [] : ['- `intervention defer --reason-file <原因文件>`']),
     ...(row.authority === 'arbitration' ? [
       '- `intervention task-rewind --to <当前需求的工作键|context|repro|plan|analysis|dev|test> --reason-file <原因文件>`',
-      '- `intervention work-item-complete --reason-file <裁决依据文件>`',
+      ...(actor === 'human' ? ['- `intervention work-item-complete --reason-file <人工裁决依据文件>`'] : []),
     ] : []),
   ].join('\n');
 }
@@ -737,7 +753,7 @@ export function buildInterventionPrompt(intervention: ClaimedIntervention) {
     : '无；这是首次尝试。';
   return [
     '# 角色目标',
-    `你是 LoopWork 系统辅助 Agent，正在处理一个${intervention.authority === 'arbitration' ? '具有流程最高裁决权限的仲裁' : '流程介入'}事项。`,
+    `你是 LoopWork 系统辅助 Agent，正在处理一个${intervention.authority === 'arbitration' ? '历史仲裁调查' : '流程介入'}事项。`,
     '你需要基于持久化事实检查问题、尽力解除阻塞，并让流程继续；不要把原 Agent 的自述当作已经验证的事实。',
     '',
     '# 当前事项',
@@ -756,7 +772,7 @@ export function buildInterventionPrompt(intervention: ClaimedIntervention) {
     '2. 使用任务上下文、代码、Git、测试、execution receipts 与现有领域命令核对事实；优先完成安全、可恢复的本地调查。',
     '3. 不得篡改原测试结果、伪造证据或直接编辑 Loop 数据库。原失败记录必须保留。',
     intervention.authority === 'arbitration'
-      ? '4. 仲裁权限只改变流程处置权，不改变事实。证据足够时必须使用 task-rewind 或 work-item-complete 执行裁决，不能用普通 resolve 只提交文本。'
+      ? '4. 自动介入不能直接完成 Dev/Test。Agent 故障由独立 Admin 调查、实际修复并请求独立验证；旧记录只能按已有范围 task-rewind 或 defer，不能用总结代替验证。'
       : '4. 优先发现真实入口、启动或检查本地服务、构造非敏感测试数据、运行测试或最小复现、检查日志与配置。可以执行仅影响当前验证的安全、可恢复操作；不得修改产品代码、权限、密钥或外部生产环境。只有取得可供后续 Agent 使用的真实信息与证据时才能 resolve，并写清动作、观察、证据位置及限制。',
     '5. 如果本次无法可靠解决，执行 defer，写清尝试、证据和仍缺少的最小条件。普通最终文本不会结束本次尝试。',
     '',
@@ -767,13 +783,12 @@ export function buildInterventionPrompt(intervention: ClaimedIntervention) {
     ...(intervention.authority === 'arbitration' ? [
       `按工作项依赖图或兼容回退语义重新编排：${command} intervention task-rewind --to <当前需求的工作键|context|repro|plan|analysis|dev|test> --reason-file <UTF-8 裁决依据文件>`,
       '工作键从 intervention status 读取，例如 ba:design、delivery:analysis:1、direct:execute；不能跨需求引用。',
-      `以仲裁权限完成当前 Dev/Test Work Item：${command} intervention work-item-complete --reason-file <UTF-8 裁决依据文件>`,
     ] : []),
     `完整任务上下文：npm --prefix ${JSON.stringify(paths.appRoot)} run loopctl -- task-context --task-id ${intervention.taskId}`,
     `任务摘要：npm --prefix ${JSON.stringify(paths.appRoot)} run loopctl -- task-get ${intervention.taskId}`,
     '',
     intervention.authority === 'arbitration'
-      ? '先执行 status，再开始调查；结束前必须成功调用 task-rewind、work-item-complete 或 defer。'
+      ? '先执行 status，再开始调查；结束前必须成功调用 task-rewind 或 defer，不能直接完成 Dev/Test。'
       : '先执行 status，再开始调查；结束前必须成功调用 resolve 或 defer。',
   ].join('\n');
 }
@@ -784,6 +799,7 @@ async function completeWorkItemByArbitration(
   actor: 'system-assistance-agent' | 'human',
   commandAudit: { command: string; hash: string; actor: string; target?: string },
 ) {
+  if (actor !== 'human') throw new Error('自动修复不能直接完成 Dev/Test；必须修复后请求独立验证');
   if (row.authority !== 'arbitration') throw new Error('当前介入事项没有仲裁权限');
   if (!row.item_id || !row.item_story_index || !['dev-agent', 'test-agent'].includes(row.item_agent || '')) {
     throw new Error('只有关联到当前 Dev/Test Work Item 的仲裁才能直接完成该工作项');
@@ -881,6 +897,7 @@ export async function runHumanArbitrationCommand(input: {
   const row = interventionCommandScopeInDb(db, input.interventionId);
   if (!row || row.task_id !== input.taskId || row.authority !== 'arbitration') throw new Error('当前需求没有该仲裁事项');
   const audit = parseInterventionCommand(input.args, 'human').audit;
+  if (audit.command === 'intervention status') return renderInterventionStatus(row, 'human');
   if (!['intervention task-rewind', 'intervention work-item-complete'].includes(audit.command)) {
     throw new Error('人工仲裁必须使用现有的 task-rewind 或 work-item-complete 命令');
   }
@@ -935,7 +952,7 @@ async function executeInterventionCommand(row: ReturnType<typeof authorizedInter
   }
   if (command === 'intervention resolve') {
     if (row.authority === 'arbitration') {
-      throw new Error('仲裁事项不能只提交文本结论；请使用 intervention task-rewind 或 intervention work-item-complete 执行裁决');
+      throw new Error('仲裁事项不能只提交文本结论；请使用 intervention task-rewind 或 defer；自动完成不能替代独立验证');
     }
     const resolution = flags.get('resolution')?.trim();
     if (!resolution) throw new Error('缺少 --resolution 或 --resolution-file');
