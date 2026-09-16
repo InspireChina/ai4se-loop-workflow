@@ -156,7 +156,7 @@ try {
   if ($process -eq [IntPtr]::Zero) { throw "OpenProcess failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
   if (-not [LoopWorkJob]::AssignProcessToJobObject($job, $process)) { throw "AssignProcessToJobObject failed: $([Runtime.InteropServices.Marshal]::GetLastWin32Error())" }
   Write-Receipt $readyPath @{ schema='${RECEIPT_SCHEMA}'; allocationId=$allocation; pid=$targetPid; jobName=$jobName; assigned=$true; bootMarker=$bootMarker }
-  [void][LoopWorkJob]::WaitForSingleObject($process, 0xffffffff)
+  [void][LoopWorkJob]::WaitForSingleObject($process, 4294967295)
   [void][LoopWorkJob]::TerminateJobObject($job, 1)
   $accounting = New-Object LoopWorkJob+BASIC_ACCOUNTING
   $accountingSize = [Runtime.InteropServices.Marshal]::SizeOf($accounting)
@@ -250,9 +250,17 @@ export async function attachWindowsJobContainment(input: {
   const script = windowsJobGuardianScript(input);
   const encoded = Buffer.from(script, 'utf16le').toString('base64');
   const guardian = spawn('powershell.exe', ['-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
-    detached: true, windowsHide: true, stdio: 'ignore',
+    // A detached PowerShell launched by the packaged Windows Electron runtime
+    // can exit successfully before evaluating its encoded command. Ignored
+    // stdio plus unref is sufficient for this guardian to outlive the caller.
+    windowsHide: true, stdio: 'ignore',
   });
-  const failed=new Promise<null>(resolve=>guardian.once('error',()=>resolve(null)));
+  const failed=new Promise<null>(resolve=>{
+    guardian.once('error',()=>resolve(null));
+    // spawn errors are not the only pre-admission failure: PowerShell may
+    // start and then close without ever producing the authoritative receipt.
+    guardian.once('close',()=>resolve(null));
+  });
   guardian.unref();
   const receipt = await Promise.race([waitForReceipt(paths.ready, value => value.allocationId === input.allocationId
     && value.pid === input.pid && value.assigned, input.timeoutMs ?? 10_000),failed]);

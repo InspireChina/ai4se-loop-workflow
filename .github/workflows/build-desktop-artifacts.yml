@@ -86,6 +86,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Verify Windows Job containment
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $env:ELECTRON_RUN_AS_NODE = '1'
+          npx --no-install electron --import tsx --test --import ./src/test/setup.ts ./src/infrastructure/windows-job-containment.test.ts
+
       - name: Build desktop artifacts
         run: ${{ matrix.command }}
         env:

@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import test from 'node:test';
+import { once } from 'node:events';
 import { mkdtemp, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
   waitForWindowsJobAdmission,
+  attachWindowsJobContainment,
   confirmWindowsJobContainmentExit,
+  isProcessInWindowsJob,
   processPredatesWindowsBoot,
   windowsJobGuardianScript,
   windowsJobPaths,
@@ -38,7 +42,37 @@ test('the Windows guardian assigns before admission and proves the Job is empty 
   assert.match(script, /ActiveProcesses/);
   assert.match(script, /Write-Receipt \$outcomePath/);
   assert.match(script, /LastBootUpTime|bootMarker/);
+  assert.match(script, /WaitForSingleObject\(\$process, 4294967295\)/);
+  assert.doesNotMatch(script, /WaitForSingleObject\(\$process, 0xffffffff\)/i);
 });
+
+test('the packaged Windows runtime can execute its guardian and complete a real Job lifecycle',
+  {skip:process.platform!=='win32',timeout:30_000},async()=>{
+    const root=await mkdtemp(join(tmpdir(),'loop-windows-real-job-'));
+    const allocationId=`real-job-${process.pid}-${Date.now()}`;
+    const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{
+      windowsHide:true,stdio:'ignore',env:{...process.env,ELECTRON_RUN_AS_NODE:'1'},
+    });
+    const closed=once(child,'close');
+    try{
+      await Promise.race([
+        once(child,'spawn'),
+        once(child,'error').then(([error])=>Promise.reject(error)),
+      ]);
+      assert.ok(child.pid);
+      assert.equal(await attachWindowsJobContainment({dataRoot:root,allocationId,pid:child.pid,timeoutMs:15_000}),true);
+      assert.equal(await isProcessInWindowsJob({dataRoot:root,allocationId,pid:child.pid,timeoutMs:5_000}),true);
+      assert.equal(child.kill(),true);
+      await closed;
+      assert.equal(await confirmWindowsJobContainmentExit({dataRoot:root,
+        process:{allocationId,pid:child.pid,marker:null},timeoutMs:15_000}),true);
+      const outcome=JSON.parse(await readFile(windowsJobPaths(root,allocationId).outcome,'utf8').then(value=>value.replace(/^\uFEFF/,'')));
+      assert.equal(outcome.assigned,true);
+      assert.equal(outcome.activeProcesses,0);
+    }finally{
+      if(child.exitCode===null&&child.signalCode===null){child.kill();await Promise.race([closed,new Promise(resolve=>setTimeout(resolve,5_000))]);}
+    }
+  });
 
 test('a reboot is positive exit proof for a prior Windows Job even without its final guardian outcome',async()=>{
   const root=await mkdtemp(join(tmpdir(),'loop-windows-reboot-'));
