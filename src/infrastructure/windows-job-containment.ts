@@ -18,6 +18,7 @@ type JobReceipt = {
   activeProcesses?: number;
   error?: string;
 };
+type WindowsJobState = {exists:boolean;activeProcesses:number|null};
 
 const RECEIPT_SCHEMA = 'loop-windows-job/v1' as const;
 let bootMarkerQuery:Promise<string|null>|undefined;
@@ -187,6 +188,49 @@ function readReceipt(path: string): JobReceipt | null {
   } catch { return null; }
 }
 
+function inspectWindowsJobState(dataRoot:string,allocationId:string) {
+  const {jobName}=windowsJobPaths(dataRoot,allocationId);
+  const script=String.raw`
+$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class LoopWorkJobInspection {
+  [StructLayout(LayoutKind.Sequential)] public struct BASIC_ACCOUNTING { public Int64 TotalUserTime, TotalKernelTime, ThisPeriodTotalUserTime, ThisPeriodTotalKernelTime; public UInt32 TotalPageFaultCount, TotalProcesses, ActiveProcesses, TotalTerminatedProcesses; }
+  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)] public static extern IntPtr OpenJobObject(UInt32 access, bool inherit, string name);
+  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool QueryInformationJobObject(IntPtr job, int infoClass, IntPtr info, uint length, IntPtr returnedLength);
+  [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr handle);
+}
+'@
+$job=[LoopWorkJobInspection]::OpenJobObject(0x0004,$false,${ps(jobName)})
+if($job -eq [IntPtr]::Zero){'missing';exit 0}
+try {
+  $accounting=New-Object LoopWorkJobInspection+BASIC_ACCOUNTING
+  $size=[Runtime.InteropServices.Marshal]::SizeOf($accounting)
+  $memory=[Runtime.InteropServices.Marshal]::AllocHGlobal($size)
+  try {
+    if(-not [LoopWorkJobInspection]::QueryInformationJobObject($job,1,$memory,$size,[IntPtr]::Zero)){exit 2}
+    $accounting=[Runtime.InteropServices.Marshal]::PtrToStructure($memory,[type][LoopWorkJobInspection+BASIC_ACCOUNTING])
+    [Console]::Out.Write([string]$accounting.ActiveProcesses)
+  } finally {[Runtime.InteropServices.Marshal]::FreeHGlobal($memory)}
+} finally {[void][LoopWorkJobInspection]::CloseHandle($job)}
+`;
+  const encoded=Buffer.from(script,'utf16le').toString('base64');
+  return new Promise<WindowsJobState|null>(resolve=>{
+    const child=spawn('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encoded],{windowsHide:true,stdio:['ignore','pipe','ignore']});
+    let output='',settled=false;let timer:NodeJS.Timeout|undefined;
+    const finish=(value:WindowsJobState|null)=>{if(settled)return;settled=true;if(timer)clearTimeout(timer);resolve(value);};
+    child.stdout?.on('data',bytes=>{output=(output+bytes.toString('utf8')).slice(-128);});
+    child.once('error',()=>finish(null));child.once('close',code=>{
+      const value=output.trim();
+      if(code!==0){finish(null);return;}
+      if(value==='missing'){finish({exists:false,activeProcesses:0});return;}
+      const active=Number(value);finish(Number.isSafeInteger(active)&&active>=0?{exists:true,activeProcesses:active}:null);
+    });
+    timer=setTimeout(()=>{child.kill('SIGKILL');finish(null);},5_000);timer.unref();
+  });
+}
+
 async function waitForReceipt(path: string, accept: (receipt: JobReceipt) => boolean, timeoutMs: number) {
   const deadline = Date.now() + timeoutMs;
   do {
@@ -231,6 +275,7 @@ export async function waitForWindowsJobAdmission(
 export async function confirmWindowsJobContainmentExit(input: {
   dataRoot: string; process: ContainedProcess; platform?: Platform; timeoutMs?: number;
   inspectBootMarker?:()=>Promise<string|null>;
+  inspectJobState?:()=>Promise<WindowsJobState|null>;
 }) {
   if ((input.platform ?? process.platform) !== 'win32') return false;
   const record = input.process;
@@ -244,7 +289,8 @@ export async function confirmWindowsJobContainmentExit(input: {
   };
   if (proven()) return true;
   const bootMarker=await (input.inspectBootMarker??inspectWindowsBootMarker)();
-  const admitted=admission?.assigned&&admission.allocationId===record.allocationId&&admission.pid===pid;
+  const admitted=admission?.assigned&&admission.allocationId===record.allocationId&&admission.pid===pid
+    &&admission.jobName===paths.jobName;
   // The Job receipt is written only after the root is inside a kill-on-close
   // Job and before that root may execute application code. A different OS boot
   // is therefore whole-container exit proof even when the desktop disappeared
@@ -252,6 +298,14 @@ export async function confirmWindowsJobContainmentExit(input: {
   if(bootMarker&&admitted&&admission.bootMarker&&differentWindowsBoot(admission.bootMarker,bootMarker))return true;
   if(bootMarker&&record.marker&&processPredatesWindowsBoot(record.marker,bootMarker)
     &&(!admission?.bootMarker||admitted&&admission.bootMarker!==bootMarker))return true;
+  // Legacy admission receipts did not persist a boot marker. The named Job is
+  // still authoritative: its admission was written only after assignment with
+  // KILL_ON_JOB_CLOSE. If that exact per-allocation Job is now absent or empty,
+  // every process it admitted has physically exited, including after reboot.
+  if(admitted){
+    const state=await (input.inspectJobState??(()=>inspectWindowsJobState(input.dataRoot,record.allocationId)))();
+    if(state&&(!state.exists||state.activeProcesses===0))return true;
+  }
   let mayTerminate=record.pid!==null;
   if (record.marker) {
     const identity = await inspectProcessIdentity(pid);

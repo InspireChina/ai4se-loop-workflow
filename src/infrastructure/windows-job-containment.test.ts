@@ -61,6 +61,15 @@ test('a prior-boot admission recovers an allocation that crashed before SQLite P
     platform:'win32',inspectBootMarker:async()=> '2026-09-16T03:00:00.0000000Z'}),true);
 });
 
+test('a missing legacy named Job recovers a pre-boot admission without PID or boot marker',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'loop-windows-legacy-unbound-'));
+  const allocationId='legacy-unbound-job',pid=9875,paths=windowsJobPaths(root,allocationId);
+  await mkdir(paths.directory,{recursive:true});
+  await writeFile(paths.ready,JSON.stringify({schema:'loop-windows-job/v1',allocationId,pid,jobName:paths.jobName,assigned:true}));
+  assert.equal(await confirmWindowsJobContainmentExit({dataRoot:root,process:{allocationId,pid:null,marker:null},
+    platform:'win32',inspectBootMarker:async()=> '2026-09-16T03:00:00.0000000Z',inspectJobState:async()=>({exists:false,activeProcesses:0})}),true);
+});
+
 test('nearby same-boot estimates do not release an unbound Windows allocation',async()=>{
   const root=await mkdtemp(join(tmpdir(),'loop-windows-same-boot-'));
   const allocationId='same-boot-unbound-job',pid=9877,paths=windowsJobPaths(root,allocationId);
@@ -68,7 +77,8 @@ test('nearby same-boot estimates do not release an unbound Windows allocation',a
   await writeFile(paths.ready,JSON.stringify({schema:'loop-windows-job/v1',allocationId,pid,jobName:paths.jobName,
     assigned:true,bootMarker:'2026-09-16T03:00:00.0000000Z'}));
   assert.equal(await confirmWindowsJobContainmentExit({dataRoot:root,process:{allocationId,pid:null,marker:null},timeoutMs:1,
-    platform:'win32',inspectBootMarker:async()=> '2026-09-16T03:00:00.0100000Z'}),false);
+    platform:'win32',inspectBootMarker:async()=> '2026-09-16T03:00:00.0100000Z',
+    inspectJobState:async()=>({exists:true,activeProcesses:1})}),false);
 });
 
 test('same-boot PID replacement is not enough to waive a Windows descendant barrier',()=>{
