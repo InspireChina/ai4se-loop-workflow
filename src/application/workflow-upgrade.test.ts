@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { databaseConnection } from '../infrastructure/database';
 import { createTask } from '../test/legacy-task-fixtures';
 import { upgradeWorkflowAtStartupInDb } from './workflow-upgrade';
+import { openInterventionInDb } from './interventions';
 
 async function fixture() {
   const db = await databaseConnection();
@@ -37,6 +38,27 @@ test('startup upgrade includes paused and cancelled history, commits an audit re
   assert.deepEqual(upgradeWorkflowAtStartupInDb(db, runId, 42), receipt);
   assert.deepEqual(db.prepare('SELECT * FROM workflow_item_events ORDER BY rowid').all(), events);
   assert.deepEqual(JSON.parse((db.prepare('SELECT receipt_json FROM workflow_upgrade_receipts WHERE run_id = ?').get(runId) as { receipt_json: string }).receipt_json), receipt);
+});
+
+test('startup upgrade imports an ended requirement recovery as resolved history without weakening live intervention guards',async()=>{
+  const {db,runId}=await fixture();const taskId=await createTask({title:'Completed requirement with recovery history'});
+  const createdAt='2025-01-02 03:04:05';
+  db.prepare(`INSERT INTO recovery_items(recovery_id,task_id,story_index,kind,source_agent,target_stage,status,summary,details_json,created_at)
+    VALUES('RECOVERY-ended',?,1,'test_failure','test-agent','dev','resolved','Historical test failure','{}',?)`).run(taskId,createdAt);
+  db.prepare("UPDATE tasks SET agile_status='done',completed_at=CURRENT_TIMESTAMP WHERE task_id=?").run(taskId);
+  const live={taskId,dedupeKey:'live-after-completion',requestedBy:'test-agent',summary:'Must remain forbidden'};
+  assert.throws(()=>openInterventionInDb(db,live),/已结束需求/);
+  const receipt=upgradeWorkflowAtStartupInDb(db,runId,42);assert.equal(receipt.tasks.length,1);
+  const adopted=db.prepare(`SELECT status,resolution,resolved_by,created_at FROM interventions
+    WHERE task_id=? AND dedupe_key='legacy-recovery:RECOVERY-ended'`).get(taskId) as
+    {status:string;resolution:string;resolved_by:string;created_at:string};
+  assert.equal(adopted.status,'resolved');assert.match(adopted.resolution,/原测试失败保留/);
+  assert.equal(adopted.resolved_by,'workflow');assert.equal(adopted.created_at,createdAt);
+  assert.equal((db.prepare("SELECT COUNT(*) AS count FROM interventions WHERE task_id=? AND status IN ('pending','running','awaiting_human')")
+    .get(taskId) as {count:number}).count,0);
+  assert.equal((db.prepare("SELECT COUNT(*) AS count FROM task_events WHERE task_id=? AND event_type IN ('InterventionRequested','ArbitrationRequested')")
+    .get(taskId) as {count:number}).count,0);
+  assert.equal((db.prepare('SELECT intervention_id FROM recovery_items WHERE recovery_id=?').get('RECOVERY-ended') as {intervention_id:string}).intervention_id.length>0,true);
 });
 
 test('ambiguous history rolls back earlier tasks and all source bindings; correction can retry the same startup boundary', async () => {

@@ -11,15 +11,24 @@ import {uiLifecycleRequestSchema,type UiLifecycleRequest} from '../domain/ui-lif
 import {attachWindowsJobContainment,confirmWindowsJobContainmentExit,withWindowsJobAdmission} from './windows-job-containment';
 
 const runFile=promisify(execFile);
-async function ownsListener(pid:number,port:number){
+export async function ownsListener(pid:number,port:number){
   try{
-    const command=process.platform==='win32'?'powershell.exe':process.platform==='darwin'?'/usr/sbin/lsof':'lsof';
-    const args=process.platform==='win32'?['-NoProfile','-NonInteractive','-Command',
-      `Get-NetTCPConnection -State Listen -LocalPort ${port} -ErrorAction Stop | Select-Object -ExpandProperty OwningProcess`]
+    const command=process.platform==='win32'?'netstat.exe':process.platform==='darwin'?'/usr/sbin/lsof':'lsof';
+    const args=process.platform==='win32'?['-ano','-p','TCP']
       :['-nP','-a','-p',String(pid),`-iTCP:${port}`,'-sTCP:LISTEN','-t'];
-    const {stdout}=await runFile(command,args,{timeout:1500,maxBuffer:4096,windowsHide:true});
-    return stdout.trim().split(/\s+/).some(value=>value===String(pid));
+    const {stdout}=await runFile(command,args,{timeout:5000,maxBuffer:4*1024*1024,windowsHide:true});
+    return process.platform==='win32'?windowsListenerOwned(stdout,pid,port)
+      :stdout.trim().split(/\s+/).some(value=>value===String(pid));
   }catch{return false;} // Missing/unknown OS evidence is not ownership proof.
+}
+
+export function windowsListenerOwned(output:string,pid:number,port:number){
+  if(!Number.isSafeInteger(pid)||pid<1||!Number.isSafeInteger(port)||port<1||port>65535)return false;
+  return output.split(/\r?\n/).some(line=>{
+    const fields=line.trim().split(/\s+/);
+    if(fields.length<5||fields[0].toUpperCase()!=='TCP'||fields.at(-2)?.toUpperCase()!=='LISTENING'||fields.at(-1)!==String(pid))return false;
+    const local=fields[1];const match=local.match(/:(\d+)$/);return !!match&&Number(match[1])===port;
+  });
 }
 
 /** UI ownership is recorded before spawn in the independent database. A child

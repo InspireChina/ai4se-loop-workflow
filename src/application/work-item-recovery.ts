@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
-import { openInterventionInDb, type InterventionRow } from './interventions';
+import { adoptHistoricalInterventionInDb, openInterventionInDb, type InterventionRow } from './interventions';
 import type { RecoveryItem, RecoveryResolutionClaim } from './recovery-items';
 
 type Db = Database.Database;
@@ -37,16 +37,18 @@ function anchors(db: Db, taskId: string, unit: number, executionId?: string | nu
  * work. It does NOT claim that the original failed tests now pass. */
 function recordDirective(db: Db, input: {
   taskId: string; sourceAgent: string; sourceExecutionId?: string | null; summary: string;
-  dedupeKey: string; context: RecoveryContext; createdAt?: string;
+  dedupeKey: string; context: RecoveryContext; createdAt?: string; historical?: boolean;
 }) {
-  const row = openInterventionInDb(db, { taskId: input.taskId, dedupeKey: input.dedupeKey,
+  const resolution=`已交回 ${input.context.targetStage}；原测试失败保留，等待后续工作项事实闭合`;
+  const value={ taskId: input.taskId, itemId: input.context.sourceItemId, dedupeKey: input.dedupeKey,
     requestedBy: input.sourceAgent, sourceExecutionId: input.sourceExecutionId, summary: input.summary,
-    context: input.context, emitEvent: false });
+    context: input.context };
+  if(input.historical)return adoptHistoricalInterventionInDb(db,{...value,resolution,resolvedBy:'workflow',createdAt:input.createdAt}).intervention_id;
+  const row = openInterventionInDb(db, { ...value, emitEvent: false });
   db.prepare(`UPDATE interventions SET status = 'resolved', item_id = ?, resolution = ?, resolved_by = 'workflow',
     resolved_at = COALESCE(resolved_at, CURRENT_TIMESTAMP), created_at = COALESCE(?, created_at), updated_at = CURRENT_TIMESTAMP
     WHERE intervention_id = ? AND status = 'pending'`)
-    .run(input.context.sourceItemId, `已交回 ${input.context.targetStage}；原测试失败保留，等待后续工作项事实闭合`,
-      input.createdAt || null, row.intervention_id);
+    .run(input.context.sourceItemId, resolution,input.createdAt || null, row.intervention_id);
   return row.intervention_id;
 }
 
@@ -60,7 +62,7 @@ export function adoptRecoveryInterventionsInDb(db: Db, taskId: string) {
         .get(row.source_execution_id, taskId);
       const interventionId = recordDirective(db, { taskId, sourceAgent: row.source_agent,
         sourceExecutionId: validSource ? row.source_execution_id : null, summary: row.summary,
-        dedupeKey: `legacy-recovery:${row.recovery_id}`, createdAt: row.created_at,
+        dedupeKey: `legacy-recovery:${row.recovery_id}`, createdAt: row.created_at, historical:true,
         context: { purpose: 'verification_recovery', storyIndex: row.story_index, targetStage: row.target_stage,
           details: decoded(row.details_json), ...anchors(db, taskId, row.story_index, row.source_execution_id),
           failureCount: row.failure_count, legacyRecoveryId: row.recovery_id, legacyStatus: row.status,

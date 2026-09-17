@@ -6,7 +6,7 @@ import {createServer} from 'node:http';
 import {dirname,join} from 'node:path';
 import test from 'node:test';
 import {AdminManagementStore} from './admin-management-store';
-import {createNativeRuntimeUi} from './native-runtime-ui';
+import {createNativeRuntimeUi,ownsListener,windowsListenerOwned} from './native-runtime-ui';
 import {captureHarnessSource,encodeHarnessSource} from '../../scripts/harness-source.mjs';
 import {writeHarnessArtifact} from '../../scripts/harness-artifact.mjs';
 import {build} from 'esbuild';
@@ -37,6 +37,29 @@ async function listen(server:ReturnType<typeof createServer>){
   await new Promise<void>(resolve=>server.listen(0,'127.0.0.1',resolve));return (server.address() as {port:number}).port;
 }
 async function freePort(){const server=createServer();const port=await listen(server);await new Promise<void>(resolve=>server.close(()=>resolve()));return port;}
+
+test('Windows raw TCP table proves only the exact listening port owner',()=>{
+  const output=`
+  Active Connections
+  Proto  Local Address          Foreign Address        State           PID
+  TCP    127.0.0.1:8787         0.0.0.0:0              LISTENING       4242
+  TCP    [::1]:8788             [::]:0                 LISTENING       4243
+  TCP    127.0.0.1:8789         127.0.0.1:53000        ESTABLISHED     4244
+  TCP    127.0.0.1:18787        0.0.0.0:0              LISTENING       14242
+  `;
+  assert.equal(windowsListenerOwned(output,4242,8787),true);
+  assert.equal(windowsListenerOwned(output,4243,8788),true);
+  assert.equal(windowsListenerOwned(output,4244,8789),false);
+  assert.equal(windowsListenerOwned(output,4242,18787),false);
+  assert.equal(windowsListenerOwned(output,42,8787),false);
+  assert.equal(windowsListenerOwned('',4242,8787),false);
+});
+
+test('Windows netstat confirms the actual listener without PowerShell',{skip:process.platform!=='win32',timeout:15_000},async()=>{
+  const server=createServer();const port=await listen(server);
+  try{assert.equal(await ownsListener(process.pid,port),true);}
+  finally{await new Promise<void>(resolve=>server.close(()=>resolve()));}
+});
 
 test('actual UI listener is independently owned before ready and its group exits before allocation release',{skip:process.platform!=='darwin'},async()=>{
   const f=await fixture();const signal=new AbortController();

@@ -87,6 +87,12 @@ const openInterventionSchema = z.object({
   emitEvent: z.boolean().default(true),
   sourceKind: z.enum(['human-input', 'assistance-request', 'agent-fault']).optional(),
 });
+const historicalInterventionSchema = openInterventionSchema.omit({ emitEvent: true }).extend({
+  resolution: z.string().trim().min(1).max(8000),
+  resolvedBy: z.literal('workflow'),
+  createdAt: z.string().trim().min(1).optional(),
+});
+type OpenIntervention = z.infer<typeof openInterventionSchema>;
 
 function addEvent(db: Db, taskId: string, actor: string, eventType: string, summary: string) {
   db.prepare(`
@@ -115,8 +121,7 @@ function legacyVerificationJobInDb(db: Db, interventionId: string) {
   `).get(interventionId) as { job_id: string; request_id: string } | undefined;
 }
 
-export function openInterventionInDb(db: Db, input: unknown) {
-  const value = openInterventionSchema.parse(input);
+function validateInterventionInDb(db: Db, value: OpenIntervention, allowEnded: boolean) {
   const sourceKind = value.sourceKind || (value.resolverStrategy === 'human_only' ? 'human-input'
     : value.authority === 'arbitration' ? 'agent-fault' : 'assistance-request');
   if (sourceKind === 'agent-fault' && value.resolverStrategy === 'human_only') throw new Error('人工输入不能声明为自动修复故障');
@@ -124,7 +129,7 @@ export function openInterventionInDb(db: Db, input: unknown) {
     SELECT task_id, agile_status FROM tasks WHERE task_id = ?
   `).get(value.taskId) as { task_id: string; agile_status: string } | undefined;
   if (!task) throw new Error(`需求不存在：${value.taskId}`);
-  if (workflowEndedInDb(db, value.taskId)) throw new Error('已结束需求不能创建介入事项');
+  if (!allowEnded && workflowEndedInDb(db, value.taskId)) throw new Error('已结束需求不能创建介入事项');
   if (value.itemId) {
     const item = db.prepare(`
       SELECT item_id FROM workflow_items WHERE item_id = ? AND task_id = ?
@@ -147,8 +152,15 @@ export function openInterventionInDb(db: Db, input: unknown) {
       || existing.source_kind !== 'legacy-unknown' && existing.source_kind !== sourceKind) {
       throw new Error(`介入事项幂等键冲突：${value.dedupeKey}`);
     }
-    return existing;
+    return { value, sourceKind, contextJson, contextHash, existing };
   }
+  return { value, sourceKind, contextJson, contextHash, existing: undefined };
+}
+
+export function openInterventionInDb(db: Db, input: unknown) {
+  const validated = validateInterventionInDb(db, openInterventionSchema.parse(input), false);
+  const { value, sourceKind, contextJson, contextHash, existing } = validated;
+  if (existing) return existing;
 
   const interventionId = `INT-${randomUUID()}`;
   db.prepare(`
@@ -197,6 +209,32 @@ export function openInterventionInDb(db: Db, input: unknown) {
     .get(interventionId) as InterventionRow;
   enqueueInterventionFaultInDb(db, created, `v${harnessVersion}`);
   return created;
+}
+
+/** Import an immutable historical conclusion without reopening live work. This
+ * is deliberately separate from openInterventionInDb: only migration callers
+ * may adopt ended-task history, and the row is terminal from its first write. */
+export function adoptHistoricalInterventionInDb(db: Db, input: unknown) {
+  const historical = historicalInterventionSchema.parse(input);
+  const validated = validateInterventionInDb(db, openInterventionSchema.parse({ ...historical, emitEvent: false }), true);
+  const { value, sourceKind, contextJson, contextHash, existing } = validated;
+  if (existing) {
+    if (existing.status !== 'resolved' || existing.resolution !== historical.resolution
+      || existing.resolved_by !== historical.resolvedBy) throw new Error(`历史介入事项状态冲突：${value.dedupeKey}`);
+    return existing;
+  }
+  const interventionId = `INT-${randomUUID()}`;
+  db.prepare(`
+    INSERT INTO interventions(
+      intervention_id, task_id, item_id, dedupe_key, status, resolver_strategy,
+      authority, requested_by, source_execution_id, summary, context_json,
+      context_hash, max_system_attempts, source_kind, resolution, resolved_by,
+      created_at, updated_at, resolved_at
+    ) VALUES(?, ?, ?, ?, 'resolved', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, CURRENT_TIMESTAMP), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  `).run(interventionId,value.taskId,value.itemId||null,value.dedupeKey,value.resolverStrategy,value.authority,
+    value.requestedBy,value.sourceExecutionId||null,value.summary,contextJson,contextHash,value.maxSystemAttempts,
+    sourceKind,historical.resolution,historical.resolvedBy,historical.createdAt||null);
+  return db.prepare('SELECT * FROM interventions WHERE intervention_id = ?').get(interventionId) as InterventionRow;
 }
 
 export async function openIntervention(input: unknown) {

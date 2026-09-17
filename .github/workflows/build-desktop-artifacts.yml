@@ -98,6 +98,11 @@ jobs:
         shell: pwsh
         run: npx --no-install tsx --test --test-name-pattern="cold worker startup|PID is durable before admission|Windows successor drains" --import ./src/test/setup.ts ./src/infrastructure/native-admin-business-worker.test.ts
 
+      - name: Verify Windows UI listener ownership
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: npx --no-install tsx --test --test-name-pattern="Windows raw TCP table|Windows netstat confirms" --import ./src/test/setup.ts ./src/infrastructure/native-runtime-ui.test.ts
+
       - name: Build desktop artifacts
         run: ${{ matrix.command }}
         env:
