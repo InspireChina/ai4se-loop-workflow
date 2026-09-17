@@ -115,6 +115,46 @@ test('nearby same-boot estimates do not release an unbound Windows allocation',a
     inspectJobState:async()=>({exists:true,activeProcesses:1})}),false);
 });
 
+test('receiptless legacy worker recovery requires both an absent launcher/worker/guardian and an empty OS Job',async()=>{
+  const root=await mkdtemp(join(tmpdir(),'loop-windows-receiptless-'));
+  for(const pid of [null,4321])for(const absent of [false,true])for(const state of [null,{exists:true,activeProcesses:1},{exists:false,activeProcesses:0},{exists:true,activeProcesses:0}]) {
+    // PID-null is the production orphan; use null for uncertain cases to avoid
+    // invoking actual Windows termination APIs on the test host.
+    if(pid!==null&&(!absent||!state||state.activeProcesses!==0))continue;
+    let inspected=false;
+    assert.equal(await confirmWindowsJobContainmentExit({dataRoot:root,process:{allocationId:'legacy-orphan',pid},
+      platform:'win32',orphanedWorker:{parentPid:1234,executable:'LoopWork.exe'},
+      inspectOrphanedWorker:async()=>absent,inspectJobState:async()=>{inspected=true;return state;}}),
+    absent&&state!==null&&state.activeProcesses===0);
+    assert.equal(inspected,absent);
+  }
+  assert.equal(await confirmWindowsJobContainmentExit({dataRoot:root,process:{allocationId:'unknown',pid:null},
+    platform:'win32',inspectJobState:async()=>({exists:false,activeProcesses:0})}),false,'no worker ownership evidence cannot waive an arbitrary reservation');
+});
+
+test('Windows legacy recovery inspects actual processes when receipts are missing',
+  {skip:process.platform!=='win32',timeout:60_000},async()=>{
+    const root=await mkdtemp(join(tmpdir(),'loop-windows-real-orphan-'));
+    const allocationId=`legacy-${process.pid}-${Date.now()}`;
+    const env={...process.env,ELECTRON_RUN_AS_NODE:'1'};
+    const parent=spawn(process.execPath,['-e','process.exit(0)'],{env,windowsHide:true,stdio:'ignore'});
+    const parentClosed=once(parent,'close');await parentClosed;assert.ok(parent.pid);
+    const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)','--',allocationId],{env,windowsHide:true,stdio:'ignore'});
+    const closed=once(child,'close');await once(child,'spawn');
+    const input={dataRoot:root,process:{allocationId,pid:null},orphanedWorker:{parentPid:parent.pid,executable:process.execPath}};
+    try {
+      assert.equal(await confirmWindowsJobContainmentExit(input),false,'a still-running allocation blocks legacy recovery');
+      child.kill();await closed;
+      assert.equal(await confirmWindowsJobContainmentExit({...input,orphanedWorker:{...input.orphanedWorker,parentPid:process.pid}}),false,'live launcher cannot be retired');
+      const encoded=Buffer.from(`$allocation = '${allocationId}'; Start-Sleep -Seconds 60`,'utf16le').toString('base64');
+      const guardian=spawn('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encoded],{windowsHide:true,stdio:'ignore'});
+      const guardianClosed=once(guardian,'close');await once(guardian,'spawn');
+      try{assert.equal(await confirmWindowsJobContainmentExit(input),false,'encoded guardian commands must also block release');}
+      finally{guardian.kill();await guardianClosed;}
+      assert.equal(await confirmWindowsJobContainmentExit(input),true,'dead launcher, no worker/guardian and missing Job retire receiptless history');
+    }finally{if(child.exitCode===null&&child.signalCode===null){child.kill();await closed;}}
+  });
+
 test('same-boot PID replacement is not enough to waive a Windows descendant barrier',()=>{
   assert.equal(processPredatesWindowsBoot('2026-09-16T04:00:00.0000000Z','2026-09-16T03:00:00.0000000Z'),false);
   assert.equal(processPredatesWindowsBoot('malformed','2026-09-16T03:00:00.0000000Z'),false);

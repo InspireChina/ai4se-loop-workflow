@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import {createHash} from 'node:crypto';
 import { mkdirSync, readFileSync } from 'node:fs';
 import {uptime} from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { inspectProcessIdentity, processIdentityMatches, terminateProcessTree } from './process-tree';
 
 type Platform = NodeJS.Platform;
@@ -188,7 +188,7 @@ function readReceipt(path: string): JobReceipt | null {
   } catch { return null; }
 }
 
-function inspectWindowsJobState(dataRoot:string,allocationId:string) {
+export function inspectWindowsJobState(dataRoot:string,allocationId:string) {
   const {jobName}=windowsJobPaths(dataRoot,allocationId);
   const script=String.raw`
 $ErrorActionPreference = 'Stop'
@@ -203,7 +203,10 @@ public static class LoopWorkJobInspection {
 }
 '@
 $job=[LoopWorkJobInspection]::OpenJobObject(0x0004,$false,${ps(jobName)})
-if($job -eq [IntPtr]::Zero){'missing';exit 0}
+if($job -eq [IntPtr]::Zero){
+  if([Runtime.InteropServices.Marshal]::GetLastWin32Error() -eq 2){'missing';exit 0}
+  exit 2
+}
 try {
   $accounting=New-Object LoopWorkJobInspection+BASIC_ACCOUNTING
   $size=[Runtime.InteropServices.Marshal]::SizeOf($accounting)
@@ -225,9 +228,55 @@ try {
       const value=output.trim();
       if(code!==0){finish(null);return;}
       if(value==='missing'){finish({exists:false,activeProcesses:0});return;}
-      const active=Number(value);finish(Number.isSafeInteger(active)&&active>=0?{exists:true,activeProcesses:active}:null);
+      const active=Number(value);finish(/^\d+$/.test(value)&&Number.isSafeInteger(active)&&active>=0?{exists:true,activeProcesses:active}:null);
     });
     timer=setTimeout(()=>{child.kill('SIGKILL');finish(null);},5_000);timer.unref();
+  });
+}
+
+/** Legacy workers could be reserved without ever persisting their PID. Before
+ * retiring one, prove its launcher and every possible worker/guardian are gone.
+ * Unreadable command lines and failed inventories are uncertainty, not absence. */
+export function windowsOrphanedWorkerProbeScript(input:{allocationId:string;parentPid:number;executable:string}) {
+  return String.raw`
+$ErrorActionPreference = 'Stop'
+$allocation = ${ps(input.allocationId)}
+$ownerPid = ${input.parentPid}
+$names = @('node.exe','electron.exe','LoopWork.exe','powershell.exe','pwsh.exe',${ps(basename(input.executable))})
+$inventory = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+if (@($inventory | Where-Object { $_.ProcessId -eq $ownerPid }).Count -ne 0) { exit 2 }
+foreach ($entry in $inventory) {
+  if ($entry.ProcessId -eq $PID) { continue }
+  $command = [string]$entry.CommandLine
+  if ($command.Contains($allocation)) { exit 2 }
+  if ($names -contains $entry.Name) {
+    if ([string]::IsNullOrWhiteSpace($command)) { exit 2 }
+    if ($command -match '(?i)-(?:EncodedCommand|enc|ec)\s+"?([A-Za-z0-9+/=]+)') {
+      $decoded = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($Matches[1]))
+      if ($decoded.Contains($allocation)) { exit 2 }
+    }
+  }
+}
+# A live process missing from CIM must not become a false absence proof.
+foreach ($entry in @(Get-Process -ErrorAction Stop)) {
+  if ($entry.Id -eq $ownerPid) { exit 2 }
+  if ($entry.Id -ne $PID -and $names -contains ($entry.ProcessName + '.exe') -and
+      @($inventory | Where-Object { $_.ProcessId -eq $entry.Id }).Count -eq 0) { exit 2 }
+}
+[Console]::Out.Write('absent')
+`;
+}
+
+async function inspectOrphanedWorker(input:{allocationId:string;parentPid:number;executable:string}) {
+  if(!Number.isSafeInteger(input.parentPid)||input.parentPid<=0)return false;
+  const encoded=Buffer.from(windowsOrphanedWorkerProbeScript(input),'utf16le').toString('base64');
+  return new Promise<boolean>(resolve=>{
+    const child=spawn('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encoded],{windowsHide:true,stdio:['ignore','pipe','ignore']});
+    let output='',settled=false;let timer:NodeJS.Timeout|undefined;
+    const finish=(value:boolean)=>{if(settled)return;settled=true;clearTimeout(timer);resolve(value);};
+    child.stdout?.on('data',bytes=>{output=(output+bytes.toString()).slice(-128);});
+    child.once('error',()=>finish(false));child.once('close',code=>finish(code===0&&output.trim()==='absent'));
+    timer=setTimeout(()=>{child.kill();finish(false);},10_000);timer.unref();
   });
 }
 
@@ -255,6 +304,7 @@ export async function attachWindowsJobContainment(input: {
     // stdio plus unref is sufficient for this guardian to outlive the caller.
     windowsHide: true, stdio: 'ignore',
   });
+  const closed=new Promise<void>(resolve=>guardian.once('close',()=>resolve()));
   const failed=new Promise<null>(resolve=>{
     guardian.once('error',()=>resolve(null));
     // spawn errors are not the only pre-admission failure: PowerShell may
@@ -264,7 +314,15 @@ export async function attachWindowsJobContainment(input: {
   guardian.unref();
   const receipt = await Promise.race([waitForReceipt(paths.ready, value => value.allocationId === input.allocationId
     && value.pid === input.pid && value.assigned, input.timeoutMs ?? 10_000),failed]);
-  return Boolean(receipt);
+  if(receipt)return true;
+  // A failed attach must not leave a late guardian able to admit the target
+  // after its caller starts pre-admission cleanup.
+  guardian.kill();
+  let timer:NodeJS.Timeout|undefined;
+  try {
+    await Promise.race([closed,new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error('Windows Job guardian exit unconfirmed')),5_000);})]);
+  } finally {clearTimeout(timer);}
+  return false;
 }
 
 export async function waitForWindowsJobAdmission(
@@ -284,12 +342,21 @@ export async function confirmWindowsJobContainmentExit(input: {
   dataRoot: string; process: ContainedProcess; platform?: Platform; timeoutMs?: number;
   inspectBootMarker?:()=>Promise<string|null>;
   inspectJobState?:()=>Promise<WindowsJobState|null>;
+  orphanedWorker?:{parentPid:number;executable:string};
+  inspectOrphanedWorker?:()=>Promise<boolean>;
 }) {
   if ((input.platform ?? process.platform) !== 'win32') return false;
   const record = input.process;
   const paths = windowsJobPaths(input.dataRoot, record.allocationId);
   const admission=readReceipt(paths.ready);
   const pid=record.pid??(admission?.assigned&&admission.allocationId===record.allocationId?admission.pid:null);
+  if(!admission&&input.orphanedWorker) {
+    const absent=await (input.inspectOrphanedWorker??(()=>inspectOrphanedWorker({allocationId:record.allocationId,...input.orphanedWorker!})))();
+    if(absent) {
+      const state=await (input.inspectJobState??(()=>inspectWindowsJobState(input.dataRoot,record.allocationId)))();
+      if(state&&(!state.exists||state.activeProcesses===0))return true;
+    }
+  }
   if (!pid) return false;
   const proven = () => {
     const receipt = readReceipt(paths.outcome);

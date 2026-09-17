@@ -93,6 +93,11 @@ jobs:
           $env:ELECTRON_RUN_AS_NODE = '1'
           npx --no-install electron --import tsx --test --import ./src/test/setup.ts ./src/infrastructure/windows-job-containment.test.ts
 
+      - name: Verify Windows worker recovery
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: npx --no-install tsx --test --test-name-pattern="cold worker startup|PID is durable before admission|Windows successor drains" --import ./src/test/setup.ts ./src/infrastructure/native-admin-business-worker.test.ts
+
       - name: Build desktop artifacts
         run: ${{ matrix.command }}
         env:

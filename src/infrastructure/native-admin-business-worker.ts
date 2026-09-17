@@ -10,19 +10,21 @@ import {sanitizeDiagnosticText} from './diagnostic-text';
 import {assertRuntimeDataOutside} from './runtime-paths';
 import {RuntimeCapabilityFailure} from '../domain/runtime-original-artifact';
 import type {RuntimeArtifact} from '../domain/runtime-update';
-import {attachWindowsJobContainment,confirmWindowsJobContainmentExit,withWindowsJobAdmission} from './windows-job-containment';
+import {attachWindowsJobContainment,confirmWindowsJobContainmentExit,inspectWindowsJobState,withWindowsJobAdmission} from './windows-job-containment';
 
-type Handle={child?:ChildProcess;closed:Promise<void>;noSpawn:boolean;record:AdminBusinessWorkerRecord};
+type Handle={child?:ChildProcess;closed:Promise<void>;noSpawn:boolean;record:AdminBusinessWorkerRecord;admission?:Promise<boolean>};
 
 /** Private, serialized capability calls. No business imports in the root;
  * every physical allocation is in management storage before spawn. */
 export function createNativeAdminBusinessWorker(ports:{
   store:AdminManagementStore;rootOwnerId:string;appRoot:string;dataRoot:string;executable:string;electronNode?:boolean;
-  timeoutMs?:number;confirmContainmentExit?:(record:AdminBusinessWorkerRecord)=>Promise<boolean>;
+  timeoutMs?:number;startupTimeoutMs?:number;confirmContainmentExit?:(record:AdminBusinessWorkerRecord)=>Promise<boolean>;
+  attachContainment?:typeof attachWindowsJobContainment;
   lane?:'business'|'harness-build';
 }) {
   const timeoutMs=ports.timeoutMs??5000;
-  if(!Number.isFinite(timeoutMs)||timeoutMs<=0)throw new Error('业务能力 worker 超时必须为正数');
+  const startupTimeoutMs=ports.startupTimeoutMs??30_000;
+  if(!Number.isFinite(timeoutMs)||timeoutMs<=0||!Number.isFinite(startupTimeoutMs)||startupTimeoutMs<=0)throw new Error('业务能力 worker 超时必须为正数');
   if(resolve(ports.store.filename)!==resolve(join(ports.dataRoot,'admin-management.db')))throw new Error('独立业务 worker 必须绑定外部 root 的管理库');
   const owned=new Map<string,Handle>();const stopping=new Map<string,Promise<boolean>>();
   const calls=new Map<AbortController,Promise<unknown>>();let serial=Promise.resolve<unknown>(undefined);
@@ -38,12 +40,32 @@ export function createNativeAdminBusinessWorker(ports:{
       const handle=owned.get(captured.allocationId);let record=handle?.record??captured;
       if(!handle)try{record=current(captured.allocationId);}catch{/* storage cannot suppress physical cleanup */}
       let stopped=false;
-      if(process.platform==='win32')stopped=ports.confirmContainmentExit
-        ? !!await ports.confirmContainmentExit(record)
-        : await confirmWindowsJobContainmentExit({dataRoot:ports.dataRoot,process:record});
+      if(handle?.noSpawn)stopped=true;
+      else if(process.platform==='win32') {
+        let admitted:boolean|undefined;
+        try {admitted=await handle?.admission;} catch {
+          // An uncertain guardian must retain the barrier, but cannot prevent
+          // terminating the captured child while later recovery gathers proof.
+          if(handle?.child){handle.child.kill();await handle.closed;}return false;
+        }
+        if(admitted===false&&handle?.child) {
+          // attach=false certifies that its guardian has stopped. The original
+          // ChildProcess handle can safely stop the gated root, even without a
+          // start marker, then the OS Job query covers any admitted descendants.
+          handle.child.kill();await handle.closed;
+          const state=await inspectWindowsJobState(ports.dataRoot,record.allocationId);
+          stopped=!!state&&(!state.exists||state.activeProcesses===0);
+        } else stopped=ports.confirmContainmentExit
+          ? !!await ports.confirmContainmentExit(record)
+          : await confirmWindowsJobContainmentExit({dataRoot:ports.dataRoot,process:record,
+              ...(!handle?{orphanedWorker:{parentPid:record.parentPid,executable:ports.executable}}:{})});
+      }
       else if(!record.pid)stopped=!!handle?.noSpawn;
-      else if(record.groupId)stopped=record.marker?await terminateProcessGroup(record.groupId,5000,record.marker):
-        await inspectProcessGroup(record.groupId).then(members=>!!members&&members.length===0);
+      else if(record.groupId) {
+        if(!record.marker&&handle?.child){handle.child.kill();await handle.closed;}
+        stopped=record.marker?await terminateProcessGroup(record.groupId,5000,record.marker):
+          await inspectProcessGroup(record.groupId).then(members=>!!members&&members.length===0);
+      }
       if(!stopped)return false;
       if(handle)await handle.closed;
       ports.store.confirmAdminBusinessWorkerExit(current(record.allocationId));owned.delete(record.allocationId);return true;
@@ -51,8 +73,8 @@ export function createNativeAdminBusinessWorker(ports:{
     stopping.set(captured.allocationId,pending);return pending;
   }
   async function execute(request:AdminBusinessRequest,cancellation:AbortController) {
-    const signal=cancellation.signal;const timer=setTimeout(()=>cancellation.abort(new Error('业务能力 worker 调用超时')),
-      request.operation==='harness-build'?20*60*1000:['harness-actions','assert-runtime','runtime-business-baseline','runtime-business-progress'].includes(request.operation)?Math.max(timeoutMs,60_000):timeoutMs);
+    const signal=cancellation.signal;
+    let timer=setTimeout(()=>cancellation.abort(new Error('业务能力 worker 启动超时')),startupTimeoutMs);
     let record:AdminBusinessWorkerRecord|undefined;let guardTimer:NodeJS.Timeout|undefined;let primary:unknown;
     let artifact:RuntimeArtifact|null= null;let selectionRevision:number|null=null;let intentRevision=0;
     try{
@@ -115,17 +137,24 @@ export function createNativeAdminBusinessWorker(ports:{
       signal.addEventListener('abort',abort,{once:true});
       try{
         if(!child.pid){await closed;await ready;throw new Error('业务能力 worker 未分配实际 PID');}
-        if(!await attachWindowsJobContainment({dataRoot:ports.dataRoot,allocationId:record.allocationId,pid:child.pid}))
-          throw new Error('业务能力 worker 无法进入 Windows Job 容器');
+        // Capture and persist the PID before admission can release the child.
+        // This also leaves a cleanup identity if storage/admission later fails.
         handle.record={...record,pid:child.pid,groupId:process.platform!=='win32'?child.pid:null};
+        handle.admission=Promise.resolve(false); // no guardian has been started
         ports.store.bindAdminBusinessWorker(record,child.pid,undefined,handle.record.groupId??undefined);
-        const identity=await waitForProcessIdentity(child.pid,{timeoutMs:1000});
+        signal.throwIfAborted();
+        handle.admission=(ports.attachContainment??attachWindowsJobContainment)({dataRoot:ports.dataRoot,allocationId:record.allocationId,pid:child.pid});
+        if(!await handle.admission)throw new Error('业务能力 worker 无法进入 Windows Job 容器');
+        const identity=await waitForProcessIdentity(child.pid,{timeoutMs:5000});
         if(identity){handle.record={...handle.record,marker:identity.startMarker,status:'bound'};
           ports.store.bindAdminBusinessWorker(record,child.pid,identity.startMarker,handle.record.groupId??undefined);}
         if(!identity)throw new Error('业务能力 worker 缺少实际启动身份');
         guardTimer=setInterval(()=>{try{ports.store.assertAdminBusinessWorker(current(record!.allocationId));}catch(error){cancellation.abort(error);}},100);
         if(signal.aborted)abort();await ready;signal.throwIfAborted();
         ports.store.assertAdminBusinessWorker(current(record.allocationId));
+        clearTimeout(timer);
+        timer=setTimeout(()=>cancellation.abort(new Error('业务能力 worker 调用超时')),
+          request.operation==='harness-build'?20*60*1000:['harness-actions','assert-runtime','runtime-business-baseline','runtime-business-progress'].includes(request.operation)?Math.max(timeoutMs,60_000):timeoutMs);
         child.send!({kind:'perform',allocationId:record.allocationId,request},error=>{if(error)replyReject(error);});
         const result=await reply;signal.throwIfAborted();ports.store.assertAdminBusinessWorker(current(record.allocationId));return result;
       }finally{signal.removeEventListener('abort',abort);}

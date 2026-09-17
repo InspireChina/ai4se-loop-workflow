@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import {randomUUID} from 'node:crypto';
+import {spawn} from 'node:child_process';
+import {once} from 'node:events';
 import {mkdir,writeFile} from 'node:fs/promises';
 import {dirname,join} from 'node:path';
 import test from 'node:test';
@@ -41,6 +43,67 @@ async function bound(h:Awaited<ReturnType<typeof fixture>>){
   while(Date.now()<deadline){const record=h.store.adminBusinessWorkers(true)[0];if(record?.marker)return record;await new Promise(resolve=>setTimeout(resolve,10));}
   throw new Error('Actual capability identity was not persisted');
 }
+
+test('cold worker startup over five seconds has its own budget before the capability call',async()=>{
+  const delayed=protocol.replace("process.send({kind:'ready',allocationId,pid:process.pid});","setTimeout(()=>process.send({kind:'ready',allocationId,pid:process.pid}),5500);");
+  const h=await fixture(delayed,1000);
+  try {
+    const result=await h.worker.run({operation:'host-audit'}) as {operation:string};
+    assert.equal(result.operation,'host-audit');assert.equal(h.store.adminBusinessWorkers(true).length,0);
+  } finally {await h.worker.stopOwned();h.store.close();}
+});
+
+test('PID is durable before admission and failed admission cleans the captured child',async()=>{
+  const h=await fixture(hungProtocol);let pid:number|undefined;
+  const worker=createNativeAdminBusinessWorker({store:h.store,rootOwnerId:'root',appRoot:h.artifact.root,
+    dataRoot:dirname(h.store.filename),executable:process.execPath,attachContainment:async input=>{
+      pid=input.pid;const record=h.store.adminBusinessWorker(input.allocationId)!;
+      assert.equal(record.pid,pid);assert.equal(record.status,'launching');
+      return false;
+    }});
+  try {
+    await assert.rejects(worker.run({operation:'host-audit'}),/无法进入 Windows Job/);
+    assert.ok(pid);assert.throws(()=>process.kill(pid!,0),/ESRCH/);
+    assert.equal(h.store.adminBusinessWorkers(true).length,0);
+  } finally {await worker.stopOwned();await h.worker.stopOwned();h.store.close();}
+});
+
+test('Windows successor drains a receiptless legacy reservation and can execute host audit',
+  {skip:process.platform!=='win32',timeout:60_000},async()=>{
+    const h=await fixture();
+    const parent=spawn(process.execPath,['-e','process.exit(0)'],{stdio:'ignore',windowsHide:true});
+    await once(parent,'close');assert.ok(parent.pid);
+    const record=h.store.reserveAdminBusinessWorker(h.rootAuthority,h.managementAuthority,h.artifact,{operation:'host-audit'});
+    const db=new Database(h.store.filename);
+    try{db.prepare('UPDATE admin_business_worker_processes SET parent_pid=? WHERE allocation_id=?').run(parent.pid,record.allocationId);}finally{db.close();}
+    h.store.releaseRuntimeHost(h.rootAuthority);h.store.releaseSupervisor(h.managementAuthority);
+    const root=h.store.acquireRuntimeHost('successor',120_000)!;h.store.acquireSupervisor('successor:management',120_000);
+    h.store.bindRuntimeHostArtifact(root,h.artifact);
+    const worker=createNativeAdminBusinessWorker({store:h.store,rootOwnerId:'successor',appRoot:h.artifact.root,
+      dataRoot:dirname(h.store.filename),executable:process.execPath});
+    try {
+      await worker.drainPrevious();
+      assert.equal(h.store.adminBusinessWorker(record.allocationId)?.status,'exited');
+      assert.equal((await worker.run({operation:'host-audit'}) as {operation:string}).operation,'host-audit');
+      assert.equal(h.store.adminBusinessWorkers(true).length,0);
+    }finally{await worker.stopOwned();h.store.close();}
+  });
+
+test('startup timeout and manual stop reap a worker that never announces readiness',{skip:process.platform==='win32'},async()=>{
+  for(const stop of [false,true]) {
+    const h=await fixture("setInterval(()=>{},1000);");
+    const worker=createNativeAdminBusinessWorker({store:h.store,rootOwnerId:'root',appRoot:h.artifact.root,
+      dataRoot:dirname(h.store.filename),executable:process.execPath,startupTimeoutMs:stop?30_000:1500});
+    try {
+      const pending=worker.run({operation:'host-audit'});void pending.catch(()=>undefined);
+      const record=await bound(h);
+      if(stop)await worker.stopOwned();
+      await assert.rejects(pending,stop?/管理停止/:/启动超时/);
+      assert.throws(()=>process.kill(record.pid!,0),/ESRCH/);
+      assert.equal(h.store.adminBusinessWorkers(true).length,0);
+    } finally {await worker.stopOwned();await h.worker.stopOwned();h.store.close();}
+  }
+});
 
 test('native write suspension preserves the actual update read-capability process; user STOP kills its physical group',
   {skip:process.platform==='win32'},async()=>{
