@@ -1,10 +1,11 @@
 import {mkdir,readFile} from 'node:fs/promises';
-import {readFileSync,writeFileSync} from 'node:fs';
+import {readFileSync} from 'node:fs';
 import {isAbsolute,join,resolve} from 'node:path';
 import {projectDatabase,type DatabaseProjection} from '../../src/infrastructure/database-compatibility-projection';
 import {sanitizeDiagnosticText} from '../../src/infrastructure/diagnostic-text';
 import {assertRuntimeDataOutside} from '../../src/infrastructure/runtime-paths';
 import {waitForWindowsJobAdmission} from '../../src/infrastructure/windows-job-containment';
+import {atomicReplaceFileSync} from '../../src/infrastructure/atomic-file';
 
 async function main() {
   await waitForWindowsJobAdmission();
@@ -20,10 +21,10 @@ async function main() {
   const allocationPath=args.get('--allocation')!;const allocation=JSON.parse(readFileSync(allocationPath,'utf8'));
   if(allocation.parentPid!==process.ppid||resolve(allocation.appRoot)!==appRoot||allocation.pid&&allocation.pid!==process.pid)throw new Error('数据库读者父进程或分配不匹配');
   // Self-binding before DB imports also preserves a parent-death launch gap.
-  writeFileSync(allocationPath,JSON.stringify({...allocation,pid:process.pid,groupId:process.platform!=='win32'?process.pid:null}),{mode:0o600});
+  atomicReplaceFileSync(allocationPath,JSON.stringify({...allocation,pid:process.pid,groupId:process.platform!=='win32'?process.pid:null}));
   const {inspectProcessIdentity}=await import('../../src/infrastructure/process-tree');const identity=await inspectProcessIdentity(process.pid);
   if(!identity)throw new Error('数据库读者启动身份无法确认');
-  writeFileSync(allocationPath,JSON.stringify({...JSON.parse(readFileSync(allocationPath,'utf8')),marker:identity.startMarker}),{mode:0o600});
+  atomicReplaceFileSync(allocationPath,JSON.stringify({...JSON.parse(readFileSync(allocationPath,'utf8')),marker:identity.startMarker}));
   let completed=false;process.once('disconnect',()=>{if(!completed)process.exit(1);});
   // Never discover/import a real configured workspace or a legacy DB.
   const workspace=join(dataRoot,'probe-workspace');await mkdir(workspace,{recursive:true});await mkdir(join(dataRoot,'tmp'),{recursive:true});

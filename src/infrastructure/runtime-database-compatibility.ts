@@ -12,6 +12,7 @@ import {sanitizeDiagnosticText} from './diagnostic-text';
 import {readHarnessArtifact} from '../../scripts/harness-artifact.mjs';
 import {assertRuntimeDataOutside} from './runtime-paths';
 import {attachWindowsJobContainment,confirmWindowsJobContainmentExit,withWindowsJobAdmission} from './windows-job-containment';
+import {atomicReplaceFileSync} from './atomic-file';
 
 type Projection={application:DatabaseProjection;business:DatabaseProjection};
 type Check=()=>void;
@@ -69,7 +70,7 @@ export function createRuntimeDatabaseCompatibility(ports:{dataRoot:string;execut
     env=withWindowsJobAdmission(env,ports.dataRoot,allocationId);
     const child=spawn(ports.executable,[join(artifact.root,'desktop-runners','database-reader.cjs'),'--app-root',artifact.root,
       '--data-root',dataRoot,'--allocation',allocationPath,...(original?['--original',original]:[])],{cwd:artifact.root,env,detached:process.platform!=='win32',windowsHide:true,stdio:['ignore','pipe','pipe','ipc']});
-    if(child.pid)writeFileSync(allocationPath,JSON.stringify({...allocation,pid:child.pid,groupId:process.platform!=='win32'?child.pid:null}),{mode:0o600});
+    if(child.pid)atomicReplaceFileSync(allocationPath,JSON.stringify({...allocation,pid:child.pid,groupId:process.platform!=='win32'?child.pid:null}));
     let stderr='',result:Projection|undefined,marker:string|null=null,spawnError:Error|undefined;
     child.stdout!.on('data',()=>undefined);child.stderr!.on('data',bytes=>{stderr=(stderr+bytes.toString()).slice(-64000);});
     const closed=new Promise<void>(resolve=>child.once('close',()=>resolve()));
@@ -91,7 +92,7 @@ export function createRuntimeDatabaseCompatibility(ports:{dataRoot:string;execut
         if(!await attachWindowsJobContainment({dataRoot:ports.dataRoot,allocationId,pid:child.pid}))
           throw new Error('数据库兼容读者无法进入 Windows Job 容器');
         marker=(await waitForProcessIdentity(child.pid,{timeoutMs:5000}))?.startMarker||null;
-        if(marker)writeFileSync(allocationPath,JSON.stringify({...readAllocation(allocationPath),marker}),{mode:0o600});
+        if(marker)atomicReplaceFileSync(allocationPath,JSON.stringify({...readAllocation(allocationPath),marker}));
       }
       await Promise.race([closed,interrupted]);check();
       if(spawnError)throw spawnError;
