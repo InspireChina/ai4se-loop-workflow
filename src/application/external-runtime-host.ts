@@ -19,6 +19,7 @@ export function createExternalRuntimeHost(ports:{
   cancelOwned:(authority:RuntimeHostAuthority)=>Promise<boolean>;
   management?:{start:(authority:RuntimeHostAuthority)=>Promise<unknown>;settled?:(state:'hosting'|'updating'|'failed')=>void;shutdown:()=>Promise<void>};
   replaceExistingLease?:boolean;strictCleanup?:boolean;
+  skipInstalledValidation?:boolean;
   onError?:(error:unknown)=>void;
   onFailure?:(failure:ExternalRuntimeFailure)=>void;
   scheduleInterval?:(callback:()=>void,ms:number)=>NodeJS.Timeout;cancelInterval?:(timer:NodeJS.Timeout)=>void;
@@ -86,7 +87,7 @@ export function createExternalRuntimeHost(ports:{
       const assertSelection=()=>{
         check();if(ports.store.control().management_mode!=='normal'||ports.store.activeRuntimeUpdate()||ports.store.runtimeInstallation()?.revision!==revision)throw new Error('启动期间安装选择或更新门禁已变化');
       };
-      stage='validation';if(!selectionValidated)await ports.validateInstalled(artifact,active.signal,assertSelection);assertSelection();
+      stage='validation';if(!selectionValidated&&!ports.skipInstalledValidation)await ports.validateInstalled(artifact,active.signal,assertSelection);assertSelection();
       stage='startup';
       await ports.ensureSelected(artifact,authority,active.signal,assertSelection);assertSelection();managementSettled('hosting');return 'hosting';
     }catch(error){

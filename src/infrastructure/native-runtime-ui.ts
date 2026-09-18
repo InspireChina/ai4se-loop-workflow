@@ -64,7 +64,7 @@ export function createNativeRuntimeUi(ports:{store:AdminManagementStore;dataRoot
       }
       let exited=false;
       if(process.platform==='win32')exited=ports.strictContainment===false
-        ?(!captured.pid?!!handle?.noSpawn||!handle:await terminateProcessTree(captured.pid,5000))
+        ?(!handle?true:!captured.pid?!!handle.noSpawn:await terminateProcessTree(captured.pid,5000))
         :ports.confirmContainmentExit?!!await ports.confirmContainmentExit(captured)
           :await confirmWindowsJobContainmentExit({dataRoot:ports.dataRoot,process:captured});
       else if(!captured.pid)exited=!!handle?.noSpawn;

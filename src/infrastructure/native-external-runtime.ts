@@ -101,11 +101,12 @@ export function createNativeExternalRuntime(ports:{
   },acquire:ports.inhibitIdleSleep??createNativeIdleSleepInhibitor(),onError:error=>{
     try{ports.onError?.(error);}catch{/* OS diagnostics cannot disable management */}
   }});
-  const host=createExternalRuntimeHost({...ports,...normal,updates,replaceExistingLease:true,strictCleanup:false,onFailure:failure=>{reportFailure(failure);},
+  const host=createExternalRuntimeHost({...ports,...normal,updates,replaceExistingLease:true,strictCleanup:false,skipInstalledValidation:true,
+    onFailure:failure=>{reportFailure(failure);},
     management:{start:async authority=>{
       rootAuthority=authority;
       if(!ports.store.runtimeHostArtifact(authority)){
-        assertRoot();ports.store.bindRuntimeHostArtifact(authority,ports.bootstrap);
+        assertRoot();ports.store.bindRuntimeHostArtifact(authority,ports.bootstrap,true);
       }
       // The runtime bundled with the newly installed desktop version wins
       // immediately. Old transition/handoff transactions are retained only as

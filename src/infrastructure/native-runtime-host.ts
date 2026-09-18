@@ -45,6 +45,7 @@ export function createNativeRuntimeHost(ports:{
       if(ports.strictContainment!==false)return ports.confirmContainmentExit
         ? !!await ports.confirmContainmentExit(latest)
         : confirmWindowsJobContainmentExit({dataRoot:ports.dataRoot,process:latest});
+      if(!handle&&ports.strictContainment===false)return true;
       if(!latest.pid)return !!handle?.noPidFailure()||!handle;
       return terminateProcessTree(latest.pid,5000);
     }
@@ -71,8 +72,7 @@ export function createNativeRuntimeHost(ports:{
           {strictContainment:ports.strictContainment!==false}):true),
       ]);
       for(const result of results)if(result.status==='rejected')report(result.reason);
-      if(!admissionClosed||ports.strictContainment!==false&&results.some(result=>result.status==='rejected'||result.value!==true)
-        ||ports.strictContainment===false&&(results[0].status==='rejected'||results[0].value!==true))return false;
+      if(ports.strictContainment!==false&&(!admissionClosed||results.some(result=>result.status==='rejected'||result.value!==true)))return false;
       ports.store.confirmRuntimeHostProcessExit(current(record.allocationId));owned.delete(record.allocationId);return true;
     })().finally(()=>stopping.delete(record.allocationId));stopping.set(record.allocationId,work);return work;
   }
@@ -99,8 +99,10 @@ export function createNativeRuntimeHost(ports:{
         &&JSON.stringify(prior.artifact)===JSON.stringify(artifact)&&handle.child.connected&&handle.child.exitCode===null&&handle.child.signalCode===null) {
         await handle.ready;assertCurrent();return;
       }
-      const [normalDrained,updatesDrained]=await Promise.all([drainNormal(authority,assertCurrent),ports.drainUpdates(assertCurrent)]);
-      if(ports.strictContainment!==false&&(!normalDrained||!updatesDrained))throw new Error('旧宿主或更新进程退出未确认，禁止普通启动');
+      const cleanup=await Promise.allSettled([drainNormal(authority,assertCurrent),ports.drainUpdates(assertCurrent)]);
+      for(const result of cleanup)if(result.status==='rejected')report(result.reason);
+      if(ports.strictContainment!==false&&cleanup.some(result=>result.status==='rejected'||result.value!==true))
+        throw new Error('旧宿主或更新进程退出未确认，禁止普通启动');
       if(ports.strictContainment!==false)await ports.assertUntrackedOrdinaryHostsExited?.(signal,assertCurrent);assertCurrent();
       const directory=join(ports.dataRoot,'runtime-hosts','logs');await mkdir(directory,{recursive:true,mode:0o700});assertCurrent();
       const record=ports.store.reserveRuntimeHostProcess(authority,artifact);

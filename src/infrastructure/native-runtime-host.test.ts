@@ -78,6 +78,20 @@ test('unknown normal-host reservation survives root takeover and blocks spawning
   }finally{f.store.close();}
 });
 
+test('standard host retires stale allocation and update cleanup errors instead of requiring manual runtime deletion',{skip:process.platform==='win32'},async()=>{
+  const f=await fixture();const old=f.store.acquireRuntimeHost('old-standard')!;
+  f.store.reserveRuntimeHostProcess(old,f.artifact);f.store.releaseRuntimeHost(old);
+  const current=f.store.acquireRuntimeHost('new-standard')!;let cleanupReported=0;
+  const native=createNativeRuntimeHost({...f,strictContainment:false,executable:process.execPath,
+    drainUpdates:async()=>{throw new Error('stale update cleanup unavailable');},confirmDescendantsExited:async()=>false,
+    onError:()=>{cleanupReported++;}});
+  try{
+    await native.ensureSelected(f.artifact,current,new AbortController().signal,()=>f.store.assertRuntimeHost(current));
+    const records=f.store.runtimeHostProcesses();assert.equal(records.length,2);assert.equal(records[0].status,'exited');
+    assert.equal(records[1].status,'ready');assert.ok(cleanupReported>=1);
+  }finally{await native.cancelOwned(current);f.store.close();}
+});
+
 test('descendant cleanup refusal or synchronous failure cannot suppress root termination, but neither can release its physical barrier',{skip:process.platform==='win32'},async()=>{
   const f=await fixture();let proof:'throw'|'false'|'true'='throw';
   const authority=f.store.acquireRuntimeHost('root')!;

@@ -891,9 +891,10 @@ export class AdminManagementStore {
 
   /** Immutable code identity of the stable root, separate from its selected
    * business installation. Read-only root diagnostics survive code rollback. */
-  bindRuntimeHostArtifact(authority:RuntimeHostAuthority,artifact:RuntimeArtifact) {
+  bindRuntimeHostArtifact(authority:RuntimeHostAuthority,artifact:RuntimeArtifact,allowInstalledRuntime=false) {
     const parsed=runtimeArtifactSchema.parse(artifact);
-    if(resolve(parsed.root)!==resolve(join(dirname(this.filename),'runtime-artifacts',parsed.artifactId)))throw new Error('root 能力必须绑定内容寻址的独立安装');
+    if(!allowInstalledRuntime&&resolve(parsed.root)!==resolve(join(dirname(this.filename),'runtime-artifacts',parsed.artifactId)))
+      throw new Error('root 能力必须绑定内容寻址的独立安装');
     return this.db.transaction(()=>{
       this.assertRuntimeHost(authority);
       const prior=this.runtimeHostArtifact(authority);

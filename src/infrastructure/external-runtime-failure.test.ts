@@ -11,7 +11,6 @@ import {confirmAdminAttemptStopped,createAdminExecutionLauncher} from './admin-e
 import {createLangfuseTelemetry} from './langfuse';
 import {captureHarnessSource,encodeHarnessSource} from '../../scripts/harness-source.mjs';
 import {writeHarnessArtifact} from '../../scripts/harness-artifact.mjs';
-import {stageRuntimeArtifact} from './runtime-selection';
 
 test('native failed ordinary startup persists exact source and cached Admin consumes it with both business databases corrupt',{skip:process.platform==='win32'},async()=>{
   const root=join(process.env.LOOP_DATA_ROOT!,randomUUID());const app=join(root,'source');const workspace=join(root,'workspace');
@@ -22,7 +21,6 @@ test('native failed ordinary startup persists exact source and cached Admin cons
   await writeFile(join(app,'scripts','fixture.cjs'),program);await writeFile(join(app,'desktop-runners','host-service.cjs'),program);
   const source=await captureHarnessSource(app);await writeFile(join(app,'harness-source.json.gz'),encodeHarnessSource(source,{buildId:'controlled-startup-failure'}));
   await writeFile(join(app,'.next','BUILD_ID'),'controlled-startup-failure');const artifact=await writeHarnessArtifact(app);
-  const staged=await stageRuntimeArtifact(artifact,root,new AbortController().signal,()=>{});
   const appDb=join(root,'loopwork.db'),bizDb=join(root,'loop-ui.db');await writeFile(appDb,'corrupt-app-sentinel');await writeFile(bizDb,'corrupt-business-sentinel');
   const store=new AdminManagementStore(join(root,'admin-management.db'));store.setIntent('running','saved-running-intent');
   const seed=store.acquireSupervisor('cache-seed')!;
@@ -47,7 +45,7 @@ test('native failed ordinary startup persists exact source and cached Admin cons
     })(...args)}),
   };
   let sleepAcquired=0,sleepReleased=0;
-  const host=createNativeExternalRuntime({store,ownerId:'external-root',dataRoot:root,executable:process.execPath,bootstrap:staged,management,
+  const host=createNativeExternalRuntime({store,ownerId:'external-root',dataRoot:root,executable:process.execPath,bootstrap:artifact,management,
     inhibitIdleSleep:async()=>{sleepAcquired++;return {isActive:()=>sleepReleased===0,release:async()=>{sleepReleased++;}};},
     // Miniature startup fixture launches no CLI descendants; these ports are
     // not claims about full production containment or update health.
@@ -68,7 +66,7 @@ test('native failed ordinary startup persists exact source and cached Admin cons
     finally{readManagement.close();}
     const observations=store.observations(caseId) as {evidence_json:string;source_version:string}[];
     assert.equal(observations.length,1);const evidence=JSON.parse(observations[0].evidence_json);
-    assert.deepEqual(evidence.attemptedArtifact,staged);assert.equal(evidence.stage,'startup');
+    assert.deepEqual(evidence.attemptedArtifact,artifact);assert.equal(evidence.stage,'startup');
     assert.match(evidence.error.message,/selected module missing/);assert.equal(evidence.processes.length,1);
     assert.throws(()=>process.kill(evidence.processes[0].pid,0));
     const deadline=Date.now()+3000;
