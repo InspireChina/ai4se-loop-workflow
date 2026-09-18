@@ -4,7 +4,7 @@ import {createExternalLifecycleAdapter,externalLifecycleView} from './external-l
 import {runtimeFallbackDocument} from '../../desktop/runtime-fallback.mjs';
 import {uiLifecycleRequestSchema} from '../domain/ui-lifecycle-protocol';
 import {randomUUID} from 'node:crypto';
-import {createDesktopRuntimeHost,prepareDesktopRuntimeInstall} from '../../desktop/runtime-host.mjs';
+import {createDesktopRuntimeHost,prepareDesktopRuntimeInstall,startDesktopRuntimeUi} from '../../desktop/runtime-host.mjs';
 
 const control={desired_intent:'stopped' as const,intent_revision:4,management_mode:'update-silence' as const,owner_id:'actual-manager',fencing_token:7,expires_at:123};
 test('desktop view uses independent intent, preserves unknown business state and never invents liveness or ownership',()=>{
@@ -70,7 +70,17 @@ test('desktop may publish immediately while deferred startup work continues in t
   let ready=false;void host.ready.then(()=>{ready=true;});await new Promise(resolve=>setImmediate(resolve));assert.equal(ready,false);
   resolveStart('observer');await host.ready;await new Promise(resolve=>setImmediate(resolve));
   assert.equal(ready,true);
-  assert.match(String(errors[0]),/observer/);
+  assert.deepEqual(errors,[]);
+});
+
+test('desktop exposes its control UI for every settled lifecycle state',async()=>{
+  for(const state of ['hosting','observer','updating','degraded']){
+    const ports:number[]=[];
+    const host={ready:Promise.resolve(state),ui:{start:async(port:number)=>{ports.push(port);return {url:`http://127.0.0.1:${port}`};}}};
+    const result=await startDesktopRuntimeUi(host,async()=>4816);
+    assert.deepEqual(result,{url:'http://127.0.0.1:4816'});
+    assert.deepEqual(ports,[4816]);
+  }
 });
 
 test('desktop update preparation no longer waits for cross-runtime readiness receipts',async()=>{

@@ -12,11 +12,21 @@ export async function createDesktopRuntimeHost(ports){
   ports.onCreated(host);
   if(ports.isQuitting()){await service.shutdown();return host;}
   ready=Promise.resolve().then(()=>service.start());
-  const report=state=>{if(state!=='hosting')ports.onError?.(new Error(`安装包 runtime 启动未完成：${state}`));};
-  if(ports.deferStartup)void ready.then(report,error=>ports.onError?.(error));
-  else report(await ready);
+  // Observer, updating, and degraded are valid management states. The desktop
+  // UI is the place where users can inspect or recover them, so only an actual
+  // startup exception is reported as an error.
+  if(ports.deferStartup)void ready.catch(error=>ports.onError?.(error));
+  else await ready;
   if(!ports.isQuitting())try{ports.setStartup?.(service.store.control().desired_intent);}catch(error){ports.onError?.(error);}
   return host;
+}
+
+/** Wait for the first management reconciliation to settle, then expose the UI
+ * for every resulting lifecycle state. Requiring `hosting` here used to hide a
+ * healthy control UI precisely when the runtime needed user attention. */
+export async function startDesktopRuntimeUi(host,availablePort){
+  await host.ready;
+  return host.ui.start(await availablePort());
 }
 
 /** Compatibility helper for callers outside the desktop shell. The updater no

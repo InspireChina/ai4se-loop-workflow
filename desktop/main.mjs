@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { configureUpdater, detachUpdaterWindow } from './updater.mjs';
 import { runtimeFallbackDocument } from './runtime-fallback.mjs';
-import {createDesktopRuntimeHost} from './runtime-host.mjs';
+import {createDesktopRuntimeHost,startDesktopRuntimeUi} from './runtime-host.mjs';
 
 let mainWindow;
 let lifecycle;
@@ -98,9 +98,7 @@ function availablePort() {
 async function startServer() {
   if(!lifecycle&&startupPromise)await startupPromise;
   if (!lifecycle) throw new Error('独立运行宿主尚未初始化');
-  const state=await lifecycle.ready;
-  if(state!=='hosting')throw new Error(`安装包 runtime 启动未完成：${state}`);
-  return lifecycle.ui.start(await availablePort());
+  return startDesktopRuntimeUi(lifecycle,availablePort);
 }
 
 function cancelUiRecovery(){

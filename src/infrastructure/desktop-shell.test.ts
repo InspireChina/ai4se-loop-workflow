@@ -25,8 +25,10 @@ test('packages a visible tray asset and restores the hidden single-instance wind
   assert.doesNotMatch(mainSource,/prepareDesktopRuntimeInstall/);
   assert.match(mainSource,/await lifecycle\.shutdown\(\)\.catch/,
     'publisher update stops the current runtime best-effort and lets the installed runtime win on restart');
-  assert.match(mainSource,/const state=await lifecycle\.ready;/,
-    'UI admission must use the completed background startup result');
+  assert.match(mainSource,/startDesktopRuntimeUi\(lifecycle,availablePort\)/,
+    'UI admission must wait for startup without requiring the business host to own the lease');
+  assert.doesNotMatch(mainSource,/state\s*!==\s*['"]hosting['"]/,
+    'Recoverable lifecycle states must not block the desktop control UI');
   assert.doesNotMatch(mainSource,/await lifecycle\.ready;\s*const state=await lifecycle\.reconcile\(\)/,
     'UI admission must not immediately repeat a completed startup reconciliation');
   assert.match(mainSource,/if\(!lifecycle\)return \{initializing:true,message:'运行宿主正在初始化'\};/,
