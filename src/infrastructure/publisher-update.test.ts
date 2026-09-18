@@ -40,6 +40,44 @@ test('publisher metadata survives management restart and only the matching ready
   }finally{f.store.close();}
 });
 
+test('a direct installer turns a verified version mismatch into a guarded update before old business startup',()=>{
+  const f=fixture();try{
+    const update=f.store.beginInstalledBootstrapTransition(f.authority,f.candidate)!;
+    assert.equal(update.phase,'stopping');
+    assert.deepEqual(update.request.before,f.before);assert.deepEqual(update.request.candidate,f.candidate);
+    assert.match(update.request.updateId,/^installer-[a-f0-9]{64}$/);
+    assert.equal(update.request.caseId,`installer:${update.request.updateId.slice('installer-'.length)}`);
+    assert.equal(f.store.control().management_mode,'update-silence');
+    assert.deepEqual(f.store.runtimeInstallation()!.artifact,f.before,'selection changes only after candidate health succeeds');
+    assert.equal(f.store.beginInstalledBootstrapTransition(f.authority,f.candidate),null,'active update is replay-safe');
+    let details=f.store.runtimeUpdateEvents(update.request.updateId,20,0).map(event=>event.detail);
+    assert.ok(details.some(detail=>detail?.includes('Verified packaged bootstrap differs')));
+    const updateAuthority=f.store.acquireRuntimeUpdate(update.request.updateId,'fixture-controller')!;
+    f.store.advanceRuntimeUpdate(updateAuthority,'stopping','aborted',{selected:f.before});
+    details=f.store.runtimeUpdateEvents(update.request.updateId,20,0).map(event=>event.detail);
+    assert.equal(f.store.beginInstalledBootstrapTransition(f.authority,f.candidate),null,'identical rejected bytes are not retried on every launch');
+    assert.deepEqual(f.store.runtimeUpdateEvents(update.request.updateId,20,0).map(event=>event.detail),details);
+  }finally{f.store.close();}
+});
+
+test('direct installer transition cannot bypass publisher state or root-bound artifact identity',()=>{
+  const f=fixture();try{
+    f.store.preparePublisherUpdate(f.authority,f.requestId,f.attemptId,'new');
+    assert.equal(f.store.beginInstalledBootstrapTransition(f.authority,f.candidate),null,'publisher preparation remains authoritative');
+  }finally{f.store.close();}
+  const mismatch=fixture();try{
+    assert.throws(()=>mismatch.store.beginInstalledBootstrapTransition(mismatch.authority,{...mismatch.candidate,sourceId:'e'.repeat(64)}),/实际安装/);
+    assert.equal(mismatch.store.activeRuntimeUpdate(),null);
+  }finally{mismatch.store.close();}
+  const filename=join(process.env.LOOP_DATA_ROOT!,randomUUID(),'selected.db');
+  const store=new AdminManagementStore(filename);try{
+    const candidate={root:join(dirname(filename),'runtime-artifacts','d'.repeat(64)),sourceId:'c'.repeat(64),artifactId:'d'.repeat(64),version:'new'};
+    const authority=store.acquireRuntimeHost('selected-root')!;store.bindRuntimeHostArtifact(authority,candidate);
+    store.initializeRuntimeInstallation(candidate);
+    assert.equal(store.beginInstalledBootstrapTransition(authority,candidate),null);
+  }finally{store.close();}
+});
+
 test('publisher physical readiness rejects unknown UI allocations and changed intent',()=>{
   const f=fixture();try{
     f.store.reserveRuntimeUiProcess(f.authority,f.before);

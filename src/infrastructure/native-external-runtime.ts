@@ -110,6 +110,12 @@ export function createNativeExternalRuntime(ports:{
       // selected business artifact. Only a physically-ready persisted
       // publisher request can enter the normal external update transaction.
       assertRoot();ports.store.beginPublisherInstallation(authority,ports.bootstrap);assertRoot();
+      // A directly launched installer never had an old UI process available
+      // to create publisher readiness. Convert that verified version mismatch
+      // into the same guarded update protocol before any old business host is
+      // admitted, otherwise an unfixed cached runtime can deadlock its own
+      // migration and prevent the new release from ever becoming selected.
+      ports.store.beginInstalledBootstrapTransition(authority,ports.bootstrap);assertRoot();
       let [result]=await Promise.all([management.start(),idleSleep.start()]);
       try{assertRoot();await ports.management.prepareCapabilities?.();assertRoot();}
       catch(error){

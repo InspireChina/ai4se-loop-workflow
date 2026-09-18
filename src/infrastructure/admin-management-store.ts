@@ -572,6 +572,39 @@ export class AdminManagementStore {
     }).immediate();
   }
 
+  /** A manually launched installer has no persisted prepare-update receipt.
+   * Treat its verified, root-bound bootstrap as a normal guarded RuntimeUpdate
+   * instead of silently continuing to run the previously selected artifact.
+   * The update controller still owns process draining, live-data compatibility,
+   * held startup, health observation and rollback. */
+  beginInstalledBootstrapTransition(authority:RuntimeHostAuthority,bootstrap:RuntimeArtifact) {
+    const candidate=runtimeArtifactSchema.parse(bootstrap);
+    return this.db.transaction(()=>{
+      this.assertRuntimeHost(authority);
+      if(this.activePublisherUpdate()||this.activeRuntimeUpdate())return null;
+      const installation=this.runtimeInstallation();
+      if(!installation||JSON.stringify(installation.artifact)===JSON.stringify(candidate))return null;
+      if(JSON.stringify(this.runtimeHostArtifact(authority))!==JSON.stringify(candidate))throw new Error('直接安装候选必须是本 root 已校验绑定的实际安装');
+      const transitionHash=createHash('sha256').update(JSON.stringify([
+        installation.artifact.artifactId,candidate.artifactId,
+      ])).digest('hex');
+      const updateId=`installer-${transitionHash}`;
+      // A terminal rejection is durable compatibility evidence. Reinstalling
+      // identical bytes must not create a startup retry loop; a new release
+      // has a new artifact identity and therefore a new transaction.
+      if(this.runtimeUpdate(updateId))return null;
+      const update=this.beginRuntimeUpdate({
+        updateId,
+        caseId:`installer:${transitionHash}`,
+        before:installation.artifact,
+        candidate,
+      });
+      this.db.prepare('INSERT INTO admin_runtime_update_events(update_id,phase,detail,created_at) VALUES(?,?,?,?)')
+        .run(update.request.updateId,update.phase,'Verified packaged bootstrap differs from persisted installation; guarded transition started',this.now());
+      return update;
+    }).immediate();
+  }
+
   runtimeUpdate(updateId: string): RuntimeUpdateRecord | null {
     const row = this.db.prepare('SELECT * FROM admin_runtime_updates WHERE update_id=?').get(updateId) as
       { request_json: string; phase: string; selected_json: string; intent_revision: number; owner_id: string | null;
