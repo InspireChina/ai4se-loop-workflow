@@ -80,7 +80,8 @@ test('staging never overwrites a corrupt published snapshot or accepts startup c
 
 test('Desktop starts independent management before selected Web and leaves immutable selection/version validation to the native service',async()=>{
   const main=await readFile(join(process.cwd(),'desktop/main.mjs'),'utf8');
-  assert.ok(main.indexOf('lifecycle = await createLifecycle(bootstrap)')<main.indexOf('selectedRuntimeRoot=lifecycle.service.store.runtimeInstallation()'));
+  assert.ok(main.indexOf('const initializing=createLifecycle(bootstrap);')<main.indexOf('await createWindow();'));
+  assert.ok(main.indexOf('const host=await pending;')<main.indexOf('selectedRuntimeRoot=host.service.store.runtimeInstallation()'));
   assert.match(main,/createNativeExternalService/);assert.match(main,/lifecycle\.ui\.start/);
   assert.doesNotMatch(main,/createManagedLoopRunLifecycle|registerHostProcess|selectInstalledRuntime/);
 });
