@@ -20,8 +20,10 @@ export type AdminControllerPorts = {
   manageFollowups?: (authority: AdminAuthority) => Promise<unknown>;
   /** Cancel capability children without waiting behind discovery/business DB work. */
   stopCapabilities?: () => Promise<void>;
-  /** Update silence drains writers but permits Root-owned, read-only update
-   * evidence. User STOP/fencing/shutdown still calls stopCapabilities. */
+  /** Inactive management drains writers but permits Root-owned, read-only
+   * diagnostics/update evidence. Explicit STOP/fencing/shutdown still calls
+   * stopCapabilities, so persisted stopped-state polling cannot cancel the
+   * external root's own startup audit. */
   suspendCapabilities?: () => Promise<void>;
   /** Before ordinary business admission, drain predecessor capability writers. */
   prepareCapabilities?: () => Promise<void>;
@@ -42,6 +44,7 @@ export function createAdminController(ports: AdminControllerPorts) {
   const launchControllers = new Map<string, AbortController>();
   const settlements = new Set<Promise<void>>();
   let capabilityStop: Promise<void> | undefined;
+  let fullyStoppedRevision: number | undefined;
   const report = (error: unknown) => {
     try { ports.onError?.(error); } catch { /* Diagnostics cannot stop supervision or physical cleanup. */ }
   };
@@ -154,7 +157,8 @@ export function createAdminController(ports: AdminControllerPorts) {
     }
     const control = store.control();
     if (control.desired_intent !== 'running' || control.management_mode !== 'normal') {
-      if(control.desired_intent==='running'&&control.management_mode==='update-silence'&&ports.suspendCapabilities){
+      if(fullyStoppedRevision===control.intent_revision)await stopActive();
+      else if(ports.suspendCapabilities){
         const results=await Promise.allSettled([stopActive(),Promise.resolve().then(()=>ports.suspendCapabilities!())]);
         const failed=results.find((result):result is PromiseRejectedResult=>result.status==='rejected');
         if(failed)throw failed.reason;
@@ -168,6 +172,7 @@ export function createAdminController(ports: AdminControllerPorts) {
       }
       return 'stopped' as const;
     }
+    fullyStoppedRevision=undefined;
     // Discovery is an adapter, not a dependency on healthy business storage.
     // Already durable management work continues even if this read fails.
     try { await ports.discover?.(); } catch (error) { report(error); }
@@ -268,6 +273,7 @@ export function createAdminController(ports: AdminControllerPorts) {
       const results = await Promise.allSettled([stopExecutionAndCapabilities(), stopDurableAttempts()]);
       const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
       if (failed) throw failed.reason;
+      fullyStoppedRevision=store.control().intent_revision;
       return serialize(reconcileOwned);
     },
     async prepareUpdate(requestId: string) {
@@ -275,6 +281,7 @@ export function createAdminController(ports: AdminControllerPorts) {
       const results = await Promise.allSettled([stopExecutionAndCapabilities(), stopDurableAttempts()]);
       const failed = results.find((result): result is PromiseRejectedResult => result.status === 'rejected');
       if (failed) throw failed.reason;
+      fullyStoppedRevision=store.control().intent_revision;
       return serialize(reconcileOwned);
     },
     async shutdown() {

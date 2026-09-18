@@ -99,7 +99,7 @@ export function createNativeAdminManagement(ports:{
         limits:resolveAgentExecutionLimits()}))(...args)),
     })),
     confirmStopped:attempt=>confirmAdminAttemptStopped(attempt,{dataRoot:ports.dataRoot}),
-    suspendCapabilities:async()=>{const results=await Promise.allSettled([worker.stopOwned(),builds.stopOwned()]);
+    suspendCapabilities:async()=>{const results=await Promise.allSettled([worker.suspendManagedOwned(),builds.stopOwned()]);
       if(results.some(result=>result.status==='rejected'))throw new AggregateError(results.flatMap(result=>result.status==='rejected'?[result.reason]:[]),'写能力 / 构建进程退出未确认');},
     stopCapabilities:async()=>{const results=await Promise.allSettled([worker.stopOwned(),builds.stopOwned(),snapshots.stopOwned()]);
       if(results.some(result=>result.status==='rejected'))throw new AggregateError(results.flatMap(result=>result.status==='rejected'?[result.reason]:[]),'能力 / 构建进程退出未确认');},

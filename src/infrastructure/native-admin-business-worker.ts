@@ -27,7 +27,7 @@ export function createNativeAdminBusinessWorker(ports:{
   if(!Number.isFinite(timeoutMs)||timeoutMs<=0||!Number.isFinite(startupTimeoutMs)||startupTimeoutMs<=0)throw new Error('业务能力 worker 超时必须为正数');
   if(resolve(ports.store.filename)!==resolve(join(ports.dataRoot,'admin-management.db')))throw new Error('独立业务 worker 必须绑定外部 root 的管理库');
   const owned=new Map<string,Handle>();const stopping=new Map<string,Promise<boolean>>();
-  const calls=new Map<AbortController,Promise<unknown>>();let serial=Promise.resolve<unknown>(undefined);
+  const calls=new Map<AbortController,{call:Promise<unknown>;operation:AdminBusinessRequest['operation']}>();let serial=Promise.resolve<unknown>(undefined);
   const current=(id:string)=>{
     const record=ports.store.adminBusinessWorker(id);
     if(!record)throw new Error('业务能力 worker 分配记录丢失');return record;
@@ -190,13 +190,27 @@ export function createNativeAdminBusinessWorker(ports:{
       const request=adminBusinessRequestSchema.parse(input);const cancellation=new AbortController();
       if(adminWorkerLane(request.operation)!==(ports.lane??'business'))throw new Error('能力调用不能跨越绑定的构建 / 诊断通道');
       const next=serial.catch(()=>undefined).then(()=>execute(request,cancellation));serial=next;
-      calls.set(cancellation,next);void next.finally(()=>calls.delete(cancellation)).catch(()=>undefined);return next;
+      calls.set(cancellation,{call:next,operation:request.operation});void next.finally(()=>calls.delete(cancellation)).catch(()=>undefined);return next;
+    },
+    async suspendManagedOwned(){
+      // host-audit belongs to the still-live external Root, not to ordinary
+      // Admin scheduling. Persisted stopped/update polling must not cancel it:
+      // the Root needs that read-only evidence to fence predecessors and bring
+      // up the control UI. Explicit stopOwned still drains every operation.
+      const pending=[...calls.entries()].filter(([,entry])=>entry.operation!=='host-audit');
+      for(const [controller] of pending)controller.abort(new Error('管理写能力已暂停'));
+      const records=[...owned.values()].map(handle=>handle.record).filter(record=>record.operation!=='host-audit');
+      const results=await Promise.allSettled(records.map(stopRecord));
+      await Promise.allSettled(pending.map(([,entry])=>entry.call));
+      const managedLeft=[...owned.values()].some(handle=>handle.record.operation!=='host-audit');
+      if(results.some(result=>result.status==='rejected'||result.value!==true)||managedLeft)
+        throw new Error('管理写能力 worker 退出未确认，保留管理宿主所有权');
     },
     async stopOwned(){
       const pending=[...calls.entries()];for(const [controller] of pending)controller.abort(new Error('管理停止或外部 root 失效'));
       const records=[...owned.values()].map(handle=>handle.record);
       const results=await Promise.allSettled(records.map(stopRecord));
-      await Promise.allSettled(pending.map(([,call])=>call));
+      await Promise.allSettled(pending.map(([,entry])=>entry.call));
       if(results.some(result=>result.status==='rejected'||result.value!==true)||owned.size)
         throw new Error('独立业务能力 worker 退出未确认，保留管理宿主所有权');
     },

@@ -24,7 +24,7 @@ function fixture(now: () => number = Date.now) {
   return { store, filename, repair };
 }
 
-test('update silence suspends writers without stopping read-only update evidence, while STOP and shutdown drain everything',async()=>{
+test('inactive polling suspends writers without stopping root read-only evidence, while STOP and shutdown drain everything',async()=>{
   const h=fixture();let suspends=0,stops=0,launches=0;
   h.store.setUpdateSilence(true,'update');
   const controller=createAdminController({store:h.store,ownerId:'host',confirmStopped:async()=>true,
@@ -33,7 +33,9 @@ test('update silence suspends writers without stopping read-only update evidence
   try{
     assert.equal(await controller.start(),'stopped');assert.equal(suspends,1);assert.equal(stops,0);
     assert.equal(await controller.reconcile(),'stopped');assert.equal(suspends,2);assert.equal(stops,0);
-    await controller.stop('user-stop');assert.ok(stops>0);assert.equal(suspends,2);assert.equal(launches,0);
+    h.store.setUpdateSilence(false,'resume');h.store.setIntent('stopped','persisted-stop');
+    assert.equal(await controller.reconcile(),'stopped');assert.equal(suspends,3);assert.equal(stops,0);
+    await controller.stop('user-stop');assert.ok(stops>0);assert.equal(suspends,3);assert.equal(launches,0);
     const beforeShutdown=stops;await controller.shutdown();assert.ok(stops>beforeShutdown);assert.equal(h.store.control().owner_id,null);
   }finally{await controller.shutdown();h.store.close();}
 });

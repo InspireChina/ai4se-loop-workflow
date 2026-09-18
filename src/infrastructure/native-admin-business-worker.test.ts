@@ -105,6 +105,17 @@ test('startup timeout and manual stop reap a worker that never announces readine
   }
 });
 
+test('stopped-state suspension preserves the external root host audit until explicit shutdown',async()=>{
+  const h=await fixture(hungProtocol);const pending=h.worker.run({operation:'host-audit'});void pending.catch(()=>undefined);
+  try{
+    const record=await bound(h);h.store.setIntent('stopped','persisted-stopped-state');
+    await h.worker.suspendManagedOwned();process.kill(record.pid!,0);
+    assert.equal(h.store.adminBusinessWorkers(true).length,1,'root audit remains available to finish startup fencing');
+    await h.worker.stopOwned();await assert.rejects(pending,/管理停止或外部 root 失效/);
+    assertGone(record.pid);assert.equal(h.store.adminBusinessWorkers(true).length,0);
+  }finally{await h.worker.stopOwned();h.store.close();}
+});
+
 test('native write suspension preserves the actual update read-capability process; user STOP kills its physical group',
   {skip:process.platform==='win32'},async()=>{
   const h=await fixture(hungProtocol);
