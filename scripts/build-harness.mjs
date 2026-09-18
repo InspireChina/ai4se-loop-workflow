@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process';
-import { cp, mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, rm, readFile, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { tmpdir } from 'node:os';
 import { captureHarnessSource, encodeHarnessSource, extractHarnessSource } from './harness-source.mjs';
 import {harnessBuildEnvironment} from './harness-build-environment.mjs';
+import {copyHarnessBuildOutput} from './copy-harness-build-output.mjs';
 
 const root = resolve(import.meta.dirname, '..');
 // A failed/new build must never retain a previous source receipt.
@@ -31,7 +32,7 @@ try {
     if ((await captureHarnessSource(root)).sourceId !== source.sourceId) throw new Error('Harness source changed during build; candidate cannot be published');
     const buildId = (await readFile(join(frozen, '.next', 'BUILD_ID'), 'utf8')).trim();
     await mkdir(join(root, '.next'), { recursive: true });
-    await cp(join(frozen, '.next'), join(root, '.next'), { recursive: true, verbatimSymlinks: true });
+    await copyHarnessBuildOutput(join(frozen, '.next'), join(root, '.next'));
     await writeFile(receipt, encodeHarnessSource(source, { buildId, nodeVersion: process.version, platform: process.platform, arch: process.arch }), { flag: 'wx', mode: 0o600 });
     console.log(`Harness source bound to successful isolated build: ${source.sourceId}`);
   }

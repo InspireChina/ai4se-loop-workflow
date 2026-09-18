@@ -13,6 +13,7 @@ import {createNativeRuntimeUi} from './native-runtime-ui';
 import {createExternalLifecycleAdapter} from '../application/external-lifecycle-adapter';
 import type {IdleSleepInhibitor} from '../application/runtime-idle-sleep';
 import {confirmWindowsJobContainmentExit} from './windows-job-containment';
+import {createSingleFlight} from '../application/single-flight';
 
 /** Shared native service composition. Its entrypoint/desktop owner can remain
  * alive while business modules execute in a separately fenced child. No Web
@@ -116,8 +117,9 @@ export async function createNativeExternalService(ports:{
         if(!await ui.drainAll(check))return false;await auditExit(signal,check);return true;
       },
     });
-    let timer:NodeJS.Timeout|undefined;let closed=false;let starting:Promise<unknown>|undefined;let shutdown:Promise<void>|undefined;
+    let timer:NodeJS.Timeout|undefined;let closed=false;let shutdown:Promise<void>|undefined;
     const report=(error:unknown)=>{try{ports.onError?.(error);}catch{/* OS logging cannot prevent cleanup */}};
+    const reconciliation=createSingleFlight(()=>root.reconcile());
     const command=createExternalRuntimeControls({store,
       preparePublisherUpdate:(requestId,attemptId,targetVersion)=>store.preparePublisherUpdate(store.runtimeHostAuthority(ownerId),requestId,attemptId,targetVersion),
       markPublisherUpdateReady:(requestId,revision)=>store.markPublisherUpdateReady(store.runtimeHostAuthority(ownerId),requestId,revision),
@@ -158,15 +160,15 @@ export async function createNativeExternalService(ports:{
       },
       async start(){
         if(closed)throw new Error('已关闭的外部服务不能重启');
-        if(!timer){timer=setInterval(()=>{void root.reconcile().catch(report);},10_000);timer.unref();}
-        if(!starting)starting=root.reconcile().catch(error=>{report(error);return 'degraded';}).finally(()=>{starting=undefined;});
-        return starting;
+        if(!timer){timer=setInterval(()=>{void reconciliation.run().catch(report);},10_000);timer.unref();}
+        return reconciliation.run().catch(error=>{report(error);return 'degraded';});
       },
-      reconcile:()=>root.reconcile(),
+      reconcile:()=>reconciliation.run(),
       async shutdown(){
         if(shutdown)return shutdown;
         closed=true;if(timer)clearInterval(timer);timer=undefined;
-        shutdown=(async()=>{await root.shutdown();await starting;store.close();})().catch(error=>{shutdown=undefined;throw error;});return shutdown;
+        const pending=reconciliation.current();
+        shutdown=(async()=>{await root.shutdown();await pending?.catch(()=>undefined);store.close();})().catch(error=>{shutdown=undefined;throw error;});return shutdown;
       },
     };
   }catch(error){store.close();throw error;}

@@ -74,7 +74,12 @@ async function createLifecycle(root) {
   const pending=createDesktopRuntimeHost({createService:()=>createNativeExternalService(options),setStartup,
     onCreated:host=>{lifecycle=host;},isQuitting:()=>quitting,deferStartup:true,onError:error=>console.error('[startup]',error)});
   startupPromise=pending;
-  try{return await pending;}finally{if(startupPromise===pending){startupPromise=undefined;startupStore=undefined;}}
+  try{
+    const host=await pending;
+    selectedRuntimeRoot=host.service.store.runtimeInstallation()?.artifact.root||host.service.bootstrap.root;
+    configureRuntimeEnvironment(runtimeRoot());
+    return host;
+  }finally{if(startupPromise===pending){startupPromise=undefined;startupStore=undefined;}}
 }
 
 function availablePort() {
@@ -91,7 +96,9 @@ function availablePort() {
 }
 
 async function startServer() {
+  if(!lifecycle&&startupPromise)await startupPromise;
   if (!lifecycle) throw new Error('独立运行宿主尚未初始化');
+  await lifecycle.ready;
   const state=await lifecycle.reconcile();
   if(state==='observer'||state==='updating')throw new Error(`桌面外部 root 交接尚未完成：${state}`);
   return lifecycle.ui.start(await availablePort());
@@ -172,6 +179,7 @@ function installLifecycleHandlers() {
   });
   ipcMain.handle('loopwork:lifecycle:status', async (event) => {
     trustedRenderer(event);
+    if(!lifecycle)return {initializing:true,message:'运行宿主正在初始化'};
     return lifecycle.status();
   });
   ipcMain.handle('loopwork:lifecycle:command', async (event, action) => {
@@ -315,10 +323,7 @@ else {
   app.whenReady().then(async () => {
     const bootstrap = runtimeRoot();
     configureRuntimeEnvironment(bootstrap);
-    lifecycle = await createLifecycle(bootstrap);
-    if(quitting)return;
-    selectedRuntimeRoot=lifecycle.service.store.runtimeInstallation()?.artifact.root||lifecycle.service.bootstrap.root;
-    configureRuntimeEnvironment(runtimeRoot());
+    const initializing=createLifecycle(bootstrap);
     installLifecycleHandlers();
     createTray();
     powerMonitor.on('shutdown', (event) => {
@@ -327,12 +332,14 @@ else {
       void requestSystemShutdown().catch(reportShutdownFailure);
     });
     powerMonitor.on('resume', () => {
-      void lifecycle.reconcile({
+      void lifecycle?.reconcile({
         source: { adapter: 'electron', instanceId: `electron-${process.pid}` },
         trigger: 'periodic-health-check',
       });
     });
     await createWindow();
+    lifecycle=await initializing;
+    if(quitting)return;
   }).catch(async (error) => {
     if(quitting)return;
     console.error(error);

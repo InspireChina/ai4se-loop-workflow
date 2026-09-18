@@ -67,7 +67,10 @@ test('desktop may publish immediately while first-start handoff continues in the
     lifecycle:{status:async()=>({}),command:async()=>({snapshot:{intent:{desired:'stopped'}}})},ui:{},reconcile:async()=> 'hosting'};
   const host=await createDesktopRuntimeHost({createService:async()=>service,onCreated:()=>{},isQuitting:()=>false,deferStartup:true,
     onError:(error:unknown)=>errors.push(error),startupHandoffTimeoutMs:0});
-  assert.equal(host.service,service);resolveStart('observer');await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(host.service,service);
+  let ready=false;void host.ready.then(()=>{ready=true;});await new Promise(resolve=>setImmediate(resolve));assert.equal(ready,false);
+  resolveStart('observer');await host.ready;await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(ready,true);
   assert.match(String(errors[0]),/observer/);
 });
 

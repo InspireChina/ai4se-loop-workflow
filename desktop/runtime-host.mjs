@@ -19,15 +19,17 @@ async function settleStartup(service,ports,state){
  * states are handoff progress, not permission to start the desktop UI. */
 export async function createDesktopRuntimeHost(ports){
   const service=await ports.createService();
+  let ready;
   const host={service,ui:service.ui,status:service.lifecycle.status,reconcile:service.reconcile,shutdown:service.shutdown,
+    get ready(){return ready;},
     command:async input=>{const receipt=await service.lifecycle.command(input);
       try{ports.setStartup?.(receipt.snapshot.intent.desired);}catch{receipt.warning='自动启动设置未能保存，运行控制已按回执处理。';}return receipt;}};
   ports.onCreated(host);
   if(ports.isQuitting()){await service.shutdown();return host;}
-  const startup=Promise.resolve().then(()=>service.start()).then(state=>settleStartup(service,ports,state));
+  ready=Promise.resolve().then(()=>service.start()).then(state=>settleStartup(service,ports,state));
   const report=state=>{if(transientStartupState(state))ports.onError?.(new Error(`桌面外部 root 交接尚未完成：${state}`));};
-  if(ports.deferStartup)void startup.then(report,error=>ports.onError?.(error));
-  else report(await startup);
+  if(ports.deferStartup)void ready.then(report,error=>ports.onError?.(error));
+  else report(await ready);
   if(!ports.isQuitting())try{ports.setStartup?.(service.store.control().desired_intent);}catch(error){ports.onError?.(error);}
   return host;
 }
