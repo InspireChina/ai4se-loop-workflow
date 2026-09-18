@@ -88,6 +88,18 @@ test('root management starts before selected business and remains supervised aft
   }finally{await host.shutdown();f.store.close();}
 });
 
+test('management background work is released only after the business admission attempt settles',async()=>{
+  const f=fixture();f.store.setIntent('running','start');
+  const host=createExternalRuntimeHost({...f.ports,management:{
+    start:async()=>{f.actions.push('management-admitted');},
+    settled:state=>{f.actions.push(`management-background:${state}`);},shutdown:async()=>undefined,
+  }});
+  try{
+    assert.equal(await host.reconcile(),'hosting');
+    assert.deepEqual(f.actions,['management-admitted','validate:known-good','ensure:known-good','management-background:hosting']);
+  }finally{await host.shutdown();f.store.close();}
+});
+
 test('observing a foreign management lease blocks ordinary business startup but does not deadlock an authorized external update',async()=>{
   const f=fixture();const host=createExternalRuntimeHost({...f.ports,management:{start:async()=> 'observer',shutdown:async()=>undefined}});
   try{

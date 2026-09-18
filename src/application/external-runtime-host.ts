@@ -17,7 +17,7 @@ export function createExternalRuntimeHost(ports:{
   drainNormal:(authority:RuntimeHostAuthority,check:()=>void)=>Promise<boolean>;
   updates:{reconcile:(updateId:string)=>Promise<unknown>;shutdown:()=>Promise<void>};
   cancelOwned:(authority:RuntimeHostAuthority)=>Promise<boolean>;
-  management?:{start:(authority:RuntimeHostAuthority)=>Promise<unknown>;shutdown:()=>Promise<void>};
+  management?:{start:(authority:RuntimeHostAuthority)=>Promise<unknown>;settled?:(state:'hosting'|'updating'|'failed')=>void;shutdown:()=>Promise<void>};
   onError?:(error:unknown)=>void;
   onFailure?:(failure:ExternalRuntimeFailure)=>void;
   scheduleInterval?:(callback:()=>void,ms:number)=>NodeJS.Timeout;cancelInterval?:(timer:NodeJS.Timeout)=>void;
@@ -25,6 +25,7 @@ export function createExternalRuntimeHost(ports:{
   let authority:RuntimeHostAuthority|undefined;let active:AbortController|undefined;let timer:NodeJS.Timeout|undefined;
   let pending:Promise<'observer'|'updating'|'hosting'>|undefined;let shutdown:Promise<void>|undefined;let closed=false;
   const report=(error:unknown)=>{try{ports.onError?.(error);}catch{/* diagnostics cannot stop fencing */}};
+  const managementSettled=(state:'hosting'|'updating'|'failed')=>{try{ports.management?.settled?.(state);}catch(error){report(error);}};
   const assertHost=()=>{if(closed||!authority)throw new Error('外部宿主已停止');ports.store.assertRuntimeHost(authority);};
   const check=()=>{assertHost();if(active?.signal.aborted)throw new Error('外部宿主操作已取消');};
   const cancel=async()=>{
@@ -58,32 +59,34 @@ export function createExternalRuntimeHost(ports:{
       check();intentRevision=ports.store.control().intent_revision;const updating=ports.store.activeRuntimeUpdate();
       if(updating) {
         // No ordinary root is started alongside a held update generation.
-        if(!await ports.drainNormal(authority,check))return 'updating';check();
-        await ports.updates.reconcile(updating.request.updateId);check();return 'updating';
+        if(!await ports.drainNormal(authority,check)){managementSettled('updating');return 'updating';}check();
+        await ports.updates.reconcile(updating.request.updateId);check();managementSettled('updating');return 'updating';
       }
       if(ports.store.control().management_mode!=='normal') {
         // Publisher preparation is also an admission barrier even before an
         // automatic RuntimeUpdate exists. Do not recreate an ordinary host
         // behind a ready-for-update receipt on the next periodic tick.
-        await ports.drainNormal(authority,check);check();return 'updating';
+        await ports.drainNormal(authority,check);check();managementSettled('updating');return 'updating';
       }
       if(managementState==='observer')return 'observer';
       ordinary=true;
       let selected=ports.store.runtimeInstallation();
+      let selectionValidated=false;
       if(!selected) {
         stage='validation';
         await ports.validateInstalled(ports.bootstrap,active.signal,check);check();
         // Another authorized writer may have installed a selection while the
         // bootstrap hash was read. Never overwrite that winner.
         selected=ports.store.runtimeInstallation()||ports.store.initializeRuntimeInstallation(ports.bootstrap);
+        selectionValidated=JSON.stringify(selected.artifact)===JSON.stringify(ports.bootstrap);
       }
       const revision=selected.revision;artifact=selected.artifact;selectionRevision=revision;
       const assertSelection=()=>{
         check();if(ports.store.control().management_mode!=='normal'||ports.store.activeRuntimeUpdate()||ports.store.runtimeInstallation()?.revision!==revision)throw new Error('启动期间安装选择或更新门禁已变化');
       };
-      stage='validation';await ports.validateInstalled(artifact,active.signal,assertSelection);assertSelection();
+      stage='validation';if(!selectionValidated)await ports.validateInstalled(artifact,active.signal,assertSelection);assertSelection();
       stage='startup';
-      await ports.ensureSelected(artifact,authority,active.signal,assertSelection);assertSelection();return 'hosting';
+      await ports.ensureSelected(artifact,authority,active.signal,assertSelection);assertSelection();managementSettled('hosting');return 'hosting';
     }catch(error){
       report(error);
       // Stop/fence/selection changes are not runtime faults. Recording facts
@@ -95,7 +98,7 @@ export function createExternalRuntimeHost(ports:{
           &&(selectionRevision===null||ports.store.runtimeInstallation()?.revision===selectionRevision))
           ports.onFailure?.({error,stage,artifact,authority,intentRevision,selectionRevision});
       }catch(diagnosticError){report(diagnosticError);}
-      active.abort();await Promise.resolve().then(()=>ports.cancelOwned(authority!)).catch(report);throw error;
+      active.abort();await Promise.resolve().then(()=>ports.cancelOwned(authority!)).catch(report);managementSettled('failed');throw error;
     }
     finally {active=undefined;}
   }

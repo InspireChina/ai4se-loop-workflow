@@ -45,6 +45,7 @@ export function createAdminController(ports: AdminControllerPorts) {
   const settlements = new Set<Promise<void>>();
   let capabilityStop: Promise<void> | undefined;
   let fullyStoppedRevision: number | undefined;
+  let backgroundEnabled = false;
   const report = (error: unknown) => {
     try { ports.onError?.(error); } catch { /* Diagnostics cannot stop supervision or physical cleanup. */ }
   };
@@ -148,7 +149,7 @@ export function createAdminController(ports: AdminControllerPorts) {
     if (stoppedAny) await ports.reconcileTakeovers(current);
   }
 
-  async function reconcileOwned() {
+  async function admitOwned():Promise<'admitted'|'observer'|'stopped'> {
     if (shuttingDown) return 'stopped' as const;
     authority = store.acquireSupervisor(ports.ownerId);
     if (!authority) {
@@ -181,22 +182,29 @@ export function createAdminController(ports: AdminControllerPorts) {
       report(error);
       return 'observer' as const;
     }
+    return 'admitted' as const;
+  }
+
+  async function reconcileOwned() {
+    const admission=await admitOwned();
+    if(admission!=='admitted')return admission;
+    const currentAuthority=authority!;
     // Discovery is an adapter, not a dependency on healthy business storage.
     // Already durable management work continues even if this read fails.
     try { await ports.discover?.(); } catch (error) { report(error); }
     const afterDiscovery = inactiveState();
     if (afterDiscovery) return afterDiscovery;
-    try { await reconcileInvalidTakeovers(authority); } catch (error) { report(error); }
+    try { await reconcileInvalidTakeovers(currentAuthority); } catch (error) { report(error); }
     const afterRevocation = inactiveState();
     if (afterRevocation) return afterRevocation;
-    try { await ports.manageActions?.(authority); } catch (error) { report(error); }
+    try { await ports.manageActions?.(currentAuthority); } catch (error) { report(error); }
     for (const entry of [...active.values()]) {
       if (!entry.completionSettled) continue;
       try {
         const stopped = await entry.handle.stop();
         if (stopped) {
-          if (!store.recoverStoppedSubmission(authority, entry.claim.attempt.attemptId, true)) {
-            store.retireStoppedAttempt(authority, entry.claim.attempt.attemptId, true, '不确定退出后的实际清理已确认');
+          if (!store.recoverStoppedSubmission(currentAuthority, entry.claim.attempt.attemptId, true)) {
+            store.retireStoppedAttempt(currentAuthority, entry.claim.attempt.attemptId, true, '不确定退出后的实际清理已确认');
           }
           active.delete(entry.claim.attempt.attemptId);
         }
@@ -206,18 +214,18 @@ export function createAdminController(ports: AdminControllerPorts) {
       if (active.has(attempt.attemptId)) continue;
       try {
         const stopped = await ports.confirmStopped(attempt);
-        if (!store.recoverStoppedSubmission(authority, attempt.attemptId, stopped)) {
-          store.retireStoppedAttempt(authority, attempt.attemptId, stopped, '恢复失联 Admin；保留原调查记录');
+        if (!store.recoverStoppedSubmission(currentAuthority, attempt.attemptId, stopped)) {
+          store.retireStoppedAttempt(currentAuthority, attempt.attemptId, stopped, '恢复失联 Admin；保留原调查记录');
         }
       } catch (error) { report(error); }
     }
-    try { await ports.manageFollowups?.(authority); } catch (error) { report(error); }
+    try { await ports.manageFollowups?.(currentAuthority); } catch (error) { report(error); }
     const afterCleanup = inactiveState();
     if (afterCleanup) return afterCleanup;
     if (active.size) return 'running' as const;
     // Re-check intent and authority atomically in claimNext, after slow cleanup.
     let claim: RepairClaim | null;
-    try { claim = store.claimScheduled(authority, Boolean(ports.launchVerification)); }
+    try { claim = store.claimScheduled(currentAuthority, Boolean(ports.launchVerification)); }
     catch (error) {
       // A stop/update/fence can commit from another host between our read and
       // the atomic claim. It is cancellation, not a failed repair attempt.
@@ -257,22 +265,35 @@ export function createAdminController(ports: AdminControllerPorts) {
     }
   }
 
+  const ensureTimer=()=>{
+    if(timer)return;
+    timer=(ports.scheduleInterval || setInterval)(() => {
+      // Renewal is never queued behind slow launch/cleanup. Admission can be
+      // armed before background discovery without letting its lease expire.
+      try {
+        if (authority && !store.renewSupervisor(authority)) void stopExecutionAndCapabilities().catch(report);
+      } catch (error) { report(error); void stopExecutionAndCapabilities().catch(report); }
+      if (!backgroundEnabled || pendingTick) return;
+      pendingTick = true;
+      void serialize(reconcileOwned).catch(report).finally(() => { pendingTick = false; });
+    }, 10_000);
+    timer.unref();
+  };
+
   return {
     reconcile: () => serialize(reconcileOwned),
+    /** Acquire/fence management writers before ordinary business admission,
+     * without putting discovery, repair scheduling or follow-ups on the
+     * desktop/UI critical path. */
+    async admit() {
+      if (shuttingDown) throw new Error('已关闭的 Admin Controller 不能重新启动');
+      ensureTimer();
+      return serialize(admitOwned);
+    },
     async start() {
       if (shuttingDown) throw new Error('已关闭的 Admin Controller 不能重新启动');
-      if (!timer) {
-        timer = (ports.scheduleInterval || setInterval)(() => {
-          // Renewal is never queued behind slow launch/cleanup.
-          try {
-            if (authority && !store.renewSupervisor(authority)) void stopExecutionAndCapabilities().catch(report);
-          } catch (error) { report(error); void stopExecutionAndCapabilities().catch(report); }
-          if (pendingTick) return;
-          pendingTick = true;
-          void serialize(reconcileOwned).catch(report).finally(() => { pendingTick = false; });
-        }, 10_000);
-        timer.unref();
-      }
+      backgroundEnabled = true;
+      ensureTimer();
       return serialize(reconcileOwned);
     },
     async stop(requestId: string) {
@@ -294,6 +315,7 @@ export function createAdminController(ports: AdminControllerPorts) {
     },
     async shutdown() {
       shuttingDown = true;
+      backgroundEnabled = false;
       if (timer) (ports.cancelInterval || clearInterval)(timer);
       timer = undefined;
       // Stop both paths even if a capability fails. Never relinquish the

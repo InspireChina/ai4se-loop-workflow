@@ -13,12 +13,32 @@ test('parent watcher coalesces startup, checks cheap availability and detects PI
   }finally{watch.stop();}
 });
 
-test('parent identity absence or query failure never authorizes a host under unknown ownership', async () => {
-  const start=createHostParentWatch({isAvailable:()=>true,readIdentity:async()=>null,onLost:async()=>undefined});
+test('parent identity absence never authorizes startup, while one transient runtime query failure remains unknown', async () => {
+  const start=createHostParentWatch({isAvailable:()=>true,readIdentity:async()=>null,onLost:async()=>undefined,waitBeforeRetry:async()=>undefined});
   await assert.rejects(start.start(),/无法确认/);start.stop();
-  let now=0;let reads=0;let lost=0;
-  const watch=createHostParentWatch({now:()=>now,isAvailable:()=>true,readIdentity:async()=>{if(reads++)throw new Error('OS lookup unavailable');return 'parent';},onLost:async()=>{lost++;}});
-  try{await watch.start();now=30_000;await watch.check();assert.equal(lost,1);}finally{watch.stop();}
+  let now=0;let reads=0;let lost=0;const values:Array<string|null|Error>=['parent',new Error('OS lookup unavailable'),'parent'];
+  const watch=createHostParentWatch({now:()=>now,isAvailable:()=>true,identityRetryMs:100,
+    readIdentity:async()=>{const value=values[reads++];if(value instanceof Error)throw value;return value??null;},onLost:async()=>{lost++;}});
+  try{
+    await watch.start();now=30_000;await watch.check();assert.equal(lost,0);
+    now+=100;await watch.check();assert.equal(lost,0);assert.equal(reads,3);
+  }finally{watch.stop();}
+});
+
+test('parent watcher fences after consecutive unknown identity evidence but mismatches immediately',async()=>{
+  let now=0;let lost:string[]=[];let value:string|null='parent';
+  const watch=createHostParentWatch({now:()=>now,isAvailable:()=>true,identityRetryMs:100,maxUnknownChecks:3,
+    readIdentity:async()=>value,onLost:async error=>{lost.push(error.message);}});
+  try{
+    await watch.start();value=null;now=30_000;
+    await watch.check();now+=100;await watch.check();assert.equal(lost.length,0);
+    now+=100;await watch.check();assert.equal(lost.length,1);assert.match(lost[0],/连续无法确认/);
+  }finally{watch.stop();}
+
+  now=0;lost=[];value='parent';
+  const mismatch=createHostParentWatch({now:()=>now,isAvailable:()=>true,readIdentity:async()=>value,onLost:async error=>{lost.push(error.message);}});
+  try{await mismatch.start();value='reused';now=30_000;await mismatch.check();assert.equal(lost.length,1);assert.match(lost[0],/身份已改变/);}
+  finally{mismatch.stop();}
 });
 
 test('slow parent identity query does not block cheap death detection or restart observation after stop', async () => {

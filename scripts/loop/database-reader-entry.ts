@@ -22,7 +22,8 @@ async function main() {
   if(allocation.parentPid!==process.ppid||resolve(allocation.appRoot)!==appRoot||allocation.pid&&allocation.pid!==process.pid)throw new Error('数据库读者父进程或分配不匹配');
   // Self-binding before DB imports also preserves a parent-death launch gap.
   atomicReplaceFileSync(allocationPath,JSON.stringify({...allocation,pid:process.pid,groupId:process.platform!=='win32'?process.pid:null}));
-  const {inspectProcessIdentity}=await import('../../src/infrastructure/process-tree');const identity=await inspectProcessIdentity(process.pid);
+  const {waitForProcessIdentity}=await import('../../src/infrastructure/process-tree');
+  const identity=await waitForProcessIdentity(process.pid,{timeoutMs:5000});
   if(!identity)throw new Error('数据库读者启动身份无法确认');
   atomicReplaceFileSync(allocationPath,JSON.stringify({...JSON.parse(readFileSync(allocationPath,'utf8')),marker:identity.startMarker}));
   let completed=false;process.once('disconnect',()=>{if(!completed)process.exit(1);});

@@ -41,6 +41,18 @@ test('serialized capability preparation retains management ownership while block
   }finally{await controller.shutdown();h.store.close();}
 });
 
+test('admission acquires and renews supervision without running discovery or repair scheduling on the caller path',async()=>{
+  const h=fixture();let discoveries=0;let launches=0;let tick!:()=>void;
+  const controller=createAdminController({store:h.store,ownerId:'admission-host',confirmStopped:async()=>true,
+    scheduleInterval:callback=>{tick=callback as ()=>void;return setInterval(()=>undefined,100_000);},
+    discover:async()=>{discoveries++;},launch:async()=>{launches++;return {completion:new Promise(()=>{}),stop:async()=>true};}});
+  try{
+    assert.equal(await controller.admit(),'admitted');assert.equal(discoveries,0);assert.equal(launches,0);
+    const expiry=h.store.control().expires_at;tick();assert.ok(h.store.control().expires_at>=expiry);
+    assert.equal(await controller.reconcile(),'launched');assert.equal(discoveries,1);assert.equal(launches,1);
+  }finally{await controller.shutdown();h.store.close();}
+});
+
 test('inactive polling suspends writers without stopping root read-only evidence, while STOP and shutdown drain everything',async()=>{
   const h=fixture();let suspends=0,stops=0,launches=0;
   h.store.setUpdateSilence(true,'update');

@@ -116,16 +116,20 @@ export function createNativeExternalRuntime(ports:{
       // admitted, otherwise an unfixed cached runtime can deadlock its own
       // migration and prevent the new release from ever becoming selected.
       ports.store.beginInstalledBootstrapTransition(authority,ports.bootstrap);assertRoot();
-      let [result]=await Promise.all([management.start(),idleSleep.start()]);
+      let [result]=await Promise.all([management.admit(),idleSleep.start()]);
       if(result==='observer'){
         // An older business host may still own the previous management lease,
         // or serialized capability preparation may still be draining a
         // predecessor. Drain the captured native host first, then retry;
         // never let a fresh business child win either startup race.
         if(!await normal.drainAll(()=>ports.store.assertRuntimeHost(authority)))return 'observer';
-        result=await management.reconcile();
+        result=await management.admit();
       }
       await idleSleep.reconcile();return result;
+    },settled:()=>{
+      // Ordinary/update admission has finished, so expensive discovery and
+      // repair scheduling can proceed without racing the startup Job admission.
+      void management.start().catch(error=>{try{ports.onError?.(error);}catch{/* diagnostics cannot stop the root */}});
     },shutdown:async()=>{
       const results=await Promise.allSettled([management.shutdown(),idleSleep.shutdown(),Promise.resolve().then(async()=>{
         if(ports.stopAdditionalHosts&&!await ports.stopAdditionalHosts(rootAuthority))throw new Error('额外宿主实际退出未确认');

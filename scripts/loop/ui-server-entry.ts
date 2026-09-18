@@ -2,7 +2,7 @@ import {createRequire} from 'node:module';
 import {readFile} from 'node:fs/promises';
 import {isAbsolute,join,resolve} from 'node:path';
 import {AdminManagementStore} from '../../src/infrastructure/admin-management-store';
-import {inspectProcessIdentity} from '../../src/infrastructure/process-tree';
+import {inspectProcessIdentity,waitForProcessIdentity} from '../../src/infrastructure/process-tree';
 import {readHarnessArtifact} from '../harness-artifact.mjs';
 import {createHostParentWatch} from '../../src/application/host-parent-watch';
 import {sanitizeDiagnosticText} from '../../src/infrastructure/diagnostic-text';
@@ -41,7 +41,7 @@ async function main(){
         ||resolve(appRoot)!==resolve(source.artifact.root)||store.control().management_mode!=='normal'||store.activeRuntimeUpdate()
         ||JSON.stringify(store.runtimeInstallation()?.artifact)!==JSON.stringify(source.artifact))throw new Error('界面服务来源、父宿主或更新门禁失效');};
     guard();const actual=await readHarnessArtifact(appRoot,{assertCurrent:guard});guard();
-    if(JSON.stringify(actual)!==JSON.stringify(source.artifact)||(await inspectProcessIdentity(process.pid))?.startMarker!==source.marker)throw new Error('界面服务实际产物或 OS 身份不匹配');guard();
+    if(JSON.stringify(actual)!==JSON.stringify(source.artifact)||(await waitForProcessIdentity(process.pid,{timeoutMs:5000}))?.startMarker!==source.marker)throw new Error('界面服务实际产物或 OS 身份不匹配');guard();
     const protocol=JSON.parse(await readFile(join(appRoot,'external-ui-protocol.json'),'utf8'));guard();
     if(protocol.version!==1||protocol.sourceId!==actual.sourceId)throw new Error('所选界面版本不支持独立监督协议');
     watch=createHostParentWatch({isAvailable:()=>{try{process.kill(source.parentPid,0);return true;}catch{return false;}},

@@ -12,6 +12,12 @@ OS 负责重新启动稳定外部 root。独立入口使用 `createNativeExterna
 重启宿主不是启动 Loop 的命令；独立管理库中已保存的 stop 和 update-silence 仍然有效。
 本配置生成器只写配置产物，不注册、覆盖或移除任何 OS 作业。启用托管是单独的运维操作。
 
+## 桌面启动分级
+
+桌面首屏、管理准入和 Admin 业务调度是不同阶段。Electron 可先显示本地控制页；外部 root 必须取得监督租约并排空旧写能力，才允许普通业务宿主准入。但配置发现、RepairCase 调度、Action 和 Follow-up 不属于普通宿主的同步启动前置；它们在本次普通/更新宿主准入尝试结束后由 Admin 后台继续。监督续租不依赖后台调度，因此慢发现不会让已取得的写隔离过期。
+
+进程身份观测使用三态语义：明确 PID 死亡或读到不同启动标记立即失效；读到相同标记继续；OS 查询临时失败为 unknown，需连续多次无法确认才关闭子宿主。这不降低业务写入、Job 容器、版本选择或实际退出屏障；只是不再把单次观测工具崩溃当成身份已改变的正面证据。
+
 ## 两种入口
 
 - `desktop`：直接启动已安装应用的真实可执行文件并传 `--hidden`。桌面源码已改为与 standalone 共用 `createNativeExternalService`，独立 root 先初始化管理库再读取、校验业务安装；界面通过受控私有 IPC 请求运行控制，不取得业务监督权。实际桌面 GUI 与发行更新后的选版、恢复仍待验收，不能仅凭源码接线声明迁移完成。不要把 `.app` 目录、快捷方式或启动脚本当作可执行文件。`data-root` 应为该应用实际 userData 下的 data 目录，不是另选一个目录；桌面配置仍由 Electron 初始化。
@@ -49,7 +55,7 @@ entry 是实际可运行的 JS/CJS，不是直接交给裸 Node 的 `.ts` 文件
 - Linux：放到当前用户 systemd user unit 目录后，`systemctl --user daemon-reload` 和 `enable --now <label>.service`；停止 / 禁用用同一准确 unit。使用 Restart=always、关闭启动频次熔断、10 秒重启间隔、45 秒停止期限和 KillMode=control-group。退出登录后继续运行需要单独配置 user manager lingering，不是这个文件自动授予的权限。ExecStart 使用 `:` 禁止环境变量替换，路径引号 / 反斜杠 / `%` 已转义；需要支持该前缀的 systemd。参考 [systemd.service](https://www.freedesktop.org/software/systemd/man/latest/systemd.service.html)。
 - Windows：由目标交互用户检查生成的 register.ps1，再执行其中注册命令；已有同名 task 会被拒绝，不使用 Force 覆盖。使用当前 SID、Limited / Interactive、IgnoreNew、无三天执行期限、允许电池持续运行。登录触发加每分钟周期触发，不依赖有限 RestartCount；省略 [RepetitionPattern.Duration](https://learn.microsoft.com/en-us/windows/win32/taskschd/repetitionpattern-duration) 表示持续重复。完全停止托管需停止并取消这个准确 ScheduledTask；注销用户后 Interactive 任务不能假装仍然运行。
 
-Windows standalone action 使用已生成内容的 EncodedCommand，不依赖执行未签名 `.ps1` 文件的客户端默认 execution policy；审计副本仍保留为 launch.ps1，修改副本不会修改已注册任务。包装进程将自己的实际 PID 传给宿主，宿主绑定启动父进程、每秒检查存活、每 30 秒异步复核创建身份；慢身份查询不阻塞廉价存活检查。父进程失效或身份无法确认时只关闭当前宿主，不杀一个被复用 PID 的其他进程。域策略、Constrained Language 或任务授权限制仍需对应系统证据，不能声称配置已通过真机验证。
+Windows standalone action 使用已生成内容的 EncodedCommand，不依赖执行未签名 `.ps1` 文件的客户端默认 execution policy；审计副本仍保留为 launch.ps1，修改副本不会修改已注册任务。包装进程将自己的实际 PID 传给宿主，宿主绑定启动父进程、每秒检查存活、每 30 秒异步复核创建身份；慢身份查询不阻塞廉价存活检查。父进程明确失效或读到不同启动标记时只关闭当前宿主，不杀一个被复用 PID 的其他进程。单次身份查询失败不是上述正面证据；连续查询失败超过有界阈值仍失败关闭。域策略、Constrained Language 或任务授权限制仍需对应系统证据，不能声称配置已通过真机验证。
 
 停止 Loop 会终止业务和修复活动，托管宿主可保持待命。OS 作业被启用时，退出宿主本身会被重启；想完全退出托管，需先停用对应 OS 作业。应用更新静默不会授权启动新的 Agent。
 

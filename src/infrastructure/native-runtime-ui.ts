@@ -93,9 +93,17 @@ export function createNativeRuntimeUi(ports:{store:AdminManagementStore;dataRoot
         if(ports.store.control().management_mode!=='normal'||ports.store.activeRuntimeUpdate()
           ||JSON.stringify(ports.store.runtimeInstallation()?.artifact)!==JSON.stringify(artifact))throw new Error('界面服务来源或更新门禁已变化');};
       starting=(async()=>{
-        guard();if(JSON.stringify(await readHarnessArtifact(artifact.root,{signal,assertCurrent:guard}))!==JSON.stringify(artifact))throw new Error('界面服务实际产物不匹配');guard();
+        guard();const actualArtifact=await readHarnessArtifact(artifact.root,{signal,assertCurrent:guard});
+        if(JSON.stringify(actualArtifact)!==JSON.stringify(artifact))throw new Error('界面服务实际产物不匹配');guard();
         const tools=ports.store.runtimeHostArtifact(authority);
-        if(!tools||tools.root!==ports.toolRoot||JSON.stringify(await readHarnessArtifact(ports.toolRoot,{signal,assertCurrent:guard}))!==JSON.stringify(tools))throw new Error('界面启动 helper 不属于当前稳定 root');guard();
+        if(!tools||tools.root!==ports.toolRoot)throw new Error('界面启动 helper 不属于当前稳定 root');
+        // The normal first-start case binds UI code and helper code to the
+        // same immutable artifact. Do not hash the same tree twice in one
+        // guarded admission; different selected/management roots still each
+        // receive their own full verification.
+        const actualTools=JSON.stringify(tools)===JSON.stringify(artifact)&&ports.toolRoot===artifact.root
+          ?actualArtifact:await readHarnessArtifact(ports.toolRoot,{signal,assertCurrent:guard});
+        if(JSON.stringify(actualTools)!==JSON.stringify(tools))throw new Error('界面启动 helper 不属于当前稳定 root');guard();
         const prior=ports.store.runtimeUiProcesses().find(row=>row.status!=='exited');const handle=prior&&handles.get(prior.allocationId);
         if(prior?.status==='ready'&&handle&&prior.authority.ownerId===authority.ownerId&&prior.authority.token===authority.token
           &&JSON.stringify(prior.artifact)===JSON.stringify(artifact)&&handle.child.exitCode===null&&handle.child.signalCode===null)return {url:handle.url};

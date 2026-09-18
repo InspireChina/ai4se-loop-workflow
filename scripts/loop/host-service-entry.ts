@@ -165,8 +165,8 @@ async function main() {
       };
       assertNormal();updateStore.bindRuntimeHostProcess(normalProcess,process.pid);
       normalFence=setInterval(()=>{try{assertNormal();}catch(error){void shutdown(error);}},1000);normalFence.unref();
-      const {inspectProcessIdentity}=await import('../../src/infrastructure/process-tree');
-      const identity=await inspectProcessIdentity(process.pid);if(!identity)throw new Error('普通宿主无法确认真实进程身份');
+      const {waitForProcessIdentity}=await import('../../src/infrastructure/process-tree');
+      const identity=await waitForProcessIdentity(process.pid,{timeoutMs:5000});if(!identity)throw new Error('普通宿主无法确认真实进程身份');
       updateStore.bindRuntimeHostProcess(normalProcess,process.pid,identity.startMarker);
       const actual=await readHarnessArtifact(appRoot,{assertCurrent:assertNormal});
       if(JSON.stringify(actual)!==JSON.stringify(normalProcess.artifact))throw new Error('普通宿主实际安装字节与分配不符');assertNormal();
@@ -181,8 +181,8 @@ async function main() {
       // The child also binds before expensive imports/identity validation,
       // reducing the parent-death gap. Unknown reservations are never guessed.
       updateStore.bindRuntimeUpdateProcess(updateProcess,process.pid);
-      const {inspectProcessIdentity}=await import('../../src/infrastructure/process-tree');
-      const ownIdentity=await inspectProcessIdentity(process.pid);
+      const {waitForProcessIdentity}=await import('../../src/infrastructure/process-tree');
+      const ownIdentity=await waitForProcessIdentity(process.pid,{timeoutMs:5000});
       if(!ownIdentity)throw new Error('无法确认持有式宿主真实进程身份');
       updateStore.bindRuntimeUpdateProcess(updateProcess,process.pid,ownIdentity.startMarker);
       const actual=await readHarnessArtifact(appRoot,{assertCurrent:()=>updateStore!.assertRuntimeUpdate(updateProcess!.authority)});
