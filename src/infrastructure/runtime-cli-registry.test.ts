@@ -35,6 +35,17 @@ test('Windows CLI admission degrades only an unavailable Job observation behind 
   }finally{f.store.close();}
 });
 
+test('standard Windows CLI admission uses the current business generation without a Job probe',async()=>{
+  const f=await fixture(undefined,process.pid,true,74);let inspected=false;
+  try{
+    await assertRuntimeCliCaller(f.store,f.record.allocationId,{platform:'win32',safetyMode:'standard',supervisionToken:74,
+      inspectMembership:async()=>{inspected=true;return 'not-member';}});
+    assert.equal(inspected,false);
+    await assert.rejects(assertRuntimeCliCaller(f.store,f.record.allocationId,{platform:'win32',safetyMode:'standard',supervisionToken:75}),
+      /有效业务监督代次/);
+  }finally{f.store.close();}
+});
+
 test('independent CLI admission is durable, source/intent fenced and cannot reopen after drain',async()=>{
   const f=await fixture();
   try {

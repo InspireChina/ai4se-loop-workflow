@@ -19,6 +19,8 @@ async function main(){
   const appRoot=args.get('--app-root'),dataRoot=args.get('--data-root'),allocationId=args.get('--ui-allocation');
   if(!appRoot||!dataRoot||!isAbsolute(appRoot)||!isAbsolute(dataRoot)||/[\x00-\x1f]/.test(appRoot+dataRoot)
     ||!allocationId||!/^[a-f0-9-]{36}$/.test(allocationId))throw new Error('界面服务必须绑定实际路径和分配');
+  const standardMode=process.env.LOOP_RUNTIME_SAFETY==='standard';
+  const relaxedWindows=standardMode&&process.platform==='win32';
   const store=new AdminManagementStore(join(dataRoot,'admin-management.db'));let watch:ReturnType<typeof createHostParentWatch>|undefined;
   let fence:NodeJS.Timeout|undefined;let closing=false;
   const shutdown=async(error?:unknown)=>{if(closing)return;closing=true;watch?.stop();if(fence)clearInterval(fence);
@@ -40,12 +42,16 @@ async function main(){
         ||JSON.stringify(current.authority)!==JSON.stringify(source.authority)||JSON.stringify(current.artifact)!==JSON.stringify(source.artifact)
         ||resolve(appRoot)!==resolve(source.artifact.root)||store.control().management_mode!=='normal'||store.activeRuntimeUpdate()
         ||JSON.stringify(store.runtimeInstallation()?.artifact)!==JSON.stringify(source.artifact))throw new Error('界面服务来源、父宿主或更新门禁失效');};
-    guard();const actual=await readHarnessArtifact(appRoot,{assertCurrent:guard});guard();
-    if(JSON.stringify(actual)!==JSON.stringify(source.artifact)||(await waitForProcessIdentity(process.pid,{timeoutMs:5000}))?.startMarker!==source.marker)throw new Error('界面服务实际产物或 OS 身份不匹配');guard();
+    guard();const actual=standardMode?source.artifact:await readHarnessArtifact(appRoot,{assertCurrent:guard});guard();
+    if(JSON.stringify(actual)!==JSON.stringify(source.artifact)
+      ||!relaxedWindows&&(await waitForProcessIdentity(process.pid,{timeoutMs:5000}))?.startMarker!==source.marker)
+      throw new Error('界面服务实际产物或 OS 身份不匹配');guard();
     const protocol=JSON.parse(await readFile(join(appRoot,'external-ui-protocol.json'),'utf8'));guard();
     if(protocol.version!==1||protocol.sourceId!==actual.sourceId)throw new Error('所选界面版本不支持独立监督协议');
-    watch=createHostParentWatch({isAvailable:()=>{try{process.kill(source.parentPid,0);return true;}catch{return false;}},
-      readIdentity:async()=>(await inspectProcessIdentity(source.parentPid))?.startMarker??null,onLost:shutdown});await watch.start();guard();
+    if(!relaxedWindows){
+      watch=createHostParentWatch({isAvailable:()=>{try{process.kill(source.parentPid,0);return true;}catch{return false;}},
+        readIdentity:async()=>(await inspectProcessIdentity(source.parentPid))?.startMarker??null,onLost:shutdown});await watch.start();guard();
+    }
     fence=setInterval(()=>{try{guard();}catch(error){void shutdown(error);}},1000);fence.unref();
     process.env.LOOP_APP_ROOT=appRoot;process.env.LOOP_DATA_ROOT=dataRoot;process.env.LOOP_GLOBAL_DB_PATH=join(dataRoot,'loop-ui.db');
     process.env.LOOP_DESKTOP='1';process.env.LOOP_EXTERNAL_UI_ALLOCATION=allocationId;

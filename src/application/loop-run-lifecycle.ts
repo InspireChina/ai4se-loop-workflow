@@ -154,7 +154,7 @@ function leaseRow(db: Awaited<ReturnType<typeof defaultDatabaseConnection>>) {
 }
 
 function supervisorOwnerPid(ownerId: string) {
-  const match = ownerId.match(/^(?:electron|web)-(\d+)-/);
+  const match = ownerId.match(/^(?:electron|web|hosted)-(\d+)-/);
   const pid = Number(match?.[1]);
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }

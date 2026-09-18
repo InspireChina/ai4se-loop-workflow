@@ -4,6 +4,11 @@ import { waitForProcessIdentity } from './process-tree';
 
 export type ManagedProcessKind = 'ui-server' | 'agent-runner' | 'agent-cli';
 
+export function managedProcessIdentityRequired(platform:NodeJS.Platform=process.platform,
+  safetyMode=process.env.LOOP_RUNTIME_SAFETY) {
+  return !(platform==='win32'&&safetyMode==='standard');
+}
+
 export function registerManagedProcessInDb(
   db: Awaited<ReturnType<typeof databaseConnection>>,
   input: {
@@ -43,8 +48,9 @@ export async function registerManagedAgentProcess(runId: string, pid: number) {
   if (!Number.isInteger(supervisionToken) || supervisionToken <= 0) {
     throw new Error('Agent CLI 缺少有效的 supervision token');
   }
-  const identity = await waitForProcessIdentity(pid);
-  if (!identity) throw new Error(`Agent CLI 已退出或等待进程身份信息就绪超时 pid=${pid}`);
+  const identity = managedProcessIdentityRequired()?await waitForProcessIdentity(pid):null;
+  const processStartMarker=identity?.startMarker??`unverified:${pid}`;
+  if (!identity&&managedProcessIdentityRequired()) throw new Error(`Agent CLI 已退出或等待进程身份信息就绪超时 pid=${pid}`);
   const db = await databaseConnection();
   db.transaction(() => {
     const lease = db.prepare(`SELECT fencing_token, expires_at FROM loop_supervisor_lease WHERE singleton = 1`).get() as {
@@ -63,11 +69,11 @@ export async function registerManagedAgentProcess(runId: string, pid: number) {
       supervisionToken,
       processKind: 'agent-cli',
       pid,
-      processStartMarker: identity.startMarker,
+      processStartMarker,
       runId,
     });
   }).immediate();
-  return identity.startMarker;
+  return processStartMarker;
 }
 
 export async function markManagedAgentProcessExited(runId: string, pid: number, processStartMarker: string) {

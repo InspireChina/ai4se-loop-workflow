@@ -29,10 +29,9 @@ test('native failed ordinary startup persists exact source and cached Admin cons
   const configuration={configurationId:'already-configured',sourceVersion:'settings-original',executorId:'claude' as const,executionOptions:{model:'configured-fixture-model'}};
   store.cacheRuntimeConfiguration(seed,configuration,0);store.releaseSupervisor(seed);
   const proof=join(workspace,'cached-invocation.json');
-  let capabilityExitUnknown=false;
   const managementOrder:string[]=[];
   const management={confirmStopped:confirmAdminAttemptStopped,
-    prepareCapabilities:async()=>{managementOrder.push('prepare');if(capabilityExitUnknown)throw new Error('old business capability physical exit unknown');},
+    prepareCapabilities:async()=>{managementOrder.push('prepare');},
     // Accelerate the real Controller timer, not a manual repair invocation.
     scheduleInterval:(callback:()=>void)=>setInterval(callback,10),
     launch:createConfiguredAdminExecution({store,refreshRuntime:async()=>{
@@ -59,19 +58,10 @@ test('native failed ordinary startup persists exact source and cached Admin cons
   try {
     assert.throws(()=>controller.reconcile(),/尚未取得所有权/);
     assert.equal(store.control().owner_id,null,'an external-root observer cannot acquire Admin supervision');
-    const existing=store.acquireSupervisor('existing-management-host')!;
-    assert.equal(await host.reconcile(),'observer','a foreign live management lease cannot be bypassed by spawning a business child');
-    assert.equal(store.runtimeHostProcesses().length,0);assert.equal(sleepAcquired,0);
-    store.releaseSupervisor(existing);
-    capabilityExitUnknown=true;
-    assert.equal(await host.reconcile(),'observer','unknown capability writers block ordinary startup without shutting management down');
-    assert.equal(store.runtimeHostProcesses().length,0);assert.equal(store.control().owner_id,'external-root:management');
-    assert.ok(managementOrder.length>=1&&managementOrder.every(step=>step==='prepare'),
-      'capability preparation runs after management ownership and blocks business admission');
-    capabilityExitUnknown=false;
+    // Standard desktop mode starts the selected runtime immediately. Admin
+    // acquisition and capability cleanup run in the background and cannot
+    // become an admission barrier for the ordinary host.
     await assert.rejects(host.reconcile(),/selected module missing/);
-    assert.equal(store.control().owner_id,'external-root:management','management belongs to the external root, not the failed business child');
-    assert.equal(sleepAcquired,1,'external management owns the idle-sleep assertion, not the failed business child');
     const readManagement=new Database(store.filename,{readonly:true,fileMustExist:true});let caseId:string;
     try{assert.equal(readManagement.prepare('SELECT count(*) FROM repair_cases').pluck().get(),1);
       caseId=readManagement.prepare<[],{case_id:string}>('SELECT case_id FROM repair_cases').get()!.case_id;}
@@ -84,6 +74,10 @@ test('native failed ordinary startup persists exact source and cached Admin cons
     const deadline=Date.now()+3000;
     while(!store.attempts(caseId).some(attempt=>attempt.status==='failed')&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));
     assert.ok(store.attempts(caseId).some(attempt=>attempt.status==='failed'),'root-owned management timer automatically consumes the durable fault');
+    assert.equal(store.control().owner_id,'external-root:management','background management belongs to the external root, not the failed business child');
+    assert.equal(sleepAcquired,1,'background management owns the idle-sleep assertion, not the failed business child');
+    assert.ok(managementOrder.length>=1&&managementOrder.every(step=>step==='prepare'),
+      'background management prepares its capabilities before consuming the durable fault');
     await host.shutdown();
     await controller.waitForSettlements();
     assert.deepEqual(JSON.parse(await readFile(proof,'utf8')),configuration);

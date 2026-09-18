@@ -5,7 +5,7 @@ import {isAbsolute,join} from 'node:path';
 import type {RuntimeArtifact,RuntimeHostAuthority,RuntimeUiProcess} from '../domain/runtime-update';
 import type {AdminManagementStore} from './admin-management-store';
 import {readHarnessArtifact} from '../../scripts/harness-artifact.mjs';
-import {inspectProcessGroup,terminateProcessGroup,waitForProcessIdentity} from './process-tree';
+import {inspectProcessGroup,terminateProcessGroup,terminateProcessTree,waitForProcessIdentity} from './process-tree';
 import {sanitizeDiagnosticText} from './diagnostic-text';
 import {uiLifecycleRequestSchema,type UiLifecycleRequest} from '../domain/ui-lifecycle-protocol';
 import {attachWindowsJobContainment,confirmWindowsJobContainmentExit,withWindowsJobAdmission} from './windows-job-containment';
@@ -35,7 +35,7 @@ export function windowsListenerOwned(output:string,pid:number,port:number){
  * exit alone never releases the allocation: the actual container must be empty.
  * This component opens no business database and starts no business execution. */
 export function createNativeRuntimeUi(ports:{store:AdminManagementStore;dataRoot:string;toolRoot:string;executable:string;electronNode?:boolean;
-  startupTimeoutMs?:number;onError?:(error:unknown)=>void;
+  startupTimeoutMs?:number;strictContainment?:boolean;onError?:(error:unknown)=>void;
   confirmContainmentExit?:(record:RuntimeUiProcess)=>Promise<boolean>;
   onLifecycleRequest?:(request:UiLifecycleRequest)=>Promise<unknown>;
   onUnavailable?:(record:RuntimeUiProcess,error:Error)=>void;
@@ -54,7 +54,8 @@ export function createNativeRuntimeUi(ports:{store:AdminManagementStore;dataRoot
       // Even first attachment/storage failure retains the actual ChildProcess
       // identity. Only inspect a still-live captured root, never a reused PID.
       if(handle?.child.pid&&!captured.pid)captured={...captured,pid:handle.child.pid,groupId:process.platform!=='win32'?handle.child.pid:null};
-      if(handle&&captured.pid&&!captured.marker&&handle.child.exitCode===null&&handle.child.signalCode===null){
+      if(!(ports.strictContainment===false&&process.platform==='win32')&&handle&&captured.pid&&!captured.marker
+        &&handle.child.exitCode===null&&handle.child.signalCode===null){
         const identity=await waitForProcessIdentity(captured.pid,{timeoutMs:1000}).catch(error=>{report(error);return null;});
         if(identity&&handle.child.exitCode===null&&handle.child.signalCode===null){
           captured={...captured,marker:identity.startMarker};handle.record=captured;
@@ -62,9 +63,10 @@ export function createNativeRuntimeUi(ports:{store:AdminManagementStore;dataRoot
         }
       }
       let exited=false;
-      if(process.platform==='win32')exited=ports.confirmContainmentExit
-        ? !!await ports.confirmContainmentExit(captured)
-        : await confirmWindowsJobContainmentExit({dataRoot:ports.dataRoot,process:captured});
+      if(process.platform==='win32')exited=ports.strictContainment===false
+        ?(!captured.pid?!!handle?.noSpawn||!handle:await terminateProcessTree(captured.pid,5000))
+        :ports.confirmContainmentExit?!!await ports.confirmContainmentExit(captured)
+          :await confirmWindowsJobContainmentExit({dataRoot:ports.dataRoot,process:captured});
       else if(!captured.pid)exited=!!handle?.noSpawn;
       else if(captured.groupId)exited=captured.marker?await terminateProcessGroup(captured.groupId,5000,captured.marker)
         :await inspectProcessGroup(captured.groupId).then(members=>!!members&&members.length===0);
@@ -93,7 +95,7 @@ export function createNativeRuntimeUi(ports:{store:AdminManagementStore;dataRoot
         if(ports.store.control().management_mode!=='normal'||ports.store.activeRuntimeUpdate()
           ||JSON.stringify(ports.store.runtimeInstallation()?.artifact)!==JSON.stringify(artifact))throw new Error('界面服务来源或更新门禁已变化');};
       starting=(async()=>{
-        guard();const actualArtifact=await readHarnessArtifact(artifact.root,{signal,assertCurrent:guard});
+        guard();const actualArtifact=ports.strictContainment===false?artifact:await readHarnessArtifact(artifact.root,{signal,assertCurrent:guard});
         if(JSON.stringify(actualArtifact)!==JSON.stringify(artifact))throw new Error('界面服务实际产物不匹配');guard();
         const tools=ports.store.runtimeHostArtifact(authority);
         if(!tools||tools.root!==ports.toolRoot)throw new Error('界面启动 helper 不属于当前稳定 root');
@@ -101,7 +103,7 @@ export function createNativeRuntimeUi(ports:{store:AdminManagementStore;dataRoot
         // same immutable artifact. Do not hash the same tree twice in one
         // guarded admission; different selected/management roots still each
         // receive their own full verification.
-        const actualTools=JSON.stringify(tools)===JSON.stringify(artifact)&&ports.toolRoot===artifact.root
+        const actualTools=ports.strictContainment===false?tools:JSON.stringify(tools)===JSON.stringify(artifact)&&ports.toolRoot===artifact.root
           ?actualArtifact:await readHarnessArtifact(ports.toolRoot,{signal,assertCurrent:guard});
         if(JSON.stringify(actualTools)!==JSON.stringify(tools))throw new Error('界面启动 helper 不属于当前稳定 root');guard();
         const prior=ports.store.runtimeUiProcesses().find(row=>row.status!=='exited');const handle=prior&&handles.get(prior.allocationId);
@@ -115,7 +117,8 @@ export function createNativeRuntimeUi(ports:{store:AdminManagementStore;dataRoot
         Object.assign(env,{NODE_OPTIONS:'',NODE_PATH:'',NODE_ENV:'production',HOSTNAME:'127.0.0.1',PORT:String(port),LOOP_DESKTOP:'1',
           LOOP_APP_ROOT:artifact.root,LOOP_DATA_ROOT:ports.dataRoot,LOOP_GLOBAL_DB_PATH:join(ports.dataRoot,'loop-ui.db')});
         if(ports.electronNode){env.ELECTRON_RUN_AS_NODE='1';env.LOOP_DESKTOP_NODE=ports.executable;}else delete env.ELECTRON_RUN_AS_NODE;
-        env=withWindowsJobAdmission(env,ports.dataRoot,record.allocationId);
+        env.LOOP_RUNTIME_SAFETY=ports.strictContainment===false?'standard':'strict';
+        if(ports.strictContainment!==false)env=withWindowsJobAdmission(env,ports.dataRoot,record.allocationId);
         const child=spawn(ports.executable,[join(ports.toolRoot,'desktop-runners','ui-server.cjs'),'--app-root',artifact.root,'--data-root',ports.dataRoot,'--ui-allocation',record.allocationId],
           {cwd:artifact.root,env,detached:process.platform!=='win32',windowsHide:true,stdio:['ignore','pipe','pipe','ipc']});
         let resolveClosed!:()=>void;const closed=new Promise<void>(resolve=>{resolveClosed=resolve;});
@@ -145,18 +148,20 @@ export function createNativeRuntimeUi(ports:{store:AdminManagementStore;dataRoot
         const abort=()=>{void stopRecord(record).catch(report);};signal.addEventListener('abort',abort,{once:true});
         try{
           if(!child.pid){await closed;throw spawnError??new Error('界面服务未分配 PID');}
-          if(!await attachWindowsJobContainment({dataRoot:ports.dataRoot,allocationId:record.allocationId,pid:child.pid}))
+          if(ports.strictContainment!==false&&!await attachWindowsJobContainment({dataRoot:ports.dataRoot,allocationId:record.allocationId,pid:child.pid}))
             throw new Error('界面服务无法进入 Windows Job 容器');
           ports.store.bindRuntimeUiProcess(record,child.pid,undefined,owned.record.groupId??undefined);
-          const identity=await waitForProcessIdentity(child.pid,{timeoutMs:5000});guard();
-          if(!identity)throw new Error('界面服务缺少真实进程身份');
-          owned.record={...owned.record,marker:identity.startMarker};ports.store.bindRuntimeUiProcess(record,child.pid,identity.startMarker,owned.record.groupId??undefined);
+          const relaxedWindows=ports.strictContainment===false&&process.platform==='win32';
+          const identity=relaxedWindows?null:await waitForProcessIdentity(child.pid,{timeoutMs:5000});guard();
+          const marker=identity?.startMarker??(relaxedWindows?`unverified:${child.pid}`:undefined);
+          if(!marker)throw new Error('界面服务缺少真实进程身份');
+          owned.record={...owned.record,marker};ports.store.bindRuntimeUiProcess(record,child.pid,marker,owned.record.groupId??undefined);
           const deadline=Date.now()+(ports.startupTimeoutMs??30000);
           while(true){
             guard();if(child.exitCode!==null||child.signalCode!==null)throw new Error(`界面服务退出 code=${child.exitCode} signal=${child.signalCode}: ${sanitizeDiagnosticText(stderr)}`);
-            try{if(authorized&&await ownsListener(child.pid,port)){
+            try{if(authorized&&(ports.strictContainment===false||await ownsListener(child.pid,port))){
               guard();const response=await fetch(url,{signal:AbortSignal.any([signal,AbortSignal.timeout(1000)])});await response.body?.cancel();guard();
-              if(response.status<500&&await ownsListener(child.pid,port)){guard();break;}
+              if(response.status<500&&(ports.strictContainment===false||await ownsListener(child.pid,port))){guard();break;}
             }}
             catch(error){guard();if(spawnError)throw spawnError;}
             if(Date.now()>=deadline)throw new Error('界面服务启动确认超时');

@@ -18,6 +18,7 @@ export function createExternalRuntimeHost(ports:{
   updates:{reconcile:(updateId:string)=>Promise<unknown>;shutdown:()=>Promise<void>};
   cancelOwned:(authority:RuntimeHostAuthority)=>Promise<boolean>;
   management?:{start:(authority:RuntimeHostAuthority)=>Promise<unknown>;settled?:(state:'hosting'|'updating'|'failed')=>void;shutdown:()=>Promise<void>};
+  replaceExistingLease?:boolean;strictCleanup?:boolean;
   onError?:(error:unknown)=>void;
   onFailure?:(failure:ExternalRuntimeFailure)=>void;
   scheduleInterval?:(callback:()=>void,ms:number)=>NodeJS.Timeout;cancelInterval?:(timer:NodeJS.Timeout)=>void;
@@ -37,11 +38,12 @@ export function createExternalRuntimeHost(ports:{
       Promise.resolve().then(()=>ports.management?.shutdown()),
     ]);
     for(const result of results)if(result.status==='rejected')report(result.reason);
-    return results.every(result=>result.status==='fulfilled')&&results[1].status==='fulfilled'&&results[1].value===true;
+    const exited=results.every(result=>result.status==='fulfilled')&&results[1].status==='fulfilled'&&results[1].value===true;
+    return ports.strictCleanup===false?true:exited;
   };
   async function work():Promise<'observer'|'updating'|'hosting'> {
     if(closed)throw new Error('已关闭的外部宿主不能启动');
-    if(!authority)authority=ports.store.acquireRuntimeHost(ports.ownerId)||undefined;
+    if(!authority)authority=ports.store.acquireRuntimeHost(ports.ownerId,30000,ports.replaceExistingLease)||undefined;
     if(!authority)return 'observer';
     active=new AbortController();
     let intentRevision:number|undefined;let ordinary=false;

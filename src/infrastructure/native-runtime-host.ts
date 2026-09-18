@@ -5,7 +5,7 @@ import type {RuntimeArtifact,RuntimeHostAuthority,RuntimeHostProcess} from '../d
 import type {AdminManagementStore} from './admin-management-store';
 import {readHarnessArtifact} from '../../scripts/harness-artifact.mjs';
 import {assertRuntimeDataOutside} from './runtime-paths';
-import {inspectProcessGroup,terminateProcessGroup,waitForProcessIdentity} from './process-tree';
+import {inspectProcessGroup,terminateProcessGroup,terminateProcessTree,waitForProcessIdentity} from './process-tree';
 import {sanitizeDiagnosticText} from './diagnostic-text';
 import {drainRuntimeCliRegistry} from './runtime-cli-registry';
 import {StringDecoder} from 'node:string_decoder';
@@ -19,6 +19,7 @@ type Owned={child:ChildProcess;closed:Promise<void>;ready:Promise<void>;noPidFai
  * Required ports intentionally have no always-success production defaults. */
 export function createNativeRuntimeHost(ports:{
   store:AdminManagementStore;dataRoot:string;executable:string;electronNode?:boolean;startupTimeoutMs?:number;
+  strictContainment?:boolean;
   drainUpdates:(check:Check)=>Promise<boolean>;
   confirmDescendantsExited:(record:RuntimeHostProcess)=>Promise<boolean>;
   assertUntrackedOrdinaryHostsExited?:(signal:AbortSignal,check:Check)=>Promise<void>;
@@ -40,9 +41,13 @@ export function createNativeRuntimeHost(ports:{
     let latest=record;
     try{const found=current(record.allocationId);if(!found)throw new Error('捕获宿主分配记录缺失');latest=found;}
     catch(error){report(error);} // storage failure cannot suppress the captured physical kill
-    if(process.platform==='win32')return ports.confirmContainmentExit
-      ? !!await ports.confirmContainmentExit(latest)
-      : confirmWindowsJobContainmentExit({dataRoot:ports.dataRoot,process:latest});
+    if(process.platform==='win32'){
+      if(ports.strictContainment!==false)return ports.confirmContainmentExit
+        ? !!await ports.confirmContainmentExit(latest)
+        : confirmWindowsJobContainmentExit({dataRoot:ports.dataRoot,process:latest});
+      if(!latest.pid)return !!handle?.noPidFailure()||!handle;
+      return terminateProcessTree(latest.pid,5000);
+    }
     if(!latest.pid)return !!handle?.noPidFailure();
     if(!latest.groupId)return false;
     const exited=latest.marker?await terminateProcessGroup(latest.groupId,5000,latest.marker):
@@ -62,10 +67,12 @@ export function createNativeRuntimeHost(ports:{
       const knownNoSpawn=!!owned.get(record.allocationId)?.noPidFailure()&&!record.pid;
       const results=await Promise.allSettled([
         physicalExit(record),Promise.resolve().then(()=>knownNoSpawn?true:ports.confirmDescendantsExited(record)),
-        Promise.resolve().then(()=>certified?drainRuntimeCliRegistry(ports.store,record.allocationId):true),
+        Promise.resolve().then(()=>certified?drainRuntimeCliRegistry(ports.store,record.allocationId,terminateProcessGroup,
+          {strictContainment:ports.strictContainment!==false}):true),
       ]);
       for(const result of results)if(result.status==='rejected')report(result.reason);
-      if(!admissionClosed||results.some(result=>result.status==='rejected'||result.value!==true))return false;
+      if(!admissionClosed||ports.strictContainment!==false&&results.some(result=>result.status==='rejected'||result.value!==true)
+        ||ports.strictContainment===false&&(results[0].status==='rejected'||results[0].value!==true))return false;
       ports.store.confirmRuntimeHostProcessExit(current(record.allocationId));owned.delete(record.allocationId);return true;
     })().finally(()=>stopping.delete(record.allocationId));stopping.set(record.allocationId,work);return work;
   }
@@ -85,22 +92,24 @@ export function createNativeRuntimeHost(ports:{
         check();ports.store.assertRuntimeHost(authority);
         if(signal.aborted||ports.store.control().management_mode!=='normal'||ports.store.activeRuntimeUpdate()||JSON.stringify(ports.store.runtimeInstallation()?.artifact)!==JSON.stringify(artifact))throw new Error('普通宿主安装选择或代次已经变化');
       };
-      await validateInstalled(artifact,signal,assertCurrent);assertCurrent();
+      if(ports.strictContainment!==false)await validateInstalled(artifact,signal,assertCurrent);assertCurrent();
       const prior=ports.store.runtimeHostProcesses().find(row=>row.status!=='exited');
       const handle=prior&&owned.get(prior.allocationId);
       if(prior&&handle&&prior.authority.ownerId===authority.ownerId&&prior.authority.token===authority.token
         &&JSON.stringify(prior.artifact)===JSON.stringify(artifact)&&handle.child.connected&&handle.child.exitCode===null&&handle.child.signalCode===null) {
         await handle.ready;assertCurrent();return;
       }
-      if(!await drainNormal(authority,assertCurrent)||!await ports.drainUpdates(assertCurrent))throw new Error('旧宿主或更新进程退出未确认，禁止普通启动');
-      await ports.assertUntrackedOrdinaryHostsExited?.(signal,assertCurrent);assertCurrent();
+      const [normalDrained,updatesDrained]=await Promise.all([drainNormal(authority,assertCurrent),ports.drainUpdates(assertCurrent)]);
+      if(ports.strictContainment!==false&&(!normalDrained||!updatesDrained))throw new Error('旧宿主或更新进程退出未确认，禁止普通启动');
+      if(ports.strictContainment!==false)await ports.assertUntrackedOrdinaryHostsExited?.(signal,assertCurrent);assertCurrent();
       const directory=join(ports.dataRoot,'runtime-hosts','logs');await mkdir(directory,{recursive:true,mode:0o700});assertCurrent();
       const record=ports.store.reserveRuntimeHostProcess(authority,artifact);
       let env:NodeJS.ProcessEnv={...process.env,NODE_OPTIONS:'',NODE_PATH:'',LOOP_APP_ROOT:artifact.root,LOOP_DATA_ROOT:ports.dataRoot,LOOP_GLOBAL_DB_PATH:join(ports.dataRoot,'loop-ui.db')};
       for(const key of Object.keys(env))if(key.startsWith('LOOP_TEST')||key==='NODE_TEST_CONTEXT'||key==='LOOP_WORKSPACE_ROOT_OVERRIDE'
         ||/^LOOP_(?:EXECUTION|INTERNAL|INTERVENTION|VERIFICATION_ASSISTANCE|ADMIN)_/.test(key))delete env[key];
       if(ports.electronNode)env.ELECTRON_RUN_AS_NODE='1';else {delete env.ELECTRON_RUN_AS_NODE;delete env.LOOP_DESKTOP_NODE;}
-      env=withWindowsJobAdmission(env,ports.dataRoot,record.allocationId);
+      env.LOOP_RUNTIME_SAFETY=ports.strictContainment===false?'standard':'strict';
+      if(ports.strictContainment!==false)env=withWindowsJobAdmission(env,ports.dataRoot,record.allocationId);
       const child=spawn(ports.executable,[join(artifact.root,'desktop-runners','host-service.cjs'),'--app-root',artifact.root,'--data-root',ports.dataRoot,
         '--host-allocation',record.allocationId,...(ports.electronNode?['--electron-node',ports.executable]:[])],
         {cwd:artifact.root,env,detached:process.platform!=='win32',windowsHide:true,stdio:['ignore','pipe','pipe','ipc']});
@@ -152,12 +161,14 @@ export function createNativeRuntimeHost(ports:{
           // before the positively empty allocation may be settled.
           await closed;await ready;throw new Error('普通宿主未分配 PID');
         }
-        if(!await attachWindowsJobContainment({dataRoot:ports.dataRoot,allocationId:record.allocationId,pid:child.pid}))
+        if(ports.strictContainment!==false&&!await attachWindowsJobContainment({dataRoot:ports.dataRoot,allocationId:record.allocationId,pid:child.pid}))
           throw new Error('普通宿主无法进入 Windows Job 容器');
         ports.store.bindRuntimeHostProcess(record,child.pid,undefined,process.platform!=='win32'?child.pid:undefined);
-        const identity=await waitForProcessIdentity(child.pid,{timeoutMs:5000});
-        if(identity)ports.store.bindRuntimeHostProcess(record,child.pid,identity.startMarker,process.platform!=='win32'?child.pid:undefined);
-        await ready;assertCurrent();if(!identity)throw new Error('普通宿主缺少真实进程身份');
+        const relaxedWindows=ports.strictContainment===false&&process.platform==='win32';
+        const identity=relaxedWindows?null:await waitForProcessIdentity(child.pid,{timeoutMs:5000});
+        const marker=identity?.startMarker??(relaxedWindows?`unverified:${child.pid}`:undefined);
+        if(marker)ports.store.bindRuntimeHostProcess(record,child.pid,marker,process.platform!=='win32'?child.pid:undefined);
+        await ready;assertCurrent();if(!marker)throw new Error('普通宿主缺少真实进程身份');
         ports.store.readyRuntimeHostProcess(authority,record.allocationId,businessSupervisionToken);
       }catch(error){await stopRecord(current(record.allocationId)).catch(report);throw error;}
       finally{clearTimeout(readyTimer);signal.removeEventListener('abort',abort);}

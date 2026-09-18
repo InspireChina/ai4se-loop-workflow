@@ -6,18 +6,27 @@ import type {RuntimeArtifact} from '../domain/runtime-update';
 import type {AdminManagementStore} from './admin-management-store';
 import {sanitizeDiagnosticText} from './diagnostic-text';
 
-/** Management construction cannot rely solely on the mutable business install.
- * Previously bound immutable root snapshots are candidates, not trusted health
- * receipts: recheck actual bytes, path and identity before using any helper. */
+/** Standard startup uses the packaged install's build binding directly.
+ * If that binding is unavailable, recovery falls back to previously bound
+ * immutable snapshots and fully rechecks their bytes before using a helper. */
 export async function resolveNativeBootstrap(ports:{
   appRoot:string;managementRoot?:string;dataRoot:string;signal:AbortSignal;
   store:Pick<AdminManagementStore,'runtimeBootstrapCandidates'|'observe'>;
+  standardMode?:boolean;
   onError?:(error:unknown)=>void;
 }):Promise<{bootstrap:RuntimeArtifact;installationError?:string}>{
   const check=()=>ports.signal.throwIfAborted();check();
   const report=(error:unknown)=>{try{ports.onError?.(error);}catch{/* diagnostics cannot remove recovery */}};
   let installedError:unknown;
   try{
+    if(ports.standardMode){
+      // The desktop executable and its packaged runtime are one installation
+      // unit. Routine startup reads the build binding only and executes that
+      // installation directly; full inventory hashing/staging is reserved for
+      // strict repair candidates and damaged-install fallback.
+      const binding=await readHarnessSourceBinding(ports.appRoot,{signal:ports.signal});check();
+      return {bootstrap:{root:binding.root,sourceId:binding.sourceId,artifactId:binding.declaredArtifactId,version:binding.version}};
+    }
     const source=await readHarnessArtifact(ports.appRoot,{signal:ports.signal});check();
     return {bootstrap:await stageRuntimeArtifact(source,ports.dataRoot,ports.signal,check)};
   }catch(error){check();installedError=error;report(error);}

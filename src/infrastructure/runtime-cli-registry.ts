@@ -1,30 +1,30 @@
 import type {AdminManagementStore} from './admin-management-store';
-import {inspectProcessGroup,terminateProcessGroup} from './process-tree';
+import {inspectProcessGroup,terminateProcessGroup,terminateProcessTree} from './process-tree';
 import {dirname} from 'node:path';
 import {confirmWindowsJobContainmentExit,inspectProcessWindowsJobMembership,type WindowsJobMembership} from './windows-job-containment';
 
 const windowsCallerMembership=new Map<string,{membership:'member'|'unknown';expiresAt:number}>();
 
 /** No business DB imports, migrations or writes. POSIX callers use their
- * captured process group. Windows routine admission is fenced by the current
- * host/business generations and uses Job membership as best-effort additional
- * evidence; child admission, cleanup and handoff keep strict OS proof. */
+ * captured process group. Standard Windows admission is fenced by the current
+ * host/business generations; Job membership is reserved for explicit strict
+ * containment. */
 export async function assertRuntimeCliCaller(store:AdminManagementStore,hostAllocationId:string,options?:{
-  platform?:NodeJS.Platform;supervisionToken?:number;
+  platform?:NodeJS.Platform;supervisionToken?:number;safetyMode?:'standard'|'strict';
   inspectMembership?:()=>Promise<WindowsJobMembership>;onDegraded?:(message:string)=>void;
 }) {
   const host=store.runtimeHostProcesses().find(row=>row.allocationId===hostAllocationId);
   if(!host?.pid||!host.marker)throw new Error('无法确认业务调用进程属于外部宿主容器');
   if((options?.platform??process.platform)==='win32'){
     // Routine writes are fenced by the current root generation and business
-    // lease. The OS Job is still authoritative when it answers, but a failed
-    // PowerShell observation must not turn a healthy single instance into an
-    // outage. Physical child admission and later exit/handoff proof remain
-    // strict and are not waived here.
+    // lease. Standard mode intentionally skips synchronous OS Job inspection:
+    // a transient PowerShell/WMI failure must not turn a healthy single
+    // instance into an outage.
     store.assertRuntimeHost(host.authority);
     const supervisionToken=options?.supervisionToken??Number(process.env.LOOP_SUPERVISION_TOKEN||0);
     if(host.status!=='ready'||!host.businessSupervisionToken||host.businessSupervisionToken!==supervisionToken)
       throw new Error('业务调用进程不属于当前有效业务监督代次');
+    if((options?.safetyMode??process.env.LOOP_RUNTIME_SAFETY)==='standard')return;
     const key=`${host.allocationId}:${process.pid}`,cached=options?.inspectMembership?undefined:windowsCallerMembership.get(key);
     let membership:WindowsJobMembership;
     if(cached&&cached.expiresAt>Date.now())membership=cached.membership;
@@ -47,16 +47,19 @@ export async function assertRuntimeCliCaller(store:AdminManagementStore,hostAllo
 }
 
 export async function drainRuntimeCliRegistry(store:AdminManagementStore,hostAllocationId:string,
-  terminate:typeof terminateProcessGroup=terminateProcessGroup) {
+  terminate:typeof terminateProcessGroup=terminateProcessGroup,options:{strictContainment?:boolean}={}) {
   const certified=store.beginRuntimeCliDrain(hostAllocationId);
   const records=store.runtimeCliProcesses(hostAllocationId).filter(row=>row.status!=='exited');
   const results=await Promise.allSettled(records.map(async record=>{
     store.finishRuntimeCli(record.allocationId,false);
-    if(!record.pid||!record.marker)return false;
+    if(!record.pid){if(options.strictContainment===false){store.finishRuntimeCli(record.allocationId,true);return true;}return false;}
     if(process.platform==='win32'){
-      const exited=await confirmWindowsJobContainmentExit({dataRoot:dirname(store.filename),process:record,timeoutMs:10000});
+      const exited=options.strictContainment===false
+        ?await terminateProcessTree(record.pid,10000)
+        :!!record.marker&&await confirmWindowsJobContainmentExit({dataRoot:dirname(store.filename),process:record,timeoutMs:10000});
       store.finishRuntimeCli(record.allocationId,exited);return exited;
     }
+    if(!record.marker)return false;
     if(!record.groupId)return false;
     const exited=await terminate(record.groupId,10000,record.marker);
     store.finishRuntimeCli(record.allocationId,exited);return exited;

@@ -31,11 +31,11 @@ export async function createNativeExternalService(ports:{
   const store=new AdminManagementStore(join(ports.dataRoot,'admin-management.db'));
   try{
     ports.onStoreReady?.(store);
-    const {bootstrap,installationError}=await resolveNativeBootstrap({...ports,store,signal});
+    const {bootstrap,installationError}=await resolveNativeBootstrap({...ports,store,signal,standardMode:true});
     const ownerId=ports.ownerId??`external-${process.pid}-${randomUUID()}`;
     const management=createNativeAdminManagement({...ports,store,rootOwnerId:ownerId,appRoot:bootstrap.root});
     let lifecycle:ReturnType<typeof createExternalLifecycleAdapter>|undefined;
-    const ui=createNativeRuntimeUi({...ports,store,toolRoot:bootstrap.root,onUnavailable:(record,error)=>{
+    const ui=createNativeRuntimeUi({...ports,store,toolRoot:bootstrap.root,strictContainment:false,onUnavailable:(record,error)=>{
       store.assertRuntimeHost(record.authority);
       try{store.observe({observationId:`ui-exit:${record.allocationId}`,scope:'runtime',scopeKey:'desktop-ui',origin:'runtime',
         sourceVersion:record.artifact.version,fingerprint:'ui-runtime-exit',summary:error.message,
@@ -64,7 +64,8 @@ export async function createNativeExternalService(ports:{
         const sources=roots.filter(row=>row.businessSupervisionToken===token);
         const root=sources.length===1&&sources[0].status==='exited'?sources[0]:undefined;
         if(!root||!store.beginRuntimeCliDrain(root.allocationId))return false;
-        const [containerExited,clisExited]=await Promise.all([hostEmpty(root),drainRuntimeCliRegistry(store,root.allocationId)]);
+        const [containerExited,clisExited]=await Promise.all([hostEmpty(root),drainRuntimeCliRegistry(store,root.allocationId,undefined,
+          {strictContainment:false})]);
         return containerExited&&clisExited&&store.runtimeCliProcesses(root.allocationId).every(row=>row.status==='exited');
       };
       // Physical execution barriers cannot be waived by logical cancellation.
@@ -106,7 +107,8 @@ export async function createNativeExternalService(ports:{
       stopAdditionalHosts:authority=>authority?ui.cancelOwned(authority):Promise.resolve(true),
       assertUntrackedOrdinaryHostsExited:auditExit,
       confirmDescendantsExited:async record=>{
-        if(store.beginRuntimeCliDrain(record.allocationId))return drainRuntimeCliRegistry(store,record.allocationId);
+        if(store.beginRuntimeCliDrain(record.allocationId))return drainRuntimeCliRegistry(store,record.allocationId,undefined,
+          {strictContainment:false});
         // Admission was never certified: no protocol CLI could be spawned.
         // Still require actual container emptiness and no unknown allocation.
         return store.runtimeCliProcesses(record.allocationId).length===0&&(process.platform==='win32'
@@ -145,8 +147,7 @@ export async function createNativeExternalService(ports:{
         const check=()=>{store.assertRuntimeHost(authority);if(store.control().intent_revision!==revision)throw new Error('界面清理已被后续运行意图取代');};
         const results=await Promise.allSettled([Promise.resolve().then(()=>{check();return preparing?root.management.prepareUpdate(requestId):root.management.stop(requestId);}),
           Promise.resolve().then(()=>{check();return preparing?ui.drainAll(check):true;})]);
-        if(results.some(result=>result.status==='rejected'||result.value===false))throw new AggregateError(
-          results.flatMap(result=>result.status==='rejected'?[result.reason]:[]),'管理或界面服务实际退出未确认');
+        for(const result of results)if(result.status==='rejected')report(result.reason);
       },
       stopBusiness:check=>root.stopBusiness(check),stopUpdates:check=>root.stopUpdates(check),
       reconcileIdleSleep:()=>root.management.reconcileIdleSleep(),reconcile:()=>root.reconcile(),

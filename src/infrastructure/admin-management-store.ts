@@ -605,6 +605,42 @@ export class AdminManagementStore {
     }).immediate();
   }
 
+  /** Standard desktop policy: the runtime shipped by the newly installed app
+   * becomes current immediately. Retained transition transactions are history,
+   * not a startup gate for the new executable. */
+  adoptInstalledRuntime(authority:RuntimeHostAuthority,bootstrap:RuntimeArtifact) {
+    const candidate=runtimeArtifactSchema.parse(bootstrap);
+    return this.db.transaction(()=>{
+      this.assertRuntimeHost(authority);
+      if(JSON.stringify(this.runtimeHostArtifact(authority))!==JSON.stringify(candidate))
+        throw new Error('直接采用的 runtime 必须来自当前安装包');
+      const now=this.now();
+      const activeUpdates=this.db.prepare("SELECT update_id,phase FROM admin_runtime_updates WHERE phase NOT IN ('succeeded','rolled-back','aborted')")
+        .all() as {update_id:string;phase:RuntimeUpdatePhase}[];
+      for(const update of activeUpdates){
+        this.db.prepare("UPDATE admin_runtime_updates SET phase='aborted',owner_id=NULL,expires_at=0,failure=?,updated_at=? WHERE update_id=?")
+          .run('Superseded by directly installed runtime',now,update.update_id);
+        this.db.prepare('INSERT INTO admin_runtime_update_events(update_id,phase,detail,created_at) VALUES(?,?,?,?)')
+          .run(update.update_id,'aborted','New installed runtime selected directly; transition handoff skipped',now);
+      }
+      for(const row of this.db.prepare("SELECT request_id,record_json FROM admin_publisher_updates WHERE json_extract(record_json,'$.status') IN ('preparing','ready')")
+        .all() as {request_id:string;record_json:string}[]){
+        const record=publisherUpdateSchema.parse(JSON.parse(row.record_json));
+        this.db.prepare('UPDATE admin_publisher_updates SET record_json=? WHERE request_id=?')
+          .run(JSON.stringify({...record,status:'aborted'}),row.request_id);
+      }
+      const current=this.runtimeInstallation();
+      if(!current)this.db.prepare('INSERT INTO admin_runtime_installation(singleton,artifact_json,revision,update_id) VALUES(1,?,1,NULL)')
+        .run(JSON.stringify(candidate));
+      else if(JSON.stringify(current.artifact)!==JSON.stringify(candidate))this.db.prepare(
+        'UPDATE admin_runtime_installation SET artifact_json=?,revision=revision+1,update_id=NULL WHERE singleton=1')
+        .run(JSON.stringify(candidate));
+      if(this.control().management_mode!=='normal')this.db.prepare(
+        "UPDATE admin_control SET management_mode='normal',intent_revision=intent_revision+1 WHERE singleton=1").run();
+      return this.runtimeInstallation()!;
+    }).immediate();
+  }
+
   runtimeUpdate(updateId: string): RuntimeUpdateRecord | null {
     const row = this.db.prepare('SELECT * FROM admin_runtime_updates WHERE update_id=?').get(updateId) as
       { request_json: string; phase: string; selected_json: string; intent_revision: number; owner_id: string | null;
@@ -796,11 +832,11 @@ export class AdminManagementStore {
     }).immediate();
   }
 
-  acquireRuntimeHost(ownerId:string,leaseMs=30000):RuntimeHostAuthority|null {
+  acquireRuntimeHost(ownerId:string,leaseMs=30000,replaceExisting=false):RuntimeHostAuthority|null {
     if(!ownerId.trim()||!Number.isFinite(leaseMs)||leaseMs<1000)throw new Error('无效外部宿主租约');
     return this.db.transaction(()=>{
       const row=this.db.prepare('SELECT owner_id,token,expires_at FROM admin_runtime_host_lease WHERE singleton=1').get() as {owner_id:string|null;token:number;expires_at:number};
-      const now=this.now();if(row.owner_id!==ownerId&&row.expires_at>now)return null;
+      const now=this.now();if(!replaceExisting&&row.owner_id!==ownerId&&row.expires_at>now)return null;
       const token=row.owner_id===ownerId&&row.expires_at>now?row.token:row.token+1;
       this.db.prepare('UPDATE admin_runtime_host_lease SET owner_id=?,token=?,expires_at=? WHERE singleton=1').run(ownerId,token,now+leaseMs);
       return {ownerId,token};

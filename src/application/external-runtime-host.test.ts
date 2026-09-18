@@ -74,6 +74,16 @@ test('external root lease is independent of Admin and update leases, excludes co
   }finally{f.store.close();}
 });
 
+test('standard desktop root replaces a retained lease instead of entering observer handoff',async()=>{
+  const f=fixture();const stale=f.store.acquireRuntimeHost('stale-root')!;
+  const host=createExternalRuntimeHost({...f.ports,ownerId:'new-desktop-root',replaceExistingLease:true,strictCleanup:false});
+  try{
+    assert.equal(await host.reconcile(),'hosting');
+    assert.equal(f.store.isRuntimeHostCurrent(stale),false);
+    assert.ok(f.actions.includes('ensure:known-good'));
+  }finally{await host.shutdown();f.store.close();}
+});
+
 test('root management starts before selected business and remains supervised after ordinary startup failure',async()=>{
   const f=fixture();f.store.setIntent('running','start');let stops=0;
   const host=createExternalRuntimeHost({...f.ports,

@@ -249,7 +249,8 @@ export async function executeAgentInvocation(input: DelegationExecutionInput): P
       ...(input.environment || {}),
       ...(resultChannel ? agentResultChannelEnv(resultChannel, context.agent) : {}),
     });
-    if(process.platform==='win32'&&allocation?.containment){
+    const strictWindowsContainment=process.env.LOOP_RUNTIME_SAFETY!=='standard';
+    if(process.platform==='win32'&&allocation?.containment&&strictWindowsContainment){
       launch.env=withWindowsJobAdmission(launch.env as NodeJS.ProcessEnv,allocation.containment.dataRoot,allocation.containment.allocationId);
       const appRoot=String(launch.env.LOOP_APP_ROOT||'');
       const bundled=join(appRoot,'desktop-runners','windows-contained-command.cjs');
@@ -302,7 +303,7 @@ export async function executeAgentInvocation(input: DelegationExecutionInput): P
       child.once('error', onError);
     });
     const launchError = spawnOutcome.spawned ? undefined : spawnOutcome.error;
-    if(child.pid&&process.platform==='win32'&&allocation?.containment
+    if(child.pid&&process.platform==='win32'&&allocation?.containment&&strictWindowsContainment
       &&!await attachWindowsJobContainment({...allocation.containment,pid:child.pid}))
       throw new Error('Agent CLI could not enter its Windows Job container');
     let processStartMarker: string | null = null;
@@ -383,7 +384,8 @@ export async function executeAgentInvocation(input: DelegationExecutionInput): P
       }
       terminationTask = (async () => {
         if (child.pid) {
-          const expectedStartMarker = processStartMarker?.startsWith('test-') ? undefined : processStartMarker || undefined;
+          const relaxedWindows=process.platform==='win32'&&process.env.LOOP_RUNTIME_SAFETY==='standard';
+          const expectedStartMarker = relaxedWindows||processStartMarker?.startsWith('test-') ? undefined : processStartMarker || undefined;
           const terminated = await terminatePhysical(child.pid, 5_000, expectedStartMarker).catch(() => false);
           terminationConfirmed = terminated;
           if (!terminated && !childExited) {

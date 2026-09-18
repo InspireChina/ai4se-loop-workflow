@@ -165,6 +165,7 @@ export function createManagedLoopRunLifecycle(options: LoopRunLifecycleOptions &
     onError: log,
   });
   const host = createRuntimeSupervisionHost({ store, management,
+    backgroundManagement:process.env.LOOP_RUNTIME_SAFETY==='standard',
     idleSleep,
     business: {
       initialize: async () => {
@@ -209,7 +210,12 @@ export function createManagedLoopRunLifecycle(options: LoopRunLifecycleOptions &
       if (current.phase !== pending.phase) throw new Error('外部激活期间更新阶段已经变化');
       return receipt;
     },
-    async start() { await host.initialize(); await management.reconcile(); await host.reconcileIdleSleep(); },
+    async start() {
+      await host.initialize();
+      if(process.env.LOOP_RUNTIME_SAFETY==='standard')void management.reconcile().catch(log);
+      else await management.reconcile();
+      await host.reconcileIdleSleep();
+    },
     async command(command: LifecycleCommand): Promise<LifecycleReceipt> {
       if (command.action.kind === 'resume-after-update' && store.activeRuntimeUpdate()) {
         return { requestId: command.requestId, outcome: 'update-in-progress', snapshot: await business.status() };

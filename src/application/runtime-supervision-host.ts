@@ -18,6 +18,7 @@ export function createRuntimeSupervisionHost(ports: {
     shutdown: () => Promise<void>;
   };
   reportBusinessFailure: (error: unknown, phase: 'initialize' | 'intent' | 'shutdown') => void;
+  backgroundManagement?:boolean;
   scheduleInterval?: (callback: () => void, ms: number) => NodeJS.Timeout;
   cancelInterval?: (timer: NodeJS.Timeout) => void;
 }) {
@@ -78,7 +79,10 @@ export function createRuntimeSupervisionHost(ports: {
             }, 10_000);
             timer.unref();
           }
-          await Promise.all([management.then(() => ports.idleSleep?.reconcile()), idleSleep, serializeBusiness(synchronizeBusiness)]);
+          if(ports.backgroundManagement){
+            void management.then(() => ports.idleSleep?.reconcile()).catch(()=>undefined);
+            await Promise.all([idleSleep,serializeBusiness(synchronizeBusiness)]);
+          }else await Promise.all([management.then(() => ports.idleSleep?.reconcile()), idleSleep, serializeBusiness(synchronizeBusiness)]);
         })().catch(error => { initializing = undefined; throw error; });
       }
       return initializing;
@@ -94,7 +98,10 @@ export function createRuntimeSupervisionHost(ports: {
         : ports.management.reconcile();
       // Do not put physical cancellation behind an unavailable business DB,
       // nor business cancellation behind slow management process cleanup.
-      await Promise.all([management, ports.idleSleep?.reconcile(), serializeBusiness(synchronizeBusiness)]);
+      if(ports.backgroundManagement){
+        void management.catch(()=>undefined);
+        await Promise.all([ports.idleSleep?.reconcile(),serializeBusiness(synchronizeBusiness)]);
+      }else await Promise.all([management, ports.idleSleep?.reconcile(), serializeBusiness(synchronizeBusiness)]);
       return revision;
     },
     /** Host health tick can retry unavailable business initialization without
@@ -118,7 +125,7 @@ export function createRuntimeSupervisionHost(ports: {
         // One failed OS release must not close management storage while the
         // independent physical process cleanup is still running.
         const errors = results.flatMap(result => result.status === 'rejected' ? [result.reason] : []);
-        if (errors.length) throw new AggregateError(errors, '监督宿主退出尚未全部完成');
+        if (errors.length&&!ports.backgroundManagement) throw new AggregateError(errors, '监督宿主退出尚未全部完成');
       });
       return shutdown;
     },

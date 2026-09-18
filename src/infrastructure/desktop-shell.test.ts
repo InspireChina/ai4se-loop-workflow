@@ -22,7 +22,9 @@ test('packages a visible tray asset and restores the hidden single-instance wind
   assert.match(mainSource,/runtimeFallbackDocument/);
   assert.ok(manifest.build?.files?.includes('runtime-host.mjs'));
   assert.match(mainSource,/Promise\.allSettled\(\[lifecycle\?\.shutdown\(\)\]\)/);
-  assert.match(mainSource,/prepareDesktopRuntimeInstall\(\{lifecycle,stopUi:stopServer\}\)/);
+  assert.doesNotMatch(mainSource,/prepareDesktopRuntimeInstall/);
+  assert.match(mainSource,/await lifecycle\.shutdown\(\)\.catch/,
+    'publisher update stops the current runtime best-effort and lets the installed runtime win on restart');
   assert.match(mainSource,/const state=await lifecycle\.ready;/,
     'UI admission must use the completed background startup result');
   assert.doesNotMatch(mainSource,/await lifecycle\.ready;\s*const state=await lifecycle\.reconcile\(\)/,

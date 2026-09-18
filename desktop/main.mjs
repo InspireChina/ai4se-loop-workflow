@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import { join } from 'node:path';
 import { configureUpdater, detachUpdaterWindow } from './updater.mjs';
 import { runtimeFallbackDocument } from './runtime-fallback.mjs';
-import {createDesktopRuntimeHost,prepareDesktopRuntimeInstall} from './runtime-host.mjs';
+import {createDesktopRuntimeHost} from './runtime-host.mjs';
 
 let mainWindow;
 let lifecycle;
@@ -99,7 +99,7 @@ async function startServer() {
   if(!lifecycle&&startupPromise)await startupPromise;
   if (!lifecycle) throw new Error('独立运行宿主尚未初始化');
   const state=await lifecycle.ready;
-  if(state==='observer'||state==='updating')throw new Error(`桌面外部 root 交接尚未完成：${state}`);
+  if(state!=='hosting')throw new Error(`安装包 runtime 启动未完成：${state}`);
   return lifecycle.ui.start(await availablePort());
 }
 
@@ -134,15 +134,8 @@ function prepareForUpdate(targetVersion) {
   updatePreparation = (async () => {
     if (!targetVersion) throw new Error('更新目标版本缺失');
     quitting = true;
-    const receipt = await lifecycle.command({
-      requestId: randomUUID(),
-      source: { adapter: 'electron', instanceId: `electron-${process.pid}`, actor: 'host' },
-      action: { kind: 'prepare-update', attemptId: randomUUID(), targetVersion },
-    });
-    if (receipt.outcome !== 'ready-for-update') {
-      throw new Error(receipt.error || `后台进程尚未清理：${JSON.stringify(receipt.residualProcesses || [])}`);
-    }
-    await prepareDesktopRuntimeInstall({lifecycle,stopUi:stopServer});
+    await stopServer().catch(error=>console.error('[update-ui-stop]',error));
+    await lifecycle.shutdown().catch(error=>console.error('[update-runtime-stop]',error));
     quitPrepared = true;
   })().catch(async (error) => {
     quitting = false;

@@ -6,7 +6,6 @@ import {createRuntimeUpdateController} from '../application/runtime-update-contr
 import {createNativeRuntimeHost} from './native-runtime-host';
 import {createNativeRuntimeUpdate,type LegacyStartupHealthReader} from './native-runtime-update';
 import {createRuntimeDatabaseCompatibility} from './runtime-database-compatibility';
-import {join,resolve} from 'node:path';
 import {createAdminController,type AdminControllerPorts} from '../application/admin-controller';
 import type {RuntimeHostAuthority} from '../domain/runtime-update';
 import {createRuntimeIdleSleep,type IdleSleepInhibitor} from '../application/runtime-idle-sleep';
@@ -24,8 +23,9 @@ export {createNativeExternalService} from './native-external-service';
 
 /** Native composition exported independently from business code. It keeps
  * required process/health proof ports explicit; it never infers success from
- * empty root records or an Agent's summary. The owner supplies an immutable
- * staged bootstrap, not an installer/cache directory that changes in place. */
+ * empty root records or an Agent's summary. Standard desktop startup may use
+ * the currently installed packaged runtime directly; strict repair/update
+ * candidates remain immutable staged artifacts. */
 export function createNativeExternalRuntime(ports:{
   store:AdminManagementStore;ownerId:string;dataRoot:string;executable:string;electronNode?:boolean;bootstrap:RuntimeArtifact;
   /** Independent configured launcher/capability ports. Mandatory: native
@@ -46,11 +46,13 @@ export function createNativeExternalRuntime(ports:{
   onError?:(error:unknown)=>void;
 }) {
   if(!ports.management?.launch||!ports.management.confirmStopped)throw new Error('原生外部 root 必须配置独立 Admin 启动与实际退出能力');
-  if(resolve(ports.bootstrap.root)!==resolve(join(ports.dataRoot,'runtime-artifacts',ports.bootstrap.artifactId)))throw new Error('外部宿主 bootstrap 必须是独立内容寻址安装快照');
+  // Standard desktop startup may execute the runtime shipped in the current
+  // installation directly. Strict repair/update candidates remain staged and
+  // fully verified by their dedicated controller paths.
   const compatibility=createRuntimeDatabaseCompatibility({dataRoot:ports.dataRoot,executable:ports.executable,electronNode:ports.electronNode,
     confirmContainmentExit:ports.confirmReaderContainmentExit});
   let nativeUpdate:ReturnType<typeof createNativeRuntimeUpdate>;
-  const normal=createNativeRuntimeHost({...ports,drainUpdates:async check=>{
+  const normal=createNativeRuntimeHost({...ports,strictContainment:false,drainUpdates:async check=>{
     check();const authorities=new Map(ports.store.liveRuntimeUpdateProcesses().map(record=>
       [JSON.stringify(record.authority),record.authority]));
     // Captured allocations only; do not rescan and kill a successor during
@@ -99,37 +101,23 @@ export function createNativeExternalRuntime(ports:{
   },acquire:ports.inhibitIdleSleep??createNativeIdleSleepInhibitor(),onError:error=>{
     try{ports.onError?.(error);}catch{/* OS diagnostics cannot disable management */}
   }});
-  const host=createExternalRuntimeHost({...ports,...normal,updates,onFailure:failure=>{reportFailure(failure);},
+  const host=createExternalRuntimeHost({...ports,...normal,updates,replaceExistingLease:true,strictCleanup:false,onFailure:failure=>{reportFailure(failure);},
     management:{start:async authority=>{
       rootAuthority=authority;
       if(!ports.store.runtimeHostArtifact(authority)){
-        await normal.validateInstalled(ports.bootstrap,new AbortController().signal,assertRoot);
         assertRoot();ports.store.bindRuntimeHostArtifact(authority,ports.bootstrap);
       }
-      // A new installer/bootstrap is not itself permission to replace the
-      // selected business artifact. Only a physically-ready persisted
-      // publisher request can enter the normal external update transaction.
-      assertRoot();ports.store.beginPublisherInstallation(authority,ports.bootstrap);assertRoot();
-      // A directly launched installer never had an old UI process available
-      // to create publisher readiness. Convert that verified version mismatch
-      // into the same guarded update protocol before any old business host is
-      // admitted, otherwise an unfixed cached runtime can deadlock its own
-      // migration and prevent the new release from ever becoming selected.
-      ports.store.beginInstalledBootstrapTransition(authority,ports.bootstrap);assertRoot();
-      let [result]=await Promise.all([management.admit(),idleSleep.start()]);
-      if(result==='observer'){
-        // An older business host may still own the previous management lease,
-        // or serialized capability preparation may still be draining a
-        // predecessor. Drain the captured native host first, then retry;
-        // never let a fresh business child win either startup race.
-        if(!await normal.drainAll(()=>ports.store.assertRuntimeHost(authority)))return 'observer';
-        result=await management.admit();
-      }
-      await idleSleep.reconcile();return result;
+      // The runtime bundled with the newly installed desktop version wins
+      // immediately. Old transition/handoff transactions are retained only as
+      // aborted history and cannot select an older cached runtime at startup.
+      assertRoot();ports.store.adoptInstalledRuntime(authority,ports.bootstrap);assertRoot();
+      return 'admitted';
     },settled:()=>{
-      // Ordinary/update admission has finished, so expensive discovery and
-      // repair scheduling can proceed without racing the startup Job admission.
-      void management.start().catch(error=>{try{ports.onError?.(error);}catch{/* diagnostics cannot stop the root */}});
+      // Admin is a background observer in standard desktop mode. Failure to
+      // acquire or inspect its own capabilities cannot block ordinary UI or
+      // business startup.
+      void Promise.allSettled([idleSleep.start(),management.start()]).then(()=>idleSleep.reconcile())
+        .catch(error=>{try{ports.onError?.(error);}catch{/* diagnostics cannot stop the root */}});
     },shutdown:async()=>{
       const results=await Promise.allSettled([management.shutdown(),idleSleep.shutdown(),Promise.resolve().then(async()=>{
         if(ports.stopAdditionalHosts&&!await ports.stopAdditionalHosts(rootAuthority))throw new Error('额外宿主实际退出未确认');

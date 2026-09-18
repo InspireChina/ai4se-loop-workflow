@@ -32,7 +32,8 @@ async function main() {
   if(args.has('--host-allocation')&&(args.has('--external-update')||!process.send||!process.connected))throw new Error('普通外部宿主必须绑定独立私有分配');
   const appRoot = resolve(args.get('--app-root') || process.env.LOOP_APP_ROOT || process.cwd());
   const dataRoot = resolve(args.get('--data-root') || process.env.LOOP_DATA_ROOT || join(appRoot, 'data'));
-  if(!args.has('--external-update')) {
+  const standardHost=args.has('--host-allocation')&&process.env.LOOP_RUNTIME_SAFETY==='standard';
+  if(!args.has('--external-update')&&!standardHost) {
     const selected=await selectInstalledRuntime(appRoot,dataRoot);
     if(resolve(selected.root)!==appRoot) {
       // Do not merely change LOOP_APP_ROOT while executing old bundled code.
@@ -165,11 +166,17 @@ async function main() {
       };
       assertNormal();updateStore.bindRuntimeHostProcess(normalProcess,process.pid);
       normalFence=setInterval(()=>{try{assertNormal();}catch(error){void shutdown(error);}},1000);normalFence.unref();
-      const {waitForProcessIdentity}=await import('../../src/infrastructure/process-tree');
-      const identity=await waitForProcessIdentity(process.pid,{timeoutMs:5000});if(!identity)throw new Error('普通宿主无法确认真实进程身份');
-      updateStore.bindRuntimeHostProcess(normalProcess,process.pid,identity.startMarker);
-      const actual=await readHarnessArtifact(appRoot,{assertCurrent:assertNormal});
-      if(JSON.stringify(actual)!==JSON.stringify(normalProcess.artifact))throw new Error('普通宿主实际安装字节与分配不符');assertNormal();
+      const relaxedWindows=process.env.LOOP_RUNTIME_SAFETY==='standard'&&process.platform==='win32';
+      const identity=relaxedWindows?null:
+        await (await import('../../src/infrastructure/process-tree')).waitForProcessIdentity(process.pid,{timeoutMs:5000});
+      const marker=identity?.startMarker??(relaxedWindows?`unverified:${process.pid}`:undefined);
+      if(!marker)throw new Error('普通宿主无法确认真实进程身份');
+      updateStore.bindRuntimeHostProcess(normalProcess,process.pid,marker);
+      if(process.env.LOOP_RUNTIME_SAFETY!=='standard'){
+        const actual=await readHarnessArtifact(appRoot,{assertCurrent:assertNormal});
+        if(JSON.stringify(actual)!==JSON.stringify(normalProcess.artifact))throw new Error('普通宿主实际安装字节与分配不符');
+      }
+      assertNormal();
       updateStore.certifyRuntimeCliHost(normalProcess);
       process.env.LOOP_RUNTIME_HOST_ALLOCATION=normalProcess.allocationId;
     }

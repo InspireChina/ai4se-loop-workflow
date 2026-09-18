@@ -32,6 +32,14 @@ test('bootstrap prefers the actual verified install and does not manufacture a f
  }finally{f.store.close();}
 });
 
+test('standard desktop startup uses the installed runtime directly without content-addressed staging',async()=>{
+ const f=await fixture();try{
+  const value=await resolveNativeBootstrap({...f,appRoot:f.source.root,standardMode:true});
+  assert.deepEqual(value,{bootstrap:{...f.source.descriptor,root:await realpath(f.source.root)}});
+  assert.equal(f.cases().length,0);
+ }finally{f.store.close();}
+});
+
 test('damaged mutable installation recovers management from reverified prior root and retains the original failure across retries',async()=>{
  const f=await fixture();try{
   await writeFile(join(f.source.root,'desktop-runners/host-service.cjs'),'damaged bytes');let reports=0;

@@ -18,6 +18,24 @@ function fixture(){
   return {filename,store,authority,before,candidate,requestId,attemptId};
 }
 
+test('standard desktop adopts the newly installed runtime directly and retires stale handoff state',()=>{
+  const f=fixture();try{
+    const update=f.store.beginInstalledBootstrapTransition(f.authority,f.candidate)!;
+    assert.equal(update.phase,'stopping');assert.equal(f.store.control().management_mode,'update-silence');
+    const selected=f.store.adoptInstalledRuntime(f.authority,f.candidate);
+    assert.deepEqual(selected.artifact,f.candidate);
+    assert.equal(f.store.activeRuntimeUpdate(),null);assert.equal(f.store.runtimeUpdate(update.request.updateId)!.phase,'aborted');
+    assert.equal(f.store.control().management_mode,'normal');
+    assert.deepEqual(f.store.adoptInstalledRuntime(f.authority,f.candidate),selected,'restart is idempotent');
+    f.store.preparePublisherUpdate(f.authority,'obsolete-publisher','obsolete-attempt','99.0.0');
+    assert.equal(f.store.activePublisherUpdate()!.status,'preparing');
+    assert.deepEqual(f.store.adoptInstalledRuntime(f.authority,f.candidate),selected);
+    assert.equal(f.store.activePublisherUpdate(),null);
+    assert.equal(f.store.publisherUpdate('obsolete-publisher')!.status,'aborted');
+    assert.equal(f.store.control().management_mode,'normal');
+  }finally{f.store.close();}
+});
+
 test('publisher metadata survives management restart and only the matching ready target enters external update',()=>{
   const f=fixture();
   try{

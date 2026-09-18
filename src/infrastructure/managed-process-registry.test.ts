@@ -2,7 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { databaseConnection } from './database';
-import { registerManagedProcessInDb } from './managed-process-registry';
+import { managedProcessIdentityRequired,registerManagedProcessInDb } from './managed-process-registry';
+
+test('standard Windows Agent registration does not depend on flaky PowerShell identity observation',()=>{
+  assert.equal(managedProcessIdentityRequired('win32','standard'),false);
+  assert.equal(managedProcessIdentityRequired('win32','strict'),true);
+  assert.equal(managedProcessIdentityRequired('darwin','standard'),true);
+});
 
 test('registers the same managed process idempotently without changing its owner run', async () => {
   const db = await databaseConnection();

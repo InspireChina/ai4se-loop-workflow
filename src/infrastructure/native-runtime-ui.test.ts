@@ -75,6 +75,18 @@ test('actual UI listener is independently owned before ready and its group exits
   }finally{await f.native.drainAll();f.store.close();}
 });
 
+test('standard UI starts with generation fencing and no strict artifact admission',{skip:process.platform!=='darwin'},async()=>{
+  const f=await fixture();const native=createNativeRuntimeUi({store:f.store,dataRoot:dirname(f.store.filename),toolRoot:f.artifact.root,
+    executable:process.execPath,startupTimeoutMs:5000,strictContainment:false});
+  try{
+    await writeFile(join(f.artifact.root,'standard-mode-extra.txt'),'not part of the strict artifact inventory');
+    const {url}=await native.start(f.artifact,f.authority,await freePort(),new AbortController().signal,()=>f.store.assertRuntimeHost(f.authority));
+    const record=f.store.runtimeUiProcesses()[0];assert.equal(record.status,'ready');assert.ok(record.marker&&!record.marker.startsWith('unverified:'));
+    assert.equal((await fetch(url)).status,200);
+    assert.equal(await native.drainAll(),true);assert.throws(()=>process.kill(record.pid!,0),/ESRCH/);
+  }finally{await native.drainAll();f.store.close();}
+});
+
 test('HTTP success from a different process cannot certify a new UI startup',{skip:process.platform!=='darwin'},async()=>{
   const f=await fixture('setInterval(()=>{},1000)');
   const old=createServer((req,res)=>res.end('old server'));const port=await listen(old);

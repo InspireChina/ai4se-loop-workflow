@@ -52,16 +52,15 @@ test('quit requested during service construction skips business startup entirely
   assert.equal(starts,0);assert.equal(stops,1);
 });
 
-test('desktop waits through stale-owner and update handoff states before exposing the UI host',async()=>{
-  const states=['observer','updating','updating','hosting'];let reconciles=0;let waits=0;let now=0;
-  const service={start:async()=>states[0],shutdown:async()=>undefined,store:{control:()=>({desired_intent:'stopped'})},
-    lifecycle:{status:async()=>({}),command:async()=>({})},ui:{},reconcile:async()=>states[++reconciles]};
-  await createDesktopRuntimeHost({createService:async()=>service,onCreated:()=>{},isQuitting:()=>false,
-    waitBeforeRetry:async()=>{waits++;now+=100;},now:()=>now,startupHandoffTimeoutMs:1_000});
-  assert.equal(reconciles,3);assert.equal(waits,3);
+test('desktop does not retry old-runtime handoff states before exposing startup result',async()=>{
+  let reconciles=0;
+  const service={start:async()=> 'observer',shutdown:async()=>undefined,store:{control:()=>({desired_intent:'stopped'})},
+    lifecycle:{status:async()=>({}),command:async()=>({})},ui:{},reconcile:async()=>{reconciles++;return 'hosting';}};
+  const host=await createDesktopRuntimeHost({createService:async()=>service,onCreated:()=>{},isQuitting:()=>false});
+  assert.equal(await host.ready,'observer');assert.equal(reconciles,0);
 });
 
-test('desktop may publish immediately while first-start handoff continues in the background',async()=>{
+test('desktop may publish immediately while deferred startup work continues in the background',async()=>{
   let resolveStart!:(state:string)=>void;const started=new Promise<string>(resolve=>{resolveStart=resolve;});const errors:unknown[]=[];
   const service={start:()=>started,shutdown:async()=>undefined,store:{control:()=>({desired_intent:'stopped'})},
     lifecycle:{status:async()=>({}),command:async()=>({snapshot:{intent:{desired:'stopped'}}})},ui:{},reconcile:async()=> 'hosting'};
@@ -74,9 +73,9 @@ test('desktop may publish immediately while first-start handoff continues in the
   assert.match(String(errors[0]),/observer/);
 });
 
-test('desktop update handoff releases the external root only after UI and update barriers are ready',async()=>{
+test('desktop update preparation no longer waits for cross-runtime readiness receipts',async()=>{
   const order:string[]=[];
   const lifecycle={service:{assertUpdateReady:async()=>{order.push('ready');}},shutdown:async()=>{order.push('shutdown');}};
   await prepareDesktopRuntimeInstall({lifecycle,stopUi:async()=>{order.push('ui');}});
-  assert.deepEqual(order,['ui','ready','shutdown']);
+  assert.deepEqual(order,['ui','shutdown']);
 });

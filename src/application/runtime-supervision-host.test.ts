@@ -140,6 +140,20 @@ test('management launch and management cleanup cannot hold up unrelated business
   } finally { launch.resolve(); cleanup.resolve(); await host.shutdown(); store.close(); }
 });
 
+test('standard supervision resolves business startup and stop without waiting for Admin',async()=>{
+  const store=storeFixture();const launch=deferred();const cleanup=deferred();let applied='';
+  const host=createRuntimeSupervisionHost({store,backgroundManagement:true,
+    management:{start:async()=>{await launch.promise;return 'idle';},reconcile:async()=> 'idle',
+      stop:async()=>{await cleanup.promise;return 'stopped';},shutdown:async()=>undefined},
+    business:{initialize:async()=>undefined,applyIntent:async intent=>{applied=intent.desired;},shutdown:async()=>undefined},
+    reportBusinessFailure:()=>undefined});
+  store.setIntent('running','start');
+  try{
+    await host.initialize();assert.equal(applied,'running');
+    await host.setIntent('stopped','stop');assert.equal(applied,'stopped');
+  }finally{launch.resolve();cleanup.resolve();await host.shutdown();store.close();}
+});
+
 test('restart respects persisted management stop rather than stale business running intent, and failure reporting cannot kill bootstrap', async () => {
   const original = storeFixture();
   const filename = original.filename;
