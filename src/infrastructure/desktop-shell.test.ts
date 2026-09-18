@@ -23,8 +23,10 @@ test('packages a visible tray asset and restores the hidden single-instance wind
   assert.ok(manifest.build?.files?.includes('runtime-host.mjs'));
   assert.match(mainSource,/Promise\.allSettled\(\[lifecycle\?\.shutdown\(\)\]\)/);
   assert.match(mainSource,/prepareDesktopRuntimeInstall\(\{lifecycle,stopUi:stopServer\}\)/);
-  assert.match(mainSource,/await lifecycle\.ready;\s*const state=await lifecycle\.reconcile\(\)/,
-    'UI admission must wait for the one background startup before reconciling');
+  assert.match(mainSource,/const state=await lifecycle\.ready;/,
+    'UI admission must use the completed background startup result');
+  assert.doesNotMatch(mainSource,/await lifecycle\.ready;\s*const state=await lifecycle\.reconcile\(\)/,
+    'UI admission must not immediately repeat a completed startup reconciliation');
   assert.match(mainSource,/if\(!lifecycle\)return \{initializing:true,message:'运行宿主正在初始化'\};/,
     'The visible initialization page must receive an explicit status before the host is published');
   assert.ok(mainSource.indexOf('await createWindow();') < mainSource.indexOf('lifecycle=await initializing;'),

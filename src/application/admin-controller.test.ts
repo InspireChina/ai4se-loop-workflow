@@ -24,6 +24,23 @@ function fixture(now: () => number = Date.now) {
   return { store, filename, repair };
 }
 
+test('serialized capability preparation retains management ownership while blocking discovery and business admission',async()=>{
+  const h=fixture();let prepared=false;let discoveries=0;let launches=0;const errors:string[]=[];
+  const controller=createAdminController({store:h.store,ownerId:'prepared-host',confirmStopped:async()=>true,
+    prepareCapabilities:async()=>{if(!prepared)throw new Error('predecessor capability exit unknown');},
+    discover:async()=>{discoveries++;},onError:error=>errors.push(String(error)),
+    launch:async()=>{launches++;return {completion:new Promise(()=>{}),stop:async()=>true};}});
+  try{
+    assert.equal(await controller.start(),'observer');
+    assert.equal(h.store.control().owner_id,'prepared-host');
+    assert.equal(discoveries,0);assert.equal(launches,0);
+    assert.match(errors[0],/predecessor capability exit unknown/);
+    prepared=true;
+    assert.equal(await controller.reconcile(),'launched');
+    assert.equal(discoveries,1);assert.equal(launches,1);
+  }finally{await controller.shutdown();h.store.close();}
+});
+
 test('inactive polling suspends writers without stopping root read-only evidence, while STOP and shutdown drain everything',async()=>{
   const h=fixture();let suspends=0,stops=0,launches=0;
   h.store.setUpdateSilence(true,'update');

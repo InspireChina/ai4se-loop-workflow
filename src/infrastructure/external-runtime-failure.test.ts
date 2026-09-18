@@ -30,8 +30,9 @@ test('native failed ordinary startup persists exact source and cached Admin cons
   store.cacheRuntimeConfiguration(seed,configuration,0);store.releaseSupervisor(seed);
   const proof=join(workspace,'cached-invocation.json');
   let capabilityExitUnknown=false;
+  const managementOrder:string[]=[];
   const management={confirmStopped:confirmAdminAttemptStopped,
-    prepareCapabilities:async()=>{if(capabilityExitUnknown)throw new Error('old business capability physical exit unknown');},
+    prepareCapabilities:async()=>{managementOrder.push('prepare');if(capabilityExitUnknown)throw new Error('old business capability physical exit unknown');},
     // Accelerate the real Controller timer, not a manual repair invocation.
     scheduleInterval:(callback:()=>void)=>setInterval(callback,10),
     launch:createConfiguredAdminExecution({store,refreshRuntime:async()=>{
@@ -65,6 +66,8 @@ test('native failed ordinary startup persists exact source and cached Admin cons
     capabilityExitUnknown=true;
     assert.equal(await host.reconcile(),'observer','unknown capability writers block ordinary startup without shutting management down');
     assert.equal(store.runtimeHostProcesses().length,0);assert.equal(store.control().owner_id,'external-root:management');
+    assert.ok(managementOrder.length>=1&&managementOrder.every(step=>step==='prepare'),
+      'capability preparation runs after management ownership and blocks business admission');
     capabilityExitUnknown=false;
     await assert.rejects(host.reconcile(),/selected module missing/);
     assert.equal(store.control().owner_id,'external-root:management','management belongs to the external root, not the failed business child');

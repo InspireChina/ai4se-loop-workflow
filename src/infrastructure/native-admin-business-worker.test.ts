@@ -293,11 +293,12 @@ test('ordinary startup predecessor drain does not kill its own in-flight capabil
 test('read-only host audit can be reserved during stopped/update intent without enabling mutating capabilities',async()=>{
   const h=await fixture();
   try{
-    h.store.setIntent('stopped','stop');
     const record=h.store.reserveAdminBusinessWorker(h.rootAuthority,h.managementAuthority,h.artifact,{operation:'host-audit'});
+    h.store.setIntent('stopped','stop');
+    h.store.assertAdminBusinessWorker(record);
+    h.store.setUpdateSilence(true,'update');
     h.store.assertAdminBusinessWorker(record);h.store.confirmAdminBusinessWorkerExit(record);
     assert.throws(()=>h.store.reserveAdminBusinessWorker(h.rootAuthority,h.managementAuthority,h.artifact,{operation:'discover'}),/运行意图/);
-    h.store.setUpdateSilence(true,'update');
     const audit=h.store.reserveAdminBusinessWorker(h.rootAuthority,h.managementAuthority,h.artifact,{operation:'host-audit'});
     h.store.assertAdminBusinessWorker(audit);h.store.confirmAdminBusinessWorkerExit(audit);
   }finally{await h.worker.stopOwned();h.store.close();}

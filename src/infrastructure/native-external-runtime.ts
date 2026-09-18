@@ -117,18 +117,11 @@ export function createNativeExternalRuntime(ports:{
       // migration and prevent the new release from ever becoming selected.
       ports.store.beginInstalledBootstrapTransition(authority,ports.bootstrap);assertRoot();
       let [result]=await Promise.all([management.start(),idleSleep.start()]);
-      try{assertRoot();await ports.management.prepareCapabilities?.();assertRoot();}
-      catch(error){
-        // A predecessor capability may still write business state. Keep
-        // independent management alive, but defer ordinary host admission.
-        for(const sink of new Set([ports.management.onError,ports.onError]))try{sink?.(error);}catch{/* diagnostics cannot remove the physical barrier */}
-        await normal.drainAll(assertRoot);
-        return 'observer';
-      }
       if(result==='observer'){
-        // An older business host may still own the previous management
-        // lease. Drain its captured native host first, then retry ownership;
-        // never let a fresh business child win this startup race.
+        // An older business host may still own the previous management lease,
+        // or serialized capability preparation may still be draining a
+        // predecessor. Drain the captured native host first, then retry;
+        // never let a fresh business child win either startup race.
         if(!await normal.drainAll(()=>ports.store.assertRuntimeHost(authority)))return 'observer';
         result=await management.reconcile();
       }

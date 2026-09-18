@@ -173,6 +173,14 @@ export function createAdminController(ports: AdminControllerPorts) {
       return 'stopped' as const;
     }
     fullyStoppedRevision=undefined;
+    // Capability cleanup is part of the same serialized reconciliation as
+    // discovery and action handling. Running it outside this queue lets the
+    // periodic tick launch a current-root diagnostic between drain checks,
+    // which then looks indistinguishable from an orphaned predecessor.
+    try { await ports.prepareCapabilities?.(); } catch (error) {
+      report(error);
+      return 'observer' as const;
+    }
     // Discovery is an adapter, not a dependency on healthy business storage.
     // Already durable management work continues even if this read fails.
     try { await ports.discover?.(); } catch (error) { report(error); }

@@ -98,8 +98,7 @@ function availablePort() {
 async function startServer() {
   if(!lifecycle&&startupPromise)await startupPromise;
   if (!lifecycle) throw new Error('独立运行宿主尚未初始化');
-  await lifecycle.ready;
-  const state=await lifecycle.reconcile();
+  const state=await lifecycle.ready;
   if(state==='observer'||state==='updating')throw new Error(`桌面外部 root 交接尚未完成：${state}`);
   return lifecycle.ui.start(await availablePort());
 }

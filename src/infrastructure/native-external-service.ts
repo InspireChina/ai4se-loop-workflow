@@ -120,6 +120,17 @@ export async function createNativeExternalService(ports:{
     let timer:NodeJS.Timeout|undefined;let closed=false;let shutdown:Promise<void>|undefined;
     const report=(error:unknown)=>{try{ports.onError?.(error);}catch{/* OS logging cannot prevent cleanup */}};
     const reconciliation=createSingleFlight(()=>root.reconcile());
+    const scheduleReconciliation=()=>{
+      if(closed||timer)return;
+      timer=setTimeout(()=>{timer=undefined;void runReconciliation().catch(report);},10_000);timer.unref();
+    };
+    const runReconciliation=async()=>{
+      // Keep a full quiet interval after the most recent reconciliation. A
+      // fixed interval can fire immediately after a long Windows process
+      // audit settles and repeatedly collide with capability cleanup.
+      if(timer)clearTimeout(timer);timer=undefined;
+      try{return await reconciliation.run();}finally{scheduleReconciliation();}
+    };
     const command=createExternalRuntimeControls({store,
       preparePublisherUpdate:(requestId,attemptId,targetVersion)=>store.preparePublisherUpdate(store.runtimeHostAuthority(ownerId),requestId,attemptId,targetVersion),
       markPublisherUpdateReady:(requestId,revision)=>store.markPublisherUpdateReady(store.runtimeHostAuthority(ownerId),requestId,revision),
@@ -160,13 +171,12 @@ export async function createNativeExternalService(ports:{
       },
       async start(){
         if(closed)throw new Error('已关闭的外部服务不能重启');
-        if(!timer){timer=setInterval(()=>{void reconciliation.run().catch(report);},10_000);timer.unref();}
-        return reconciliation.run().catch(error=>{report(error);return 'degraded';});
+        return runReconciliation().catch(error=>{report(error);return 'degraded';});
       },
-      reconcile:()=>reconciliation.run(),
+      reconcile:()=>runReconciliation(),
       async shutdown(){
         if(shutdown)return shutdown;
-        closed=true;if(timer)clearInterval(timer);timer=undefined;
+        closed=true;if(timer)clearTimeout(timer);timer=undefined;
         const pending=reconciliation.current();
         shutdown=(async()=>{await root.shutdown();await pending?.catch(()=>undefined);store.close();})().catch(error=>{shutdown=undefined;throw error;});return shutdown;
       },

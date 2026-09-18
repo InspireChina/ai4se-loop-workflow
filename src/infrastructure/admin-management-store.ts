@@ -845,7 +845,7 @@ export class AdminManagementStore {
     this.assertRuntimeHost(record.rootAuthority);const audit=record.operation==='host-audit';
     const baseline=record.operation==='runtime-business-baseline';const control=this.assertAuthority(record.managementAuthority,!audit&&!baseline);
     if(record.status==='exited'||record.managementAuthority.ownerId!==`${record.rootAuthority.ownerId}:management`
-      ||control.intent_revision!==record.intentRevision||!audit&&!baseline&&this.activeRuntimeUpdate()
+      ||!audit&&control.intent_revision!==record.intentRevision||!audit&&!baseline&&this.activeRuntimeUpdate()
       ||baseline&&(control.desired_intent!=='running'||control.management_mode!=='update-silence'||this.activeRuntimeUpdate()?.phase!=='stopping'))
       throw new Error('独立业务能力 worker 的运行意图或所有权已改变');
     const rootBound=audit||baseline||record.operation==='harness-actions'||record.operation==='harness-build'||record.operation==='assert-runtime'||record.operation==='runtime-business-progress';
