@@ -4,7 +4,7 @@ import type {RuntimeCliProcess} from '../domain/runtime-cli';
 import type {AdminManagementStore} from './admin-management-store';
 import {assertRuntimeVerificationInput} from './runtime-verification-input';
 import {inspectProcessGroup} from './process-tree';
-import {confirmWindowsJobContainmentExit,isProcessInWindowsJob} from './windows-job-containment';
+import {confirmWindowsJobContainmentExit,waitForProcessWindowsJobMembership} from './windows-job-containment';
 
 /** Root-owned read-only physical proof. No business DB imports or workflow
  * completion; a ready flag cannot substitute for actual process containment. */
@@ -30,8 +30,10 @@ export async function confirmRuntimeRepairHandoff(ports:{
           throw new Error('旧 Windows Job 容器仍存活或退出证据缺失，不能交还');
         check();
       }
-      if(!target.host.pid||!await isProcessInWindowsJob({dataRoot:ports.dataRoot,allocationId:target.host.allocationId,pid:target.host.pid}))
-        throw new Error('新普通宿主不属于登记的 Windows Job 容器，不能交还');
+      if(!target.host.pid)throw new Error('无法确认新普通宿主属于登记的 Windows Job 容器，不能交还');
+      const membership=await waitForProcessWindowsJobMembership({dataRoot:ports.dataRoot,allocationId:target.host.allocationId,pid:target.host.pid});
+      if(membership==='not-member')throw new Error('新普通宿主不属于登记的 Windows Job 容器，不能交还');
+      if(membership==='unknown')throw new Error('暂时无法确认新普通宿主属于登记的 Windows Job 容器，不能交还');
     }
     check();
   } else {

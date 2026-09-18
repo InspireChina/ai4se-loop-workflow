@@ -5,12 +5,12 @@ import {mkdir,readFile,writeFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import test from 'node:test';
 import {AdminManagementStore} from './admin-management-store';
-import {drainRuntimeCliRegistry} from './runtime-cli-registry';
+import {assertRuntimeCliCaller,drainRuntimeCliRegistry} from './runtime-cli-registry';
 import {inspectProcessIdentity,terminateProcessGroup} from './process-tree';
 import {executeDelegation} from './delegation-execution';
 import {createLangfuseTelemetry} from './langfuse';
 
-async function fixture(rootOverride?:string,groupId=process.pid,certified=true) {
+async function fixture(rootOverride?:string,groupId=process.pid,certified=true,businessSupervisionToken?:number) {
   const root=rootOverride||join(process.env.LOOP_DATA_ROOT!,randomUUID());await mkdir(root,{recursive:true});
   const filename=join(root,'admin-management.db');
   const store=new AdminManagementStore(filename);store.setIntent('running','controlled-start');
@@ -18,9 +18,22 @@ async function fixture(rootOverride?:string,groupId=process.pid,certified=true) 
   const artifact={root:join(root,'artifact'),sourceId:'a'.repeat(64),artifactId:'b'.repeat(64),version:'fixture'};
   store.initializeRuntimeInstallation(artifact);const record=store.reserveRuntimeHostProcess(authority,artifact);
   store.bindRuntimeHostProcess(record,process.pid,(await inspectProcessIdentity(process.pid))!.startMarker,groupId);
-  if(certified)store.certifyRuntimeCliHost(record);store.readyRuntimeHostProcess(authority,record.allocationId);
+  if(certified)store.certifyRuntimeCliHost(record);store.readyRuntimeHostProcess(authority,record.allocationId,businessSupervisionToken);
   return {root,filename,store,record,authority};
 }
+
+test('Windows CLI admission degrades only an unavailable Job observation behind current logical fencing',async()=>{
+  const f=await fixture(undefined,process.pid,true,73);const diagnostics:string[]=[];
+  try{
+    await assertRuntimeCliCaller(f.store,f.record.allocationId,{platform:'win32',supervisionToken:73,
+      inspectMembership:async()=> 'unknown',onDegraded:message=>diagnostics.push(message)});
+    assert.equal(diagnostics.length,1);
+    await assert.rejects(assertRuntimeCliCaller(f.store,f.record.allocationId,{platform:'win32',supervisionToken:72,
+      inspectMembership:async()=> 'member'}),/有效业务监督代次/);
+    await assert.rejects(assertRuntimeCliCaller(f.store,f.record.allocationId,{platform:'win32',supervisionToken:73,
+      inspectMembership:async()=> 'not-member'}),/不属于当前 Windows Job/);
+  }finally{f.store.close();}
+});
 
 test('independent CLI admission is durable, source/intent fenced and cannot reopen after drain',async()=>{
   const f=await fixture();

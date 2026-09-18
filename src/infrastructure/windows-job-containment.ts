@@ -392,8 +392,16 @@ export async function confirmWindowsJobContainmentExit(input: {
   return Boolean(receipt);
 }
 
-export async function isProcessInWindowsJob(input:{dataRoot:string;allocationId:string;pid:number;platform?:Platform;timeoutMs?:number}) {
-  if((input.platform??process.platform)!=='win32')return false;
+export type WindowsJobMembership='member'|'not-member'|'unknown';
+
+type WindowsJobMembershipInput={dataRoot:string;allocationId:string;pid:number;platform?:Platform;timeoutMs?:number};
+
+/** Distinguish an authoritative negative result from a failed observation.
+ * PowerShell is only the transport for the native Job query; its crash,
+ * timeout or inability to open a handle is not evidence that the target
+ * escaped the registered Job. */
+export async function inspectProcessWindowsJobMembership(input:WindowsJobMembershipInput):Promise<WindowsJobMembership> {
+  if((input.platform??process.platform)!=='win32')return 'unknown';
   const paths=windowsJobPaths(input.dataRoot,input.allocationId);
   const script=String.raw`
 Add-Type -TypeDefinition @'
@@ -408,16 +416,36 @@ public static class LoopWorkJobMembership {
 '@
 $job=[LoopWorkJobMembership]::OpenJobObject(0x0004,$false,${ps(paths.jobName)})
 $target=[LoopWorkJobMembership]::OpenProcess(0x1000,$false,${input.pid})
-try { $inside=$false; if($job -eq [IntPtr]::Zero -or $target -eq [IntPtr]::Zero -or -not [LoopWorkJobMembership]::IsProcessInJob($target,$job,[ref]$inside)){ exit 2 }; if($inside){'true'}else{'false'} }
+try { $inside=$false; if($job -eq [IntPtr]::Zero -or $target -eq [IntPtr]::Zero -or -not [LoopWorkJobMembership]::IsProcessInJob($target,$job,[ref]$inside)){ exit 2 }; if($inside){'member'}else{'not-member'} }
 finally { if($target -ne [IntPtr]::Zero){[void][LoopWorkJobMembership]::CloseHandle($target)}; if($job -ne [IntPtr]::Zero){[void][LoopWorkJobMembership]::CloseHandle($job)} }
 `;
   const encoded=Buffer.from(script,'utf16le').toString('base64');
-  return new Promise<boolean>(resolve=>{
+  return new Promise<WindowsJobMembership>(resolve=>{
     const child=spawn('powershell.exe',['-NoProfile','-NonInteractive','-EncodedCommand',encoded],{windowsHide:true,stdio:['ignore','pipe','ignore']});
     let output='';let settled=false;let timer:NodeJS.Timeout|undefined;
-    const finish=(value:boolean)=>{if(settled)return;settled=true;clearTimeout(timer);resolve(value);};
+    const finish=(value:WindowsJobMembership)=>{if(settled)return;settled=true;clearTimeout(timer);resolve(value);};
     child.stdout?.on('data',bytes=>{output=(output+bytes.toString()).slice(-64);});
-    child.once('error',()=>finish(false));child.once('close',code=>finish(code===0&&output.trim()==='true'));
-    timer=setTimeout(()=>{child.kill('SIGKILL');finish(false);},input.timeoutMs??5000);timer.unref();
+    child.once('error',()=>finish('unknown'));child.once('close',code=>{
+      const value=output.trim();finish(code===0&&(value==='member'||value==='not-member')?value:'unknown');
+    });
+    timer=setTimeout(()=>{child.kill('SIGKILL');finish('unknown');},input.timeoutMs??5000);timer.unref();
   });
+}
+
+export async function waitForProcessWindowsJobMembership(input:WindowsJobMembershipInput&{
+  attempts?:number;retryIntervalMs?:number;
+  inspect?:(attempt:number)=>Promise<WindowsJobMembership>;
+}):Promise<WindowsJobMembership> {
+  const attempts=Math.max(1,input.attempts??3),inspect=input.inspect??(()=>inspectProcessWindowsJobMembership(input));
+  for(let attempt=1;attempt<=attempts;attempt++){
+    const result=await inspect(attempt);
+    if(result!=='unknown'||attempt===attempts)return result;
+    await new Promise<void>(resolve=>setTimeout(resolve,input.retryIntervalMs??100));
+  }
+  return 'unknown';
+}
+
+/** Compatibility helper for callers that only need a one-shot positive proof. */
+export async function isProcessInWindowsJob(input:WindowsJobMembershipInput) {
+  return await inspectProcessWindowsJobMembership(input)==='member';
 }

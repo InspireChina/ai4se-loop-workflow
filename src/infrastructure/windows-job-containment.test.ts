@@ -10,11 +10,31 @@ import {
   attachWindowsJobContainment,
   confirmWindowsJobContainmentExit,
   isProcessInWindowsJob,
+  waitForProcessWindowsJobMembership,
   processPredatesWindowsBoot,
   windowsJobGuardianScript,
   windowsJobPaths,
   withWindowsJobAdmission,
 } from './windows-job-containment';
+
+test('Windows Job membership retries observation outages without weakening an authoritative rejection',async()=>{
+  const observations=['unknown','unknown','member'] as const;let attempts=0;
+  assert.equal(await waitForProcessWindowsJobMembership({dataRoot:'unused',allocationId:'unused',pid:1,platform:'win32',
+    retryIntervalMs:0,inspect:async()=>observations[attempts++]}),'member');
+  assert.equal(attempts,3);
+
+  attempts=0;
+  assert.equal(await waitForProcessWindowsJobMembership({dataRoot:'unused',allocationId:'unused',pid:1,platform:'win32',
+    retryIntervalMs:0,inspect:async()=>{attempts++;return 'not-member';}}),'not-member');
+  assert.equal(attempts,1);
+});
+
+test('Windows Job membership preserves repeated observation failure as unknown',async()=>{
+  let attempts=0;
+  assert.equal(await waitForProcessWindowsJobMembership({dataRoot:'unused',allocationId:'unused',pid:1,platform:'win32',
+    attempts:3,retryIntervalMs:0,inspect:async()=>{attempts++;return 'unknown';}}),'unknown');
+  assert.equal(attempts,3);
+});
 
 test('Windows descendants are gated on a per-allocation Job Object admission receipt', async () => {
   const root = await mkdtemp(join(tmpdir(), 'loop-windows-job-'));

@@ -9,7 +9,7 @@ import {readRuntimeOriginalOperationInDb} from '../application/runtime-original-
 import {assertRuntimeVerificationInput} from './runtime-verification-input';
 import {inspectProcessGroup} from './process-tree';
 import {runtimeBusinessProgressResultSchema} from '../domain/runtime-business-progress';
-import {confirmWindowsJobContainmentExit,isProcessInWindowsJob} from './windows-job-containment';
+import {confirmWindowsJobContainmentExit,waitForProcessWindowsJobMembership} from './windows-job-containment';
 
 class ProgressSourceChanged extends Error {}
 
@@ -38,8 +38,9 @@ export async function observeRuntimeBusinessProgress(ports:{
   };
   const checkHost=async()=>{
     if(process.platform==='win32'){
-      if(!await isProcessInWindowsJob({dataRoot:ports.dataRoot,allocationId:target.host.allocationId,pid:target.host.pid!}))
-        throw new Error('业务恢复的当前普通宿主不属于登记的 Windows Job 容器');
+      const membership=await waitForProcessWindowsJobMembership({dataRoot:ports.dataRoot,allocationId:target.host.allocationId,pid:target.host.pid!});
+      if(membership==='not-member')throw new Error('业务恢复的当前普通宿主不属于登记的 Windows Job 容器');
+      if(membership==='unknown')throw new Error('暂时无法确认业务恢复的当前普通宿主属于登记的 Windows Job 容器');
       check();return;
     }
     const members=await inspectProcessGroup(target.host.groupId!);check();
