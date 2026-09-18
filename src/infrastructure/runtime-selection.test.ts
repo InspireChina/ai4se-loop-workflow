@@ -82,6 +82,6 @@ test('Desktop starts independent management before selected Web and leaves immut
   const main=await readFile(join(process.cwd(),'desktop/main.mjs'),'utf8');
   assert.ok(main.indexOf('const initializing=createLifecycle(bootstrap);')<main.indexOf('await createWindow();'));
   assert.ok(main.indexOf('const host=await pending;')<main.indexOf('selectedRuntimeRoot=host.service.store.runtimeInstallation()'));
-  assert.match(main,/createNativeExternalService/);assert.match(main,/lifecycle\.ui\.start/);
+  assert.match(main,/createNativeExternalService/);assert.match(main,/startDesktopRuntimeUi\(lifecycle,availablePort\)/);
   assert.doesNotMatch(main,/createManagedLoopRunLifecycle|registerHostProcess|selectInstalledRuntime/);
 });
