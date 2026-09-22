@@ -29,7 +29,7 @@ export default function CreateTaskDialog({ dependencyCandidates, projects, initi
 
   return <>
     <button className="button" type="button" onClick={() => dialogRef.current?.showModal()}><Plus size={15}/>创建需求</button>
-    <dialog className="task-create-dialog" ref={dialogRef} onClick={(event) => {
+    <dialog className="task-create-dialog task-create-dialog-wide" ref={dialogRef} onClick={(event) => {
       if (event.target === event.currentTarget) dialogRef.current?.close();
     }}>
       <div className="dialog-head">
@@ -37,7 +37,7 @@ export default function CreateTaskDialog({ dependencyCandidates, projects, initi
         <button className="icon-button" type="button" aria-label="关闭" onClick={() => dialogRef.current?.close()}><X size={18}/></button>
       </div>
       <form action={createAndOpenTask} className="form-panel dialog-form">
-        <RequirementInputFields dependencyCandidates={dependencyCandidates} projects={projects} initial={{ projectId: initialProjectId }} autoFocus/>
+        <RequirementInputFields dependencyCandidates={dependencyCandidates} projects={projects} layout="split" initial={{ projectId: initialProjectId }} autoFocus/>
         <div className="dialog-actions">
           <button className="button secondary" type="button" onClick={() => dialogRef.current?.close()}>取消</button>
           <CreateTaskButton/>

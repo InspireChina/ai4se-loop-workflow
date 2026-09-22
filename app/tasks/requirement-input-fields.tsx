@@ -18,6 +18,7 @@ type RequirementInputFieldsProps = {
   dependencyCandidates: RequirementDependencyCandidate[];
   projects?: Project[];
   excludedTaskId?: string;
+  layout?: 'stacked' | 'split';
   initial?: {
     title?: string;
     description?: string;
@@ -35,7 +36,7 @@ function defaultMetadataValue(key: RequirementMetadataKey) {
   return definition.inputType === 'select' ? 'balanced' : '';
 }
 
-export function RequirementInputFields({ dependencyCandidates, projects, excludedTaskId, initial, autoFocus = false }: RequirementInputFieldsProps) {
+export function RequirementInputFields({ dependencyCandidates, projects, excludedTaskId, layout = 'stacked', initial, autoFocus = false }: RequirementInputFieldsProps) {
   const nextMetadataId = useRef(initial?.metadata?.length || 0);
   const [metadata, setMetadata] = useState<MetadataEntry[]>(() => (initial?.metadata || []).map((item, index) => ({
     id: `initial-${index}`,
@@ -71,13 +72,17 @@ export function RequirementInputFields({ dependencyCandidates, projects, exclude
       : current.filter((item) => item !== taskId));
   }
 
-  return <>
+  return <div className={`requirement-input-fields ${layout}`}>
     {projects && <label>项目<select name="projectId" required value={projectId} onChange={(event) => {
       setProjectId(event.target.value);
       setSelectedDependencyIds([]);
     }}>{projects.map((project) => <option value={project.project_id} key={project.project_id}>{project.name}</option>)}</select></label>}
     <label>标题<input name="title" required autoFocus={autoFocus} defaultValue={initial?.title} placeholder="例如：项目列表支持按 PIC 筛选"/></label>
-    <label>描述（可选）<textarea name="description" rows={4} defaultValue={initial?.description} placeholder="补充背景、目标或验收要求"/></label>
+    <label className="requirement-description-field">
+      <span>描述（可选）</span>
+      <small>可详细填写背景、目标、约束条件与验收要求。</small>
+      <textarea name="description" rows={layout === 'split' ? 18 : 4} defaultValue={initial?.description} placeholder="补充背景、目标、约束条件或验收要求"/>
+    </label>
     <div className="fields">
       <label>PIPELINE<select name="pipeline" defaultValue={initial?.pipeline || 'feature'}>{REQUIREMENT_PIPELINES.map((pipeline) => <option value={pipeline.id} key={pipeline.id}>{pipeline.label}</option>)}</select></label>
       <label>优先级（9 最高）<select name="priority" defaultValue={initial?.priority || DEFAULT_REQUIREMENT_PRIORITY}>{REQUIREMENT_PRIORITY_OPTIONS.map((priority) => <option value={priority.value} key={priority.value}>{priority.label}</option>)}</select></label>
@@ -139,5 +144,5 @@ export function RequirementInputFields({ dependencyCandidates, projects, exclude
             : null}
       </div>
     </fieldset>
-  </>;
+  </div>;
 }
