@@ -136,7 +136,7 @@ npm run desktop:dist:mac:signed
 npm run desktop:dist:win
 ```
 
-产物位于 `dist-desktop/`。`better-sqlite3` 会在准备桌面 runtime 时针对当前 Electron、操作系统和 CPU 架构重新编译，所以 Windows 和 macOS 产物应分别在对应平台构建，不能复用另一平台生成的 `desktop-runtime/`。桌面构建会额外安装 `desktop/package-lock.json` 中的更新器运行时依赖。
+产物位于 `dist-desktop/`。`better-sqlite3` 会在准备桌面 runtime 时针对当前 Electron、操作系统和 CPU 架构重新编译，所以 Windows 和 macOS 产物应分别在对应平台构建，不能复用另一平台生成的 `desktop-runtime/`。打包时会拒绝跨操作系统构建；Windows CI 会用打包后的 Electron 实际加载两处 `better-sqlite3` 原生模块，校验失败则不上传安装包。桌面构建会额外安装 `desktop/package-lock.json` 中的更新器运行时依赖。
 
 桌面主进程承载独立于 UI 的 Loop 生命周期：用户点击“开始运行”后会持久化持续运行意图，并以 30 秒监督租约和 fencing token 管理 Runner。Runner 异常退出或 heartbeat 失效时，会通过既有草稿与 checkpoint 恢复链回收旧 execution 并启动新一轮；连续失败采用 5 秒、15 秒、30 秒、随后最多 5 分钟的退避，健康运行 10 分钟后重置。关闭窗口只隐藏到托盘，明确退出才停止 Loop。应用更新会先进入更新静默并验证 UI Server、Runner 和 Agent CLI 进程树全部退出；失败时不会自动恢复 Agent，用户可明确重试或恢复使用。
 

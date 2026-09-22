@@ -13,6 +13,9 @@ export function packagedOperationsSkillTarget(context) {
 }
 
 export default async function afterPack(context) {
+  if (context.electronPlatformName !== process.platform) {
+    throw new Error(`Desktop native modules must be built on ${context.electronPlatformName}; current platform is ${process.platform}`);
+  }
   const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const installRoot = packagedInstallRoot(context);
   const resources = context.electronPlatformName === 'darwin'
