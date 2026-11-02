@@ -1,3 +1,4 @@
+import { loadExternalAgent } from '../infrastructure/external-agents';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AgentExecutionOptions } from '../infrastructure/agent-executor';
@@ -215,15 +216,12 @@ export async function claimNextVerificationAssistance(input: {
   }).immediate();
 }
 
-export function buildVerificationAssistancePrompt(job: ClaimedVerificationAssistance) {
+export function buildVerificationAssistancePrompt(job: ClaimedVerificationAssistance, workspaceRoot = paths.root) {
   const command = loopAgentCommandPrefix(paths.appRoot);
   const previous = job.previousReasons.length
     ? job.previousReasons.map((reason, index) => `${index + 1}. ${reason}`).join('\n')
     : '无；这是首次尝试。';
   return [
-    '# 角色目标',
-    '你是 LoopWork 的系统辅助 Agent。验证 Agent 因缺少执行条件或可靠证据提出了验证协助。你要先代表人工尽力调查并解决，让无人值守流程继续。',
-    '',
     '# 当前请求',
     `需求：${job.taskTitle}（${job.taskId}）`,
     `交付单元：${job.storyIndex ?? '需求级'}`,
@@ -236,13 +234,7 @@ export function buildVerificationAssistancePrompt(job: ClaimedVerificationAssist
     '# 先前尝试',
     previous,
     '',
-    '# 工作规则',
-    '1. 必须先执行 verification-assistance status，然后读取最新任务上下文、相关代码、运行环境和已有验证证据。',
-    '2. 优先自行补齐本机可获得的条件：发现真实入口、启动或检查本地服务、构造非敏感测试数据、运行测试或最小复现、检查日志与配置。不得仅因请求原本写给人工就直接放弃。',
-    '3. 可以执行只影响当前验证的安全、可恢复操作；不得修改产品代码、Loop 数据库、需求/通道状态、权限、密钥或外部生产环境，不得伪造观察。',
-    '4. 只有取得足以让验证 Agent继续原计划的真实信息、环境入口、执行结果或证据时才能 resolve。答案必须写清执行了什么、实际观察、证据位置及限制。',
-    '5. 如果安全能力范围内仍无法解决，执行 defer，准确说明已尝试动作、失败证据，以及最终必须由人提供的最小信息或动作。普通最终文本不会结束本次尝试。',
-    '',
+    loadExternalAgent(workspaceRoot, 'system-assistance-agent').prompt,
     '# 可用领域命令',
     `查看状态：${command} verification-assistance status`,
     `成功解决：${command} verification-assistance resolve --answer-file <UTF-8 答复文件>`,

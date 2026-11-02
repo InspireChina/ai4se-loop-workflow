@@ -1,7 +1,7 @@
+import { loadExternalAgent, mergeExternalAgentOptions } from './external-agents';
+import { getConfiguredWorkspaceRoot } from './database';
+import { assertSupportedAgentExecutor } from '../domain/agent-executor';
 import crossSpawn from 'cross-spawn';
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import type { AgentExecutorId } from '../domain/agent-executor';
 import { buildAgentProcessLaunch, createTemporaryPrompt, removeTemporaryPrompt } from './delegation-execution';
 import { resolveAgentExecutionLimits } from './agent-execution-limits';
@@ -15,11 +15,13 @@ export async function runSystemAssistancePrompt(input: {
   prompt: string;
   onProgress?: (event: TaskContextChatProgressEvent) => void;
 }) {
+  assertSupportedAgentExecutor(input.executorId);
   const executor = getAgentExecutor(input.executorId);
-  const workspace = mkdtempSync(join(tmpdir(), 'loopwork-config-chat-'));
   const temporaryPrompt = executor.promptMode === 'file-reference' ? createTemporaryPrompt(input.prompt) : null;
   const invocationPrompt = temporaryPrompt?.reference || input.prompt;
-  const launch = buildAgentProcessLaunch(executor, invocationPrompt, workspace, input.executionOptions);
+  const role = loadExternalAgent(getConfiguredWorkspaceRoot(), 'agent-configuration-assistant');
+  const options = mergeExternalAgentOptions(role, input.executionOptions);
+  const launch = buildAgentProcessLaunch(executor, invocationPrompt, getConfiguredWorkspaceRoot(), options);
   const limits = resolveAgentExecutionLimits(process.env);
   const accumulator = createAgentFinalTextAccumulator(executor.id);
   const publishProgress = (line: string) => {
@@ -31,7 +33,7 @@ export async function runSystemAssistancePrompt(input: {
   let terminationReason = '';
   try {
     const child = crossSpawn(launch.command, launch.args, {
-      cwd: workspace,
+      cwd: getConfiguredWorkspaceRoot(),
       env: launch.env as NodeJS.ProcessEnv,
       stdio: [executor.promptMode === 'stdin' ? 'pipe' : 'ignore', 'pipe', 'pipe'],
       windowsHide: true,
@@ -69,6 +71,5 @@ export async function runSystemAssistancePrompt(input: {
     return answer;
   } finally {
     removeTemporaryPrompt(temporaryPrompt);
-    rmSync(workspace, { recursive: true, force: true });
   }
 }

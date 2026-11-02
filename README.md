@@ -48,6 +48,24 @@ flowchart LR
 
 结卡前后的文档评论采用前向反馈流程：Feedback Agent 先把冻结批次按共同验收目标分组；直接回复和历史说明就地闭环，Bug 先复现；所有需要工程实施的 Bug、行为修订、范围新增和技术调整都先由交付规划 Agent 形成一个或多个完整的追加交付单元。旧交付单元、旧交付规格和旧文档始终作为历史事实保留，不因评论回退或改写；新增单元重新经过交付分析、开发、验证和 Feedback 独立验证，最后由 Review 生成反映最终状态的结卡报告。
 
+## DJI 单工作目录
+
+一个实例只运行一个工作目录，不支持项目注册、增删、切换或按项目筛选。默认使用启动目录，也可通过 `./start.sh --workspace /path/to/repository` 指定。工作目录在实例运行期间固定；环境变量 `LOOP_WORKSPACE_ROOT` 可在启动前显式指定，`.env` / `.env.local` 中的旧目录选择不再生效。
+
+Agent 仍是原有 Workflow 中固定的角色；`.omp/agents` 仅提供对应角色的外部定义，不会自动创建新角色、改变流程或增加节点。多余定义可以供 OMP 子任务使用，但不加入 LoopWork Workflow。
+
+状态数据库内部保留一个固定命名空间用于 Workflow 外键、锁和证据关联，不再构成多项目功能。已有任务的数据目录不能切换到其他工作目录；运行其他目录请使用独立 `--data-dir`。
+
+## DJI 文件与 Agent 定义
+
+原有 Workflow、角色分工、阶段流转及完整 Web UI 保留。系统自动扫描当前工作目录 `.omp/agents/**/*.md`。有 frontmatter `name` 时以它作为角色 ID，否则以文件名（去掉 `.md`）作为角色 ID。文件可以任意命名或分目录组织；重复 ID 或无效定义会明确报错。
+
+Agent Prompt 只使用检测到的 Markdown 正文，可引用 `.omp` Skill 和 Markdown 模板。新增、修改、删除文件会在下次页面加载或执行时直接反映，无需导入。缺失定义会在页面标明并阻止该角色执行，不回退到服务目录、环境配置或内部 Prompt。
+
+LoopWork 内部只保留 Workflow 角色身份和执行协议，不向工作目录初始化或复制角色定义，也不编辑或演化覆盖 Agent Prompt。Prompt 页面用于展示检测结果、文件来源和正文。一次执行会在原生会话目录冻结 Markdown 正文快照，用于保证执行输入稳定；它不是可编辑的角色配置。Runtime 目录不再生成 `PROMPT.md` 副本；Agent frontmatter 可声明 `model`、`thinking`（兼容 `thinking-level` / `thinkingLevel`）、`tools` 和 `skills`；模型与思考强度仍可在每个 Agent 的 Runtime 页面自定义并优先于外部定义；留空字段继续继承外部定义、流程默认与 OMP 默认。`tools: []` 禁用内置工具，`skills` 对应 OMP 原生 Skill 名称过滤，Skill 的发现和加载由 OMP 自身完成。主流程角色使用一个模型，OMP 子 Agent 的专属配置仍由 OMP 管理。原角色 Prompt 文件位于本仓库 `.omp/agents/`，系统不会把它们自动复制到其他工作目录。
+
+新版本默认使用 `data/dji/` 独立数据根目录，不导入之前运行的数据。文档、对话、日志、内容与 JSON 快照以独立文件保存，数据库保存状态、索引和文件引用；可在设置的“工作目录 → 文件存放目录”指定目录，也可用 `LOOP_FILES_ROOT` 固定目录。不同文档版本使用独立文件，事务回滚不覆盖已发布版本。 应同时备份完整数据根目录（包括状态数据库和 payload-key）及所选文件目录，切换存放目录不会搬迁旧文件。内容文件按哈希保存，未被提交或引用的文件可能作为孤立文件保留，当前不自动清理。
+
 ## 人机边界
 
 LoopWork 只在以下情况请求人介入：
@@ -69,13 +87,13 @@ LoopWork 只在以下情况请求人介入：
 - Agent 调度、角色化上下文投影与认知隔离。
 - execution 级 Context Snapshot、精简 Working Pack 和按需只读上下文检索。
 - Workflow 状态机、任务队列和代码槽。
-- 版本化 Prompt、Memory、项目知识和交付规格。
+- 外部 Agent 输入快照、Memory、项目知识和交付规格。
 - 结构化 Agent Result、Test Evidence 和 Trace。
 - execution attempt、Receipt、中断恢复、重试和 rewind。
 - Feedback Agent 的批次分组、前向追加工作和独立处理验证。
 - 每个需求一个持久化 Chat 会话；Agent 每轮重新读取交付文档、活动和代码。Runner 空闲、相关文件归属清楚且调整不改变业务语义、范围、可观察结果或验收标准时，可直接完成局部 UI、排版和 wording 小改动，验证后只提交自己的代码且不创建交付单元；其他变化统一进入 Feedback 闭环，始终不由 Chat 修改 Loop 状态。
 - 权限边界、人工介入和可插拔执行器。
-- 受限的 Prompt 演化，以及可诊断但不会在安装包内自行修改源码的运行事件。
+- 执行证据、Memory 与运行诊断界面保留；不生成内部 Prompt 候选，不自动改写外部 Agent。独立 Evaluator 默认停用，显式设置 `LOOP_ENABLE_EVALUATOR=1` 才会运行，其角色同样来自 `.omp/agents/evolution-evaluator.md`。
 
 项目只需要注入自己的 Agent Profile、领域知识、AC、工具、权限和验证规则；后续可以进一步通过 Skill 和 Workflow Profile 复用这些配置。统一的是“如何可靠运行一个 Loop”，而不是“每个项目应该做什么”。
 
@@ -87,19 +105,28 @@ LoopWork 只在以下情况请求人介入：
 | Human-gated L4 Delivery | 设计阶段：Agent 监测线上环境，生产操作由人确认 |
 | L4 End-to-End | 设计阶段：客户需求 → BA → 工程交付 → 业务结果 |
 
-当前实现采用 Next.js、SQLite 和本地 Runner。它支持 Cursor、Codex、Claude 和 Oh My Pi CLI，但尚未证明大规模并发能力；Worktree 提供 Git 隔离，不等同于 OS 级安全沙箱。
+当前实现采用 Next.js、SQLite 和本地 Runner。DJI 分支仅支持 Oh My Pi（OMP）CLI，但尚未证明大规模并发能力；Worktree 提供 Git 隔离，不等同于 OS 级安全沙箱。
+
+## DJI 运行边界
+
+- 原有 Workflow、角色权限、执行凭证、幂等、Dev / Test 隔离和结果应用仍由 LoopWork 管理。
+- `.omp/agents` 维护专业指令，包括流程角色、任务 Chat、配置辅助和验证协助；Skill、规则及 Markdown 模板使用 OMP 自身的发现机制。
+- 原生 `loopwork` 工具只暴露当前执行授权的领域命令，不执行 Shell。即使角色没有 Bash，也可查询状态、提交产物；服务端仍校验凭证与阶段。
+- Web 日志通过运行事件推送，连接和丢失事件由定期校准恢复。任务执行、对话的模型事件继续呈现在原 UI。
+- DJI 仅发布 Web 入口；桌面更新与历史数据库导入入口不启用。
 
 ## 快速开始
 
-要求 Node.js 环境，并预先安装至少一种可用的 Agent CLI：Cursor、Codex、Claude 或 Oh My Pi。选择 Oh My Pi 时，LoopWork 调用本机 `omp` 的一次性 JSON 模式；模型和思考强度可以在 Runtime 设置中覆盖，留空时沿用 OMP 的默认配置。可通过 `OMP_CLI` 覆盖可执行文件路径。
+DJI 分支保留完整 Workflow 和 Web UI，仅支持 OMP。`./start.sh` 启动 Web/API 和 Runner 监督服务；也可用 `./start.sh --port 8000 --data-dir /path/to/data` 指定端口和数据根目录。首次缺少依赖时自动安装。生产模式先 `npm run build`，再 `./start.sh --production`。
+
+要求 Node.js 20.9+ 环境，并预先安装并配置 Oh My Pi（OMP）CLI。LoopWork 通过本机 `omp --mode rpc` 驱动原生会话、工具、Skill 与上下文压缩。每次 Workflow 执行隔离会话，任务 Chat 使用可恢复会话，均保存在所选文件目录的 `sessions/` 下。模型和思考强度按字段继承：Agent 页面已启用配置中的自定义值 → 外部定义 → 流程全局默认 → OMP 默认。模型留空或思考强度选择默认时继续继承。专业 Prompt 始终来自外部文件。可通过 `OMP_CLI` 覆盖可执行文件路径。
 
 ```bash
 npm install
-npm run db:migrate
-npm run dev
+./start.sh
 ```
 
-打开 `http://localhost:3000`，在项目设置中选择目标仓库，再到 Agent 配置页为各流程 Agent 分别选择执行器、模型和思考强度，然后在运行页面启动 Loop。
+打开 `http://localhost:3000`，确认页面显示的当前工作目录，再到 Agent 配置页为各流程 Agent 配置 OMP 模型和思考强度，然后在运行页面启动 Loop。目标工作目录需要准备对应 `.omp/agents` 定义；系统不会自动复制本仓库角色文件。
 
 常用命令：
 
@@ -117,43 +144,6 @@ npm run db:migrate -- --legacy-db /path/to/data/<hash>/loop-ui.db --workspace-ro
 ```
 
 迁移器会先对源库做 SQLite backup，只在备份上升级 schema，然后将数据合并到全局库。源库不会被修改，导入记录保证重复执行不会重复写入。
-
-## 桌面应用
-
-桌面版使用 Electron 承载 Next.js standalone 服务，并把 SQLite 数据保存到操作系统的用户数据目录。Agent CLI 和 Git 仍从本机环境中发现，因此使用前需要安装并登录至少一种受支持的 Agent CLI。
-
-```bash
-# 本机开发运行
-npm run desktop:dev
-
-# macOS 未签名 DMG（本机架构验证）
-npm run desktop:dist:mac
-
-# macOS 已签名构建（需要 Developer ID 和公证配置）
-npm run desktop:dist:mac:signed
-
-# Windows NSIS 安装器（在 Windows 构建机运行）
-npm run desktop:dist:win
-```
-
-产物位于 `dist-desktop/`。`better-sqlite3` 会在准备桌面 runtime 时针对当前 Electron、操作系统和 CPU 架构重新编译，所以 Windows 和 macOS 产物应分别在对应平台构建，不能复用另一平台生成的 `desktop-runtime/`。打包时会拒绝跨操作系统构建；Windows CI 会用打包后的 Electron 实际加载两处 `better-sqlite3` 原生模块，校验失败则不上传安装包。桌面构建会额外安装 `desktop/package-lock.json` 中的更新器运行时依赖。
-
-桌面主进程承载独立于 UI 的 Loop 生命周期：用户点击“开始运行”后会持久化持续运行意图，并以 30 秒监督租约和 fencing token 管理 Runner。Runner 异常退出或 heartbeat 失效时，会通过既有草稿与 checkpoint 恢复链回收旧 execution 并启动新一轮；连续失败采用 5 秒、15 秒、30 秒、随后最多 5 分钟的退避，健康运行 10 分钟后重置。关闭窗口只隐藏到托盘，明确退出才停止 Loop。应用更新会先进入更新静默并验证 UI Server、Runner 和 Agent CLI 进程树全部退出；失败时不会自动恢复 Agent，用户可明确重试或恢复使用。
-
-### 通过 GitHub Actions 构建跨平台安装包
-
-仓库中的 `Build Desktop Artifacts` 工作流会在各平台的原生 Runner 上生成：
-
-- Windows x64：NSIS 安装版 EXE。
-- macOS Apple Silicon：ARM64 DMG 和自动升级使用的 ZIP。
-- macOS Intel：x64 DMG 和自动升级使用的 ZIP。
-
-1. 将代码推送到 GitHub 的 `release` 分支；每次推送都会自动触发构建。
-2. 构建结束后进入 GitHub 仓库的 **Actions → Build Desktop Artifacts → 对应运行记录**。
-3. 在页面底部按系统下载 `LoopWork-windows-x64-*`、`LoopWork-macos-arm64-*` 或 `LoopWork-macos-x64-*`。
-4. 每个 Artifact 都附带按平台命名的 `SHA256SUMS-<platform>.txt`。Windows 下载后运行带 `Setup` 的 EXE 安装。
-
-也可以在 Actions 页面点击 **Run workflow** 随时手动构建。推送版本标签（例如 `v0.1.11`）会在所有平台构建成功后自动创建 GitHub Release，并上传 Windows 安装版 EXE、两个架构的 macOS DMG、两个自动升级 ZIP、更新清单和统一校验文件。安装后的应用可在“关于”页检查、下载并重启安装新版本。GitHub 会为标签自动附带无法隐藏的 Source code ZIP / tar.gz。当前 Windows 和 macOS 产物没有代码签名，安装时可能显示未知发布者或无法验证开发者，并可能阻止自动安装；正式公开分发前需要配置平台签名证书。
 
 ## 技术文档
 

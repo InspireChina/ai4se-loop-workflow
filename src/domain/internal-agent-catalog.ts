@@ -1,6 +1,7 @@
 export type InternalAgentDefinition = {
   id: string;
   label: string;
+  definitionId: string;
   description: string;
   runtimeIdentity: string;
   trigger: string;
@@ -10,12 +11,13 @@ export type InternalAgentDefinition = {
 
 /**
  * Model-backed roles that exist outside the configurable workflow Agent list.
- * These definitions describe v0.1 capabilities only; they are intentionally
- * read-only because their prompts and permissions are owned by the Harness.
+ * Role identities and permissions are owned by the Harness. Professional
+ * prompts are read from the selected working directory, like workflow roles.
  */
 export const INTERNAL_AGENT_DEFINITIONS = [
   {
     id: 'system-assistance-agent',
+    definitionId: 'system-assistance-agent',
     label: '系统辅助 Agent',
     description: '在 Test Agent 缺少运行条件或可靠证据时先行调查，最多自动尝试三次，再转交人工。',
     runtimeIdentity: 'system-assistance-agent · verification-assistance',
@@ -25,15 +27,17 @@ export const INTERNAL_AGENT_DEFINITIONS = [
   },
   {
     id: 'prompt-evolution-agent',
-    label: 'Prompt 演化 Agent',
-    description: '从已结束的真实执行中提取观察，生成受 Canary 约束的 Prompt Candidate。',
+    definitionId: 'evolution-evaluator',
+    label: '执行经验诊断 Agent',
+    description: '可选地从真实执行中提取可复用经验；不生成或覆盖外部 Prompt。',
     runtimeIdentity: 'prompt-evolution-agent · evolution',
-    trigger: '项目开启自动演化且存在合格执行证据',
+    trigger: '显式设置 LOOP_ENABLE_EVALUATOR=1，且项目允许经验提取',
     authority: '后台旁路运行；不能推进业务流程或绕过 Harness',
     editable: false,
   },
   {
     id: 'context-chat-agent',
+    definitionId: 'context-chat-agent',
     label: '任务上下文 Chat Agent',
     description: '读取需求最新上下文并回答问题，可提交受限的结构化变更请求。',
     runtimeIdentity: 'context-chat-agent · context-chat-execution',
@@ -43,6 +47,7 @@ export const INTERNAL_AGENT_DEFINITIONS = [
   },
   {
     id: 'agent-configuration-assistant',
+    definitionId: 'agent-configuration-assistant',
     label: 'Agent 配置助手',
     description: '根据用户要求生成命令链 YAML 修改草稿，由页面校验后再交给用户保存。',
     runtimeIdentity: 'system assistance invocation · configuration-chat',

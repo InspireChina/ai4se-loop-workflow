@@ -4,22 +4,13 @@ import { ensureAgentRuntimeWorkspace } from './agent-profiles';
 import { createTask } from './tasks';
 import { databaseConnection } from '../infrastructure/database';
 
-test('rejects cross-project Agent evolution runs and observation evidence at the database boundary', async () => {
+test('keeps evolution evidence in the fixed workspace and binds occurrences to the exact task', async () => {
   await ensureAgentRuntimeWorkspace();
   const db = await databaseConnection();
-  const firstProjectId = 'PRJ-evolution-integrity-a';
-  const secondProjectId = 'PRJ-evolution-integrity-b';
-  db.prepare(`
-    INSERT OR IGNORE INTO projects(project_id, name, workspace_root, is_default)
-    VALUES(?, '演化完整性 A', ?, 0), (?, '演化完整性 B', ?, 0)
-  `).run(
-    firstProjectId,
-    `${process.env.LOOP_WORKSPACE_ROOT_OVERRIDE}-evolution-a`,
-    secondProjectId,
-    `${process.env.LOOP_WORKSPACE_ROOT_OVERRIDE}-evolution-b`,
-  );
-  const firstTaskId = await createTask({ title: '演化证据项目 A', projectId: firstProjectId });
-  const secondTaskId = await createTask({ title: '演化证据项目 B', projectId: secondProjectId });
+  const firstProjectId = 'PRJ-default';
+  const secondProjectId = 'not-a-workspace';
+  const firstTaskId = await createTask({ title: '演化证据任务 A' });
+  const secondTaskId = await createTask({ title: '演化证据任务 B' });
   const executionId = 'EXEC-project-evolution-integrity';
   db.prepare(`
     INSERT INTO execution_attempts(
@@ -65,10 +56,10 @@ test('rejects cross-project Agent evolution runs and observation evidence at the
       comment_id, document_id, task_id, document_revision, agent_id, anchor_type, content
     ) VALUES(?, ?, ?, 1, 'dev-agent', 'file', '评论证据')
   `).run(commentId, documentId, secondTaskId);
-  assert.throws(() => db.prepare(`
-    INSERT INTO project_agent_observation_comment_evidence(observation_id, comment_id)
-    VALUES(?, ?)
-  `).run(observationId, commentId), /评论证据必须属于同一项目/);
+  // Both tasks belong to the one workspace. Comment evidence is workspace-level;
+  // execution occurrences above still must match the exact task.
+  db.prepare(`INSERT INTO project_agent_observation_comment_evidence(observation_id, comment_id) VALUES(?, ?)`)
+    .run(observationId, commentId);
   assert.throws(
     () => db.prepare('UPDATE project_agent_observations SET project_id = ? WHERE observation_id = ?').run(secondProjectId, observationId),
     /不能把已有证据的 Agent 观察切换到其他项目/,

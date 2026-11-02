@@ -483,14 +483,15 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     const failureReason = `Runner 健康检查失败：${health.reason}`;
     if (run?.runId) await endRun(run.runId, true, { preserveRunIntent: true, reason: failureReason });
     state = stateRow(db);
-    const restartCount = state.restart_count + 1;
-    const retryAt = new Date(Date.now() + lifecycleRestartDelayMs(restartCount)).toISOString();
+    const initialStart = !run && state.actual_phase === 'stopped';
+    const restartCount = initialStart ? 0 : state.restart_count + 1;
+    const retryAt = initialStart ? null : new Date(Date.now() + lifecycleRestartDelayMs(restartCount)).toISOString();
     db.prepare(`
       UPDATE loop_lifecycle_state
       SET actual_phase = 'starting', restart_count = ?, retry_at = ?, healthy_since = NULL,
           runner_suspect_since = NULL, last_health_json = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP
       WHERE singleton = 1
-    `).run(restartCount, retryAt, run ? JSON.stringify(run.health) : null, failureReason);
+    `).run(restartCount, retryAt, run ? JSON.stringify(run.health) : null, initialStart ? null : failureReason);
     let runId: string | undefined;
     try {
       runId = await beginRun(`${options.adapter}-supervisor`, { preserveRunIntent: true });

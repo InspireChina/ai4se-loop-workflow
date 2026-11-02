@@ -1,3 +1,6 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdirSync, existsSync } from 'node:fs';
+import { documentFilesRoot } from './document-files';
 import type { ChildProcess } from 'node:child_process';
 import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -72,10 +75,23 @@ export function removeTemporaryPrompt(prompt: TemporaryPrompt | null) {
 }
 
 export function buildAgentProcessLaunch(executor: AgentExecutor, prompt: string, workspaceRoot: string, executionOptions: AgentExecutionOptions, baseEnv: AgentEnvironment = process.env) {
+  const rpc = executor.transport === 'omp-rpc';
+  const sessions = executionOptions.sessionDirectory || join(documentFilesRoot(), 'sessions', String(baseEnv.LOOP_EXECUTION_ID || randomUUID()));
+  if (rpc && executionOptions.systemPromptText) {
+    mkdirSync(sessions, { recursive: true });
+    const core = baseEnv.LOOP_EXECUTION_TOKEN || baseEnv.LOOP_VERIFICATION_ASSISTANCE_COMMAND_TOKEN
+      ? '\n\n# Harness boundary\n只处理当前 execution 授权的角色和范围。任务状态、调度、其他 Agent 和结果应用由 LoopWork 管理。使用 loopwork 工具查询状态与提交产物；只有对应终止命令成功才表示完成。'
+      : '';
+    const content = executionOptions.systemPromptText + core;
+    const path = join(sessions, `agent-${createHash('sha256').update(content).digest('hex')}.md`);
+    if (!existsSync(path)) writeFileSync(path, content, { mode: 0o600 });
+    executionOptions = { ...executionOptions, systemPromptFile: path };
+  }
+
   return {
-    command: executor.command,
-    args: [...(executor.prefixArgs || []), ...executor.buildArgs(prompt, workspaceRoot, executionOptions)],
-    env: { ...baseEnv, ...(executor.env || {}) },
+    command: rpc ? process.execPath : executor.command,
+    args: [...(rpc ? [join(process.env.LOOP_APP_ROOT || process.cwd(), 'scripts', 'omp-rpc.mjs'), executor.command] : executor.prefixArgs || []), ...executor.buildArgs(prompt, workspaceRoot, executionOptions)],
+    env: { ...baseEnv, ...(executor.env || {}), ...(rpc ? { LOOP_NODE: process.execPath, LOOP_APP_ROOT: process.env.LOOP_APP_ROOT || process.cwd() } : {}), ...(rpc ? { LOOP_OMP_SESSION_DIR: sessions } : {}) },
   };
 }
 

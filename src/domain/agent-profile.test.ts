@@ -1,8 +1,11 @@
+import { loadExternalAgent } from '../infrastructure/external-agents';
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
+import { AGENT_PROFILE_DEFINITIONS as PROFILE_METADATA, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
-test('ships rigorous V15 seed prompts for every flow Agent', () => {
+const AGENT_PROFILE_DEFINITIONS = Object.fromEntries(Object.entries(PROFILE_METADATA).map(([id, definition]) => [id, { ...definition, prompt: loadExternalAgent(process.cwd(), id).prompt }]));
+
+test('preserves the complete original V15 role contracts in external OMP Agent files', () => {
   assert.equal(AGENT_PROMPT_SEED_REVISION, 15);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;

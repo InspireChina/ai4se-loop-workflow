@@ -303,7 +303,7 @@ test('edits the complete requirement input only before the first Agent execution
 
   const contextTaskId = await createTask({ title: 'Context Agent started' });
   const { beginTaskContextChatTurn } = await import('./task-context-chat');
-  await beginTaskContextChatTurn(contextTaskId, 'Read the current context', 'codex');
+  await beginTaskContextChatTurn(contextTaskId, 'Read the current context', 'omp');
   await assert.rejects(() => updateUnstartedTaskInput({
     taskId: contextTaskId,
     title: 'Must not replace context input',
@@ -1990,287 +1990,7 @@ test('does not consume an Agent slot after Analysis has exited and its result is
   assert.equal(dispatched.length, 4);
 });
 
-test('keeps one hidden global role Prompt while isolating Overlay and Memory by project', async () => {
-  const {
-    ensureAgentRuntimeWorkspace,
-    getAgentProfile,
-    loadAgentRuntime,
-    resetAgentPromptToSystemTemplate,
-    saveAgentMemory,
-    saveAgentPrompt,
-  } = await import('./agent-profiles');
-  const { databaseConnection, hash, paths } = await import('../infrastructure/database');
-  const { AGENT_PROFILE_DEFINITIONS } = await import('../domain/agent-profile');
-  const db = await databaseConnection();
-  const runtimeRoot = await ensureAgentRuntimeWorkspace();
-  const defaultProject = await getAgentProfile('dev-agent');
-  const secondProjectId = 'PRJ-agent-knowledge-isolation';
-  db.prepare(`
-    INSERT INTO projects(project_id, name, workspace_root, description)
-    VALUES(?, 'Second project', ?, 'Agent knowledge isolation test')
-  `).run(secondProjectId, `${paths.root}-second`);
-  await ensureAgentRuntimeWorkspace();
-  const upgradedSystemSeed = await getAgentProfile('review-agent');
-  assert.equal(upgradedSystemSeed.profile.prompt_seed_revision, 15);
-  assert.equal(upgradedSystemSeed.currentPrompt.version, 15);
-  assert.equal(upgradedSystemSeed.currentPrompt.template_version, 15);
-  assert.equal(upgradedSystemSeed.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['review-agent'].prompt);
 
-  assert.ok(!runtimeRoot.startsWith(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE || ''));
-  assert.equal(defaultProject.profile.prompt_seed_revision, 15);
-  assert.equal(defaultProject.currentPrompt.version, 15);
-  assert.equal(defaultProject.currentPrompt.template_version, 15);
-  assert.equal(defaultProject.currentPrompt.source, 'system');
-  assert.equal(defaultProject.currentPrompt.content, AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt);
-  assert.equal('promptHistory' in defaultProject, false);
-  assert.equal(existsSync(join(defaultProject.runtimeDirectory, 'history')), false);
-  assert.equal(existsSync(join(defaultProject.runtimeDirectory, 'candidates')), false);
-  assert.ok(defaultProject.currentPrompt.content.length > 800);
-  assert.match(defaultProject.currentPrompt.content, /# 角色目标/);
-  assert.match(defaultProject.currentPrompt.content, /# 完成条件/);
-
-  const overlayA = `${defaultProject.currentPrompt.content}\n\n# 默认项目约定\n\n- 使用 npm test。`;
-  const overlayB = `${defaultProject.currentPrompt.content}\n\n# 第二项目约定\n\n- 使用 pnpm test。`;
-  const overlayRevisionA = await saveAgentPrompt({ projectId: defaultProject.project.project_id, agentId: 'dev-agent', content: overlayA });
-  const overlayRevisionB = await saveAgentPrompt({ projectId: secondProjectId, agentId: 'dev-agent', content: overlayB });
-  const memoryRevisionA = await saveAgentMemory({ projectId: defaultProject.project.project_id, agentId: 'dev-agent', content: '# Durable Memory\n\n- 默认项目经验。' });
-  const memoryRevisionB = await saveAgentMemory({ projectId: secondProjectId, agentId: 'dev-agent', content: '# Durable Memory\n\n- 第二项目经验。' });
-
-  const detailA = await getAgentProfile('dev-agent', true, defaultProject.project.project_id);
-  const detailB = await getAgentProfile('dev-agent', true, secondProjectId);
-  assert.equal(detailA.currentPrompt.content, detailB.currentPrompt.content);
-  assert.equal(detailA.projectOverlay.content, overlayA);
-  assert.equal(detailB.projectOverlay.content, overlayB);
-  assert.equal(detailA.projectOverlay.revision, overlayRevisionA);
-  assert.equal(detailB.projectOverlay.revision, overlayRevisionB);
-  assert.equal(detailA.currentMemory.revision, memoryRevisionA);
-  assert.equal(detailB.currentMemory.revision, memoryRevisionB);
-  assert.match(detailA.currentMemory.content, /默认项目经验/);
-  assert.match(detailB.currentMemory.content, /第二项目经验/);
-  assert.notEqual(detailA.runtimeDirectory, detailB.runtimeDirectory);
-
-  const runtimeA = await loadAgentRuntime('dev-agent', 'plan', defaultProject.project.project_id);
-  const runtimeB = await loadAgentRuntime('dev-agent', 'plan', secondProjectId);
-  assert.match(runtimeA.prompt, /# 角色目标/);
-  assert.match(runtimeA.prompt, /默认项目约定/);
-  assert.doesNotMatch(runtimeA.prompt, /第二项目约定/);
-  assert.match(runtimeB.prompt, /# 角色目标/);
-  assert.match(runtimeB.prompt, /第二项目约定/);
-  assert.doesNotMatch(runtimeB.prompt, /默认项目约定/);
-  assert.equal(runtimeA.promptHash, hash(runtimeA.prompt));
-  assert.equal(runtimeB.promptHash, hash(runtimeB.prompt));
-
-  writeFileSync(join(detailA.runtimeDirectory, 'PROMPT.md'), `${runtimeA.prompt}\n- 不应反向导入。`);
-  await ensureAgentRuntimeWorkspace();
-  assert.doesNotMatch(readFileSync(join(detailA.runtimeDirectory, 'PROMPT.md'), 'utf8'), /不应反向导入/);
-
-  const resetRevision = await resetAgentPromptToSystemTemplate({ projectId: defaultProject.project.project_id, agentId: 'dev-agent' });
-  const resetA = await getAgentProfile('dev-agent', false, defaultProject.project.project_id);
-  const preservedB = await getAgentProfile('dev-agent', false, secondProjectId);
-  assert.equal(resetRevision, overlayRevisionA + 1);
-  assert.equal(resetA.projectOverlay.content, resetA.currentPrompt.content);
-  assert.equal(resetA.currentMemory.revision, memoryRevisionA);
-  assert.equal(preservedB.projectOverlay.content, overlayB);
-  assert.equal(await resetAgentPromptToSystemTemplate({ projectId: defaultProject.project.project_id, agentId: 'dev-agent' }), resetRevision);
-});
-
-test('promotes repeated project evidence into only that project Overlay through deterministic Canary runs', async () => {
-  const { createTask } = await import('./tasks');
-  const { databaseConnection, hash } = await import('../infrastructure/database');
-  const { applyEvolutionResult, beginEvolutionRun, updatePromptCanary } = await import('./agent-evolution');
-  const { ensureAgentRuntimeWorkspace, getAgentProfile, loadAgentRuntime } = await import('./agent-profiles');
-  const { cancelExecution } = await import('./executions');
-  const db = await databaseConnection();
-  const taskA = await createTask({ title: 'Evolution evidence A' });
-  const taskB = await createTask({ title: 'Evolution evidence B' });
-
-  const addExecution = (executionId: string, taskId: string, candidateId: string | null = null) => {
-    db.prepare(`
-      INSERT INTO execution_attempts(
-        execution_id, run_id, task_id, agent, pipeline, delegation_key,
-        attempt, status, input_hash, input_json, result_json, evolution_candidate_id
-      ) VALUES(?, 'run-evolution-test', ?, 'dev-agent', 'dev', ?, 1, 'applied', ?, '{}', '{"outcome":"completed"}', ?)
-    `).run(executionId, taskId, `key-${executionId}`, `hash-${executionId}`, candidateId);
-  };
-  const evaluate = async (executionId: string, taskId: string, fingerprint: string, target: 'memory' | 'prompt') => {
-    addExecution(executionId, taskId);
-    const evidence = {
-      executionId,
-      taskId,
-      storyIndex: 1,
-      agentId: 'dev-agent',
-      attempt: 1,
-      promptVersion: 1,
-      result: { outcome: 'completed', summary: 'Execution completed with verified evidence.' },
-      applicationOutcome: 'advanced',
-      diagnostics: [],
-    };
-    const run = await beginEvolutionRun(evidence);
-    assert.ok(run?.prompt);
-    await applyEvolutionResult(run!.evolutionId, evidence, {
-      summary: 'A reusable behavior was observed.',
-      observations: [{
-        fingerprint,
-        category: 'verification',
-        summary: 'Use the repository test command before declaring completion',
-        guidance: 'When implementation changes are complete, run the repository test command and retain its deterministic result.',
-        target,
-        confidence: 0.9,
-        reusable: true,
-      }],
-    });
-  };
-
-  const beforeMemory = await getAgentProfile('dev-agent');
-  await evaluate('evo-memory-1', taskA, 'run-repository-tests', 'memory');
-  await evaluate('evo-memory-2', taskA, 'run-repository-tests', 'memory');
-  let detail = await getAgentProfile('dev-agent');
-  assert.equal(detail.currentMemory.revision, beforeMemory.currentMemory.revision);
-  await evaluate('evo-memory-3', taskB, 'run-repository-tests', 'memory');
-  detail = await getAgentProfile('dev-agent');
-  assert.equal(detail.currentMemory.revision, beforeMemory.currentMemory.revision + 1);
-  assert.match(detail.currentMemory.content, /EVOLUTION:run-repository-tests/);
-
-  await evaluate('evo-prompt-1', taskA, 'verify-before-completion', 'prompt');
-  await evaluate('evo-prompt-2', taskA, 'verify-before-completion', 'prompt');
-  await evaluate('evo-prompt-3', taskB, 'verify-before-completion', 'prompt');
-  detail = await getAgentProfile('dev-agent');
-  assert.ok(detail.candidatePrompt);
-  assert.equal(detail.profile.canary_remaining, 3);
-  assert.equal(hash(detail.candidatePrompt!.content), detail.candidatePrompt!.content_hash);
-  assert.match(detail.candidatePrompt!.content, /# 角色目标/);
-  assert.equal(detail.candidatePrompt!.base_overlay_revision, detail.projectOverlay.revision);
-  assert.match(detail.candidatePrompt!.content, /EVOLUTION:verify-before-completion/);
-  const candidateId = detail.candidatePrompt!.candidate_id;
-  const projectId = detail.project.project_id;
-  const candidateRuntime = await loadAgentRuntime('dev-agent', undefined, projectId);
-  assert.equal(candidateRuntime.evolutionCandidateId, candidateId);
-  assert.equal(candidateRuntime.promptVersion, detail.candidatePrompt!.revision);
-  assert.equal(candidateRuntime.promptTemplateVersion, detail.currentPrompt.template_version);
-  assert.match(candidateRuntime.prompt, /# 角色目标/);
-  assert.match(candidateRuntime.prompt, /EVOLUTION:verify-before-completion/);
-  assert.equal(
-    (db.prepare("SELECT COUNT(*) AS count FROM project_agent_overlays WHERE project_id = ? AND agent_id = 'dev-agent'").get(projectId) as { count: number }).count,
-    1,
-  );
-  assert.equal(
-    (db.prepare("SELECT COUNT(*) AS count FROM project_agent_overlay_candidates WHERE project_id = ? AND agent_id = 'dev-agent'").get(projectId) as { count: number }).count,
-    1,
-  );
-
-  const canaryDelegation = (taskId: string): DelegationEnvelope => ({
-    taskId,
-    lane: 'delivery',
-    pipeline: 'dev',
-    agent: 'dev-agent',
-    storyIndex: 1,
-    resources: ['code:workspace', 'browser:exclusive'],
-    description: '验证 Prompt Canary 串行执行',
-    title: 'Prompt Canary',
-    taskDescription: null,
-    itemType: 'feature',
-    priority: 'P2',
-    link: '',
-    externalId: '',
-    externalStatus: '',
-    agileStatus: 'in dev',
-    currentSubagent: 'dev-agent',
-    resumePending: 0,
-    specResolvedIndex: 1,
-    runState: 'runnable',
-    closureStatus: 'open',
-    reviewRevision: 0,
-    reviewDocumentId: '',
-    lastActor: 'system',
-    analysisIndex: 1,
-    devIndex: 0,
-    testIndex: 0,
-    totalStories: 1,
-    nextStep: '',
-    blockedReason: '',
-    owner: '',
-    evidence: '',
-    risk: '',
-  });
-  const activeCanary = await beginTestExecutionAttempt({
-    runId: 'run-canary-serial-1',
-    delegation: canaryDelegation(taskA),
-    prompt: candidateRuntime.prompt,
-    promptVersion: detail.candidatePrompt!.revision,
-    promptTemplateVersion: detail.currentPrompt.template_version,
-    promptHash: candidateRuntime.promptHash,
-    evolutionCandidateId: candidateId,
-  });
-  assert.equal(activeCanary.attempt.prompt_version, detail.candidatePrompt!.revision);
-  assert.equal(activeCanary.attempt.prompt_template_version, detail.currentPrompt.template_version);
-  assert.equal(activeCanary.attempt.prompt_hash, candidateRuntime.promptHash);
-  await assert.rejects(
-    beginTestExecutionAttempt({
-      runId: 'run-canary-serial-2',
-      delegation: canaryDelegation(taskB),
-      prompt: candidateRuntime.prompt,
-      promptVersion: detail.candidatePrompt!.revision,
-      promptTemplateVersion: detail.currentPrompt.template_version,
-      promptHash: candidateRuntime.promptHash,
-      evolutionCandidateId: candidateId,
-    }),
-    );
-  await cancelExecution(activeCanary.attempt.execution_id, '只验证串行门禁，不计入 Canary');
-
-  for (const index of [1, 2, 3]) {
-    const executionId = `canary-success-${index}`;
-    addExecution(executionId, index === 1 ? taskA : taskB, candidateId);
-    if (index < 3) await updatePromptCanary('dev-agent', true, executionId);
-    else await ensureAgentRuntimeWorkspace();
-  }
-  detail = await getAgentProfile('dev-agent');
-  assert.equal(detail.candidatePrompt, null);
-  assert.match(detail.projectOverlay.content, /EVOLUTION:verify-before-completion/);
-  assert.equal(hash(detail.projectOverlay.content), detail.projectOverlay.content_hash);
-  assert.doesNotMatch(detail.currentPrompt.content, /EVOLUTION:verify-before-completion/);
-  assert.equal(detail.observations.find((item) => item.fingerprint === 'verify-before-completion')?.status, 'promoted_prompt');
-  assert.equal(
-    (db.prepare("SELECT COUNT(*) AS count FROM project_agent_overlays WHERE project_id = ? AND agent_id = 'dev-agent'").get(projectId) as { count: number }).count,
-    1,
-  );
-  assert.equal(
-    (db.prepare("SELECT COUNT(*) AS count FROM project_agent_overlay_candidates WHERE project_id = ? AND agent_id = 'dev-agent'").get(projectId) as { count: number }).count,
-    0,
-  );
-  const promotedOverlay = detail.projectOverlay;
-  await ensureAgentRuntimeWorkspace();
-  detail = await getAgentProfile('dev-agent');
-  assert.equal(detail.projectOverlay.revision, promotedOverlay.revision);
-  assert.equal(detail.projectOverlay.content_hash, promotedOverlay.content_hash);
-  const upgradedRuntime = await loadAgentRuntime('dev-agent', undefined, projectId);
-  assert.match(upgradedRuntime.prompt, /# 角色目标/);
-  assert.match(upgradedRuntime.prompt, /EVOLUTION:verify-before-completion/);
-
-  await evaluate('evo-rollback-1', taskA, 'avoid-ambiguous-tool-order', 'prompt');
-  await evaluate('evo-rollback-2', taskB, 'avoid-ambiguous-tool-order', 'prompt');
-  await evaluate('evo-rollback-3', taskB, 'avoid-ambiguous-tool-order', 'prompt');
-  detail = await getAgentProfile('dev-agent');
-  const currentOverlayBeforeRejectedCanary = detail.projectOverlay;
-  const rejectedCandidateId = detail.candidatePrompt!.candidate_id;
-  for (const index of [1, 2, 3]) addExecution(`late-canary-success-${index}`, taskA, rejectedCandidateId);
-  addExecution('late-canary-failure', taskB, rejectedCandidateId);
-  db.prepare("UPDATE execution_attempts SET status = 'running' WHERE execution_id = 'late-canary-failure'").run();
-  await ensureAgentRuntimeWorkspace();
-  detail = await getAgentProfile('dev-agent');
-  assert.ok(detail.candidatePrompt);
-  assert.equal(detail.projectOverlay.content_hash, currentOverlayBeforeRejectedCanary.content_hash);
-  db.prepare("UPDATE execution_attempts SET status = 'retryable_failed' WHERE execution_id = 'late-canary-failure'").run();
-  await ensureAgentRuntimeWorkspace();
-  detail = await getAgentProfile('dev-agent');
-  assert.equal(detail.candidatePrompt, null);
-  assert.equal(detail.projectOverlay.revision, currentOverlayBeforeRejectedCanary.revision);
-  assert.equal(detail.projectOverlay.content_hash, currentOverlayBeforeRejectedCanary.content_hash);
-  assert.equal(
-    (db.prepare("SELECT COUNT(*) AS count FROM project_agent_overlay_candidates WHERE project_id = ? AND agent_id = 'dev-agent'").get(projectId) as { count: number }).count,
-    0,
-  );
-  assert.equal(detail.observations.find((item) => item.fingerprint === 'avoid-ambiguous-tool-order')?.status, 'rejected');
-});
 
 test('redacts nested authorization attributes before persisting runtime events', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
@@ -2370,15 +2090,15 @@ test('infers event metadata from message prefix', async () => {
     assert.equal(event.body, c.message);
   }
 
-  const attributesEvent = db.prepare("SELECT attributes_json FROM runtime_events WHERE body = 'plain log without prefix'").get() as any;
+  const attributesEvent = db.prepare("SELECT attributes_json FROM runtime_events WHERE loopwork_read_payload(body) = 'plain log without prefix'").get() as any;
   assert.equal(attributesEvent.attributes_json, '{}');
 
-  const kvEvent = db.prepare("SELECT attributes_json FROM runtime_events WHERE body = '[派发] task assigned'").get() as any;
+  const kvEvent = db.prepare("SELECT attributes_json FROM runtime_events WHERE loopwork_read_payload(body) = '[派发] task assigned'").get() as any;
   assert.equal(kvEvent.attributes_json, '{}');
 
   const kvMessage = '[派发] executor=agent-runner lane=delivery agent=dev-agent requirement=REQ-1 unit=1 flow=dev resource=none tool=harness code=main';
   recordLoopLogEventInDb(db, runId, kvMessage);
-  const kvRich = db.prepare("SELECT attributes_json FROM runtime_events WHERE body = ?").get(kvMessage) as any;
+  const kvRich = db.prepare("SELECT attributes_json FROM runtime_events WHERE loopwork_read_payload(body) = ?").get(kvMessage) as any;
   const parsed = JSON.parse(kvRich.attributes_json);
   assert.equal(parsed.executor, 'agent-runner');
   assert.equal(parsed.lane, 'delivery');

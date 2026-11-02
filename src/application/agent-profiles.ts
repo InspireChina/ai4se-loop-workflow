@@ -1,3 +1,4 @@
+import { discoverExternalAgents, externalAgentPath, loadExternalAgent } from '../infrastructure/external-agents';
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -6,7 +7,7 @@ import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { AGENT_PROFILE_DEFINITIONS, AGENT_PROMPT_SEED_REVISION, DEFAULT_AGENT_MEMORY, FLOW_AGENT_IDS, isFlowAgentId, type FlowAgentId } from '../domain/agent-profile';
 import { databaseConnection, hash, paths } from '../infrastructure/database';
-import { defaultProjectInDb, projectInDb } from './projects';
+import { workspaceContextInDb, resolveWorkspaceContextInDb } from './workspace-context';
 
 export type AgentProfile = {
   agent_id: FlowAgentId;
@@ -28,7 +29,7 @@ export type CurrentPrompt = {
   template_version: number;
   content: string;
   content_hash: string;
-  source: 'system' | 'human' | 'evolution';
+  source: 'system' | 'human' | 'evolution' | 'file';
   reason: string | null;
   updated_at: string;
   status: 'active';
@@ -67,6 +68,7 @@ export type AgentRuntimeContext = {
   agentId: FlowAgentId;
   projectId: string;
   prompt: string;
+  promptPath: string;
   promptVersion: number;
   promptTemplateVersion: number;
   promptHash: string;
@@ -113,7 +115,6 @@ export type DailyMemoryObservation = {
   promoted: boolean;
 };
 
-const overlaySchema = z.string().trim().min(1, '项目 Prompt 不能为空').max(100_000);
 const memorySchema = z.string().trim().max(40_000);
 
 export function agentRuntimeRoot() {
@@ -121,7 +122,7 @@ export function agentRuntimeRoot() {
 }
 
 function agentDirectory(projectId: string, agentId: FlowAgentId) {
-  return join(agentRuntimeRoot(), 'projects', projectId, 'agents', agentId);
+  return join(agentRuntimeRoot(), 'agents', agentId);
 }
 
 function atomicWrite(path: string, content: string) {
@@ -130,38 +131,18 @@ function atomicWrite(path: string, content: string) {
   renameSync(temporary, path);
 }
 
-function materializeAgent(projectId: string, agentId: FlowAgentId, prompt: string, memory: string) {
+function materializeAgentMemory(projectId: string, agentId: FlowAgentId, memory: string) {
   const directory = agentDirectory(projectId, agentId);
   mkdirSync(join(directory, 'memory'), { recursive: true, mode: 0o700 });
   rmSync(join(directory, 'history'), { recursive: true, force: true });
   rmSync(join(directory, 'candidates'), { recursive: true, force: true });
-  atomicWrite(join(directory, 'PROMPT.md'), `${prompt.trim()}\n`);
+  rmSync(join(directory, 'PROMPT.md'), { force: true });
   atomicWrite(join(directory, 'MEMORY.md'), `${memory.trim()}\n`);
 }
 
 type AgentDatabase = Awaited<ReturnType<typeof databaseConnection>>;
-function rolePrompt(agentId: FlowAgentId): CurrentPrompt {
-  const definition = AGENT_PROFILE_DEFINITIONS[agentId];
-  return {
-    agent_id: agentId,
-    version: AGENT_PROMPT_SEED_REVISION,
-    template_version: AGENT_PROMPT_SEED_REVISION,
-    content: definition.prompt,
-    content_hash: hash(definition.prompt),
-    source: 'system',
-    reason: `隐藏的全局角色模板 V${AGENT_PROMPT_SEED_REVISION}`,
-    updated_at: '',
-    status: 'active',
-  };
-}
-
-function composePrompt(agentId: FlowAgentId, overlay: string) {
-  const base = AGENT_PROFILE_DEFINITIONS[agentId].prompt.trim();
-  return overlay.trim() || base;
-}
-
 function resolveProject(db: AgentDatabase, projectIdInput?: string) {
-  const project = projectIdInput ? projectInDb(db, projectIdInput) : defaultProjectInDb(db);
+  const project = projectIdInput ? resolveWorkspaceContextInDb(db, projectIdInput) : workspaceContextInDb(db);
   if (!project) throw new Error('项目不存在');
   return project;
 }
@@ -185,96 +166,16 @@ function parseDailyMemoryObservations(content: string, durableMemory = ''): Dail
   });
 }
 
-type CanaryAttemptRow = {
-  execution_id: string;
-  status: string;
-  result_json: string | null;
-};
-
-const ACTIVE_EXECUTION_STATUSES = new Set(['planned', 'running', 'output_received', 'verifying', 'applying']);
-const FAILED_EXECUTION_STATUSES = new Set(['retryable_failed', 'system_blocked']);
-
-function canaryAttemptOutcome(attempt: CanaryAttemptRow): 'active' | 'succeeded' | 'failed' | 'ignored' {
-  if (ACTIVE_EXECUTION_STATUSES.has(attempt.status)) return 'active';
-  if (FAILED_EXECUTION_STATUSES.has(attempt.status)) return 'failed';
-  if (attempt.status !== 'applied') return 'ignored';
-  try {
-    const result = JSON.parse(attempt.result_json || '') as { outcome?: string; verdict?: string };
-    return result.outcome === 'failed' || result.verdict === 'failed' ? 'failed' : 'succeeded';
-  } catch {
-    return 'failed';
-  }
-}
-
-function projectOverlayCandidateInDb(db: AgentDatabase, projectId: string, agentId: FlowAgentId) {
-  const row = db.prepare(`
-    SELECT * FROM project_agent_overlay_candidates
-    WHERE project_id = ? AND agent_id = ?
-  `).get(projectId, agentId) as Omit<PromptCandidate, 'source' | 'status'> | undefined;
-  return row ? { ...row, source: 'evolution' as const, status: 'candidate' as const } : null;
-}
-
-export function isActiveProjectOverlayCandidateInDb(
-  db: AgentDatabase,
-  projectId: string,
-  agentId: string,
-  candidateId: string,
-) {
-  return isFlowAgentId(agentId)
-    && projectOverlayCandidateInDb(db, projectId, agentId)?.candidate_id === candidateId;
-}
-
-function reconcileProjectOverlayCandidate(db: AgentDatabase, projectId: string, agentId: FlowAgentId) {
-  const candidate = projectOverlayCandidateInDb(db, projectId, agentId);
-  if (!candidate) return;
-  const attempts = db.prepare(`
-    SELECT execution_id, status, result_json
-    FROM execution_attempts
-    WHERE evolution_candidate_id = ?
-    ORDER BY created_at, execution_id
-  `).all(candidate.candidate_id) as CanaryAttemptRow[];
-  const outcomes = attempts.map(canaryAttemptOutcome);
-  let fingerprint = '';
-  try { fingerprint = String(JSON.parse(candidate.evidence_json || '{}').fingerprint || ''); } catch { /* optional evidence */ }
-  if (outcomes.includes('failed')) {
-    db.prepare('DELETE FROM project_agent_overlay_candidates WHERE candidate_id = ?').run(candidate.candidate_id);
-    if (fingerprint) db.prepare(`
-      UPDATE project_agent_observations SET status = 'rejected', last_seen_at = CURRENT_TIMESTAMP
-      WHERE project_id = ? AND agent_id = ? AND fingerprint = ? AND status = 'prompt_candidate'
-    `).run(projectId, agentId, fingerprint);
-    return;
-  }
-  const successes = outcomes.filter((outcome) => outcome === 'succeeded').length;
-  const active = outcomes.filter((outcome) => outcome === 'active').length;
-  const remaining = Math.max(0, 3 - successes);
-  if (remaining === 0 && active === 0) {
-    db.prepare(`
-      UPDATE project_agent_overlays
-      SET content = ?, content_hash = ?, revision = ?, source = 'evolution', reason = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE project_id = ? AND agent_id = ? AND revision = ?
-    `).run(candidate.content, candidate.content_hash, candidate.revision, candidate.reason, projectId, agentId, candidate.base_overlay_revision);
-    db.prepare('DELETE FROM project_agent_overlay_candidates WHERE candidate_id = ?').run(candidate.candidate_id);
-    if (fingerprint) db.prepare(`
-      UPDATE project_agent_observations SET status = 'promoted_prompt', last_seen_at = CURRENT_TIMESTAMP
-      WHERE project_id = ? AND agent_id = ? AND fingerprint = ?
-    `).run(projectId, agentId, fingerprint);
-    return;
-  }
-  db.prepare(`
-    UPDATE project_agent_overlay_candidates
-    SET remaining_runs = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE candidate_id = ?
-  `).run(remaining, candidate.candidate_id);
+export function isActiveProjectOverlayCandidateInDb(db: AgentDatabase, projectId: string, agentId: string, candidateId: string) {
+  return false;
 }
 
 async function writeManifest() {
   const db = await databaseConnection();
   const profiles = db.prepare(`
-    SELECT state.project_id, state.agent_id, overlay.revision AS overlay_revision,
+    SELECT state.project_id, state.agent_id, 0 AS overlay_revision,
            state.current_memory_revision, state.auto_evolve, state.updated_at
     FROM project_agent_states state
-    JOIN project_agent_overlays overlay
-      ON overlay.project_id = state.project_id AND overlay.agent_id = state.agent_id
     ORDER BY state.project_id, state.agent_id
   `).all();
   atomicWrite(join(agentRuntimeRoot(), 'manifest.json'), `${JSON.stringify({
@@ -294,12 +195,6 @@ export async function ensureAgentRuntimeWorkspace() {
     INSERT OR IGNORE INTO agent_profiles(agent_id, display_name, prompt_seed_revision)
     VALUES(?, ?, ?)
   `);
-  const insertLegacyPrompt = db.prepare(`
-    INSERT INTO agent_prompts(
-      agent_id, version, template_version, content, content_hash, source, reason
-    ) VALUES(?, 1, ?, ?, ?, 'system', ?)
-    ON CONFLICT(agent_id) DO NOTHING
-  `);
   const insertLegacyMemory = db.prepare(`
     INSERT OR IGNORE INTO agent_memory_versions(
       agent_id, revision, content, content_hash, source, reason
@@ -309,13 +204,6 @@ export async function ensureAgentRuntimeWorkspace() {
     for (const agentId of FLOW_AGENT_IDS) {
       const definition = AGENT_PROFILE_DEFINITIONS[agentId];
       insertProfile.run(agentId, definition.label, AGENT_PROMPT_SEED_REVISION);
-      insertLegacyPrompt.run(
-        agentId,
-        AGENT_PROMPT_SEED_REVISION,
-        definition.prompt,
-        hash(definition.prompt),
-        `由系统模板 V${AGENT_PROMPT_SEED_REVISION} 初始化`,
-      );
       db.prepare(`
         UPDATE agent_profiles
         SET display_name = ?, current_prompt_version = ?, prompt_seed_revision = ?, updated_at = CURRENT_TIMESTAMP
@@ -342,41 +230,11 @@ export async function ensureAgentRuntimeWorkspace() {
           VALUES(?, ?, ?, ?)
         `).run(project.project_id, agentId, project.is_default ? profile.current_memory_revision : 1, profile.auto_evolve);
         db.prepare(`
-          INSERT OR IGNORE INTO project_agent_overlays(project_id, agent_id, revision, content, content_hash, source, reason)
-          VALUES(?, ?, 1, ?, ?, 'seed', '基于全局角色模板初始化项目 Prompt')
-        `).run(project.project_id, agentId, definition.prompt.trim(), hash(definition.prompt.trim()));
-        db.prepare(`
           INSERT OR IGNORE INTO project_agent_memory_versions(
             project_id, agent_id, revision, content, content_hash, source, reason
           ) VALUES(?, ?, 1, ?, ?, 'seed', '项目初始长期记忆')
         `).run(project.project_id, agentId, DEFAULT_AGENT_MEMORY, hash(DEFAULT_AGENT_MEMORY.trim()));
-        const overlay = db.prepare(`
-          SELECT revision, content, content_hash, source, reason
-          FROM project_agent_overlays WHERE project_id = ? AND agent_id = ?
-        `).get(project.project_id, agentId) as Pick<ProjectAgentOverlay, 'revision' | 'content' | 'content_hash' | 'source' | 'reason'>;
-        const waitingForLegacyPrompt = project.is_default
-          && overlay.source === 'migration'
-          && overlay.reason === '多项目迁移：等待提取原项目 Overlay';
-        const legacyPrompt = waitingForLegacyPrompt
-          ? db.prepare('SELECT version, content FROM agent_prompts WHERE agent_id = ?').get(agentId) as { version: number; content: string } | undefined
-          : undefined;
-        const content = legacyPrompt?.content.trim() || overlay.content.trim() || definition.prompt.trim();
-        const revision = Math.max(overlay.revision, legacyPrompt?.version || 1);
-        if (content !== overlay.content || hash(content) !== overlay.content_hash || revision !== overlay.revision || waitingForLegacyPrompt) {
-          db.prepare(`
-            UPDATE project_agent_overlays
-            SET revision = ?, content = ?, content_hash = ?,
-                reason = ?, updated_at = CURRENT_TIMESTAMP
-            WHERE project_id = ? AND agent_id = ?
-          `).run(
-            revision,
-            content,
-            hash(content),
-            waitingForLegacyPrompt ? '从历史项目 Prompt 迁移' : overlay.reason,
-            project.project_id,
-            agentId,
-          );
-        }
+
       }
     }
   }).immediate();
@@ -384,7 +242,6 @@ export async function ensureAgentRuntimeWorkspace() {
   for (const project of projects) {
     for (const agentId of FLOW_AGENT_IDS) {
       migrateLegacyDailyFiles(db, project.project_id, agentId);
-      reconcileProjectOverlayCandidate(db, project.project_id, agentId);
       await reconcileAgentFiles(project.project_id, agentId);
     }
   }
@@ -422,9 +279,6 @@ async function reconcileAgentFiles(projectId: string, agentId: FlowAgentId) {
   const db = await databaseConnection();
   const state = db.prepare('SELECT * FROM project_agent_states WHERE project_id = ? AND agent_id = ?')
     .get(projectId, agentId) as { current_memory_revision: number };
-  const overlay = projectOverlayCandidateInDb(db, projectId, agentId) || db.prepare(`
-    SELECT * FROM project_agent_overlays WHERE project_id = ? AND agent_id = ?
-  `).get(projectId, agentId) as ProjectAgentOverlay;
   let memory = db.prepare(`
     SELECT * FROM project_agent_memory_versions
     WHERE project_id = ? AND agent_id = ? AND revision = ?
@@ -445,7 +299,7 @@ async function reconcileAgentFiles(projectId: string, agentId: FlowAgentId) {
       `).get(projectId, agentId) as MemoryVersion;
     }
   } catch { /* Missing or invalid local files are rematerialized from SQLite. */ }
-  materializeAgent(projectId, agentId, composePrompt(agentId, overlay.content), memory.content);
+  materializeAgentMemory(projectId, agentId, memory.content);
 }
 
 export async function listAgentProfiles(projectIdInput?: string) {
@@ -456,13 +310,12 @@ export async function listAgentProfiles(projectIdInput?: string) {
     SELECT profile.*,
       state.current_memory_revision AS project_memory_revision,
       state.auto_evolve AS project_auto_evolve,
-      overlay.revision AS project_overlay_revision,
+      0 AS project_overlay_revision,
       (SELECT COUNT(*) FROM project_agent_observations observation WHERE observation.project_id = ? AND observation.agent_id = profile.agent_id) AS observation_count,
       (SELECT COUNT(*) FROM project_agent_observations observation WHERE observation.project_id = ? AND observation.agent_id = profile.agent_id AND observation.status IN ('promoted_memory', 'promoted_prompt')) AS promoted_count,
       (SELECT COUNT(*) FROM execution_attempts attempt JOIN tasks task ON task.task_id = attempt.task_id WHERE task.project_id = ? AND attempt.agent = profile.agent_id) AS execution_count
     FROM agent_profiles profile
     JOIN project_agent_states state ON state.project_id = ? AND state.agent_id = profile.agent_id
-    JOIN project_agent_overlays overlay ON overlay.project_id = state.project_id AND overlay.agent_id = profile.agent_id
     ORDER BY CASE profile.agent_id
       WHEN 'backlog-agent' THEN 1 WHEN 'story-splitter-agent' THEN 2
       WHEN 'analyst-agent' THEN 3 WHEN 'repro-agent' THEN 4
@@ -476,13 +329,16 @@ export async function listAgentProfiles(projectIdInput?: string) {
     promoted_count: number;
     execution_count: number;
   })[];
+  const detected = discoverExternalAgents(project.workspace_root);
   return profiles.map((profile) => ({
     ...profile,
-    current_prompt_version: profile.project_overlay_revision,
+    current_prompt_version: (() => { try { return loadExternalAgent(project.workspace_root, profile.agent_id).revision; } catch { return 0; } })(),
+    externalAgentPath: detected.find((agent) => agent.id === profile.agent_id)?.path || null,
+    externalAgentError: (() => { try { loadExternalAgent(project.workspace_root, profile.agent_id); return null; } catch (error) { return error instanceof Error ? error.message : String(error); } })(),
     current_memory_revision: profile.project_memory_revision,
     auto_evolve: profile.project_auto_evolve,
-    candidate_prompt_version: projectOverlayCandidateInDb(db, project.project_id, profile.agent_id)?.revision || null,
-    canary_remaining: projectOverlayCandidateInDb(db, project.project_id, profile.agent_id)?.remaining_runs || 0,
+    candidate_prompt_version: null,
+    canary_remaining: 0,
     project,
   }));
 }
@@ -496,19 +352,24 @@ export async function getAgentProfile(agentIdInput: string, ensure = true, proje
   const storedProfile = db.prepare('SELECT * FROM agent_profiles WHERE agent_id = ?').get(agentId) as AgentProfile | undefined;
   const state = db.prepare('SELECT * FROM project_agent_states WHERE project_id = ? AND agent_id = ?')
     .get(project.project_id, agentId) as { current_memory_revision: number; auto_evolve: number } | undefined;
-  const projectOverlay = db.prepare('SELECT * FROM project_agent_overlays WHERE project_id = ? AND agent_id = ?')
-    .get(project.project_id, agentId) as ProjectAgentOverlay | undefined;
-  const projectCandidate = projectOverlayCandidateInDb(db, project.project_id, agentId);
+  const projectCandidate: PromptCandidate | null = null;
   const profile = storedProfile ? {
     ...storedProfile,
-    current_prompt_version: projectOverlay?.revision || 1,
+    current_prompt_version: 0,
     current_memory_revision: state?.current_memory_revision || 1,
     auto_evolve: state?.auto_evolve ?? storedProfile.auto_evolve,
-    candidate_prompt_version: projectCandidate?.revision || null,
-    canary_remaining: projectCandidate?.remaining_runs || 0,
+    candidate_prompt_version: null,
+    canary_remaining: 0,
   } : undefined;
-  if (!profile || !state || !projectOverlay) throw new Error(`项目 Agent Profile 不存在：${project.name} / ${agentId}`);
-  const currentPrompt = rolePrompt(agentId);
+  if (!profile || !state) throw new Error(`项目 Agent Profile 不存在：${project.name} / ${agentId}`);
+  let externalAgent: ReturnType<typeof loadExternalAgent> | null = null;
+  let externalAgentError: string | null = null;
+  try { externalAgent = loadExternalAgent(project.workspace_root, agentId); }
+  catch (error) { externalAgentError = error instanceof Error ? error.message : String(error); }
+  const currentPrompt: CurrentPrompt = { agent_id: agentId, template_version: 0, source: 'file', status: 'active', content: externalAgent?.prompt || '',
+    content_hash: externalAgent?.hash || hash(''), version: externalAgent?.revision || 0,
+    updated_at: externalAgent?.updatedAt || '', reason: externalAgentPath(project.workspace_root, agentId) };
+
   const currentMemory = db.prepare(`
     SELECT * FROM project_agent_memory_versions
     WHERE project_id = ? AND agent_id = ? AND revision = ?
@@ -536,8 +397,10 @@ export async function getAgentProfile(agentIdInput: string, ensure = true, proje
     project,
     profile,
     currentPrompt,
-    projectOverlay,
-    candidatePrompt: projectCandidate,
+    externalAgentPath: externalAgentPath(project.workspace_root, agentId),
+    externalAgentError,
+    projectOverlay: { agent_id: agentId, project_id: project.project_id, revision: currentPrompt.version, content: currentPrompt.content, content_hash: currentPrompt.content_hash, source: 'seed' as const, reason: currentPrompt.reason, updated_at: currentPrompt.updated_at },
+    candidatePrompt: null as PromptCandidate | null,
     currentMemory,
     memoryHistory,
     observations,
@@ -545,32 +408,6 @@ export async function getAgentProfile(agentIdInput: string, ensure = true, proje
     dailyMemories,
     runtimeDirectory: directory,
   };
-}
-
-async function replaceProjectPrompt(
-  projectId: string,
-  agentId: FlowAgentId,
-  contentInput: string,
-  reason: string,
-  source: ProjectAgentOverlay['source'] = 'human',
-) {
-  const content = overlaySchema.parse(contentInput);
-  const db = await databaseConnection();
-  const current = db.prepare('SELECT * FROM project_agent_overlays WHERE project_id = ? AND agent_id = ?')
-    .get(projectId, agentId) as ProjectAgentOverlay;
-  if (current.content_hash === hash(content)) return current.revision;
-  const revision = current.revision + 1;
-  db.transaction(() => {
-    db.prepare('DELETE FROM project_agent_overlay_candidates WHERE project_id = ? AND agent_id = ?').run(projectId, agentId);
-    db.prepare(`
-      UPDATE project_agent_overlays
-      SET revision = ?, content = ?, content_hash = ?, source = ?, reason = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE project_id = ? AND agent_id = ?
-    `).run(revision, content, hash(content), source, reason, projectId, agentId);
-  })();
-  await reconcileAgentFiles(projectId, agentId);
-  await writeManifest();
-  return revision;
 }
 
 async function createMemoryVersion(projectId: string, agentId: FlowAgentId, contentInput: string, source: MemoryVersion['source'], reason: string, evidence?: unknown) {
@@ -590,38 +427,17 @@ async function createMemoryVersion(projectId: string, agentId: FlowAgentId, cont
       WHERE project_id = ? AND agent_id = ?
     `).run(revision, projectId, agentId);
   })();
-  const selectedOverlay = projectOverlayCandidateInDb(db, projectId, agentId) || db.prepare(`
-    SELECT * FROM project_agent_overlays WHERE project_id = ? AND agent_id = ?
-  `).get(projectId, agentId) as ProjectAgentOverlay;
-  materializeAgent(projectId, agentId, composePrompt(agentId, selectedOverlay.content), content);
+  materializeAgentMemory(projectId, agentId, content);
   await writeManifest();
   return revision;
 }
 
 export async function saveAgentPrompt(input: { projectId?: string; agentId: string; content: unknown; reason?: unknown }) {
-  if (!isFlowAgentId(input.agentId)) throw new Error('未知 Agent');
-  await ensureAgentRuntimeWorkspace();
-  const db = await databaseConnection();
-  const project = resolveProject(db, input.projectId);
-  const revision = await replaceProjectPrompt(project.project_id, input.agentId, String(input.content ?? ''), String(input.reason || '用户编辑项目 Agent Overlay'));
-  try { revalidatePath('/agents', 'layout'); } catch { /* Non-request usage. */ }
-  return revision;
+  throw new Error('Agent Prompt 由外部 .omp/agents 文件管理，请直接编辑对应 Markdown 文件');
 }
 
 export async function resetAgentPromptToSystemTemplate(input: { projectId?: string; agentId: string }) {
-  if (!isFlowAgentId(input.agentId)) throw new Error('未知 Agent');
-  await ensureAgentRuntimeWorkspace();
-  const db = await databaseConnection();
-  const project = resolveProject(db, input.projectId);
-  const revision = await replaceProjectPrompt(
-    project.project_id,
-    input.agentId,
-    AGENT_PROFILE_DEFINITIONS[input.agentId].prompt,
-    `用户恢复全局角色模板 V${AGENT_PROMPT_SEED_REVISION}`,
-    'human',
-  );
-  try { revalidatePath('/agents', 'layout'); } catch { /* Non-request usage. */ }
-  return revision;
+  throw new Error('Agent Prompt 由外部 .omp/agents 文件管理，请直接编辑对应 Markdown 文件');
 }
 
 export async function saveAgentMemory(input: { projectId?: string; agentId: string; content: unknown; reason?: unknown }) {
@@ -712,12 +528,12 @@ function recentMemory(projectId: string, agentId: FlowAgentId) {
   return content;
 }
 
-export async function loadAgentRuntime(agentIdInput: string, pipeline?: string, projectIdInput?: string): Promise<AgentRuntimeContext> {
+export async function loadAgentRuntime(agentIdInput: string, pipeline?: string, projectIdInput?: string, workspaceRoot?: string): Promise<AgentRuntimeContext> {
   if (!isFlowAgentId(agentIdInput)) throw new Error(`未知 Agent：${agentIdInput}`);
   await ensureAgentRuntimeWorkspace();
   const detail = await getAgentProfile(agentIdInput, false, projectIdInput);
-  const selectedOverlay = detail.candidatePrompt || detail.projectOverlay;
-  const composedPrompt = composePrompt(agentIdInput, selectedOverlay.content);
+  const externalAgent = loadExternalAgent(workspaceRoot || detail.project.workspace_root, agentIdInput);
+  const composedPrompt = `# Agent Definition: ${externalAgent.path}\n相对文件引用以 ${externalAgent.directory} 为基准；按需读取其中引用的 Skill 和 Markdown 模板。\n\n${externalAgent.prompt}`;
   const modeInstruction = pipeline === 'resume'
     ? agentIdInput === 'backlog-agent'
       ? '根据上下文中已回答的需求级产品问题更新需求目标、范围、路由和交付边界；不要重复询问已经回答的问题。'
@@ -734,11 +550,12 @@ export async function loadAgentRuntime(agentIdInput: string, pipeline?: string, 
     agentId: agentIdInput,
     projectId: detail.project.project_id,
     prompt,
-    promptVersion: selectedOverlay.revision,
+    promptPath: externalAgent.path,
+    promptVersion: externalAgent.revision,
     promptTemplateVersion: AGENT_PROMPT_SEED_REVISION,
     promptHash: hash(prompt),
-    promptStatus: detail.candidatePrompt ? 'candidate' : 'active',
-    evolutionCandidateId: detail.candidatePrompt?.candidate_id || null,
+    promptStatus: 'active',
+    evolutionCandidateId: null,
     memory: detail.currentMemory.content,
     memoryRevision: detail.currentMemory.revision,
     memoryHash: detail.currentMemory.content_hash,
@@ -753,35 +570,12 @@ export async function createProjectOverlayCandidate(input: {
   reason: string;
   evidence: unknown;
 }) {
-  await ensureAgentRuntimeWorkspace();
-  const db = await databaseConnection();
-  const current = db.prepare('SELECT * FROM project_agent_overlays WHERE project_id = ? AND agent_id = ?')
-    .get(input.projectId, input.agentId) as ProjectAgentOverlay;
-  if (projectOverlayCandidateInDb(db, input.projectId, input.agentId)) return null;
-  const candidateId = randomUUID();
-  db.prepare(`
-    INSERT INTO project_agent_overlay_candidates(
-      candidate_id, project_id, agent_id, revision, base_overlay_revision,
-      content, content_hash, reason, evidence_json, remaining_runs
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 3)
-  `).run(
-    candidateId,
-    input.projectId,
-    input.agentId,
-    current.revision + 1,
-    current.revision,
-    input.content,
-    hash(input.content),
-    input.reason,
-    JSON.stringify(input.evidence),
-  );
-  return projectOverlayCandidateInDb(db, input.projectId, input.agentId);
+  return null as PromptCandidate | null;
 }
 
 export const agentProfileInternals = {
   createMemoryVersion,
   parseDailyMemoryObservations,
   agentDirectory,
-  composePrompt,
   atomicWrite,
 };

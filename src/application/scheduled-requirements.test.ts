@@ -102,99 +102,21 @@ test('retries the same failed occurrence instead of advancing to a later generat
   assert.equal(occurrences[0].attempt_count, 2);
 });
 
-test('keeps a scheduled requirement bound to its selected project when materializing', async () => {
-  const db = await databaseConnection();
-  const projectId = 'PRJ-scheduled-isolation';
-  db.prepare(`
-    INSERT OR IGNORE INTO projects(project_id, name, workspace_root, is_default)
-    VALUES(?, '定时需求隔离项目', ?, 0)
-  `).run(projectId, `${process.env.LOOP_WORKSPACE_ROOT_OVERRIDE}-scheduled`);
+test('scheduled requirements always materialize in the current working directory', async () => {
   const planId = await createScheduledRequirement({
-    projectId,
-    recurrenceKind: 'daily',
-    timezone: 'Asia/Shanghai',
-    localTime: '09:30',
-    title: '归属不随默认项目变化',
-    pipeline: 'direct',
-    priority: '5',
+    title: 'Single workspace schedule', recurrenceKind: 'once', timezone: 'UTC',
+    onceAtLocal: '2026-11-03T10:00', pipeline: 'direct', priority: '5',
   });
-  db.prepare(`UPDATE scheduled_requirement_plans SET next_trigger_at = '2026-08-13T01:30:00.000Z' WHERE plan_id = ?`).run(planId);
-  const result = await materializeDueScheduledRequirements(new Date('2026-08-13T10:00:00.000Z'));
-  const created = result.created.find((item) => item.planId === planId);
-  assert.ok(created);
-  assert.equal((await getTask(created.taskId))?.task.project_id, projectId);
-  assert.equal(
-    (db.prepare('SELECT project_id FROM scheduled_requirement_plans WHERE plan_id = ?').get(planId) as { project_id: string }).project_id,
-    projectId,
-  );
+  const occurrences = await materializeDueScheduledRequirements(new Date('2026-11-03T10:01:00Z'));
+  const created = occurrences.created.find(item => item.planId === planId)!;
+  assert.ok(created?.taskId);
+  assert.equal((await getTask(created.taskId))?.task.work_dir, process.env.LOOP_WORKSPACE_ROOT_OVERRIDE);
+  assert.equal((await getTask(created.taskId))?.task.project_id, 'PRJ-default');
 });
 
-test('keeps soft-deleted project schedules dormant until the workspace is restored', async () => {
-  const db = await databaseConnection();
-  const projectId = 'PRJ-scheduled-soft-deleted';
-  db.prepare(`
-    INSERT OR IGNORE INTO projects(project_id, name, workspace_root, is_default)
-    VALUES(?, '软删定时项目', ?, 0)
-  `).run(projectId, `${process.env.LOOP_WORKSPACE_ROOT_OVERRIDE}-scheduled-soft-deleted`);
-  const planId = await createScheduledRequirement({
-    projectId,
-    recurrenceKind: 'daily',
-    timezone: 'Asia/Shanghai',
-    localTime: '09:30',
-    title: '软删期间不得生成',
-    pipeline: 'direct',
-    priority: '5',
-  });
-  db.prepare(`UPDATE scheduled_requirement_plans SET next_trigger_at = '2026-08-13T01:30:00.000Z' WHERE plan_id = ?`).run(planId);
-  db.prepare('UPDATE projects SET deleted_at = CURRENT_TIMESTAMP WHERE project_id = ?').run(projectId);
-
-  assert.equal((await listScheduledRequirements()).some((plan) => plan.plan_id === planId), false);
-  const dormant = await materializeDueScheduledRequirements(new Date('2026-08-13T10:00:00.000Z'));
-  assert.equal(dormant.created.some((item) => item.planId === planId), false);
-
-  db.prepare('UPDATE projects SET deleted_at = NULL WHERE project_id = ?').run(projectId);
-  assert.equal((await listScheduledRequirements()).some((plan) => plan.plan_id === planId), true);
-  const restored = await materializeDueScheduledRequirements(new Date('2026-08-13T10:00:00.000Z'));
-  assert.equal(restored.created.some((item) => item.planId === planId), true);
-});
-
-test('does not move a materialized schedule and its history to another project', async () => {
-  const db = await databaseConnection();
-  const originalProject = db.prepare('SELECT project_id FROM projects WHERE is_default = 1').get() as { project_id: string };
-  const otherProjectId = 'PRJ-scheduled-history-target';
-  db.prepare(`
-    INSERT OR IGNORE INTO projects(project_id, name, workspace_root, is_default)
-    VALUES(?, '定时历史目标项目', ?, 0)
-  `).run(otherProjectId, `${process.env.LOOP_WORKSPACE_ROOT_OVERRIDE}-scheduled-history-target`);
-  const planId = await createScheduledRequirement({
-    projectId: originalProject.project_id,
-    recurrenceKind: 'daily',
-    timezone: 'Asia/Shanghai',
-    localTime: '10:30',
-    title: '不能跨项目移动的定时需求',
-    pipeline: 'direct',
-    priority: '5',
-  });
-  db.prepare(`UPDATE scheduled_requirement_plans SET next_trigger_at = '2026-08-13T02:30:00.000Z' WHERE plan_id = ?`).run(planId);
-  const materialized = await materializeDueScheduledRequirements(new Date('2026-08-13T10:00:00.000Z'));
-  assert.ok(materialized.created.some((item) => item.planId === planId));
-
-  await assert.rejects(() => updateScheduledRequirement({
-    planId,
-    projectId: otherProjectId,
-    recurrenceKind: 'daily',
-    timezone: 'Asia/Shanghai',
-    localTime: '10:30',
-    title: '不能跨项目移动的定时需求',
-    pipeline: 'direct',
-    priority: '5',
-  }), /已经生成过需求，不能切换项目/);
-  assert.equal(
-    (db.prepare('SELECT project_id FROM scheduled_requirement_plans WHERE plan_id = ?').get(planId) as { project_id: string }).project_id,
-    originalProject.project_id,
-  );
-  assert.throws(
-    () => db.prepare('UPDATE scheduled_requirement_plans SET project_id = ? WHERE plan_id = ?').run(otherProjectId, planId),
-    /定时计划.*项目/,
-  );
+test('rejects project selection for scheduled requirements', async () => {
+  await assert.rejects(createScheduledRequirement({
+    projectId: 'other-workspace', title: 'Invalid schedule', recurrenceKind: 'daily',
+    timezone: 'UTC', localTime: '10:00', pipeline: 'direct',
+  }), /当前工作目录/);
 });

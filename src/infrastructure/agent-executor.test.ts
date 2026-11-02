@@ -497,15 +497,15 @@ test('passes the configured Claude model as an explicit CLI override', () => {
   assert.equal(executor.promptMode, 'stdin');
 });
 
-test('runs Oh My Pi as an ephemeral auto-approved JSON stream using stdin', () => {
+test('runs Oh My Pi through native RPC with stdin task packets', () => {
   const executor = getAgentExecutor('omp');
   assert.equal(executor.command, process.env.OMP_CLI || 'omp');
-  assert.deepEqual(executor.buildArgs('prompt', '/workspace'), ['--print', '--mode', 'json', '--no-session', '--approval-mode', 'yolo']);
+  assert.deepEqual(executor.buildArgs('prompt', '/workspace'), ['--approval-mode', 'yolo']);
   assert.deepEqual(executor.buildArgs('prompt', '/workspace', { model: 'ollama/qwen3.6:35b', reasoningEffort: 'high' }), [
-    '--print', '--mode', 'json', '--no-session', '--approval-mode', 'yolo',
+    '--approval-mode', 'yolo',
     '--model', 'ollama/qwen3.6:35b', '--thinking', 'high',
   ]);
-  assert.match(executor.formatCommand('/workspace'), /^omp --print --mode json --no-session --approval-mode yolo/);
+  assert.match(executor.formatCommand('/workspace'), /^omp --mode rpc --approval-mode yolo/);
   assert.match(executor.formatCommand('/workspace', { model: 'opus', reasoningEffort: 'xhigh' }), /--model opus --thinking xhigh/);
   assert.equal(executor.promptMode, 'stdin');
 });

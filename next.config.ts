@@ -1,7 +1,6 @@
 import type { NextConfig } from 'next';
 
 const nextConfig: NextConfig = {
-  output: 'standalone',
   outputFileTracingExcludes: {
     '*': [
       './data/**/*',
@@ -14,6 +13,8 @@ const nextConfig: NextConfig = {
     '/*': [
       './app-migrations/**/*.sql',
       './migrations/**/*.sql',
+      './scripts/omp-rpc.mjs',
+      './scripts/omp-extension.mjs',
     ],
   },
   experimental: { serverActions: { bodySizeLimit: '2mb' } },

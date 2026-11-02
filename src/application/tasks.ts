@@ -1,3 +1,5 @@
+import { createRuntimeEvent, publishRuntimeEvent } from '../infrastructure/runtime-event-hub';
+import { hydrateDocument, storeDocumentBody } from '../infrastructure/document-files';
 import { randomUUID } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
@@ -50,7 +52,7 @@ import {
   type RequirementDependency,
 } from './task-dependencies';
 import { queueVerificationAssistanceInDb } from './verification-assistance';
-import { defaultProjectInDb, projectInDb } from './projects';
+import { workspaceContextInDb } from './workspace-context';
 
 export type Task = TaskState & {
   project_id: string;
@@ -358,9 +360,21 @@ export async function recordRuntimeEventWithFallback(runId: string, warning: str
   }
 }
 
+const pendingLogNotifications = new Set<string>();
+function notifyLogReaders(runId: string) {
+  if (pendingLogNotifications.has(runId)) return;
+  pendingLogNotifications.add(runId);
+  const timer = setTimeout(() => {
+    pendingLogNotifications.delete(runId);
+    void publishRuntimeEvent(createRuntimeEvent('run.logs-appended', 0, { entityId: runId })).catch(() => undefined);
+  }, 30);
+  timer.unref();
+}
+
 function appendRunLogInDb(db: Awaited<ReturnType<typeof databaseConnection>>, runId: string, message: string) {
   if (!/^[a-zA-Z0-9-]+$/.test(runId)) throw new Error('invalid run id');
   db.prepare('INSERT INTO run_logs(run_id, line) VALUES(?, ?)').run(runId, loopLogLine(message));
+  notifyLogReaders(runId);
   try {
     recordLoopLogEventInDb(db, runId, message);
   } catch (error) {
@@ -406,16 +420,15 @@ async function syncTaskFiles(_db: Awaited<ReturnType<typeof databaseConnection>>
   // DB-first product mode: target repo files are no longer generated or synchronized.
 }
 
-export async function listTasks(options: { includeTerminal?: boolean; projectId?: string } = {}): Promise<TaskWithLanes[]> {
+export async function listTasks(options: { includeTerminal?: boolean } = {}): Promise<TaskWithLanes[]> {
   const db = await databaseConnection();
   const filters = ['projects.deleted_at IS NULL'];
   if (!options.includeTerminal) filters.push("tasks.agile_status NOT IN ('done', 'cancelled')");
-  if (options.projectId) filters.push('tasks.project_id = ?');
   const where = filters.length ? `WHERE ${filters.join(' AND ')}` : '';
   const tasks = db.prepare(`
     ${taskSelect}
     ${where}
-  `).all(...(options.projectId ? [options.projectId] : [])) as Task[];
+  `).all() as Task[];
   tasks.sort((left, right) => Number(right.agile_status === 'blocked') - Number(left.agile_status === 'blocked')
     || requirementPriorityRank(right.priority) - requirementPriorityRank(left.priority)
     || right.updated_at.localeCompare(left.updated_at));
@@ -460,22 +473,22 @@ export async function listRequirementDependencyCandidates() {
  * Returns completed Tasks only. Cancelled Tasks are a separate terminal state
  * and deliberately do not appear in this result.
  */
-export async function listCompletedTasks(options: { projectId?: string } = {}): Promise<Task[]> {
+export async function listCompletedTasks(): Promise<Task[]> {
   const db = await databaseConnection();
   return db.prepare(`
     ${taskSelect}
-    WHERE projects.deleted_at IS NULL AND tasks.agile_status = 'done'${options.projectId ? ' AND tasks.project_id = ?' : ''}
+    WHERE projects.deleted_at IS NULL AND tasks.agile_status = 'done'
     ORDER BY COALESCE(tasks.completed_at, tasks.updated_at) DESC
-  `).all(...(options.projectId ? [options.projectId] : [])) as Task[];
+  `).all() as Task[];
 }
 
-export async function listDeletedTasks(options: { projectId?: string } = {}): Promise<Task[]> {
+export async function listDeletedTasks(): Promise<Task[]> {
   const db = await databaseConnection();
   return db.prepare(`
     ${taskSelect}
-    WHERE projects.deleted_at IS NULL AND tasks.agile_status = 'cancelled'${options.projectId ? ' AND tasks.project_id = ?' : ''}
+    WHERE projects.deleted_at IS NULL AND tasks.agile_status = 'cancelled'
     ORDER BY COALESCE(tasks.completed_at, tasks.updated_at) DESC
-  `).all(...(options.projectId ? [options.projectId] : [])) as Task[];
+  `).all() as Task[];
 }
 
 export async function countRecentEvents(): Promise<number> {
@@ -576,7 +589,7 @@ export async function getTask(taskId: string) {
     WHERE request.task_id = ?
     ORDER BY request.created_at
   `).all(taskId) as RuntimeInputRequest[];
-  const documents = db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[];
+  const documents = (db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[]).map(hydrateDocument);
   const documentComments = db.prepare('SELECT * FROM document_comments WHERE task_id = ? ORDER BY created_at').all(taskId) as DocumentComment[];
   const feedbackBatches = db.prepare(`
     SELECT * FROM feedback_batches WHERE task_id = ? ORDER BY batch_number
@@ -673,6 +686,7 @@ export async function upsertDocument(input: unknown) {
     const existing = db.prepare('SELECT document_id FROM documents WHERE task_id = ? AND story_index IS ? AND kind = ?').get(value.taskId, value.storyIndex || null, value.kind) as { document_id: string } | undefined;
     const storyIndex = value.storyIndex || null;
     const documentId = existing?.document_id || randomUUID();
+    const body = storeDocumentBody(value.taskId, documentId, value.content, value.format);
     if (existing) {
       db.prepare(`
         UPDATE documents
@@ -683,12 +697,12 @@ export async function upsertDocument(input: unknown) {
             revision = revision + 1,
             updated_at = CURRENT_TIMESTAMP
         WHERE document_id = ?
-      `).run(title, value.content, value.format, value.actor, documentId);
+      `).run(title, body, value.format, value.actor, documentId);
     } else {
       db.prepare(`
         INSERT INTO documents(document_id, task_id, story_index, kind, title, content, format, source_agent)
         VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(documentId, value.taskId, storyIndex, value.kind, title, value.content, value.format, value.actor);
+      `).run(documentId, value.taskId, storyIndex, value.kind, title, body, value.format, value.actor);
     }
     addEvent(db, value.taskId, value.actor, 'DocumentUpserted', `保存文档：${title}`);
     db.exec('COMMIT');
@@ -702,12 +716,13 @@ export async function upsertDocument(input: unknown) {
 
 export async function listDocuments(taskId: string) {
   const db = await databaseConnection();
-  return db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[];
+  return (db.prepare('SELECT * FROM documents WHERE task_id = ? ORDER BY story_index, kind, updated_at').all(taskId) as Document[]).map(hydrateDocument);
 }
 
 export async function getDocument(taskId: string, kind: string, storyIndex?: number | null) {
   const db = await databaseConnection();
-  return db.prepare('SELECT * FROM documents WHERE task_id = ? AND kind = ? AND story_index IS ?').get(taskId, kind, storyIndex || null) as Document | undefined;
+  const document = db.prepare('SELECT * FROM documents WHERE task_id = ? AND kind = ? AND story_index IS ?').get(taskId, kind, storyIndex || null) as Document | undefined;
+  return document ? hydrateDocument(document) : undefined;
 }
 
 const documentCommentSchema = z.object({
@@ -724,7 +739,8 @@ const documentCommentSchema = z.object({
 export async function addDocumentComment(input: unknown) {
   const value = documentCommentSchema.parse(input);
   const db = await databaseConnection();
-  const document = db.prepare('SELECT * FROM documents WHERE document_id = ? AND task_id = ?').get(value.documentId, value.taskId) as Document | undefined;
+  const storedDocument = db.prepare('SELECT * FROM documents WHERE document_id = ? AND task_id = ?').get(value.documentId, value.taskId) as Document | undefined;
+  const document = storedDocument ? hydrateDocument(storedDocument) : undefined;
   if (!document) throw new Error('文档不存在');
   const task = fetchTask(db, value.taskId);
   const revisesBusinessAnalysisSpecification = task?.item_type === 'business-analysis'
@@ -857,7 +873,7 @@ export const createTaskSchema = z.object({
   actor: z.enum(['human', 'system']).default('human'),
   status: z.enum(['backlog', 'in plan', 'in repro', 'ready for dev', 'in dev', 'in review', 'in feedback', 'ready_to_close', 'done', 'cancelled', 'blocked']).default('backlog'),
   currentSubagent: z.string().trim().optional().nullable(),
-  projectId: z.string().trim().optional().nullable(),
+  projectId: z.never({ invalid_type_error: 'DJI 不支持选择项目；所有任务使用当前工作目录' }).optional(),
 });
 
 export type ParsedCreateTaskInput = z.infer<typeof createTaskSchema>;
@@ -872,7 +888,7 @@ export function createTaskInDb(
   const description = value.description?.trim() || null;
   const link = value.link || null;
   const requestedSubagent = value.currentSubagent || null;
-  const project = value.projectId ? projectInDb(db, value.projectId) : defaultProjectInDb(db);
+  const project = workspaceContextInDb(db);
   if (!project) throw new Error('指定项目不存在');
   assertActorCanCreate(value.actor, value.status, requestedSubagent);
   const currentSubagent = requestedSubagent
@@ -2442,6 +2458,7 @@ export async function endRun(runId: string, force = false, options: { stopRunner
     `).run(force ? 'crashed' : 'stopped', force ? reason : null, current.runId);
   }
   db.prepare("DELETE FROM loop_meta WHERE key = 'active_run'").run();
+  notifyLogReaders(runId);
 }
 
 type LoopRunRow = {

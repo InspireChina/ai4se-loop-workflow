@@ -104,7 +104,7 @@ function ensureBuiltinAgentConfiguration(
         .run(builtinKey, builtinKey === 'openspec' ? 'openspec' : null, configurationId);
     } else {
       const hasActive = db.prepare(`SELECT 1 FROM agent_configuration_sets WHERE agent_id = ? AND is_active = 1`).get(agentId);
-      const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
+      const prompt = '';
       const storedName = builtinKey === 'openspec' && db.prepare(`
         SELECT 1 FROM agent_configuration_sets WHERE agent_id = ? AND name = ?
       `).get(agentId, name) ? 'OpenSpec（内置）' : name;
@@ -121,20 +121,6 @@ function ensureBuiltinAgentConfiguration(
     }
     configuration = { configuration_id: configurationId };
   }
-  const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
-  db.prepare(`
-    UPDATE agent_configuration_sets
-    SET prompt_content = ?, prompt_hash = ?, prompt_reason = ?, prompt_template_version = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE configuration_id = ? AND prompt_source = 'system' AND prompt_template_version < ?
-  `).run(
-    prompt, hash(prompt), `系统模板 V${AGENT_PROMPT_SEED_REVISION}`, AGENT_PROMPT_SEED_REVISION,
-    configuration.configuration_id, AGENT_PROMPT_SEED_REVISION,
-  );
-  db.prepare(`
-    UPDATE agent_configuration_sets
-    SET prompt_content = ?, prompt_hash = ?, updated_at = CURRENT_TIMESTAMP
-    WHERE configuration_id = ? AND trim(prompt_content) = ''
-  `).run(prompt, hash(prompt), configuration.configuration_id);
   for (const item of catalog) {
     const yaml = bundledCommandChainYaml(item.id, builtinKey);
     db.prepare(`
@@ -198,14 +184,7 @@ export function activeAgentConfigurationPrompt(agentId: FlowAgentId) {
 }
 
 export function activeAgentConfigurationPromptCandidate(agentId: FlowAgentId): AgentConfigurationPromptCandidate | null {
-  ensureAgentConfigurationSeeds();
-  const row = appDatabaseConnection().prepare(`
-    SELECT candidate.*
-    FROM agent_configuration_prompt_candidates candidate
-    JOIN agent_configuration_sets configuration ON configuration.configuration_id = candidate.configuration_id
-    WHERE candidate.agent_id = ? AND configuration.is_active = 1
-  `).get(agentId) as Omit<AgentConfigurationPromptCandidate, 'source' | 'status'> | undefined;
-  return row ? { ...row, source: 'evolution', status: 'candidate' } : null;
+  return null;
 }
 
 export function isActiveAgentConfigurationPromptCandidate(agentIdInput: string, candidateId: string) {
@@ -219,82 +198,14 @@ export function createAgentConfigurationPromptCandidate(input: {
   reason: string;
   evidence: unknown;
 }) {
-  ensureAgentConfigurationSeeds();
-  const current = activeAgentConfigurationPrompt(input.agentId);
-  const db = appDatabaseConnection();
-  if (activeAgentConfigurationPromptCandidate(input.agentId)) return null;
-  const candidateId = randomUUID();
-  const revision = current.revision + 1;
-  db.prepare(`
-    INSERT INTO agent_configuration_prompt_candidates(
-      candidate_id, configuration_id, agent_id, revision, base_prompt_revision,
-      content, content_hash, reason, evidence_json, remaining_runs
-    ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, 3)
-  `).run(
-    candidateId, current.configurationId, input.agentId, revision, current.revision,
-    input.content, hash(input.content), input.reason, JSON.stringify(input.evidence),
-  );
-  revalidateAgent(input.agentId);
-  return activeAgentConfigurationPromptCandidate(input.agentId);
+  return null as AgentConfigurationPromptCandidate | null;
 }
 
 export function syncAgentConfigurationCanaryReceipts(input: {
   agentId: FlowAgentId;
   receipts: { executionId: string; outcome: 'active' | 'succeeded' | 'failed' | 'ignored' }[];
 }) {
-  const candidate = activeAgentConfigurationPromptCandidate(input.agentId);
-  if (!candidate) return { status: 'none' as const, fingerprint: '' };
-  const db = appDatabaseConnection();
-  return db.transaction(() => {
-    const upsert = db.prepare(`
-      INSERT INTO agent_configuration_canary_receipts(candidate_id, execution_id, outcome)
-      VALUES(?, ?, ?)
-      ON CONFLICT(candidate_id, execution_id) DO UPDATE SET
-        outcome = excluded.outcome, updated_at = CURRENT_TIMESTAMP
-    `);
-    const remove = db.prepare(`
-      DELETE FROM agent_configuration_canary_receipts
-      WHERE candidate_id = ? AND execution_id = ?
-    `);
-    for (const receipt of input.receipts) {
-      if (receipt.outcome === 'ignored') remove.run(candidate.candidate_id, receipt.executionId);
-      else upsert.run(candidate.candidate_id, receipt.executionId, receipt.outcome);
-    }
-    const rows = db.prepare(`
-      SELECT outcome FROM agent_configuration_canary_receipts WHERE candidate_id = ?
-    `).all(candidate.candidate_id) as { outcome: 'active' | 'succeeded' | 'failed' }[];
-    let fingerprint = '';
-    try { fingerprint = String(JSON.parse(candidate.evidence_json || '{}').fingerprint || ''); } catch { /* optional evidence */ }
-    if (rows.some((row) => row.outcome === 'failed')) {
-      db.prepare(`DELETE FROM agent_configuration_prompt_candidates WHERE candidate_id = ?`).run(candidate.candidate_id);
-      return { status: 'rejected' as const, fingerprint };
-    }
-    const successes = rows.filter((row) => row.outcome === 'succeeded').length;
-    const active = rows.filter((row) => row.outcome === 'active').length;
-    const remaining = Math.max(0, 3 - successes);
-    if (remaining === 0 && active === 0) {
-      const updated = db.prepare(`
-        UPDATE agent_configuration_sets
-        SET prompt_content = ?, prompt_hash = ?, prompt_revision = ?,
-            prompt_source = 'evolution', prompt_reason = ?, updated_at = CURRENT_TIMESTAMP
-        WHERE configuration_id = ? AND prompt_revision = ? AND is_active = 1
-      `).run(
-        candidate.content,
-        candidate.content_hash,
-        candidate.revision,
-        candidate.reason,
-        candidate.configuration_id,
-        candidate.base_prompt_revision,
-      );
-      db.prepare(`DELETE FROM agent_configuration_prompt_candidates WHERE candidate_id = ?`).run(candidate.candidate_id);
-      return { status: updated.changes ? 'promoted' as const : 'rejected' as const, fingerprint };
-    }
-    db.prepare(`
-      UPDATE agent_configuration_prompt_candidates
-      SET remaining_runs = ?, updated_at = CURRENT_TIMESTAMP WHERE candidate_id = ?
-    `).run(remaining, candidate.candidate_id);
-    return { status: 'candidate' as const, fingerprint, remaining };
-  }).immediate();
+  return { status: 'none' as const, fingerprint: '' };
 }
 
 function configurationSets(agentId: FlowAgentId): AgentConfigurationSet[] {
@@ -375,7 +286,7 @@ export function createAgentConfiguration(input: { agentId: string; name: unknown
     `).get(sourceId, input.agentId) as Pick<ConfigurationRow,
       'prompt_content' | 'prompt_revision' | 'prompt_source' | 'prompt_reason' | 'prompt_template_version' | 'context_adapter'
     > | undefined : undefined;
-    const prompt = sourceConfiguration?.prompt_content || AGENT_PROFILE_DEFINITIONS[input.agentId as FlowAgentId].prompt;
+    const prompt = '';
     db.prepare(`
       INSERT INTO agent_configuration_sets(
         configuration_id, agent_id, name, context_adapter, prompt_content, prompt_hash, prompt_revision,
@@ -417,30 +328,7 @@ export function saveActiveAgentConfigurationPrompt(input: {
   reason?: string | null;
   templateVersion?: number;
 }) {
-  if (!isFlowAgentId(input.agentId)) throw new Error(`未知 Agent：${input.agentId}`);
-  const content = z.string().trim().min(1).max(100_000).parse(input.content);
-  ensureAgentConfigurationSeeds();
-  const db = appDatabaseConnection();
-  const result = db.transaction(() => {
-    db.prepare(`DELETE FROM agent_configuration_prompt_candidates WHERE agent_id = ?`).run(input.agentId);
-    return db.prepare(`
-      UPDATE agent_configuration_sets
-      SET prompt_content = ?, prompt_hash = ?, prompt_revision = prompt_revision + 1,
-          prompt_source = ?, prompt_reason = ?, prompt_template_version = ?,
-          updated_at = CURRENT_TIMESTAMP
-      WHERE agent_id = ? AND is_active = 1
-    `).run(
-      content,
-      hash(content),
-      input.source || 'human',
-      input.reason || null,
-      input.templateVersion || AGENT_PROMPT_SEED_REVISION,
-      input.agentId,
-    );
-  })();
-  if (!result.changes) throw new Error('Agent 当前配置不存在');
-  revalidateAgent(input.agentId);
-  return listAgentConfigurations(input.agentId).find((item) => item.active)!;
+  throw new Error('Agent Prompt 只从当前工作目录的 .omp/agents 加载，不能在内部保存');
 }
 
 export function renameAgentConfiguration(input: { agentId: string; configurationId: unknown; name: unknown }) {

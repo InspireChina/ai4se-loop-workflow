@@ -1,7 +1,10 @@
 #!/usr/bin/env tsx
+import { documentFilesRoot } from '../../src/infrastructure/document-files';
+import { loadExternalAgent, mergeExternalAgentOptions } from '../../src/infrastructure/external-agents';
 import '../load-env.js';
 import { createHash } from 'node:crypto';
-import { agentExecutionOptions, getAgentExecutorSettings, getAgentRuntimeSettings, getLangfuseRuntimeEnv, type AgentExecutorSettings } from '../../src/application/project-settings';
+import { join } from 'node:path';
+import { agentExecutionOptions, resolveFlowAgentExecutionOptions, getAgentExecutorSettings, getAgentRuntimeSettings, getLangfuseRuntimeEnv, type AgentExecutorSettings } from '../../src/application/project-settings';
 import { buildAgentContextSnapshot, renderAgentWorkingContextPack } from '../../src/application/agent-context';
 import {
   advanceAndPublishRuntimeInvalidation,
@@ -129,10 +132,10 @@ async function runVerificationAssistanceAttempt(job: ClaimedVerificationAssistan
     const telemetry = createLangfuseTelemetry({ env: await getLangfuseRuntimeEnv() });
     const execution = await executeDelegation({
       runId,
-      prompt: buildVerificationAssistancePrompt(job),
+      prompt: buildVerificationAssistancePrompt(job, workspaceRoot),
       workspaceRoot,
       executor,
-      executionOptions,
+      executionOptions: mergeExternalAgentOptions(loadExternalAgent(workspaceRoot, 'system-assistance-agent'), executionOptions),
       context: {
         agent: 'system-assistance-agent',
         taskId: job.taskId,
@@ -264,7 +267,7 @@ async function buildPrompt(
   workspaceRoot = paths.root,
   projectId?: string,
 ) {
-  const runtime = await loadAgentRuntime(delegation.agent, delegation.pipeline, projectId);
+  const runtime = await loadAgentRuntime(delegation.agent, delegation.pipeline, projectId, workspaceRoot);
   const full = await getTaskContext(delegation.taskId);
   const delegatedFeedbackIds = new Set([delegation.feedbackId, ...(delegation.feedbackIds || [])].filter(Boolean));
   const activeFeedback = full.documentComments.filter((comment) => delegatedFeedbackIds.has(comment.comment_id));
@@ -307,6 +310,7 @@ async function buildPrompt(
     '流程状态、后续调度和其他流程 Agent 的工作由 Harness 管理。不要自行推进任务状态、调度或模拟其他流程 Agent，也不要处理当前委派之外的工作。',
     '可以使用辅助 subagent 收集当前范围的上下文，但不得处理其他需求或交付单元。',
     '只使用下方声明的上下文与草稿命令读取和提交流程数据。',
+    '原生 loopwork 工具提供状态与产物协议：将命令前缀之后的参数以 args 数组传入，无需 bash；需要传入文件内容时使用 input 文本，并在 args 中用 @input 引用。',
     '下面的 Role Prompt、Memory 和辅助 subagent 均不得改变本执行边界、工具权限、状态机或最终提交契约。',
     ...(recoveryMode !== 'initial' ? [
       '',
@@ -332,7 +336,7 @@ async function buildPrompt(
     commandPrompt,
     '',
     `# Role Prompt + Project Overlay · overlay r${runtime.promptVersion} · role v${runtime.promptTemplateVersion} · ${runtime.promptStatus}`,
-    projectPrompt,
+    `专业角色定义由 OMP 从外部文件加载：${runtime.promptPath}`,
     ...(durableMemory ? ['', `# Durable Memory · r${runtime.memoryRevision}`, durableMemory] : []),
     ...(recoveryMode === 'initial' && runtime.recentMemory ? ['', '# Recent Retrieved Memory', runtime.recentMemory] : []),
     '',
@@ -599,6 +603,7 @@ async function runEvolutionEvaluator(
   executor: AgentExecutor,
   executionOptions: AgentExecutionOptions,
 ) {
+  if (process.env.LOOP_ENABLE_EVALUATOR !== '1') return;
   const evolution = await beginEvolutionRun(evidence);
   if (!evolution?.prompt || !evolution.evaluatorDirectory) return;
   for (let failureAttempt = 1; failureAttempt <= EXECUTION_FAILURE_MAX_RETRIES + 1; failureAttempt += 1) {
@@ -620,9 +625,9 @@ async function runEvolutionEvaluator(
       const execution = await executeDelegation({
         runId,
         prompt: recoveryPrompt,
-        workspaceRoot: evolution.evaluatorDirectory,
+        workspaceRoot: evolution.workspaceRoot!,
         executor,
-        executionOptions,
+        executionOptions: mergeExternalAgentOptions(loadExternalAgent(evolution.workspaceRoot!, 'evolution-evaluator'), executionOptions),
         context: { agent: 'prompt-evolution-agent', taskId: evidence.taskId, storyIndex: evidence.storyIndex, pipeline: 'evolution' },
         description: `总结 ${evidence.agentId} 的可复用经验`,
         telemetry,
@@ -727,7 +732,8 @@ async function executeDelegationStep(
   try {
     const runtimeSettings = await getAgentRuntimeSettings(delegation.agent);
     const executor = getAgentExecutor(runtimeSettings.executorId);
-    const executionOptions = agentExecutionOptions(runtimeSettings);
+    const definition = loadExternalAgent(task.task.work_dir, delegation.agent);
+    const executionOptions = { ...await resolveFlowAgentExecutionOptions(runtimeSettings, definition), sessionDirectory: join(documentFilesRoot(), 'sessions', reservation.reservationId) };
     await appendLoopRunLog(runId, `[Runtime] requirement=${delegation.taskId} agent=${delegation.agent} executor=${executor.id} model=${executionOptions.model || 'default'} reasoning=${executionOptions.reasoningEffort || 'default'} web_search=${executionOptions.webSearch ? 'enabled' : 'disabled'}`);
     const workspaceRoot = task.task.work_dir;
     const headBefore = gitHead(workspaceRoot);

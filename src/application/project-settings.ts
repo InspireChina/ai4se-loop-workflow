@@ -1,9 +1,10 @@
+import { mergeExternalAgentOptions, type ExternalAgent } from '../infrastructure/external-agents';
 import { revalidatePath } from 'next/cache';
 import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { z } from 'zod';
-import { AGENT_EXECUTORS, type AgentExecutorId } from '../domain/agent-executor';
+import { SUPPORTED_AGENT_EXECUTORS, type AgentExecutorId } from '../domain/agent-executor';
 import { FLOW_AGENT_IDS, isFlowAgentId, type FlowAgentId } from '../domain/agent-profile';
 import type { AgentExecutionOptions } from '../infrastructure/agent-executor';
 import { appDatabaseConnection, databaseConnection } from '../infrastructure/database';
@@ -14,13 +15,10 @@ export const AGENT_EXECUTOR_OPTIONS: ReadonlyArray<{
   label: string;
   description: string;
 }> = [
-  { id: 'cursor', label: 'Cursor', description: '使用 Cursor Agent CLI 执行每个推进步骤。' },
-  { id: 'codex', label: 'Codex', description: '使用 Codex CLI 的非交互 JSON 模式执行。' },
-  { id: 'claude', label: 'Claude', description: '使用 Claude Code CLI 的流式 JSON 模式执行。' },
-  { id: 'omp', label: 'Oh My Pi', description: '使用 OMP CLI 的 JSON 模式，可覆盖模型与思考强度。' },
+  { id: 'omp', label: 'Oh My Pi', description: '使用 OMP 原生 RPC，每个 Agent 可独立配置模型与思考强度。' },
 ];
 
-const executorSchema = z.enum(AGENT_EXECUTORS);
+const executorSchema = z.enum(SUPPORTED_AGENT_EXECUTORS);
 const workspaceRootSchema = z.string().trim().min(1, '请输入工作区根目录');
 export const CODEX_REASONING_EFFORTS = ['default', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
 export type CodexReasoningEffort = typeof CODEX_REASONING_EFFORTS[number];
@@ -222,7 +220,7 @@ function runtimeConfigurationFromRow(row: GlobalRuntimeConfigurationRow): Global
     agentId: row.agent_id,
     name: row.name,
     active: Boolean(row.is_active),
-    executorId: executor.success ? executor.data : 'cursor',
+    executorId: executor.success ? executor.data : 'omp',
     codexModel: model.success ? model.data : DEFAULT_CODEX_MODEL,
     codexReasoningEffort: effort.success ? effort.data : 'default',
     codexWebSearch: Boolean(row.codex_web_search),
@@ -258,7 +256,7 @@ function ensureGlobalRuntimeConfigurationSeeds() {
               configuration_id, scope, agent_id, name, is_active, executor_id,
               codex_model, codex_reasoning_effort, codex_web_search,
               claude_model, omp_model, omp_thinking
-            ) VALUES(?, ?, NULL, ?, 1, 'cursor', ?, 'default', 1, '', '', 'default')
+            ) VALUES(?, ?, NULL, ?, 1, 'omp', ?, 'default', 1, '', '', 'default')
           `).run(configurationId, scope, scope === 'system' ? '系统辅助默认' : '流程 Agent 默认', DEFAULT_CODEX_MODEL);
           active = { configuration_id: configurationId };
         }
@@ -419,6 +417,15 @@ export async function getAgentRuntimeSettings(agentIdInput: string): Promise<Age
     configurationId: effective.configurationId,
     configurationName: effective.name,
   };
+}
+
+export async function resolveFlowAgentExecutionOptions(settings: AgentRuntimeSettings, definition: ExternalAgent) {
+  const defaults = settings.source === 'global_default' ? settings : await getFlowAgentDefaultRuntimeSettings();
+  return mergeExternalAgentOptions(
+    definition,
+    agentExecutionOptions(defaults),
+    settings.source === 'agent_configuration' ? agentExecutionOptions(settings) : {},
+  );
 }
 
 export async function listAgentRuntimeSettings(): Promise<AgentRuntimeSettings[]> {

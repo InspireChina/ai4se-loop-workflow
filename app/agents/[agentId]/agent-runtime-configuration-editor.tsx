@@ -102,7 +102,7 @@ export function AgentRuntimeConfigurationEditor(props: {
   }
 
   return <section className="card settings agent-section-card agent-runtime-config-editor">
-    <div className="settings-section-head"><span className="executor-icon"><Bot size={18}/></span><div><strong>全局 Agent Runtime</strong><p className="muted settings-description">保存在 LoopWork 安装数据中，不随项目切换。可保存多套配置并立即切换。</p></div><span className={`badge ${effective.source === 'agent_configuration' ? 'green' : 'blue'}`}>{effective.source === 'agent_configuration' ? effective.configurationName : '跟随流程默认'}</span></div>
+    <div className="settings-section-head"><span className="executor-icon"><Bot size={18}/></span><div><strong>此 Agent 的 OMP 参数</strong><p className="muted settings-description">可独立设置此 Agent 的模型和思考强度，保存多套配置并切换；不会修改外部 Prompt。</p></div><span className={`badge ${effective.source === 'agent_configuration' ? 'green' : 'blue'}`}>{effective.source === 'agent_configuration' ? effective.configurationName : '跟随流程默认'}</span></div>
     <div className="agent-config-toolbar">
       <div className="agent-config-choice-row agent-runtime-config-choice-row"><label>预览配置<select value={selectedId} onChange={(event) => selectConfiguration(event.target.value)}>
           <option value={GLOBAL_DEFAULT}>流程 Agent 默认 · {flowDefault.name}</option>
@@ -122,17 +122,15 @@ export function AgentRuntimeConfigurationEditor(props: {
         </div></fieldset>
         <div className="agent-runtime-parameters">
           <header><span>运行参数</span><strong>{executor?.label || executorId}</strong><small>{selected ? '只显示当前执行器会使用的参数。' : '当前为只读预览。'}</small></header>
-          {executorId === 'cursor' && <section className="agent-runtime-empty"><span className="executor-icon"><Bot size={20}/></span><div><strong>使用 Cursor CLI 默认参数</strong><p>Cursor 当前没有需要由 LoopWork 额外覆盖的模型或思考参数。</p></div></section>}
-          {executorId === 'codex' && <fieldset className="codex-settings" disabled={!selected || busy}><legend>Codex 参数</legend><div className="fields"><label>模型<select name="codexModel" defaultValue={preview.codexModel}>{props.codexModelOptions.map((model) => <option value={model.id} key={model.id}>{model.label}</option>)}</select></label><label>思考强度<select name="codexReasoningEffort" defaultValue={preview.codexReasoningEffort}>{props.reasoningEfforts.map((effort) => <option value={effort} key={effort}>{effort === 'default' ? '跟随默认值' : effort}</option>)}</select></label></div><label className="checkbox"><input type="checkbox" name="codexWebSearch" defaultChecked={preview.codexWebSearch}/>启用实时网页搜索</label></fieldset>}
-          {executorId === 'claude' && <fieldset className="claude-settings" disabled={!selected || busy}><legend>Claude 参数</legend><div className="fields"><label>模型<input name="claudeModel" defaultValue={preview.claudeModel} placeholder="留空时使用 CLI 默认模型" spellCheck={false}/></label></div></fieldset>}
-          {executorId === 'omp' && <fieldset className="omp-settings" disabled={!selected || busy}><legend>Oh My Pi 参数</legend><div className="fields"><label>模型<input name="ompModel" defaultValue={preview.ompModel} placeholder="留空时使用 OMP 默认模型" spellCheck={false}/></label><label>思考强度<select name="ompThinking" defaultValue={preview.ompThinking}>{props.ompThinkingLevels.map((level) => <option value={level} key={level}>{level === 'default' ? '跟随默认值' : level}</option>)}</select></label></div></fieldset>}
+          {executorId === 'omp' && <fieldset className="omp-settings" disabled={!selected || busy}><legend>Oh My Pi 参数</legend><div className="fields"><label>模型<input name="ompModel" defaultValue={preview.ompModel} placeholder="留空时继承外部定义或流程默认" spellCheck={false}/></label><label>思考强度<select name="ompThinking" defaultValue={preview.ompThinking}>{props.ompThinkingLevels.map((level) => <option value={level} key={level}>{level === 'default' ? '跟随默认值' : level}</option>)}</select></label></div></fieldset>}
           {executorId !== 'codex' && <><input type="hidden" name="codexModel" value={preview.codexModel}/><input type="hidden" name="codexReasoningEffort" value={preview.codexReasoningEffort}/><input type="hidden" name="codexWebSearch" value={preview.codexWebSearch ? 'on' : ''}/></>}
           {executorId !== 'claude' && <input type="hidden" name="claudeModel" value={preview.claudeModel}/>}
           {executorId !== 'omp' && <><input type="hidden" name="ompModel" value={preview.ompModel}/><input type="hidden" name="ompThinking" value={preview.ompThinking}/></>}
         </div>
       </div>
-      {selected ? <button className="button" type="submit" disabled={busy}><Save size={14}/>保存配置</button> : <p className="muted">当前预览的是全局流程默认值。复制为新配置后即可修改并单独启用。</p>}
+      {selected ? <button className="button" type="submit" disabled={busy}><Save size={14}/>保存配置</button> : <p className="muted">当前跟随流程默认。复制为新配置后，可修改参数并点击“立即启用”。</p>}
     </form>
+    <p className="muted">生效顺序：此 Agent 的自定义值 → 外部定义 → 流程全局默认 → OMP 默认。模型留空或思考强度选择“跟随默认值”时继续继承。</p>
     {error && <p className="context-chat-error">{error}</p>}{notice && <p className="agent-config-notice"><Check size={14}/>{notice}</p>}
   </section>;
 }

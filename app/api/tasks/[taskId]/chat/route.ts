@@ -5,7 +5,7 @@ import { EXECUTION_FAILURE_MAX_RETRIES } from '../../../../../src/application/ex
 import { waitForExecutionRetryBackoff, type ExecutionRecoveryMode } from '../../../../../src/application/execution-retry-policy';
 import { sanitizeDiagnosticText } from '../../../../../src/infrastructure/diagnostic-text';
 import { runTaskContextChatTurn } from '../../../../../src/infrastructure/task-context-chat-executor';
-import { taskWorkspaceRoot } from '../../../../../src/application/projects';
+import { taskWorkspaceRoot } from '../../../../../src/application/workspace-context';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -44,6 +44,12 @@ export async function POST(request: Request, context: { params: Promise<{ taskId
           let recoveryMode: ExecutionRecoveryMode = 'initial';
           let retryNumber = 0;
           let recoveryMessages: Array<{ role: 'user' | 'assistant'; content: string }> = [];
+          if (!providerSessionId) {
+            const transcript = await getTaskContextChat(taskId);
+            recoveryMessages = transcript.messages
+              .filter((message) => message.messageId !== claimedMessageId)
+              .map((message) => ({ role: message.role, content: message.content }));
+          }
           for (let failureAttempt = 1; failureAttempt <= EXECUTION_FAILURE_MAX_RETRIES + 1; failureAttempt += 1) {
             try {
               const result = await runTaskContextChatTurn({

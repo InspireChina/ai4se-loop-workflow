@@ -193,3 +193,21 @@ test('desktop restart clears update silence after skipping past the recorded tar
   assert.equal(recovered.last_error, null);
   await lifecycle.shutdown(false);
 });
+
+test('a clean manual start is healthy and does not count as a failed Runner restart', async () => {
+  const db = await databaseConnection();
+  db.prepare(`UPDATE loop_lifecycle_state SET desired_intent='stopped', mode='normal', actual_phase='stopped', active_run_id=NULL, retry_at=NULL, restart_count=3, last_error='previous error' WHERE singleton=1`).run();
+  const lifecycle = createLoopRunLifecycle({ ownerId: `cli-${process.pid}-${randomUUID()}`, adapter: 'cli' });
+  const source = { adapter: 'cli' as const, instanceId: 'clean-start', actor: 'human' as const };
+  try {
+    const receipt = await lifecycle.command({ requestId: randomUUID(), source, action: { kind: 'start' } });
+    assert.equal(receipt.outcome, 'started');
+    assert.equal(receipt.snapshot.run.healthy, true);
+    assert.equal(receipt.snapshot.supervision.restartCount, 0);
+    assert.equal(receipt.snapshot.supervision.retryAt, null);
+    assert.equal(receipt.snapshot.lastError, null);
+  } finally {
+    await lifecycle.command({ requestId: randomUUID(), source, action: { kind: 'stop', reason: 'user-stop' } });
+    await lifecycle.shutdown(true);
+  }
+});

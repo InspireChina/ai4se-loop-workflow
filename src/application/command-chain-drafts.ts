@@ -914,7 +914,7 @@ function cloneReviewReportBaseline(db: Db, draft: CommandChainDraftRow, document
       AND result.agent = 'review-agent' AND result.application_status = 'applied'
       AND result.effect_outcome = 'advanced'
     JOIN documents baseline ON baseline.document_id = ? AND baseline.task_id = awd.task_id
-      AND json_extract(result.result_json, '$.artifact.content') = baseline.content
+      AND json_extract(result.result_json, '$.artifact.content') = loopwork_read_document(loopwork_read_payload(baseline.content))
     WHERE awd.task_id = ? AND awd.command_chain_id = 'review'
       AND awd.status = 'submitted' AND awd.terminal_action = 'complete'
       AND EXISTS (

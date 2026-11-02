@@ -1,25 +1,24 @@
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
-import { Activity, BookOpenText, BrainCircuit, CalendarDays, Check, CircleAlert, CircleDot, FolderCog, Gauge, MemoryStick, PencilLine, RotateCcw, Sparkles } from 'lucide-react';
+import { Activity, BookOpenText, BrainCircuit, CalendarDays, Check, CircleAlert, CircleDot, FolderCog, Gauge, MemoryStick, PencilLine, Sparkles } from 'lucide-react';
 import { getAgentProfile } from '../../../src/application/agent-profiles';
 import { listAgentConfigurations } from '../../../src/application/agent-configurations';
 import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, OMP_THINKING_LEVELS, getAgentRuntimeSettings, getFlowAgentDefaultRuntimeSettings, listAgentRuntimeConfigurations } from '../../../src/application/project-settings';
-import { AGENT_PROMPT_SEED_REVISION, isFlowAgentId } from '../../../src/domain/agent-profile';
+import { isFlowAgentId } from '../../../src/domain/agent-profile';
 import { MarkdownContent } from '../../../src/ui/markdown-content';
 import { agentCommandChains, agentPipelineLabel } from '../../../src/domain/agent-command-profile';
-import { resetAgentPromptAction, saveAgentMemoryAction, saveAgentPromptAction, setAgentAutoEvolutionAction } from '../../actions';
+import { saveAgentMemoryAction } from '../../actions';
 import { AgentConfigurationEditor } from './agent-configuration-editor';
 import { AgentRuntimeConfigurationEditor } from './agent-runtime-configuration-editor';
-import { listProjects } from '../../../src/application/projects';
 
 export const dynamic = 'force-dynamic';
 
 const agentSections = [
-  { id: 'runtime', label: '运行参数', description: '全局 CLI、模型与配置切换', icon: Gauge },
+  { id: 'runtime', label: '运行参数', description: '独立 OMP 模型、思考强度与配置', icon: Gauge },
   { id: 'commands', label: '命令链', description: '阶段顺序与终止动作', icon: CircleDot },
-  { id: 'prompt', label: 'Prompt', description: '当前项目 Agent Overlay', icon: BrainCircuit },
-  { id: 'memory', label: 'Memory', description: '当前项目长期经验与观察', icon: MemoryStick },
-  { id: 'evolution', label: '演化', description: '策略、候选与观察', icon: Sparkles },
+  { id: 'prompt', label: 'Prompt', description: '外部 .omp/agents 定义', icon: BrainCircuit },
+  { id: 'memory', label: 'Memory', description: '当前工作目录长期经验与观察', icon: MemoryStick },
+  { id: 'evolution', label: '观察', description: '执行经验与证据', icon: Sparkles },
   { id: 'diagnostics', label: '诊断', description: '生效输入与 Runtime 文件', icon: Activity },
 ] as const;
 
@@ -47,40 +46,33 @@ function dailyMemoryBody(content: string) {
     .trim();
 }
 
-export default async function AgentDetailPage({ params, searchParams }: { params: Promise<{ agentId: string }>; searchParams: Promise<{ section?: string | string[]; project?: string | string[]; memoryMode?: string | string[]; memoryError?: string | string[]; memoryPromoted?: string | string[] }> }) {
+export default async function AgentDetailPage({ params, searchParams }: { params: Promise<{ agentId: string }>; searchParams: Promise<{ section?: string | string[]; memoryMode?: string | string[]; memoryError?: string | string[]; memoryPromoted?: string | string[] }> }) {
   const [{ agentId }, query] = await Promise.all([params, searchParams]);
   if (!isFlowAgentId(agentId)) notFound();
-  const projects = await listProjects();
-  const requestedProjectId = Array.isArray(query.project) ? query.project[0] : query.project;
-  const currentProject = projects.find((project) => project.project_id === requestedProjectId)
-    || projects.find((project) => project.is_default)
-    || projects[0];
-  if (!currentProject) notFound();
   const [detail, runtimeSettings, flowDefaults, runtimeConfigurations, agentConfigurations] = await Promise.all([
-    getAgentProfile(agentId, true, currentProject.project_id),
+    getAgentProfile(agentId, true),
     getAgentRuntimeSettings(agentId),
     getFlowAgentDefaultRuntimeSettings(),
     Promise.resolve(listAgentRuntimeConfigurations(agentId)),
     Promise.resolve(listAgentConfigurations(agentId)),
   ]);
+  const currentProject = detail.project;
   const section = selectedSection(query.section);
   const memoryMode = Array.isArray(query.memoryMode) ? query.memoryMode[0] : query.memoryMode;
   const editingMemory = memoryMode === 'edit';
   const memoryError = Array.isArray(query.memoryError) ? query.memoryError[0] : query.memoryError;
   const memoryPromoted = Array.isArray(query.memoryPromoted) ? query.memoryPromoted[0] : query.memoryPromoted;
-  const overlayUsesGlobalBaseline = detail.projectOverlay.content.trim() === detail.currentPrompt.content.trim() && !detail.candidatePrompt;
-  const selectedOverlay = detail.candidatePrompt || detail.projectOverlay;
   const agentHref = (targetSection: AgentSection, extra: Record<string, string> = {}) => {
-    const parameters = new URLSearchParams({ section: targetSection, project: currentProject.project_id, ...extra });
+    const parameters = new URLSearchParams({ section: targetSection, ...extra });
     return `/agents/${agentId}?${parameters}`;
   };
   const effectivePrompt = [
     '# Harness Core Contract（只读）',
     '流程调度、权限、状态机和最小结果协议由 Harness 执行，专业语义由对应 Agent 判断，Agent Prompt 无权扩大权限。',
     '',
-    `# ${currentProject.name} · Project Prompt Overlay · r${selectedOverlay.revision}${detail.candidatePrompt ? ' Canary' : ''}`,
-    `# 基线：全局角色模板 V${AGENT_PROMPT_SEED_REVISION}`,
-    selectedOverlay.content,
+    `# ${currentProject.name} · 外部 Agent 定义`,
+    `# 来源：${detail.externalAgentPath}`,
+    detail.currentPrompt.content,
     '',
     `# Durable Memory · r${detail.currentMemory.revision}`,
     detail.currentMemory.content,
@@ -88,7 +80,7 @@ export default async function AgentDetailPage({ params, searchParams }: { params
   const commandChains = agentCommandChains(agentId);
 
   return <>
-    <header className="page-header agent-page-header"><div><Link className="crumb" href="/agents">Agent 配置</Link><p className="eyebrow">{agentId}</p><h1>{detail.definition.label}</h1><p className="muted">{detail.definition.description}</p></div><div className="agent-header-actions"><form className="agent-project-switcher" method="get"><input type="hidden" name="section" value={section}/><label><span className="agent-project-label"><FolderCog size={14}/>项目</span><select aria-label="当前项目" name="project" defaultValue={currentProject.project_id}>{projects.map((project) => <option value={project.project_id} key={project.project_id}>{project.name}{project.is_default ? '（默认）' : ''}</option>)}</select></label><button className="button secondary" type="submit">应用</button></form><span className={`badge agent-evolution-badge ${detail.candidatePrompt ? 'amber' : detail.profile.auto_evolve ? 'green' : 'blue'}`}>{detail.candidatePrompt ? `Overlay Canary r${detail.candidatePrompt.revision}` : detail.profile.auto_evolve ? '项目演化已开启' : '项目演化已关闭'}</span></div></header>
+    <header className="page-header agent-page-header"><div><Link className="crumb" href="/agents">Agent 配置</Link><p className="eyebrow">{agentId}</p><h1>{detail.definition.label}</h1><p className="muted">{detail.definition.description}</p></div><div className="agent-header-actions"><span className="badge blue">外部 Agent · OMP</span></div></header>
 
     <div className="settings-layout agent-settings-layout">
       <nav className="card settings-navigation agent-section-nav" aria-label="Agent 配置目录">
@@ -109,8 +101,8 @@ export default async function AgentDetailPage({ params, searchParams }: { params
       <div className="agent-workspace">
         <section className="agent-profile-summary" aria-label="Agent 配置摘要">
           <div><span>Runtime</span><strong>{runtimeSettings.executorId}</strong><small>{runtimeSettings.source === 'global_default' ? '跟随流程默认' : runtimeSettings.configurationName}</small></div>
-          <div><span>Project Overlay</span><strong>r{detail.projectOverlay.revision}</strong><small>{currentProject.name} · {overlayUsesGlobalBaseline ? '使用全局基线' : '已覆盖'}</small></div>
-          <div><span>Project Memory</span><strong>r{detail.currentMemory.revision}</strong><small>{detail.dailyFiles.length} 个 daily 文件</small></div>
+          <div><span>Agent 定义</span><strong>外部 Markdown</strong><small>{currentProject.name} · 文件来源</small></div>
+          <div><span>Workspace Memory</span><strong>r{detail.currentMemory.revision}</strong><small>{detail.dailyFiles.length} 个 daily 文件</small></div>
           <div><span>演化证据</span><strong>{detail.observations.length}</strong><small>条可复用观察</small></div>
         </section>
       {section === 'runtime' && <AgentRuntimeConfigurationEditor
@@ -145,23 +137,12 @@ export default async function AgentDetailPage({ params, searchParams }: { params
       </div>}
 
       {section === 'prompt' && <div className="agent-section-layout">
-        <form action={saveAgentPromptAction} className="card settings agent-editor agent-section-card">
-          <input type="hidden" name="agentId" value={agentId}/><input type="hidden" name="projectId" value={currentProject.project_id}/><input type="hidden" name="section" value="prompt"/>
-          <div className="settings-section-head"><span className="executor-icon"><BrainCircuit size={18}/></span><div><strong>{currentProject.name} · Agent Overlay</strong><p className="muted settings-description">基于全局角色模板初始化完整 Prompt；保存修改后，当前项目直接使用这里的版本覆盖全局基线。</p></div><span className="badge">r{detail.projectOverlay.revision}</span></div>
-          <textarea className="code-editor" name="content" defaultValue={detail.projectOverlay.content}/>
-          <label>修改原因<input name="reason" placeholder="例如：补充当前项目的浏览器验证顺序"/></label>
-          <button className="button" type="submit">保存项目 Overlay</button>
-        </form>
-        <aside className="agent-section-aside">
-          <section className="card settings agent-context-note"><strong>作用范围</strong><p className="muted settings-description">已发生的 execution 保留当时的输入快照；这里的修改只影响 {currentProject.name} 此后新启动的执行。</p><span className="badge green">仅当前项目</span></section>
-          <form action={resetAgentPromptAction} className="card settings agent-danger-card">
-            <input type="hidden" name="agentId" value={agentId}/><input type="hidden" name="projectId" value={currentProject.project_id}/><input type="hidden" name="section" value="prompt"/>
-            <div className="settings-section-head"><span className="executor-icon"><RotateCcw size={18}/></span><div><strong>恢复全局基线</strong><p className="muted settings-description">用当前全局角色模板覆盖项目版本；当前项目 Memory 不变。</p></div></div>
-            <span className={`badge ${overlayUsesGlobalBaseline ? 'green' : 'amber'}`}>{overlayUsesGlobalBaseline ? '正在使用基线' : '项目已覆盖'}</span>
-            <label className="checkbox"><input type="checkbox" name="confirm" required disabled={overlayUsesGlobalBaseline}/>我确认恢复当前项目 Prompt</label>
-            <button className="button secondary" type="submit" disabled={overlayUsesGlobalBaseline}>恢复全局基线</button>
-          </form>
-        </aside>
+        <section className="card settings agent-editor agent-section-card">
+          <div className="settings-section-head"><span className="executor-icon"><BrainCircuit size={18}/></span><div><strong>{currentProject.name} · 外部 Agent 定义</strong><p className="muted settings-description">自动检测当前工作目录的 .omp/agents，实际文件路径见下方。修改文件后，下一次执行直接读取；原有 Workflow、角色职责和状态流转保持。</p></div><span className="badge">文件管理</span></div>
+          <p className="path-value"><code>{detail.externalAgentPath}</code></p>
+          {detail.externalAgentError ? <p className="memory-operation-message error">{detail.externalAgentError}</p> : <MarkdownContent content={detail.currentPrompt.content}/>}
+        </section>
+        <aside className="agent-section-aside"><section className="card settings agent-context-note"><strong>编辑方式</strong><p className="muted settings-description">在文件系统编辑此 Agent Markdown 正文，可引用 Skill 和 Markdown 模板。LoopWork 不在数据库维护另一套 Prompt，也不覆盖外部文件。</p><p className="muted settings-description">Agent frontmatter 可声明 model、thinking、tools 和 skills；OMP Runtime 页面可单独覆盖模型和思考强度；Harness 的流程边界和执行契约继续生效。</p></section></aside>
       </div>}
 
       {section === 'memory' && <div className="memory-section-stack">
@@ -170,14 +151,14 @@ export default async function AgentDetailPage({ params, searchParams }: { params
         <section className="card settings agent-section-card memory-card">
           <div className="settings-section-head memory-section-head">
             <span className="executor-icon"><MemoryStick size={18}/></span>
-            <div><strong>{currentProject.name} · Durable Memory</strong><p className="muted settings-description">仅在当前项目内跨任务复用的稳定经验。默认以文档方式阅读，需要修改时再进入编辑模式。</p></div>
+            <div><strong>{currentProject.name} · Durable Memory</strong><p className="muted settings-description">仅在当前工作目录内跨任务复用的稳定经验。默认以文档方式阅读，需要修改时再进入编辑模式。</p></div>
             <div className="memory-head-actions"><span className="badge">r{detail.currentMemory.revision}</span>{editingMemory
               ? <Link className="button secondary memory-mode-button" href={agentHref('memory')}><BookOpenText size={15}/>返回阅读</Link>
               : <Link className="button secondary memory-mode-button" href={agentHref('memory', { memoryMode: 'edit' })}><PencilLine size={15}/>编辑</Link>}
             </div>
           </div>
           {editingMemory ? <form action={saveAgentMemoryAction} className="agent-editor memory-edit-form">
-            <input type="hidden" name="agentId" value={agentId}/><input type="hidden" name="projectId" value={currentProject.project_id}/><input type="hidden" name="section" value="memory"/>
+            <input type="hidden" name="agentId" value={agentId}/><input type="hidden" name="section" value="memory"/>
             <textarea className="code-editor memory-editor" name="content" defaultValue={detail.currentMemory.content}/>
             <label>修改原因<input name="reason" placeholder="例如：补充项目测试工具的稳定用法"/></label>
             <div className="form-actions"><button className="button" type="submit">保存长期记忆</button><Link className="button secondary" href={agentHref('memory')}>取消</Link></div>
@@ -187,7 +168,7 @@ export default async function AgentDetailPage({ params, searchParams }: { params
         <section className="card settings agent-section-card daily-memory-card">
           <div className="settings-section-head">
             <span className="executor-icon"><CalendarDays size={18}/></span>
-            <div><strong>{currentProject.name} · Daily Memory</strong><p className="muted settings-description">按日期浏览当前项目的短期观察；最新一天默认展开，内容以 Markdown 排版显示。</p></div>
+            <div><strong>{currentProject.name} · Daily Memory</strong><p className="muted settings-description">按日期浏览当前工作目录的短期观察；最新一天默认展开，内容以 Markdown 排版显示。</p></div>
             <span className="badge">最近 {detail.dailyMemories.length} / {detail.dailyFiles.length} 天</span>
           </div>
           <div className="daily-memory-list">{detail.dailyMemories.length ? detail.dailyMemories.map((memory, index) => {
@@ -197,7 +178,7 @@ export default async function AgentDetailPage({ params, searchParams }: { params
                 <div className="daily-observation-actions">{observation.promoted
                   ? <span className="badge green"><Check size={13}/>已加入 Durable Memory</span>
                   : <form action={`/agents/${agentId}/memory/promote`} method="post">
-                    <input type="hidden" name="projectId" value={currentProject.project_id}/><input type="hidden" name="memoryName" value={memory.name}/><input type="hidden" name="executionId" value={observation.executionId}/><input type="hidden" name="fingerprint" value={observation.fingerprint}/>
+                    <input type="hidden" name="memoryName" value={memory.name}/><input type="hidden" name="executionId" value={observation.executionId}/><input type="hidden" name="fingerprint" value={observation.fingerprint}/>
                     <button className="button secondary daily-promote-button" type="submit"><MemoryStick size={14}/>加入 Durable Memory</button>
                   </form>}
                 </div>
@@ -208,23 +189,17 @@ export default async function AgentDetailPage({ params, searchParams }: { params
         </section>
       </div>}
 
-      {section === 'evolution' && <div className="agent-section-layout">
+      {section === 'evolution' && <div className="agent-section-layout"><section className="card settings"><strong>外部 Agent Prompt</strong><p className="muted">Prompt 由工作目录 .omp/agents 维护。内部学习不会生成、提升或覆盖 Prompt 候选。</p></section>
         <section className="card settings agent-section-card">
-          <div className="settings-section-head"><span className="executor-icon"><Sparkles size={18}/></span><div><strong>{currentProject.name} · 演化观察</strong><p className="muted settings-description">Evaluator 从当前项目的真实 execution 中提取候选经验；Harness 决定是否提升。</p></div><span className="badge">{detail.observations.length} 条</span></div>
+          <div className="settings-section-head"><span className="executor-icon"><Sparkles size={18}/></span><div><strong>{currentProject.name} · 演化观察</strong><p className="muted settings-description">保留执行经验和证据查看。DJI 默认不启动独立 Evaluator；专业知识和角色行为由 .omp Agent / Skill 维护。</p></div><span className="badge">{detail.observations.length} 条</span></div>
           <div className="observation-list">{detail.observations.length ? detail.observations.map((observation) => <div key={observation.observation_id}>
             <span className="badge">{observation.target}</span><b>{observation.summary}</b>
             <p>{observation.guidance}</p><small>{observation.fingerprint} · {observation.occurrence_count} 次 · confidence {observation.confidence.toFixed(2)}</small>
           </div>) : <p className="muted">尚未产生可复用观察。</p>}</div>
         </section>
         <aside className="agent-section-aside">
-          <form action={setAgentAutoEvolutionAction} className="card settings">
-            <input type="hidden" name="agentId" value={agentId}/><input type="hidden" name="projectId" value={currentProject.project_id}/><input type="hidden" name="section" value="evolution"/>
-            <strong>自动演化策略</strong>
-            <p className="muted settings-description">仅对当前项目提升 Memory 和生成 Overlay 候选；用户保存 Overlay 会立即取代候选。</p>
-            <label className="checkbox"><input type="checkbox" name="enabled" defaultChecked={Boolean(detail.profile.auto_evolve)}/>启用自动演化</label>
-            <button className="button secondary" type="submit">保存演化设置</button>
-          </form>
-          <section className="card settings"><strong>当前 Overlay 候选</strong>{detail.candidatePrompt ? <><span className="badge amber">Canary r{detail.candidatePrompt.revision}</span><p className="muted settings-description">仍需 {detail.profile.canary_remaining} 次当前项目的成功执行。</p></> : <p className="muted settings-description">当前项目没有等待验证的 Overlay Canary。</p>}</section>
+          <section className="card settings"><strong>知识维护</strong><p className="muted settings-description">在 .omp/agents 和 Skill 中维护专业知识、规则及模板引用。LoopWork 不自动改写外部 Prompt。</p></section>
+          <section className="card settings"><strong>独立 Evaluator</strong><p className="muted settings-description">默认停用，任务完成后不额外调用模型。需要诊断性经验提取时，可显式设置 LOOP_ENABLE_EVALUATOR=1。</p></section>
         </aside>
       </div>}
 
@@ -234,8 +209,8 @@ export default async function AgentDetailPage({ params, searchParams }: { params
           <pre className="effective-prompt">{effectivePrompt}</pre>
         </section>
         <aside className="agent-section-aside">
-          <section className="card settings"><div className="settings-section-head"><span className="executor-icon"><FolderCog size={18}/></span><div><strong>Runtime Workspace</strong><p className="muted settings-description">项目隔离的运行时物化目录。</p></div></div><p className="path-line">{detail.runtimeDirectory}</p><small>{detail.dailyFiles.length} 个 daily memory 文件。PROMPT.md 由数据库单向物化，不进入目标仓库 Git。</small></section>
-          <section className="card settings"><strong>输入版本</strong><div className="diagnostic-facts"><span>Role</span><b>V{detail.currentPrompt.template_version}</b><span>Overlay</span><b>r{selectedOverlay.revision}</b><span>Memory</span><b>r{detail.currentMemory.revision}</b></div></section>
+          <section className="card settings"><div className="settings-section-head"><span className="executor-icon"><FolderCog size={18}/></span><div><strong>Runtime Workspace</strong><p className="muted settings-description">当前实例的运行时文件目录。</p></div></div><p className="path-line">{detail.runtimeDirectory}</p><small>{detail.dailyFiles.length} 个 daily memory 文件。Agent Prompt 直接读取工作目录的 .omp/agents，不在 Runtime 目录生成副本。</small></section>
+          <section className="card settings"><strong>输入版本</strong><div className="diagnostic-facts"><span>定义 Hash</span><b>{detail.currentPrompt.content_hash.slice(0, 12)}</b><span>来源</span><b>.omp/agents</b><span>Memory</span><b>r{detail.currentMemory.revision}</b></div></section>
         </aside>
       </div>}
       </div>

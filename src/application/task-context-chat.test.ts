@@ -7,25 +7,25 @@ test('keeps one executor-bound context chat per task and persists its transcript
   const { beginTaskContextChatTurn, completeTaskContextChatTurn, getTaskContextChat } = await import('./task-context-chat');
   const taskId = await createTask({ title: 'Context chat isolation' });
 
-  const first = await beginTaskContextChatTurn(taskId, 'What is the current state?', 'cursor');
-  assert.equal(first.session.executor, 'cursor');
+  const first = await beginTaskContextChatTurn(taskId, 'What is the current state?', 'omp');
+  assert.equal(first.session.executor, 'omp');
   assert.match(first.commandToken, /^[0-9a-f-]{36}$/);
-  await assert.rejects(() => beginTaskContextChatTurn(taskId, 'Can this overlap?', 'claude'), /正在回答/);
+  await assert.rejects(() => beginTaskContextChatTurn(taskId, 'Can this overlap?', 'omp'), /正在回答/);
 
   const answer = await completeTaskContextChatTurn({
     sessionId: first.session.sessionId,
     content: 'The task is in backlog.',
-    providerSessionId: 'cursor-session-1',
+    providerSessionId: 'omp-session-1',
   });
   assert.equal(answer.role, 'assistant');
 
-  const second = await beginTaskContextChatTurn(taskId, 'What changed?', 'claude');
+  const second = await beginTaskContextChatTurn(taskId, 'What changed?', 'omp');
   assert.equal(second.session.sessionId, first.session.sessionId);
-  assert.equal(second.session.executor, 'cursor');
-  assert.equal(second.session.providerSessionId, 'cursor-session-1');
+  assert.equal(second.session.executor, 'omp');
+  assert.equal(second.session.providerSessionId, 'omp-session-1');
 
   const chat = await getTaskContextChat(taskId);
-  assert.equal(chat.session?.executor, 'cursor');
+  assert.equal(chat.session?.executor, 'omp');
   assert.deepEqual(chat.messages.map((message) => [message.role, message.content]), [
     ['user', 'What is the current state?'],
     ['assistant', 'The task is in backlog.'],
@@ -35,7 +35,7 @@ test('keeps one executor-bound context chat per task and persists its transcript
   await completeTaskContextChatTurn({
     sessionId: second.session.sessionId,
     content: 'Nothing yet.',
-    providerSessionId: 'cursor-session-1',
+    providerSessionId: 'omp-session-1',
   });
 });
 
@@ -56,7 +56,7 @@ test('submits unlimited keyed change requests from one Chat turn into the existi
   db.prepare(`
     UPDATE tasks SET total_stories = 1, agile_status = 'in dev' WHERE task_id = ?
   `).run(taskId);
-  const claimed = await beginTaskContextChatTurn(taskId, 'Change this button label', 'codex');
+  const claimed = await beginTaskContextChatTurn(taskId, 'Change this button label', 'omp');
   const submitted = await submitTaskContextChatChangeRequest({
     sessionId: claimed.session.sessionId,
     messageId: claimed.messageId,
@@ -108,7 +108,7 @@ test('submits unlimited keyed change requests from one Chat turn into the existi
   const completed = await completeTaskContextChatTurn({
     sessionId: claimed.session.sessionId,
     content: 'The change request entered the Feedback loop.',
-    providerSessionId: 'codex-session-1',
+    providerSessionId: 'omp-session-1',
     userMessageId: claimed.messageId,
   });
   assert.equal(completed.changeRequestSubmitted, true);
@@ -141,7 +141,7 @@ test('does not pause the current task Delivery lane while context Chat is runnin
       spec_id, task_id, story_index, revision, status, spec_json, resolved_at
     ) VALUES('SPEC-chat-ready', ?, 1, 1, 'resolved', '{}', CURRENT_TIMESTAMP)
   `).run(taskId);
-  const chat = await beginTaskContextChatTurn(taskId, 'Explain the current delivery state', 'codex');
+  const chat = await beginTaskContextChatTurn(taskId, 'Explain the current delivery state', 'omp');
 
   const pipeline = await inspectTaskDispatch(taskId);
   assert.deepEqual(pipeline.map((item) => [item.agent, item.storyIndex]), [['dev-agent', 1]]);
@@ -149,7 +149,7 @@ test('does not pause the current task Delivery lane while context Chat is runnin
   await completeTaskContextChatTurn({
     sessionId: chat.session.sessionId,
     content: 'Workspace coordination verified.',
-    providerSessionId: 'codex-session-2',
+    providerSessionId: 'omp-session-2',
   });
 });
 
@@ -157,8 +157,8 @@ test('rejects empty or oversized context chat input', async () => {
   const { createTask } = await import('./tasks');
   const { beginTaskContextChatTurn } = await import('./task-context-chat');
   const taskId = await createTask({ title: 'Context chat validation' });
-  await assert.rejects(() => beginTaskContextChatTurn(taskId, '   ', 'codex'));
-  await assert.rejects(() => beginTaskContextChatTurn(taskId, 'x'.repeat(20_001), 'codex'));
+  await assert.rejects(() => beginTaskContextChatTurn(taskId, '   ', 'omp'));
+  await assert.rejects(() => beginTaskContextChatTurn(taskId, 'x'.repeat(20_001), 'omp'));
 });
 
 test('records four context Chat retries, rotates the provider session, and releases after exhaustion', async () => {
@@ -170,7 +170,7 @@ test('records four context Chat retries, rotates the provider session, and relea
     recordTaskContextChatFailureAttempt,
   } = await import('./task-context-chat');
   const taskId = await createTask({ title: 'Context chat retry activity' });
-  const claimed = await beginTaskContextChatTurn(taskId, 'Explain the failure', 'codex');
+  const claimed = await beginTaskContextChatTurn(taskId, 'Explain the failure', 'omp');
   const db = await databaseConnection();
   db.prepare('UPDATE task_context_chat_sessions SET provider_session_id = ? WHERE session_id = ?')
     .run('oversized-provider-session', claimed.session.sessionId);

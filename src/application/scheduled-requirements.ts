@@ -18,7 +18,7 @@ import {
   publishRuntimeInvalidation,
 } from './runtime-events';
 import { createTaskInDb, createTaskSchema } from './tasks';
-import { defaultProjectInDb, projectInDb } from './projects';
+import { workspaceContextInDb } from './workspace-context';
 
 export type ScheduledRequirementPlan = {
   plan_id: string;
@@ -60,7 +60,7 @@ export type ScheduledRequirementOccurrence = {
 
 const scheduleInputSchema = z.object({
   planId: z.string().uuid().optional(),
-  projectId: z.string().trim().min(1).optional().nullable(),
+  projectId: z.never({ invalid_type_error: 'DJI 定时计划只使用当前工作目录' }).optional(),
   recurrenceKind: z.enum(SCHEDULE_RECURRENCE_KINDS),
   timezone: z.string().trim().min(1).default(systemTimeZone()),
   localTime: z.string().trim().optional().nullable(),
@@ -152,7 +152,7 @@ export async function createScheduledRequirement(input: unknown) {
   const normalized = normalizeInput(input);
   const planId = randomUUID();
   const db = await databaseConnection();
-  const project = normalized.value.projectId ? projectInDb(db, normalized.value.projectId) : defaultProjectInDb(db);
+  const project = workspaceContextInDb(db);
   if (!project) throw new Error('指定项目不存在');
   const scheduleRevision = db.transaction(() => {
     db.prepare(`
@@ -191,26 +191,7 @@ export async function updateScheduledRequirement(input: unknown) {
   const current = db.prepare('SELECT project_id FROM scheduled_requirement_plans WHERE plan_id = ? AND deleted_at IS NULL')
     .get(value.planId) as { project_id: string } | undefined;
   if (!current) throw new Error('定时计划不存在');
-  const project = projectInDb(db, normalized.value.projectId || current.project_id);
-  if (!project) throw new Error('指定项目不存在');
-  if (project.project_id !== current.project_id) {
-    const materialized = db.prepare(`
-      SELECT 1
-      FROM scheduled_requirement_plans plan
-      WHERE plan.plan_id = ?
-        AND (
-          plan.last_task_id IS NOT NULL
-          OR EXISTS (
-            SELECT 1 FROM scheduled_requirement_occurrences occurrence
-            WHERE occurrence.plan_id = plan.plan_id AND occurrence.task_id IS NOT NULL
-          )
-        )
-      LIMIT 1
-    `).get(value.planId);
-    if (materialized) {
-      throw new Error('定时计划已经生成过需求，不能切换项目；请为目标项目新建计划');
-    }
-  }
+  const project = workspaceContextInDb(db);
   const scheduleRevision = db.transaction(() => {
     const updated = db.prepare(`
       UPDATE scheduled_requirement_plans
@@ -355,7 +336,6 @@ export async function materializeDueScheduledRequirements(now = new Date()) {
           continue;
         }
         const parsedTask = createTaskSchema.parse({
-          projectId: plan.project_id,
           title: plan.template_title,
           description: plan.template_description,
           itemType: plan.template_pipeline,

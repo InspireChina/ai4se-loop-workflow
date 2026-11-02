@@ -1,3 +1,4 @@
+import { storeDocumentBody } from '../infrastructure/document-files';
 import { randomUUID } from 'node:crypto';
 import { revalidatePath } from 'next/cache';
 import type { AgentResult } from '../domain/agent-result';
@@ -73,7 +74,7 @@ export async function publishReviewReport(input: {
       delegation.taskId,
       `review_v${reviewRevision}`,
       artifact.title,
-      artifact.content,
+      storeDocumentBody(delegation.taskId, documentId, artifact.content),
     );
     db.prepare(`
       INSERT INTO task_events(event_id, task_id, actor, event_type, summary)

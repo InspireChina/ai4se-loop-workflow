@@ -11,7 +11,6 @@ import {
   resumeScheduledRequirementAction,
 } from '../actions';
 import { CreateScheduleDialog, EditScheduleDialog } from './create-schedule-dialog';
-import { listProjects } from '../../src/application/projects';
 import { REQUIREMENT_PIPELINES } from '../../src/domain/pipeline-catalog';
 
 export const dynamic = 'force-dynamic';
@@ -21,8 +20,7 @@ const recurrenceLabels: Record<string, string> = {
 };
 
 export default async function SchedulesPage() {
-  const [plans, projects] = await Promise.all([listScheduledRequirements(), listProjects()]);
-  const projectNames = new Map(projects.map((project) => [project.project_id, project.name]));
+  const plans = await listScheduledRequirements();
   const histories = new Map(await Promise.all(plans.map(async (plan) => [plan.plan_id, await listScheduledRequirementOccurrences(plan.plan_id, 5)] as const)));
   const supportedValuesOf = (Intl as typeof Intl & { supportedValuesOf?: (key: 'timeZone') => string[] }).supportedValuesOf;
   const currentTimezone = systemTimeZone();
@@ -30,7 +28,7 @@ export default async function SchedulesPage() {
   if (!timezones.includes(currentTimezone)) timezones.unshift(currentTimezone);
 
   return <>
-    <header className="page-header schedule-page-header"><div><p className="eyebrow">SCHEDULED REQUIREMENTS</p><h1>定时需求</h1><p className="muted">按计划自动创建需求，每次独立推进。</p></div><CreateScheduleDialog timezones={timezones} projects={projects}/></header>
+    <header className="page-header schedule-page-header"><div><p className="eyebrow">SCHEDULED REQUIREMENTS</p><h1>定时需求</h1><p className="muted">按计划自动创建需求，每次独立推进。</p></div><CreateScheduleDialog timezones={timezones}/></header>
     <section>
       <div className="schedule-list-heading"><h2>全部计划 <span>{plans.length}</span></h2><span>{plans.filter((plan) => plan.enabled && plan.next_trigger_at).length} 个已启用</span></div>
       <div className="schedule-list">
@@ -39,12 +37,12 @@ export default async function SchedulesPage() {
             <div className="schedule-plan-icon"><CalendarClock size={21}/></div>
             <div className="schedule-plan-main">
               <div className="schedule-title-line"><h3>{plan.template_title}</h3><span className={`badge ${!plan.enabled ? 'amber' : plan.next_trigger_at ? 'green' : ''}`}>{!plan.enabled ? '已暂停' : plan.next_trigger_at ? '已启用' : '已结束'}</span></div>
-              <div className="schedule-plan-meta"><span>{projectNames.get(plan.project_id) || '未找到项目'}</span><span>{REQUIREMENT_PIPELINES.find((pipeline) => pipeline.id === plan.template_pipeline)?.label || plan.template_pipeline}</span><span>{recurrenceLabels[plan.recurrence_kind]}{plan.recurrence_kind === 'weekly' ? ` · 星期${['日', '一', '二', '三', '四', '五', '六'][plan.weekday ?? 1]}` : plan.recurrence_kind === 'monthly' ? ` · ${plan.day_of_month} 日` : ''}{plan.local_time ? ` ${plan.local_time}` : ''}</span></div>
+              <div className="schedule-plan-meta"><span>{REQUIREMENT_PIPELINES.find((pipeline) => pipeline.id === plan.template_pipeline)?.label || plan.template_pipeline}</span><span>{recurrenceLabels[plan.recurrence_kind]}{plan.recurrence_kind === 'weekly' ? ` · 星期${['日', '一', '二', '三', '四', '五', '六'][plan.weekday ?? 1]}` : plan.recurrence_kind === 'monthly' ? ` · ${plan.day_of_month} 日` : ''}{plan.local_time ? ` ${plan.local_time}` : ''}</span></div>
               {plan.template_description && <p className="schedule-description">{plan.template_description}</p>}
             </div>
             <div className="schedule-next"><small>下次执行</small><strong>{!plan.enabled ? '恢复后继续执行' : formatScheduleInstant(plan.next_trigger_at, plan.timezone)}</strong><small>{plan.timezone}</small></div>
             <div className="schedule-actions">
-              <EditScheduleDialog plan={plan} timezones={timezones} projects={projects}/>
+              <EditScheduleDialog plan={plan} timezones={timezones}/>
               <form action={plan.enabled ? pauseScheduledRequirementAction : resumeScheduledRequirementAction}><input type="hidden" name="planId" value={plan.plan_id}/><button className="icon-button schedule-action" type="submit" aria-label={`${plan.enabled ? '暂停' : '恢复'}计划：${plan.template_title}`} title={plan.enabled ? '暂停计划' : '恢复计划'}>{plan.enabled ? <CirclePause size={17}/> : <CirclePlay size={17}/>}</button></form>
               <form action={deleteScheduledRequirementAction}><input type="hidden" name="planId" value={plan.plan_id}/><button className="icon-button schedule-action schedule-delete" type="submit" aria-label={`删除计划：${plan.template_title}`} title="删除计划"><Trash2 size={16}/></button></form>
             </div>

@@ -39,7 +39,7 @@ test('switches predefined and custom configurations independently inside one Age
   });
   activateAgentConfiguration({ agentId: 'backlog-agent', configurationId });
   const promptRevision = activeAgentConfigurationPrompt('backlog-agent').revision;
-  saveActiveAgentConfigurationPrompt({ agentId: 'backlog-agent', content: '# 全局严格验收 Prompt' });
+  assert.throws(() => saveActiveAgentConfigurationPrompt({ agentId: 'backlog-agent', content: '# 全局严格验收 Prompt' }), /只从当前工作目录/);
 
   const configurations = listAgentConfigurations('backlog-agent');
   assert.equal(configurations.length, initial.length + 1);
@@ -49,8 +49,8 @@ test('switches predefined and custom configurations independently inside one Age
   assert.equal(activeAgentConfigurationContextAdapter('backlog-agent'), 'openspec');
   assert.match(configurations.find((item) => item.active)!.documents[0].yaml, /global-agent-configuration-test/);
   assert.equal(loadCommandChainDefinition('requirement-context').agent, 'backlog-agent');
-  assert.equal(activeAgentConfigurationPrompt('backlog-agent').content, '# 全局严格验收 Prompt');
-  assert.equal(activeAgentConfigurationPrompt('backlog-agent').revision, promptRevision + 1);
+  assert.equal(activeAgentConfigurationPrompt('backlog-agent').content, '');
+  assert.equal(activeAgentConfigurationPrompt('backlog-agent').revision, promptRevision);
 
   const appRow = appDatabaseConnection().prepare(`
     SELECT COUNT(*) AS count FROM agent_configuration_sets WHERE agent_id = 'backlog-agent'

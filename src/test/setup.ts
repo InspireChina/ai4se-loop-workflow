@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, rmSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -11,12 +11,13 @@ if (process.env.LOOP_TEST_SETUP_PID !== String(process.pid)) {
   const workspaceRoot = join(testRoot, 'workspace');
   const dataRoot = join(testRoot, 'data');
   mkdirSync(workspaceRoot, { recursive: true });
+  cpSync(join(sourceRoot, '.omp', 'agents'), join(workspaceRoot, '.omp', 'agents'), { recursive: true });
 
   process.env.LOOP_TEST = '1';
   process.env.LOOP_TEST_SETUP_PID = String(process.pid);
   process.env.LOOP_APP_ROOT = sourceRoot;
   process.env.LOOP_DATA_ROOT = dataRoot;
-  process.env.LOOP_WORKSPACE_ROOT_OVERRIDE = workspaceRoot;
+  process.env.LOOP_WORKSPACE_ROOT_OVERRIDE = realpathSync(workspaceRoot);
 
   process.on('exit', () => {
     try { rmSync(testRoot, { recursive: true, force: true }); } catch { /* Windows may retain a SQLite handle until process teardown. */ }

@@ -15,6 +15,11 @@ export type AgentExecutionOptions = {
   model?: string;
   reasoningEffort?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
   webSearch?: boolean;
+  systemPromptFile?: string;
+  systemPromptText?: string;
+  tools?: string[];
+  skills?: string[];
+  sessionDirectory?: string;
 };
 
 export type AgentRunMetrics = {
@@ -51,6 +56,7 @@ export type AgentExecutor = {
   prefixArgs?: string[];
   env?: AgentEnvironment;
   promptMode: 'argument' | 'stdin' | 'file-reference';
+  transport?: 'omp-rpc';
   buildArgs(prompt: string, workspaceRoot: string, options?: AgentExecutionOptions): string[];
   formatCommand(workspaceRoot: string, options?: AgentExecutionOptions): string;
   parseStdout(line: string, context: AgentExecutionContext): string | null;
@@ -752,14 +758,17 @@ const executors: Omit<Record<AgentExecutorId, AgentExecutor>, 'cursor'> = {
     parseStderr: (line, context) => stderrLog('claude', context, line),
   },
   omp: {
-    id: 'omp', label: 'Oh My Pi', command: process.env.OMP_CLI || 'omp', promptMode: 'stdin',
+    id: 'omp', label: 'Oh My Pi', command: process.env.OMP_CLI || 'omp', promptMode: 'stdin', transport: 'omp-rpc',
     buildArgs: (_prompt, _workspace, options) => [
-      '--print', '--mode', 'json', '--no-session', '--approval-mode', 'yolo',
+      '--approval-mode', 'yolo',
       ...(options?.model ? ['--model', options.model] : []),
       ...(options?.reasoningEffort ? ['--thinking', options.reasoningEffort] : []),
+      ...(options?.systemPromptFile ? ['--append-system-prompt', options.systemPromptFile] : []),
+      ...(options?.tools ? options.tools.length ? ['--tools', options.tools.join(',')] : ['--no-tools'] : []),
+      ...(options?.skills?.length ? ['--skills', options.skills.join(',')] : []),
     ],
     formatCommand: (workspace, options) => [
-      'omp --print --mode json --no-session --approval-mode yolo',
+      'omp --mode rpc --approval-mode yolo',
       options?.model ? `--model ${options.model}` : '',
       options?.reasoningEffort ? `--thinking ${options.reasoningEffort}` : '',
       `(stdin cwd=${workspace})`,

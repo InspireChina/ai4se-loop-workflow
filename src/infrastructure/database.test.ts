@@ -1199,3 +1199,25 @@ test('migrates role drafts and replaces the obsolete verification data model', (
   assert.deepEqual(foreignKeyViolations, []);
   db.close();
 });
+
+test('DJI initializes fresh state without opening configured historical databases', async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const { execFileSync } = await import('node:child_process');
+  const root = mkdtempSync(join(tmpdir(), 'dji-fresh-state-'));
+  const workspace = join(root, 'workspace');
+  mkdirSync(workspace);
+  const legacy = join(root, 'historical.db');
+  writeFileSync(legacy, 'This historical source must never be read as SQLite');
+  const result = execFileSync(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+    process.env.LOOP_TEST_SETUP_PID=String(process.pid);
+    const {databaseConnection}=await import('./src/infrastructure/database.ts');
+    const db=await databaseConnection();
+    console.log(JSON.stringify({tasks:db.prepare('SELECT COUNT(*) FROM tasks').pluck().get()}));
+  `], { cwd: process.cwd(), encoding: 'utf8', env: {
+    ...process.env, LOOP_DATA_ROOT: root, LOOP_GLOBAL_DB_PATH: join(root, 'state.db'),
+    LOOP_WORKSPACE_ROOT_OVERRIDE: workspace, LOOP_LEGACY_DB_PATH: legacy,
+  } });
+  assert.deepEqual(JSON.parse(result), { tasks: 0 });
+});

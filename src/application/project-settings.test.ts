@@ -60,7 +60,7 @@ test('inherits the global flow runtime by default and preserves explicit agent c
 
   try {
     await setFlowAgentDefaultRuntimeSettings({
-      executorId: 'codex',
+      executorId: 'omp',
       codexModel: 'gpt-5.6-terra',
       codexReasoningEffort: 'high',
       codexWebSearch: true,
@@ -69,8 +69,8 @@ test('inherits the global flow runtime by default and preserves explicit agent c
       ompThinking: 'default',
     });
     await inheritFlowRuntimeConfiguration('backlog-agent');
-    await createOverride('dev-agent', '测试 Claude Runtime', {
-      executorId: 'claude',
+    await createOverride('dev-agent', '测试 OMP 默认 Runtime', {
+      executorId: 'omp',
       codexModel: 'gpt-5.6-sol',
       codexReasoningEffort: 'default',
       codexWebSearch: false,
@@ -91,17 +91,17 @@ test('inherits the global flow runtime by default and preserves explicit agent c
     const backlog = await getAgentRuntimeSettings('backlog-agent');
     const dev = await getAgentRuntimeSettings('dev-agent');
     assert.equal(backlog.source, 'global_default');
-    assert.equal(backlog.executorId, 'codex');
-    assert.deepEqual(agentExecutionOptions(backlog), { model: 'gpt-5.6-terra', reasoningEffort: 'high', webSearch: true });
+    assert.equal(backlog.executorId, 'omp');
+    assert.deepEqual(agentExecutionOptions(backlog), { model: undefined, reasoningEffort: undefined });
     assert.equal(dev.source, 'agent_configuration');
-    assert.equal(dev.executorId, 'claude');
-    assert.deepEqual(agentExecutionOptions(dev), { model: 'claude-sonnet-4-6' });
+    assert.equal(dev.executorId, 'omp');
+    assert.deepEqual(agentExecutionOptions(dev), { model: undefined, reasoningEffort: undefined });
     const spec = await getAgentRuntimeSettings('requirement-spec-agent');
     assert.equal(spec.executorId, 'omp');
     assert.deepEqual(agentExecutionOptions(spec), { model: 'ollama/qwen3.6:35b', reasoningEffort: 'high' });
 
     await setFlowAgentDefaultRuntimeSettings({
-      executorId: 'cursor',
+      executorId: 'omp',
       codexModel: 'gpt-5.6-luna',
       codexReasoningEffort: 'low',
       codexWebSearch: false,
@@ -109,8 +109,8 @@ test('inherits the global flow runtime by default and preserves explicit agent c
       ompModel: '',
       ompThinking: 'default',
     });
-    assert.equal((await getAgentRuntimeSettings('backlog-agent')).executorId, 'cursor');
-    assert.equal((await getAgentRuntimeSettings('dev-agent')).executorId, 'claude');
+    assert.equal((await getAgentRuntimeSettings('backlog-agent')).executorId, 'omp');
+    assert.equal((await getAgentRuntimeSettings('dev-agent')).executorId, 'omp');
     assert.equal((await listAgentRuntimeSettings()).length, FLOW_AGENT_IDS.length);
     await assert.rejects(() => getAgentRuntimeSettings('unknown-agent'), /未知 Agent/);
   } finally {
@@ -131,28 +131,28 @@ test('stores system Runtime outside project settings and maps it to execution op
 
   try {
     await setAgentExecutorSettings({
-      executorId: 'claude',
+      executorId: 'omp',
       codexModel: 'gpt-5.6-sol',
       codexReasoningEffort: 'default',
       codexWebSearch: true,
-      claudeModel: 'claude-sonnet-4-6',
-      ompModel: '',
+      claudeModel: '',
+      ompModel: 'provider/system-model',
       ompThinking: 'default',
     });
     const settings = await getAgentExecutorSettings();
-    assert.equal(settings.claudeModel, 'claude-sonnet-4-6');
+    assert.equal(settings.ompModel, 'provider/system-model');
     assert.equal(settings.codexWebSearch, true);
-    assert.deepEqual(agentExecutionOptions(settings), { model: 'claude-sonnet-4-6' });
+    assert.deepEqual(agentExecutionOptions(settings), { model: 'provider/system-model', reasoningEffort: undefined });
 
     db.prepare(`
       INSERT INTO project_settings(setting_key, setting_value) VALUES('agent_executor', 'cursor')
       ON CONFLICT(setting_key) DO UPDATE SET setting_value = excluded.setting_value
     `).run();
-    assert.equal((await getAgentExecutorSettings()).executorId, 'claude');
+    assert.equal((await getAgentExecutorSettings()).executorId, 'omp');
 
-    const blank = await setAgentExecutorSettings({ ...settings, claudeModel: '  ' });
-    assert.equal(blank.claudeModel, '');
-    assert.deepEqual(agentExecutionOptions(blank), {});
+    const blank = await setAgentExecutorSettings({ ...settings, ompModel: '  ' });
+    assert.equal(blank.ompModel, '');
+    assert.deepEqual(agentExecutionOptions(blank), { model: undefined, reasoningEffort: undefined });
   } finally {
     await setAgentExecutorSettings(previous);
     if (legacy) {
@@ -266,5 +266,52 @@ test('saves Langfuse settings without exposing the secret and builds runner env'
       deleteSettings.run(...keys);
       for (const row of backup) restore.run(row.setting_key, row.setting_value);
     })();
+  }
+});
+
+test('manual Agent OMP parameters override external defaults while blank fields inherit per field', async () => {
+  const settings = await import('./project-settings');
+  const { loadExternalAgent, mergeExternalAgentOptions } = await import('../infrastructure/external-agents');
+  const role = loadExternalAgent(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE!, 'dev-agent');
+  role.metadata = { model: 'external/model', thinking: 'high', tools: [], skills: ['delivery'] };
+  const defaultsBefore = await settings.getFlowAgentDefaultRuntimeSettings();
+  const previous = await settings.getAgentRuntimeSettings('dev-agent');
+  let configurationId = '';
+  try {
+    await settings.setFlowAgentDefaultRuntimeSettings({ ...defaultsBefore, ompModel: 'flow/model', ompThinking: 'low' });
+    await settings.inheritFlowRuntimeConfiguration('dev-agent');
+    const inherited = await settings.resolveFlowAgentExecutionOptions(await settings.getAgentRuntimeSettings('dev-agent'), role);
+    assert.equal(inherited.model, 'external/model');
+    assert.equal(inherited.reasoningEffort, 'high');
+    configurationId = await settings.createAgentRuntimeConfiguration({ agentId: 'dev-agent', name: 'Manual OMP override' });
+    await settings.saveAgentRuntimeConfiguration({ ...defaultsBefore, agentId: 'dev-agent', configurationId, name: 'Manual OMP override', ompModel: 'manual/model', ompThinking: 'off' });
+    await settings.activateAgentRuntimeConfiguration({ agentId: 'dev-agent', configurationId });
+    const custom = await settings.resolveFlowAgentExecutionOptions(await settings.getAgentRuntimeSettings('dev-agent'), role);
+    assert.equal(custom.model, 'manual/model');
+    assert.equal(custom.reasoningEffort, 'off');
+    const { getAgentExecutor } = await import('../infrastructure/agent-executor');
+    const args = getAgentExecutor('omp').buildArgs('task', process.env.LOOP_WORKSPACE_ROOT_OVERRIDE!, custom);
+    assert.equal(args[args.indexOf('--model') + 1], 'manual/model');
+    assert.equal(args[args.indexOf('--thinking') + 1], 'off');
+    assert.equal(args.filter(arg => arg === '--model').length, 1);
+    assert.equal(custom.systemPromptText, role.prompt);
+    assert.deepEqual(custom.tools, []);
+    assert.deepEqual(custom.skills, ['delivery']);
+    await settings.saveAgentRuntimeConfiguration({ ...defaultsBefore, agentId: 'dev-agent', configurationId, name: 'Manual OMP override', ompModel: '', ompThinking: 'default' });
+    const blank = await settings.resolveFlowAgentExecutionOptions(await settings.getAgentRuntimeSettings('dev-agent'), role);
+    assert.equal(blank.model, 'external/model');
+    assert.equal(blank.reasoningEffort, 'high');
+    role.metadata = {};
+    const fallback = await settings.resolveFlowAgentExecutionOptions(await settings.getAgentRuntimeSettings('dev-agent'), role);
+    assert.equal(fallback.model, 'flow/model');
+    assert.equal(fallback.reasoningEffort, 'low');
+    const native = mergeExternalAgentOptions(role);
+    assert.equal(native.model, undefined);
+    assert.equal(native.reasoningEffort, undefined);
+  } finally {
+    await settings.inheritFlowRuntimeConfiguration('dev-agent');
+    if (configurationId) await settings.deleteAgentRuntimeConfiguration({ agentId: 'dev-agent', configurationId });
+    await settings.setFlowAgentDefaultRuntimeSettings(defaultsBefore);
+    if (previous.source === 'agent_configuration') await settings.activateAgentRuntimeConfiguration({ agentId: 'dev-agent', configurationId: previous.configurationId });
   }
 });

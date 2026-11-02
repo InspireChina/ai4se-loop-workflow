@@ -7,7 +7,6 @@ import { REQUIREMENT_PIPELINES } from '../../src/domain/pipeline-catalog';
 import { DEFAULT_REQUIREMENT_PRIORITY, REQUIREMENT_PRIORITY_OPTIONS } from '../../src/domain/requirement-priority';
 import { REQUIREMENT_METADATA_DEFINITIONS, type RequirementMetadataKey } from '../../src/domain/requirement-metadata';
 import type { ScheduledRequirementPlan } from '../../src/application/scheduled-requirements';
-import type { Project } from '../../src/application/projects';
 import { saveScheduledRequirementAction } from '../actions';
 
 function localDateTimeValue(value: string | null | undefined, timezone: string) {
@@ -27,12 +26,11 @@ function localDateTimeValue(value: string | null | undefined, timezone: string) 
 export function ScheduleForm({
   plan,
   timezones,
-  projects,
   onCancel,
 }: {
   plan?: ScheduledRequirementPlan;
   timezones: string[];
-  projects: Project[];
+
   onCancel?: () => void;
 }) {
   const initialMetadata = useMemo(() => {
@@ -67,11 +65,7 @@ export function ScheduleForm({
       <label>需求标题<input name="title" required maxLength={300} defaultValue={plan?.template_title || ''} placeholder="例如：整理本周客户反馈"/></label>
       <label>需求描述 <span className="schedule-optional">可选</span><textarea name="description" rows={5} defaultValue={plan?.template_description || ''} placeholder="描述要完成的工作、预期结果和注意事项。每次创建的需求都会使用这份描述。"/></label>
       <div className="fields">
-      <label>所属项目
-        <select name="projectId" required defaultValue={plan?.project_id || projects[0]?.project_id}>
-          {projects.map((project) => <option value={project.project_id} key={project.project_id}>{project.name}{project.is_default ? '（默认）' : ''}</option>)}
-        </select>
-      </label>
+
       <label>工作流程<select name="pipeline" defaultValue={plan?.template_pipeline || 'feature'}>{REQUIREMENT_PIPELINES.map((pipeline) => <option value={pipeline.id} key={pipeline.id}>{pipeline.label}</option>)}</select></label>
       </div>
       <details className="schedule-advanced" open={advancedOpen} onToggle={(event) => setAdvancedOpen(event.currentTarget.open)}>

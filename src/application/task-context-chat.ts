@@ -1,3 +1,5 @@
+import { storeDocumentBody } from '../infrastructure/document-files';
+import { assertSupportedAgentExecutor } from '../domain/agent-executor';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AgentExecutorId } from '../domain/agent-executor';
@@ -81,6 +83,7 @@ export async function getTaskContextChat(taskId: string) {
 }
 
 export async function beginTaskContextChatTurn(taskId: string, content: unknown, requestedExecutor: AgentExecutorId) {
+  assertSupportedAgentExecutor(requestedExecutor);
   const message = messageSchema.parse(content);
   const db = await databaseConnection();
   return db.transaction(() => {
@@ -102,6 +105,10 @@ export async function beginTaskContextChatTurn(taskId: string, content: unknown,
     if (row.state === 'running') {
       const stale = db.prepare("SELECT datetime(?) < datetime('now', '-30 minutes') AS stale").get(row.updated_at) as { stale: number };
       if (!stale.stale) throw new Error('上下文 Agent 正在回答上一条消息，请稍后再试');
+    }
+    if (row.executor !== 'omp') {
+      db.prepare(`UPDATE task_context_chat_sessions SET executor = 'omp', provider_session_id = NULL WHERE session_id = ?`).run(row.session_id);
+      row = { ...row, executor: 'omp', provider_session_id: null };
     }
     const commandToken = randomUUID();
     const messageId = randomUUID();
@@ -198,9 +205,8 @@ export async function submitTaskContextChatChangeRequest(input: unknown) {
         INSERT INTO documents(
           document_id, task_id, story_index, kind, title, content, format, source_agent
         ) VALUES(?, ?, NULL, 'context-chat-change-requests', '上下文对话变更请求',
-          '# 上下文对话变更请求\n\n本页记录从右侧上下文对话提交、等待 Feedback 闭环处理的修改请求。历史交付事实不会被改写。',
-          'markdown', 'human')
-      `).run(document.document_id, task.task_id);
+          ?, 'markdown', 'human')
+      `).run(document.document_id, task.task_id, storeDocumentBody(task.task_id, document.document_id, '# 上下文对话变更请求\n\n本页记录从右侧上下文对话提交、等待 Feedback 闭环处理的修改请求。历史交付事实不会被改写。'));
     }
 
     const commentId = randomUUID();

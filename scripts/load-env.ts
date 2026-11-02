@@ -14,7 +14,7 @@ for (const file of ['.env', '.env.local']) {
     const line = rawLine.trim();
     if (!line || line.startsWith('#')) continue;
     const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/);
-    if (!match || explicitEnv.has(match[1])) continue;
+    if (!match || explicitEnv.has(match[1]) || ['LOOP_WORKSPACE_ROOT', 'LOOP_WORKSPACE_ROOT_OVERRIDE'].includes(match[1])) continue;
     process.env[match[1]] = match[2].replace(/^['"]|['"]$/g, '');
   }
 }

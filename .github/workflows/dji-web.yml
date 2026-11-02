@@ -1,0 +1,20 @@
+name: DJI Web
+
+on:
+  push:
+    branches: [feature/dji]
+  pull_request:
+    branches: [feature/dji]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build

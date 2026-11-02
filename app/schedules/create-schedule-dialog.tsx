@@ -3,18 +3,17 @@
 import { useRef } from 'react';
 import { CalendarClock, Pencil, Plus, X } from 'lucide-react';
 import { ScheduleForm } from './schedule-form';
-import type { Project } from '../../src/application/projects';
 import type { ScheduledRequirementPlan } from '../../src/application/scheduled-requirements';
 
-export function CreateScheduleDialog({ timezones, projects }: { timezones: string[]; projects: Project[] }) {
-  return <ScheduleDialog timezones={timezones} projects={projects}/>;
+export function CreateScheduleDialog({ timezones }: { timezones: string[] }) {
+  return <ScheduleDialog timezones={timezones}/>;
 }
 
-export function EditScheduleDialog({ plan, timezones, projects }: { plan: ScheduledRequirementPlan; timezones: string[]; projects: Project[] }) {
-  return <ScheduleDialog plan={plan} timezones={timezones} projects={projects}/>;
+export function EditScheduleDialog({ plan, timezones }: { plan: ScheduledRequirementPlan; timezones: string[] }) {
+  return <ScheduleDialog plan={plan} timezones={timezones}/>;
 }
 
-function ScheduleDialog({ plan, timezones, projects }: { plan?: ScheduledRequirementPlan; timezones: string[]; projects: Project[] }) {
+function ScheduleDialog({ plan, timezones }: { plan?: ScheduledRequirementPlan; timezones: string[] }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const close = () => dialogRef.current?.close();
 
@@ -29,7 +28,7 @@ function ScheduleDialog({ plan, timezones, projects }: { plan?: ScheduledRequire
         <div><p className="eyebrow">{plan ? 'EDIT SCHEDULE' : 'NEW SCHEDULE'}</p><h2><CalendarClock size={19}/>{plan ? '编辑定时计划' : '新建定时计划'}</h2></div>
         <button className="icon-button" type="button" aria-label="关闭" onClick={close}><X size={18}/></button>
       </div>
-      <ScheduleForm plan={plan} timezones={timezones} projects={projects} onCancel={close}/>
+      <ScheduleForm plan={plan} timezones={timezones} onCancel={close}/>
     </dialog>
   </>;
 }
