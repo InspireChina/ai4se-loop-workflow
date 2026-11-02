@@ -106,10 +106,7 @@ export async function beginTaskContextChatTurn(taskId: string, content: unknown,
       const stale = db.prepare("SELECT datetime(?) < datetime('now', '-30 minutes') AS stale").get(row.updated_at) as { stale: number };
       if (!stale.stale) throw new Error('上下文 Agent 正在回答上一条消息，请稍后再试');
     }
-    if (row.executor !== 'omp') {
-      db.prepare(`UPDATE task_context_chat_sessions SET executor = 'omp', provider_session_id = NULL WHERE session_id = ?`).run(row.session_id);
-      row = { ...row, executor: 'omp', provider_session_id: null };
-    }
+    assertSupportedAgentExecutor(row.executor);
     const commandToken = randomUUID();
     const messageId = randomUUID();
     db.prepare(`

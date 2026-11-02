@@ -734,7 +734,7 @@ async function executeDelegationStep(
     const executor = getAgentExecutor(runtimeSettings.executorId);
     const definition = loadExternalAgent(task.task.work_dir, delegation.agent);
     const executionOptions = { ...await resolveFlowAgentExecutionOptions(runtimeSettings, definition), sessionDirectory: join(documentFilesRoot(), 'sessions', reservation.reservationId) };
-    await appendLoopRunLog(runId, `[Runtime] requirement=${delegation.taskId} agent=${delegation.agent} executor=${executor.id} model=${executionOptions.model || 'default'} reasoning=${executionOptions.reasoningEffort || 'default'} web_search=${executionOptions.webSearch ? 'enabled' : 'disabled'}`);
+    await appendLoopRunLog(runId, `[Runtime] requirement=${delegation.taskId} agent=${delegation.agent} executor=${executor.id} model=${executionOptions.model || 'default'} reasoning=${executionOptions.reasoningEffort || 'default'}`);
     const workspaceRoot = task.task.work_dir;
     const headBefore = gitHead(workspaceRoot);
     const builtPrompt = await buildPrompt(delegation, headBefore || null, reservation.attempt, workspaceRoot, task.task.project_id);
@@ -759,7 +759,7 @@ async function executeDelegationStep(
           executorId: runtimeSettings.executorId,
           model: executionOptions.model,
           reasoningEffort: executionOptions.reasoningEffort,
-          webSearchEnabled: Boolean(executionOptions.webSearch),
+          webSearchEnabled: false,
         },
       },
     });

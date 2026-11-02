@@ -4,7 +4,6 @@
   "version": "0.1.32",
   "type": "module",
   "scripts": {
-    "version:check": "node scripts/check-release-version.mjs",
     "dev": "node --import tsx scripts/web-server.ts",
     "build": "next build",
     "start": "node --import tsx scripts/web-server.ts --production",

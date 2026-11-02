@@ -1,0 +1,4 @@
+ALTER TABLE global_runtime_configurations DROP COLUMN codex_model;
+ALTER TABLE global_runtime_configurations DROP COLUMN codex_reasoning_effort;
+ALTER TABLE global_runtime_configurations DROP COLUMN codex_web_search;
+ALTER TABLE global_runtime_configurations DROP COLUMN claude_model;

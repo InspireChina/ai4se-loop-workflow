@@ -3,7 +3,7 @@
 import { setDocumentFilesRoot } from '../src/infrastructure/document-files';
 import { redirect } from 'next/navigation';
 import { setAgentConcurrency, setAgentExecutorSettings, setFlowAgentDefaultRuntimeSettings, setLangfuseSettings } from '../src/application/project-settings';
-import { resetAgentPromptToSystemTemplate, saveAgentMemory, saveAgentPrompt, setAgentAutoEvolution } from '../src/application/agent-profiles';
+import { saveAgentMemory } from '../src/application/agent-profiles';
 import {
   addDocumentComment,
   addStory,
@@ -193,10 +193,6 @@ export async function resumeTaskAction(formData: FormData) {
 export async function saveAgentExecutorAction(formData: FormData) {
   await setAgentExecutorSettings({
     executorId: formData.get('agentExecutor'),
-    codexModel: formData.get('codexModel'),
-    codexReasoningEffort: formData.get('codexReasoningEffort'),
-    codexWebSearch: formData.get('codexWebSearch'),
-    claudeModel: formData.get('claudeModel'),
     ompModel: formData.get('ompModel'),
     ompThinking: formData.get('ompThinking'),
   });
@@ -206,10 +202,6 @@ export async function saveAgentExecutorAction(formData: FormData) {
 export async function saveFlowAgentDefaultRuntimeAction(formData: FormData) {
   await setFlowAgentDefaultRuntimeSettings({
     executorId: formData.get('agentExecutor'),
-    codexModel: formData.get('codexModel'),
-    codexReasoningEffort: formData.get('codexReasoningEffort'),
-    codexWebSearch: formData.get('codexWebSearch'),
-    claudeModel: formData.get('claudeModel'),
     ompModel: formData.get('ompModel'),
     ompThinking: formData.get('ompThinking'),
   });
@@ -327,18 +319,9 @@ export async function acknowledgeClosureAction(formData: FormData) {
   redirect('/tasks');
 }
 
-export async function saveAgentPromptAction(formData: FormData) {
-  const agentId = String(formData.get('agentId'));
-  await saveAgentPrompt({ agentId, content: formData.get('content'), reason: formData.get('reason') });
-  redirectToAgentSection(agentId, formData.get('section'));
-}
 
-export async function resetAgentPromptAction(formData: FormData) {
-  const agentId = String(formData.get('agentId'));
-  if (formData.get('confirm') !== 'on') throw new Error('请先确认恢复当前项目 Prompt');
-  await resetAgentPromptToSystemTemplate({ agentId });
-  redirectToAgentSection(agentId, formData.get('section'));
-}
+
+
 
 export async function saveAgentMemoryAction(formData: FormData) {
   const agentId = String(formData.get('agentId'));
@@ -346,11 +329,7 @@ export async function saveAgentMemoryAction(formData: FormData) {
   redirectToAgentSection(agentId, formData.get('section'));
 }
 
-export async function setAgentAutoEvolutionAction(formData: FormData) {
-  const agentId = String(formData.get('agentId'));
-  await setAgentAutoEvolution({ agentId, enabled: formData.get('enabled') });
-  redirectToAgentSection(agentId, formData.get('section'));
-}
+
 
 export async function saveDocumentStorageAction(formData: FormData) {
   setDocumentFilesRoot(String(formData.get('documentFilesRoot') || ''));

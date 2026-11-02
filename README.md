@@ -2,7 +2,7 @@
 
 LoopWork 是一个面向 **L4 Development** 的 AI 软件开发 Workflow Infra。它将工作重心从“人通过 Chat 持续推动 Agent”转为“确定性的 Harness 持续驱动多个专业 Agent”，使需求能够跨会话完成分析、开发、验证、恢复和结卡。
 
-详细设计见 [L4 LOOP 工作手册](./docs/l4-loop-handbook.md)。
+运行架构见 [DJI 架构](./docs/dji-architecture.md)，Workflow 设计见 [L4 LOOP 工作手册](./docs/l4-loop-handbook.md)。
 
 ## 核心原则
 
@@ -113,7 +113,7 @@ LoopWork 只在以下情况请求人介入：
 - `.omp/agents` 维护专业指令，包括流程角色、任务 Chat、配置辅助和验证协助；Skill、规则及 Markdown 模板使用 OMP 自身的发现机制。
 - 原生 `loopwork` 工具只暴露当前执行授权的领域命令，不执行 Shell。即使角色没有 Bash，也可查询状态、提交产物；服务端仍校验凭证与阶段。
 - Web 日志通过运行事件推送，连接和丢失事件由定期校准恢复。任务执行、对话的模型事件继续呈现在原 UI。
-- DJI 仅发布 Web 入口；桌面更新与历史数据库导入入口不启用。
+- DJI 仅提供 Web 入口，不包含桌面端、历史数据库导入及其他执行器适配。
 
 ## 快速开始
 
@@ -137,19 +137,11 @@ npm run loopctl -- status
 npm run loopctl -- paths
 ```
 
-从旧版“每项目一个数据库”迁移时，先运行不带参数的命令查看 `pendingLegacyDatabases`，再为每个历史库显式指定对应项目目录：
-
-```bash
-npm run db:migrate -- --legacy-db /path/to/data/<hash>/loop-ui.db --workspace-root /path/to/project
-```
-
-迁移器会先对源库做 SQLite backup，只在备份上升级 schema，然后将数据合并到全局库。源库不会被修改，导入记录保证重复执行不会重复写入。
-
 ## 技术文档
 
+- [DJI 架构](./docs/dji-architecture.md)：OMP、单工作目录、文件存储与运行边界。
+
 - [L4 LOOP 工作手册](./docs/l4-loop-handbook.md)：WHY、设计原则、Development / Delivery / End-to-End 与统一 Infra。
-- [V1 技术方案](./docs/v1-technical-solution.md)：架构、持久化、执行协议和验收标准。
-- [DDD 边界与模型](./docs/v1-ddd-boundaries.md)：统一语言、限界上下文和领域不变量。
 
 ## 目录
 

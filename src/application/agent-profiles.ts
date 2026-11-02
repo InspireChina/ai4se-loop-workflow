@@ -1,7 +1,7 @@
 import { discoverExternalAgents, externalAgentPath, loadExternalAgent } from '../infrastructure/external-agents';
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
@@ -187,7 +187,6 @@ async function writeManifest() {
 
 export async function ensureAgentRuntimeWorkspace() {
   const db = await databaseConnection();
-  mkdirSync(join(agentRuntimeRoot(), 'projects'), { recursive: true, mode: 0o700 });
   mkdirSync(join(agentRuntimeRoot(), 'evolution', 'observations'), { recursive: true, mode: 0o700 });
   mkdirSync(join(agentRuntimeRoot(), 'evolution', 'evaluations'), { recursive: true, mode: 0o700 });
 
@@ -195,7 +194,7 @@ export async function ensureAgentRuntimeWorkspace() {
     INSERT OR IGNORE INTO agent_profiles(agent_id, display_name, prompt_seed_revision)
     VALUES(?, ?, ?)
   `);
-  const insertLegacyMemory = db.prepare(`
+  const insertInitialMemory = db.prepare(`
     INSERT OR IGNORE INTO agent_memory_versions(
       agent_id, revision, content, content_hash, source, reason
     ) VALUES(?, 1, ?, ?, 'seed', '初始长期记忆')
@@ -209,7 +208,7 @@ export async function ensureAgentRuntimeWorkspace() {
         SET display_name = ?, current_prompt_version = ?, prompt_seed_revision = ?, updated_at = CURRENT_TIMESTAMP
         WHERE agent_id = ?
       `).run(definition.label, AGENT_PROMPT_SEED_REVISION, AGENT_PROMPT_SEED_REVISION, agentId);
-      insertLegacyMemory.run(agentId, DEFAULT_AGENT_MEMORY, hash(DEFAULT_AGENT_MEMORY.trim()));
+      insertInitialMemory.run(agentId, DEFAULT_AGENT_MEMORY, hash(DEFAULT_AGENT_MEMORY.trim()));
     }
   }).immediate();
 
@@ -241,7 +240,6 @@ export async function ensureAgentRuntimeWorkspace() {
 
   for (const project of projects) {
     for (const agentId of FLOW_AGENT_IDS) {
-      migrateLegacyDailyFiles(db, project.project_id, agentId);
       await reconcileAgentFiles(project.project_id, agentId);
     }
   }
@@ -249,31 +247,7 @@ export async function ensureAgentRuntimeWorkspace() {
   return agentRuntimeRoot();
 }
 
-function migrateLegacyDailyFiles(db: Database.Database, projectId: string, agentId: FlowAgentId) {
-  const sources = new Set<string>([join(agentRuntimeRoot(), 'agents', agentId, 'memory')]);
-  const imports = db.prepare(`
-    SELECT source_db_path FROM legacy_project_database_imports WHERE project_id = ?
-  `).all(projectId) as { source_db_path: string }[];
-  for (const item of imports) {
-    const runtimeRoot = join(dirname(item.source_db_path), 'agent-runtime');
-    sources.add(join(runtimeRoot, 'agents', agentId, 'memory'));
-    const projectRoots = join(runtimeRoot, 'projects');
-    if (existsSync(projectRoots)) {
-      for (const name of readdirSync(projectRoots)) {
-        sources.add(join(projectRoots, name, 'agents', agentId, 'memory'));
-      }
-    }
-  }
-  const target = join(agentDirectory(projectId, agentId), 'memory');
-  mkdirSync(target, { recursive: true, mode: 0o700 });
-  for (const source of sources) {
-    if (!existsSync(source)) continue;
-    for (const name of readdirSync(source).filter((item) => /^\d{4}-\d{2}-\d{2}\.md$/u.test(item))) {
-      const destination = join(target, name);
-      if (!existsSync(destination)) copyFileSync(join(source, name), destination);
-    }
-  }
-}
+
 
 async function reconcileAgentFiles(projectId: string, agentId: FlowAgentId) {
   const db = await databaseConnection();

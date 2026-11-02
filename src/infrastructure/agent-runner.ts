@@ -14,13 +14,10 @@ import {
   releaseRunnerStartGate,
   runPidPath,
 } from './run-process';
-import { isDesktopRuntime, runtimeNodeEnvironment, runtimeNodeExecutable, runtimeScript } from './runtime-entry';
+import { runtimeScript } from './runtime-entry';
 
 export function resolveRunnerCommand(runId: string, scriptName: string) {
   const name = scriptName.replace(/\.ts$/, '');
-  if (isDesktopRuntime()) {
-    return { command: runtimeNodeExecutable(), args: [runtimeScript(name), runId] };
-  }
   const script = runtimeScript(name);
   const requireFromApp = createRequire(join(paths.appRoot, 'package.json'));
   const tsxCli = requireFromApp.resolve('tsx/cli');
@@ -64,7 +61,6 @@ async function startManagedRunner(runId: string, scriptName: string, supervision
       windowsHide: true,
       env: {
         ...process.env,
-        ...runtimeNodeEnvironment(),
         LOOP_APP_ROOT: paths.appRoot,
         LOOP_WORKSPACE_ROOT_OVERRIDE: paths.root,
         LOOP_SUPERVISION_TOKEN: String(supervisionToken),
@@ -152,8 +148,8 @@ export async function stopAgentRun(runId: string) {
   }
   const command = await inspectProcessCommand(pid);
   if (!command && !isProcessAlive(pid)) return;
-  const knownLegacyRunner = command.includes('agent-runner') || command.includes('dispatch-waiter');
-  if (!knownLegacyRunner || !command.includes(runId)) {
+  const verifiedRunner = command.includes('agent-runner');
+  if (!verifiedRunner || !command.includes(runId)) {
     throw new Error(`无法验证旧 Runner 进程身份 pid=${pid}`);
   }
   if (!await terminateProcessTree(pid, 10_000)) {

@@ -3,7 +3,7 @@ import { getConfiguredWorkspaceRoot } from './database';
 import { assertSupportedAgentExecutor } from '../domain/agent-executor';
 import crossSpawn from 'cross-spawn';
 import type { AgentExecutorId } from '../domain/agent-executor';
-import { buildAgentProcessLaunch, createTemporaryPrompt, removeTemporaryPrompt } from './delegation-execution';
+import { buildAgentProcessLaunch } from './delegation-execution';
 import { resolveAgentExecutionLimits } from './agent-execution-limits';
 import { createAgentFinalTextAccumulator, getAgentExecutor, type AgentExecutionOptions } from './agent-executor';
 import { taskContextChatProgressEvents, type TaskContextChatProgressEvent } from './task-context-chat-executor';
@@ -17,8 +17,7 @@ export async function runSystemAssistancePrompt(input: {
 }) {
   assertSupportedAgentExecutor(input.executorId);
   const executor = getAgentExecutor(input.executorId);
-  const temporaryPrompt = executor.promptMode === 'file-reference' ? createTemporaryPrompt(input.prompt) : null;
-  const invocationPrompt = temporaryPrompt?.reference || input.prompt;
+  const invocationPrompt = input.prompt;
   const role = loadExternalAgent(getConfiguredWorkspaceRoot(), 'agent-configuration-assistant');
   const options = mergeExternalAgentOptions(role, input.executionOptions);
   const launch = buildAgentProcessLaunch(executor, invocationPrompt, getConfiguredWorkspaceRoot(), options);
@@ -70,6 +69,5 @@ export async function runSystemAssistancePrompt(input: {
     if (!answer) throw new Error('系统辅助 Agent 没有返回配置');
     return answer;
   } finally {
-    removeTemporaryPrompt(temporaryPrompt);
   }
 }

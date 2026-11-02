@@ -2,7 +2,7 @@ import { discoverExternalAgents } from '../../src/infrastructure/external-agents
 import Link from 'next/link';
 import { Bot, BrainCircuit, Database, GitBranch, LockKeyhole, ShieldCheck, Zap } from 'lucide-react';
 import { listAgentProfiles } from '../../src/application/agent-profiles';
-import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, listAgentRuntimeSettings } from '../../src/application/project-settings';
+import { AGENT_EXECUTOR_OPTIONS, listAgentRuntimeSettings } from '../../src/application/project-settings';
 import { AGENT_PROFILE_DEFINITIONS, type FlowAgentId } from '../../src/domain/agent-profile';
 import { INTERNAL_AGENT_DEFINITIONS } from '../../src/domain/internal-agent-catalog';
 
@@ -26,13 +26,7 @@ export default async function AgentsPage() {
         const definition = AGENT_PROFILE_DEFINITIONS[profile.agent_id as FlowAgentId];
         const runtime = runtimeByAgent.get(profile.agent_id);
         const executorLabel = AGENT_EXECUTOR_OPTIONS.find((option) => option.id === runtime?.executorId)?.label || runtime?.executorId;
-        const modelLabel = runtime?.executorId === 'codex'
-          ? CODEX_MODEL_OPTIONS.find((option) => option.id === runtime.codexModel)?.label || runtime.codexModel
-          : runtime?.executorId === 'claude'
-            ? runtime.claudeModel || 'CLI 默认'
-            : runtime?.executorId === 'omp'
-              ? `${runtime.ompModel || 'OMP 默认'} · ${runtime.ompThinking === 'default' ? '默认思考强度' : runtime.ompThinking}`
-            : 'CLI 默认';
+        const modelLabel = `${runtime?.ompModel || 'OMP 默认'} · ${runtime?.ompThinking === 'default' ? '默认思考强度' : runtime?.ompThinking}`;
         const runtimeLabel = `${executorLabel} ${runtime?.source === 'agent_configuration' ? '自定义' : '默认'} · ${modelLabel} · ${runtime?.source === 'agent_configuration' ? runtime.configurationName : '流程默认'}`;
           return <Link href={`/agents/${profile.agent_id}`} className="card agent-card" key={profile.agent_id}>
             <div className="agent-card-head"><span className="executor-icon"><Bot size={18}/></span><span className="agent-card-badges"><span className="badge">{runtimeLabel}</span><span className="badge blue">外部定义</span></span></div>

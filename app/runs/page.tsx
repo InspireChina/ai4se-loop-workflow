@@ -12,9 +12,7 @@ export const dynamic = 'force-dynamic';
 function runDetail(run: NonNullable<Awaited<ReturnType<typeof getRunStatus>>>) {
   const supervisor = run.owner === 'cli-supervisor'
     ? 'CLI Supervisor'
-    : run.owner === 'electron-supervisor'
-      ? 'Electron Supervisor'
-      : null;
+    : run.owner === 'web-supervisor' ? 'Web Supervisor' : null;
   const processKind = run.processKind || 'agent-runner';
   return `${processKind} · pid ${run.pid ?? '启动中'}${supervisor ? ` · 由 ${supervisor} 管理` : ''}`;
 }

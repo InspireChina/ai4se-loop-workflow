@@ -6,7 +6,6 @@ import { Bot, Check, CopyPlus, Play, Save, Trash2 } from 'lucide-react';
 import type { AgentRuntimeSettings, GlobalRuntimeConfiguration } from '../../../src/application/project-settings';
 
 type ExecutorOption = { id: GlobalRuntimeConfiguration['executorId']; label: string; description: string };
-type ModelOption = { id: string; label: string };
 const GLOBAL_DEFAULT = '__global_default__';
 
 export function AgentRuntimeConfigurationEditor(props: {
@@ -15,8 +14,6 @@ export function AgentRuntimeConfigurationEditor(props: {
   initialEffective: AgentRuntimeSettings;
   flowDefault: GlobalRuntimeConfiguration;
   executorOptions: readonly ExecutorOption[];
-  codexModelOptions: readonly ModelOption[];
-  reasoningEfforts: readonly string[];
   ompThinkingLevels: readonly string[];
 }) {
   const router = useRouter();
@@ -95,8 +92,6 @@ export function AgentRuntimeConfigurationEditor(props: {
     await mutate({
       action: 'save', configurationId: selected.configurationId,
       name: values.get('name'), executorId: values.get('executorId'),
-      codexModel: values.get('codexModel'), codexReasoningEffort: values.get('codexReasoningEffort'),
-      codexWebSearch: values.get('codexWebSearch') === 'on', claudeModel: values.get('claudeModel'),
       ompModel: values.get('ompModel'), ompThinking: values.get('ompThinking'),
     }, 'Runtime 配置已保存。');
   }
@@ -123,9 +118,6 @@ export function AgentRuntimeConfigurationEditor(props: {
         <div className="agent-runtime-parameters">
           <header><span>运行参数</span><strong>{executor?.label || executorId}</strong><small>{selected ? '只显示当前执行器会使用的参数。' : '当前为只读预览。'}</small></header>
           {executorId === 'omp' && <fieldset className="omp-settings" disabled={!selected || busy}><legend>Oh My Pi 参数</legend><div className="fields"><label>模型<input name="ompModel" defaultValue={preview.ompModel} placeholder="留空时继承外部定义或流程默认" spellCheck={false}/></label><label>思考强度<select name="ompThinking" defaultValue={preview.ompThinking}>{props.ompThinkingLevels.map((level) => <option value={level} key={level}>{level === 'default' ? '跟随默认值' : level}</option>)}</select></label></div></fieldset>}
-          {executorId !== 'codex' && <><input type="hidden" name="codexModel" value={preview.codexModel}/><input type="hidden" name="codexReasoningEffort" value={preview.codexReasoningEffort}/><input type="hidden" name="codexWebSearch" value={preview.codexWebSearch ? 'on' : ''}/></>}
-          {executorId !== 'claude' && <input type="hidden" name="claudeModel" value={preview.claudeModel}/>}
-          {executorId !== 'omp' && <><input type="hidden" name="ompModel" value={preview.ompModel}/><input type="hidden" name="ompThinking" value={preview.ompThinking}/></>}
         </div>
       </div>
       {selected ? <button className="button" type="submit" disabled={busy}><Save size={14}/>保存配置</button> : <p className="muted">当前跟随流程默认。复制为新配置后，可修改参数并点击“立即启用”。</p>}

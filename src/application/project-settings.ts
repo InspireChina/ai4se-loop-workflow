@@ -20,22 +20,9 @@ export const AGENT_EXECUTOR_OPTIONS: ReadonlyArray<{
 
 const executorSchema = z.enum(SUPPORTED_AGENT_EXECUTORS);
 const workspaceRootSchema = z.string().trim().min(1, '请输入工作区根目录');
-export const CODEX_REASONING_EFFORTS = ['default', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const;
-export type CodexReasoningEffort = typeof CODEX_REASONING_EFFORTS[number];
-export const CODEX_MODEL_OPTIONS = [
-  { id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol', description: '最高智能，适合复杂分析与开发任务。' },
-  { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra', description: '平衡智能、速度与成本。' },
-  { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna', description: '优先低成本，适合更轻量的任务。' },
-] as const;
-export type CodexModel = typeof CODEX_MODEL_OPTIONS[number]['id'];
-export const DEFAULT_CODEX_MODEL: CodexModel = 'gpt-5.6-sol';
-export const DEFAULT_CLAUDE_MODEL = '';
 export const DEFAULT_OMP_MODEL = '';
 export const OMP_THINKING_LEVELS = ['default', 'off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'auto'] as const;
 export type OmpThinkingLevel = typeof OMP_THINKING_LEVELS[number];
-const codexModelSchema = z.enum(CODEX_MODEL_OPTIONS.map((option) => option.id) as [CodexModel, ...CodexModel[]]);
-const codexReasoningEffortSchema = z.enum(CODEX_REASONING_EFFORTS);
-const claudeModelSchema = z.string().trim().max(200, 'Claude 模型名称不能超过 200 个字符').regex(/^[^\u0000-\u001f\u007f]*$/, 'Claude 模型名称包含无效控制字符');
 const ompModelSchema = z.string().trim().max(200, 'OMP 模型名称不能超过 200 个字符').regex(/^[^\u0000-\u001f\u007f]*$/, 'OMP 模型名称包含无效控制字符');
 const ompThinkingSchema = z.enum(OMP_THINKING_LEVELS);
 const langfuseSampleRateSchema = z.coerce.number().min(0, '采样率不能小于 0').max(1, '采样率不能大于 1');
@@ -56,10 +43,6 @@ const LANGFUSE_SETTING_KEYS = [
 
 export type AgentExecutorSettings = {
   executorId: AgentExecutorId;
-  codexModel: CodexModel;
-  codexReasoningEffort: CodexReasoningEffort;
-  codexWebSearch: boolean;
-  claudeModel: string;
   ompModel: string;
   ompThinking: OmpThinkingLevel;
 };
@@ -88,10 +71,6 @@ type GlobalRuntimeConfigurationRow = {
   name: string;
   is_active: number;
   executor_id: string;
-  codex_model: string;
-  codex_reasoning_effort: string;
-  codex_web_search: number;
-  claude_model: string;
   omp_model: string;
   omp_thinking: string;
   created_at: string;
@@ -187,10 +166,6 @@ export function normalizeWorkspaceRoot(input: unknown) {
 
 type RuntimeSettingsInput = {
   executorId?: unknown;
-  codexModel?: unknown;
-  codexReasoningEffort?: unknown;
-  codexWebSearch?: unknown;
-  claudeModel?: unknown;
   ompModel?: unknown;
   ompThinking?: unknown;
 };
@@ -198,20 +173,13 @@ type RuntimeSettingsInput = {
 function parseExecutorSettingsInput(input: RuntimeSettingsInput): AgentExecutorSettings {
   return {
     executorId: executorSchema.parse(input.executorId),
-    codexModel: codexModelSchema.parse(input.codexModel ?? DEFAULT_CODEX_MODEL),
-    codexReasoningEffort: codexReasoningEffortSchema.parse(input.codexReasoningEffort ?? 'default'),
-    codexWebSearch: input.codexWebSearch === true || input.codexWebSearch === 'on' || input.codexWebSearch === 'true',
-    claudeModel: claudeModelSchema.parse(input.claudeModel ?? DEFAULT_CLAUDE_MODEL),
     ompModel: ompModelSchema.parse(input.ompModel ?? DEFAULT_OMP_MODEL),
     ompThinking: ompThinkingSchema.parse(input.ompThinking ?? 'default'),
   };
 }
 
 function runtimeConfigurationFromRow(row: GlobalRuntimeConfigurationRow): GlobalRuntimeConfiguration {
-  const executor = executorSchema.safeParse(row.executor_id);
-  const model = codexModelSchema.safeParse(row.codex_model);
-  const effort = codexReasoningEffortSchema.safeParse(row.codex_reasoning_effort);
-  const claudeModel = claudeModelSchema.safeParse(row.claude_model);
+  const executor = executorSchema.parse(row.executor_id);
   const ompModel = ompModelSchema.safeParse(row.omp_model);
   const ompThinking = ompThinkingSchema.safeParse(row.omp_thinking);
   return {
@@ -220,11 +188,7 @@ function runtimeConfigurationFromRow(row: GlobalRuntimeConfigurationRow): Global
     agentId: row.agent_id,
     name: row.name,
     active: Boolean(row.is_active),
-    executorId: executor.success ? executor.data : 'omp',
-    codexModel: model.success ? model.data : DEFAULT_CODEX_MODEL,
-    codexReasoningEffort: effort.success ? effort.data : 'default',
-    codexWebSearch: Boolean(row.codex_web_search),
-    claudeModel: claudeModel.success ? claudeModel.data : DEFAULT_CLAUDE_MODEL,
+    executorId: executor,
     ompModel: ompModel.success ? ompModel.data : DEFAULT_OMP_MODEL,
     ompThinking: ompThinking.success ? ompThinking.data : 'default',
     createdAt: row.created_at,
@@ -254,10 +218,9 @@ function ensureGlobalRuntimeConfigurationSeeds() {
           db.prepare(`
             INSERT OR IGNORE INTO global_runtime_configurations(
               configuration_id, scope, agent_id, name, is_active, executor_id,
-              codex_model, codex_reasoning_effort, codex_web_search,
-              claude_model, omp_model, omp_thinking
-            ) VALUES(?, ?, NULL, ?, 1, 'omp', ?, 'default', 1, '', '', 'default')
-          `).run(configurationId, scope, scope === 'system' ? '系统辅助默认' : '流程 Agent 默认', DEFAULT_CODEX_MODEL);
+              omp_model, omp_thinking
+            ) VALUES(?, ?, NULL, ?, 1, 'omp', '', 'default')
+          `).run(configurationId, scope, scope === 'system' ? '系统辅助默认' : '流程 Agent 默认');
           active = { configuration_id: configurationId };
         }
       }
@@ -312,12 +275,10 @@ export async function createAgentRuntimeConfiguration(input: {
   appDatabaseConnection().prepare(`
     INSERT INTO global_runtime_configurations(
       configuration_id, scope, agent_id, name, is_active, executor_id,
-      codex_model, codex_reasoning_effort, codex_web_search, claude_model, omp_model, omp_thinking
-    ) VALUES(?, 'agent', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+      omp_model, omp_thinking
+    ) VALUES(?, 'agent', ?, ?, 0, ?, ?, ?)
   `).run(
-    configurationId, input.agentId, name, settings.executorId, settings.codexModel,
-    settings.codexReasoningEffort, settings.codexWebSearch ? 1 : 0,
-    settings.claudeModel, settings.ompModel, settings.ompThinking,
+    configurationId, input.agentId, name, settings.executorId, settings.ompModel, settings.ompThinking,
   );
   await invalidateGlobalRuntime('global-agent-runtime-created', input.agentId);
   return configurationId;
@@ -333,13 +294,11 @@ export async function saveAgentRuntimeConfiguration(input: RuntimeSettingsInput 
   const settings = parseExecutorSettingsInput(input);
   const result = appDatabaseConnection().prepare(`
     UPDATE global_runtime_configurations
-    SET name = ?, executor_id = ?, codex_model = ?, codex_reasoning_effort = ?,
-        codex_web_search = ?, claude_model = ?, omp_model = ?, omp_thinking = ?,
+    SET name = ?, executor_id = ?, omp_model = ?, omp_thinking = ?,
         updated_at = CURRENT_TIMESTAMP
     WHERE configuration_id = ? AND scope = 'agent' AND agent_id = ?
   `).run(
-    name, settings.executorId, settings.codexModel, settings.codexReasoningEffort,
-    settings.codexWebSearch ? 1 : 0, settings.claudeModel, settings.ompModel,
+    name, settings.executorId, settings.ompModel,
     settings.ompThinking, String(input.configurationId), input.agentId,
   );
   if (!result.changes) throw new Error('Runtime 配置不存在');
@@ -407,10 +366,6 @@ export async function getAgentRuntimeSettings(agentIdInput: string): Promise<Age
   return {
     agentId: agentIdInput,
     executorId: effective.executorId,
-    codexModel: effective.codexModel,
-    codexReasoningEffort: effective.codexReasoningEffort,
-    codexWebSearch: effective.codexWebSearch,
-    claudeModel: effective.claudeModel,
     ompModel: effective.ompModel,
     ompThinking: effective.ompThinking,
     source: selected ? 'agent_configuration' : 'global_default',
@@ -438,13 +393,11 @@ async function saveScopedRuntimeConfiguration(scope: 'system' | 'flow', input: R
   if (!current) throw new Error('全局 Runtime 配置不存在');
   appDatabaseConnection().prepare(`
     UPDATE global_runtime_configurations
-    SET executor_id = ?, codex_model = ?, codex_reasoning_effort = ?,
-        codex_web_search = ?, claude_model = ?, omp_model = ?, omp_thinking = ?,
+    SET executor_id = ?, omp_model = ?, omp_thinking = ?,
         updated_at = CURRENT_TIMESTAMP
     WHERE configuration_id = ?
   `).run(
-    settings.executorId, settings.codexModel, settings.codexReasoningEffort,
-    settings.codexWebSearch ? 1 : 0, settings.claudeModel, settings.ompModel,
+    settings.executorId, settings.ompModel,
     settings.ompThinking, current.configurationId,
   );
   await invalidateGlobalRuntime(`global-${scope}-runtime-saved`);
@@ -465,17 +418,10 @@ export async function setAgentExecutorId(input: unknown) {
 }
 
 export function agentExecutionOptions(settings: AgentExecutorSettings): AgentExecutionOptions {
-  if (settings.executorId === 'codex') return {
-    model: settings.codexModel || undefined,
-    reasoningEffort: settings.codexReasoningEffort === 'default' ? undefined : settings.codexReasoningEffort,
-    webSearch: settings.codexWebSearch || undefined,
-  };
-  if (settings.executorId === 'claude') return settings.claudeModel ? { model: settings.claudeModel } : {};
-  if (settings.executorId === 'omp') return {
+  return {
     model: settings.ompModel || undefined,
     reasoningEffort: settings.ompThinking === 'default' ? undefined : settings.ompThinking,
   };
-  return {};
 }
 
 export async function getLangfuseSettings(): Promise<LangfuseSettings> {

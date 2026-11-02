@@ -10,7 +10,7 @@ import {
 } from './execution-retry-policy';
 
 test('uses bounded universal retry backoff for every failure kind', () => {
-  const env = { LOOP_RETRY_BACKOFF_SCALE: '1' } as NodeJS.ProcessEnv;
+  const env = { LOOP_RETRY_BACKOFF_SCALE: '1', NODE_ENV: 'test' } as NodeJS.ProcessEnv;
   assert.equal(executionRetryBackoffMs(1, env), 10_000);
   assert.equal(executionRetryBackoffMs(2, env), 30_000);
   assert.equal(executionRetryBackoffMs(3, env), 120_000);

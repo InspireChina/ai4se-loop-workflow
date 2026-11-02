@@ -4,8 +4,6 @@ const nextConfig: NextConfig = {
   outputFileTracingExcludes: {
     '*': [
       './data/**/*',
-      './desktop-runtime/**/*',
-      './dist-desktop/**/*',
       './tmp/**/*',
     ],
   },

@@ -11,14 +11,15 @@ test('allows an exact same-origin request and requests without an Origin header'
   assert.equal(isAllowedLocalRequestOrigin(request('http://127.0.0.1:3100/api')), true);
 });
 
-test('allows Windows desktop loopback aliases even when Next reconstructs another port', () => {
-  assert.equal(isAllowedLocalRequestOrigin(request('http://localhost:3000/api', 'http://127.0.0.1:49152')), true);
-  assert.equal(isAllowedLocalRequestOrigin(request('http://127.0.0.1:3000/api', 'http://localhost:49152')), true);
-  assert.equal(isAllowedLocalRequestOrigin(request('http://[::1]:3000/api', 'http://127.0.0.1:49152')), true);
+test('allows loopback aliases only on the same Web port', () => {
+  assert.equal(isAllowedLocalRequestOrigin(request('http://localhost:3000/api', 'http://127.0.0.1:3000')), true);
+  assert.equal(isAllowedLocalRequestOrigin(request('http://127.0.0.1:3000/api', 'http://localhost:3000')), true);
+  assert.equal(isAllowedLocalRequestOrigin(request('http://[::1]:3000/api', 'http://127.0.0.1:3000')), true);
 });
 
 test('rejects external, malformed, and non-http origins', () => {
   assert.equal(isAllowedLocalRequestOrigin(request('http://127.0.0.1:3000/api', 'https://example.test')), false);
+  assert.equal(isAllowedLocalRequestOrigin(request('http://127.0.0.1:3000/api', 'http://127.0.0.1:49152')), false);
   assert.equal(isAllowedLocalRequestOrigin(request('http://127.0.0.1:3000/api', 'file://')), false);
   assert.equal(isAllowedLocalRequestOrigin(request('http://127.0.0.1:3000/api', 'not-a-url')), false);
 });

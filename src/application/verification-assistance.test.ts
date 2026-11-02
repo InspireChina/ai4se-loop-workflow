@@ -38,7 +38,7 @@ test('tries verification assistance three times before exposing it to a human', 
     const claimed = await claimNextVerificationAssistance({
       runId: `run-assistance-${expectedAttempt}`,
       executorId: 'codex',
-      executionOptions: { model: 'gpt-5.6-sol', reasoningEffort: 'high', webSearch: true },
+      executionOptions: { model: 'gpt-5.6-sol', reasoningEffort: 'high' },
     });
     assert.ok(claimed);
     assert.equal(claimed.attempt, expectedAttempt);

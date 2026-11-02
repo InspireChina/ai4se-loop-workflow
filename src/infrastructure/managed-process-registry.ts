@@ -50,12 +50,12 @@ export async function registerManagedAgentProcess(runId: string, pid: number) {
     const lease = db.prepare(`SELECT fencing_token, expires_at FROM loop_supervisor_lease WHERE singleton = 1`).get() as {
       fencing_token: number; expires_at: string;
     } | undefined;
-    const state = db.prepare(`SELECT desired_intent, mode FROM loop_lifecycle_state WHERE singleton = 1`).get() as {
-      desired_intent: string; mode: string;
+    const state = db.prepare(`SELECT desired_intent FROM loop_lifecycle_state WHERE singleton = 1`).get() as {
+      desired_intent: string;
     } | undefined;
     const leaseExpiresAt = lease ? new Date(lease.expires_at).getTime() : 0;
     if (!lease || lease.fencing_token !== supervisionToken || leaseExpiresAt <= Date.now()
-      || state?.desired_intent !== 'running' || state.mode !== 'normal') {
+      || state?.desired_intent !== 'running') {
       throw new Error('Agent CLI 登记被拒绝：监督代次已经失效');
     }
     registerManagedProcessInDb(db, {

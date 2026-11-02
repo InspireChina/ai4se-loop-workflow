@@ -26,8 +26,6 @@ process.env.LOOP_WORKSPACE_ROOT = resolve(values.workspace || process.env.LOOP_W
 if (values.workspace) process.env.LOOP_WORKSPACE_ROOT_OVERRIDE = resolve(values.workspace);
 Object.assign(process.env, { NODE_ENV: values.production ? 'production' : 'development' });
 // This entry point always hosts the Web runtime.
-delete process.env.LOOP_DESKTOP;
-delete process.env.LOOP_DESKTOP_NODE;
 
 process.env.NEXT_MANUAL_SIG_HANDLE = '1';
 const app = next({ dev: !values.production, hostname: values.hostname, port });

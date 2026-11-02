@@ -36,25 +36,6 @@ function stripLogPrefix(body: string) {
   return body.replace(/^.*?\s-\s*/, '').replace(/^.*?：/, '');
 }
 
-function isCursorDiagnostic(text: string) {
-  return /^cursor-retrieval:\s+tracing to\b/.test(text.trim());
-}
-
-function friendlyCursorDiagnostic(text: string) {
-  if (isCursorDiagnostic(text)) return `Cursor retrieval 已开启诊断 trace（非错误）：${text.replace(/^cursor-retrieval:\s*/, '')}`;
-  return text;
-}
-
-function parseExecutorEvent(body: string) {
-  const detail = stripLogPrefix(body).trim();
-  if (!detail.startsWith('{')) return null;
-  try {
-    return JSON.parse(detail) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
 function toolNameLabel(tool: string) {
   const lower = tool.toLowerCase();
   if (lower === 'agent-command') return 'Agent 领域命令';
@@ -201,7 +182,7 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
   if (parsed.label === '工具调用' || parsed.label === '工具结果') {
     return { ...base, kind: 'tool', status: parsed.label === '工具结果' ? 'success' : 'running', title: `${agentLabel(meta.agent)} ${parsed.label}`, detail: stripLogPrefix(parsed.body) };
   }
-  if (parsed.label === '执行器工具' || parsed.label === 'Cursor工具') {
+  if (parsed.label === '执行器工具') {
     const detailBody = stripLogPrefix(parsed.body).replace(/^(?:调用|完成)：/, '');
     const extracted = extractToolEventFromJson(detailBody);
     if (extracted) {
@@ -218,7 +199,7 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
     const tool = meta.tool || '工具';
     return { ...base, kind: 'tool', status: isDone ? 'success' : 'running', title: `${isDone ? '完成' : '调用'} ${toolNameLabel(tool)}`, detail: detailBody };
   }
-  if (parsed.label === '执行器输出' || parsed.label === 'Cursor输出') {
+  if (parsed.label === '执行器输出') {
     if (parsed.body.includes('type=user')) return null;
     const detail = stripLogPrefix(parsed.body).replace(/^type=\w+\s*-\s*/, '');
     if (detail.trim().startsWith('{')) {
@@ -232,81 +213,20 @@ export function parseRunLogLine(line: string): ParsedRunLog | null {
     }
     return { ...base, kind: 'executor', status: 'info', title: 'Agent 思考', detail };
   }
-  if (parsed.label === '执行器事件' || parsed.label === 'Cursor事件') {
-    const event = parseExecutorEvent(parsed.body);
-    const type = String(event?.type || '');
-    const subtype = String(event?.subtype || '');
-    if (type === 'system' || subtype === 'completed') return null;
-    if (type === 'retry') return null;
-    if (type === 'connection') {
-      const attempt = Number(event?.attempt || 0);
-      const sessionId = String(event?.session_id || '');
-      const connectionMeta = {
-        ...meta,
-        cursorConnection: 'true',
-        cursorConnectionSubtype: subtype,
-        cursorConnectionSession: sessionId,
-        cursorConnectionAttempt: attempt ? String(attempt) : '',
-        cursorConnectionStartedAt: subtype === 'reconnecting' ? parsed.timestamp : '',
-      };
-      if (subtype === 'reconnecting') {
-        return {
-          ...base,
-          kind: 'executor',
-          status: 'running',
-          title: 'Cursor 连接重试',
-          detail: attempt ? `正在重新连接（第 ${attempt} 次）` : '正在重新连接',
-          meta: connectionMeta,
-        };
-      }
-      if (subtype === 'reconnected') {
-        return {
-          ...base,
-          kind: 'executor',
-          status: 'success',
-          title: 'Cursor 连接已恢复',
-          detail: '连接已恢复',
-          meta: connectionMeta,
-        };
-      }
-      if (subtype === 'failed' || subtype === 'disconnected') {
-        return {
-          ...base,
-          kind: 'error',
-          status: 'error',
-          title: 'Cursor 连接失败',
-          detail: '无法恢复与 Cursor 服务的连接',
-          meta: connectionMeta,
-        };
-      }
-    }
-    const executor = meta.executor ? `${meta.executor[0].toUpperCase()}${meta.executor.slice(1)}` : 'Agent';
-    return { ...base, kind: 'executor', status: 'info', title: `${executor} 事件`, detail: stripLogPrefix(parsed.body) };
-  }
-  if (parsed.label === '执行器警告'
-    && /codex_core_plugins::manifest: ignoring interface\.defaultPrompt: maximum of \d+ prompts is supported/.test(parsed.body)) return null;
   if (parsed.label === '执行器警告') {
     return { ...base, kind: 'executor', status: 'info', title: `${meta.executor || 'Agent'} 警告`, detail: parsed.body };
   }
-  if (parsed.label === '执行器诊断' || parsed.label === 'Cursor诊断') {
-    return { ...base, kind: 'executor', status: 'info', title: `${meta.executor || 'Cursor'} 诊断`, detail: friendlyCursorDiagnostic(parsed.body) };
+  if (parsed.label === '执行器诊断') {
+    return { ...base, kind: 'executor', status: 'info', title: `${meta.executor || 'OMP'} 诊断`, detail: parsed.body };
   }
-  if (parsed.label === 'Cursor错误' && isCursorDiagnostic(parsed.body)) {
-    return { ...base, kind: 'executor', status: 'info', title: 'Cursor 诊断', detail: friendlyCursorDiagnostic(parsed.body) };
-  }
-  if (parsed.label === '执行器错误' && (
-    /Reading additional input from stdin/.test(parsed.body)
-    || /codex_core_skills::loader: ignoring interface\.icon_(?:small|large)/.test(parsed.body)
-    || /codex_core_plugins::manifest: ignoring interface\.defaultPrompt: maximum of \d+ prompts is supported/.test(parsed.body)
-  )) return null;
   if (parsed.label === '执行器错误' && /(?:^|\s)WARN(?:ING)?(?:\s|:)/i.test(parsed.body)) {
     return { ...base, kind: 'executor', status: 'info', title: `${meta.executor || 'Agent'} 警告`, detail: parsed.body };
   }
-  if (parsed.label === '执行器错误' || parsed.label === 'Cursor错误' || parsed.label === '错误') {
+  if (parsed.label === '执行器错误' || parsed.label === '错误') {
     return { ...base, kind: 'error', status: 'error', title: '运行错误', detail: parsed.body };
   }
-  if (parsed.label === '执行器' || parsed.label === 'Cursor') {
-    const executor = meta.executor ? `${meta.executor[0].toUpperCase()}${meta.executor.slice(1)}` : 'Cursor';
+  if (parsed.label === '执行器') {
+    const executor = meta.executor ? `${meta.executor[0].toUpperCase()}${meta.executor.slice(1)}` : 'OMP';
     return { ...base, kind: 'executor', status: parsed.body.includes('退出') ? 'success' : 'info', title: `${executor} CLI`, detail: parsed.body };
   }
   return { ...base, kind: 'raw', status: 'info', title: parsed.label, detail: parsed.body };

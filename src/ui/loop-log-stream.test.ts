@@ -22,23 +22,13 @@ test('keeps only the latest 500 visible run log events by default', () => {
   assert.equal(visible.at(-1)?.title, 'Event 500');
 });
 
-test('folds a Cursor reconnect sequence into one restored connection event', () => {
-  const events = parseRunLog([
-    '2026-09-09T05:20:29.639Z [执行器事件] executor=cursor lane=control agent=idea-context-agent requirement=REQ-1 unit=- flow=ba-intent - {"type":"connection","subtype":"reconnecting","session_id":"session-1","attempt":1}',
-    '2026-09-09T05:20:31.668Z [执行器事件] executor=cursor lane=control agent=idea-context-agent requirement=REQ-1 unit=- flow=ba-intent - {"type":"retry","subtype":"starting","session_id":"session-1","attempt":1}',
-    '2026-09-09T05:21:01.677Z [执行器事件] executor=cursor lane=control agent=idea-context-agent requirement=REQ-1 unit=- flow=ba-intent - {"type":"connection","subtype":"reconnecting","session_id":"session-1","attempt":2}',
-    '2026-09-09T05:21:06.868Z [执行器事件] executor=cursor lane=control agent=idea-context-agent requirement=REQ-1 unit=- flow=ba-intent - {"type":"connection","subtype":"reconnected","session_id":"session-1"}',
+test('merges successive native OMP assistant messages within one Agent scope', () => {
+  const events=parseRunLog([
+    '2026-11-02T00:00:00Z [执行器输出] executor=omp agent=dev-agent requirement=REQ-1 flow=dev - Inspecting the workspace.',
+    '2026-11-02T00:00:01Z [执行器输出] executor=omp agent=dev-agent requirement=REQ-1 flow=dev - Checking the result.',
   ].join('\n'));
-
-  const visible = appendMergedEvents([], events);
-  assert.equal(visible.length, 1);
-  assert.equal(visible[0].title, 'Cursor 连接已恢复');
-  assert.equal(visible[0].status, 'success');
-  assert.equal(visible[0].detail, '重试 2 次，耗时 37 秒');
-
-  const tree = buildLogTree(visible);
-  assert.equal(tree.length, 1);
-  assert.equal(tree[0].title, '需求意图 Agent');
-  assert.equal(tree[0].children.length, 1);
-  assert.equal(tree[0].children[0].title, 'Cursor 连接已恢复');
+  const visible=appendMergedEvents([],events);
+  assert.equal(visible.length,1);
+  assert.match(visible[0].detail,/Inspecting.*Checking/);
+  assert.equal(buildLogTree(visible).length,1);
 });

@@ -227,7 +227,6 @@ async function main() {
       await printBlockList(value(args, 'format', 'markdown'));
       return;
     case 'system-unblock':
-    case 'block-release': // legacy operator alias
       {
         const lane = optional(args, 'lane');
         if (lane && lane !== 'analysis' && lane !== 'delivery') throw new Error('--lane must be analysis or delivery');

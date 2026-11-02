@@ -27,16 +27,16 @@ test('native workflow tool requires credentials, passes literal arguments withou
     register({ zod: z, registerTool: (value: unknown) => { tool = value; } });
     const payload = 'UTF-8 文档';
     const sentinel = join(root, 'must-not-exist');
-    const output = await tool.execute('call', { args: ['direct', 'submit', '--summary', `$(touch ${sentinel})`, '--result-file', '@input'], input: payload });
+    const output = await (tool as any).execute('call', { args: ['direct', 'submit', '--summary', `$(touch ${sentinel})`, '--result-file', '@input'], input: payload });
     const result = JSON.parse(output.content[0].text);
     assert.equal(result.body, payload);
     assert.equal(result.args[3], `$(touch ${sentinel})`);
     assert.equal(existsSync(sentinel), false);
     assert.deepEqual(readdirSync(temp), []);
-    await assert.rejects(tool.execute('bad', { args: ['rejected'] }), /Authorization denied/);
+    await assert.rejects((tool as any).execute('bad', { args: ['rejected'] }), /Authorization denied/);
     process.env.LOOP_CONTEXT_CHAT_COMMAND_TOKEN = 'chat-token';
     register({ zod: z, registerTool: (value: unknown) => { tool = value; } });
-    await assert.rejects(tool.execute('mutate', { args: ['direct', 'submit'] }), /cannot call/);
+    await assert.rejects((tool as any).execute('mutate', { args: ['direct', 'submit'] }), /cannot call/);
   } finally {
     keys.forEach((key, index) => { if (previous[index] === undefined) delete process.env[key]; else process.env[key] = previous[index]; });
   }

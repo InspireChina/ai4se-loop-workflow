@@ -4,6 +4,8 @@ import type { AgentContextSnapshot } from '../application/agent-context';
 import type { ExecutionAttempt } from '../application/executions';
 import { laneForAgent } from '../application/task-lanes';
 import type { DelegationEnvelope } from '../application/tasks';
+import type { Delegation } from '../domain/task';
+export type TestDelegation = Delegation & Partial<DelegationEnvelope>;
 import { isActiveProjectOverlayCandidateInDb } from '../application/agent-profiles';
 
 export class PromptCanaryDeferredError extends Error {
@@ -15,7 +17,7 @@ export class PromptCanaryDeferredError extends Error {
 
 const RECOVERABLE = ['output_received', 'verifying', 'applying'] as const;
 
-function delegationKey(delegation: DelegationEnvelope, inputHash: string) {
+function delegationKey(delegation: TestDelegation, inputHash: string) {
   return hash(JSON.stringify({
     taskId: delegation.taskId,
     lane: delegation.lane,
@@ -32,7 +34,7 @@ function delegationKey(delegation: DelegationEnvelope, inputHash: string) {
   }));
 }
 
-function retrySignature(delegation: DelegationEnvelope) {
+function retrySignature(delegation: TestDelegation) {
   const base = {
     taskId: delegation.taskId,
     lane: delegation.lane || laneForAgent(delegation.agent),
@@ -78,7 +80,7 @@ function storedRetrySignature(attempt: ExecutionAttempt) {
 /** Creates legacy execution snapshots for domain tests. Runtime dispatch must use ProgressDispatcher. */
 export async function beginTestExecutionAttempt(input: {
   runId: string;
-  delegation: DelegationEnvelope;
+  delegation: TestDelegation;
   prompt: string;
   baseCommit?: string;
   promptVersion?: number;

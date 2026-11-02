@@ -253,29 +253,6 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .update-warning{display:flex;align-items:flex-start;gap:9px;border:1px solid #f2d9a2;border-radius:8px;background:#fff8e8;color:#785518;padding:11px 12px;line-height:1.45}
 .update-warning svg{flex:none;margin-top:1px}
 .update-actions{display:flex;align-items:center;gap:12px;min-height:36px}
-.migration-card{padding:20px;display:grid;gap:14px}
-.migration-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:12px}
-.migration-head .button{white-space:nowrap}
-.migration-note{margin:0;padding:10px 12px;border-radius:7px;background:#f7f9fc;color:#647086;font-size:12px;line-height:1.5}
-.migration-result{display:grid;gap:12px}
-.migration-summary{display:flex;flex-wrap:wrap;gap:8px}
-.migration-summary span{padding:7px 10px;border:1px solid var(--line);border-radius:7px;background:#fff;color:#647086;font-size:12px}
-.migration-summary span.success{border-color:#cce4d5;background:#f0faf4;color:var(--green)}
-.migration-summary span.error{border-color:#efc6bf;background:#fff3f0;color:#9c352b}
-.migration-summary b{color:inherit}
-.migration-empty{display:flex;align-items:center;gap:7px;margin:0;color:var(--green);font-size:12px}
-.migration-details{border:1px solid var(--line);border-radius:8px;overflow:hidden}
-.migration-details summary{padding:10px 12px;background:#f7f9fc;cursor:pointer;font-size:12px;font-weight:650}
-.migration-items{display:grid}
-.migration-item{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:start;gap:10px;padding:11px 12px;border-top:1px solid var(--line)}
-.migration-item:first-child{border-top:0}
-.migration-item .badge{margin-top:1px}
-.migration-item.imported .badge{background:#e6f5ec;color:var(--green)}
-.migration-item.failed .badge{background:#fff0ed;color:#a53e32}
-.migration-item.skipped .badge{background:#fff7e6;color:#8a5a10}
-.migration-item strong,.migration-item small{display:block}
-.migration-item small{margin-top:3px;color:#7a8497;overflow-wrap:anywhere}
-.migration-item p{margin:4px 0 0;color:#526075;font-size:12px}
 .update-ok{display:flex;align-items:center;gap:6px;color:var(--green);font-weight:650}
 .update-signing-note{margin:0;padding-top:13px;border-top:1px solid var(--line);line-height:1.5}
 .spin{animation:spin .9s linear infinite}
@@ -351,45 +328,14 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .settings-section-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:12px;align-items:start}
 .settings-section-head .badge{align-self:center}
 .settings code{background:#eef3ff;color:var(--blue);border-radius:5px;padding:1px 5px}
-.codex-settings,.claude-settings,.omp-settings{border-top:1px solid var(--line);padding-top:16px;margin-top:4px}
-.codex-settings>small,.claude-settings>small,.omp-settings>small{display:block;margin-top:8px}
-.settings:has(input[name="agentExecutor"][value="cursor"]:checked) .codex-settings,
-.settings:has(input[name="agentExecutor"][value="claude"]:checked) .codex-settings,
-.settings:has(input[name="agentExecutor"][value="omp"]:checked) .codex-settings{display:none}
-.settings:has(input[name="agentExecutor"][value="cursor"]:checked) .claude-settings,
-.settings:has(input[name="agentExecutor"][value="codex"]:checked) .claude-settings,
-.settings:has(input[name="agentExecutor"][value="omp"]:checked) .claude-settings{display:none}
-.settings:has(input[name="agentExecutor"][value="cursor"]:checked) .omp-settings,
-.settings:has(input[name="agentExecutor"][value="codex"]:checked) .omp-settings,
-.settings:has(input[name="agentExecutor"][value="claude"]:checked) .omp-settings{display:none}
-.workspace-switch{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;align-items:end}
-.workspace-switch label{min-width:0}
-.project-filter{display:flex;gap:8px;align-items:center;margin-left:auto}
-.project-filter select{min-width:160px}
+.omp-settings{border-top:1px solid var(--line);padding-top:16px;margin-top:4px}
+.omp-settings>small{display:block;margin-top:8px}
 .attention-section{margin-top:30px}
 .section-title-with-tags{display:flex;align-items:center;justify-content:flex-start;gap:12px;margin-bottom:12px}
 .section-title-with-tags h2{margin:0}
-.project-filter-tags{display:flex;align-items:center;justify-content:flex-start;gap:7px;flex-wrap:wrap}
-.project-filter-tags a{padding:5px 11px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--muted);font-size:12px;line-height:1.4;text-decoration:none}
-.project-filter-tags a:hover{border-color:#9bb8eb;color:var(--blue);background:#f7faff}
-.project-filter-tags a[aria-current="page"]{border-color:#8bb0f0;background:#eef3ff;color:var(--blue);font-weight:650}
 .task-project-filter-tags{margin-left:auto;min-width:0;flex-wrap:nowrap;overflow-x:auto;padding:2px 1px;scrollbar-width:none}
 .task-project-filter-tags::-webkit-scrollbar{display:none}
 .task-project-filter-tags a{flex:none}
-.project-manager{display:grid;gap:18px;padding:18px}
-.project-list{display:grid;gap:10px}
-.project-editor{border:1px solid var(--line);border-radius:8px;background:#fff;overflow:hidden}
-.project-editor summary{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 16px;cursor:pointer}
-.project-editor summary span{display:grid;gap:3px;min-width:0}
-.project-editor summary strong{display:flex;align-items:center;gap:8px}
-.project-editor summary small{overflow-wrap:anywhere}
-.project-editor summary em{font-size:12px;color:var(--muted);font-style:normal;white-space:nowrap}
-.project-default-badge{display:inline-flex!important;align-items:center;gap:4px;width:max-content;border-radius:999px;background:#fff4d6;color:#9a6500;padding:3px 7px;font-size:11px;font-weight:650}
-.project-editor .settings-editor-form{border-top:1px solid var(--line)}
-.project-editor-actions{display:flex;gap:8px}
-.project-secondary-actions{display:flex;justify-content:space-between;gap:10px;padding:0 18px 18px}
-.project-create-form{border:1px dashed #b8c6dd;border-radius:8px}
-.project-create-form h3{display:flex;gap:7px;align-items:center;margin:0}
 .button.danger{background:#fff4f2;color:var(--red);border-color:#e8b1aa}
 .settings>.button{justify-self:start}
 .executor-settings{border:0;padding:0;margin:4px 0 0;display:grid;gap:10px}
@@ -579,14 +525,8 @@ pre{white-space:pre-wrap;background:#151a24;color:#dce4f4;padding:12px;border-ra
 .agent-stats span{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);border-radius:99px;padding:4px 8px;color:#59667a;font-size:11px}
 .agent-page-header{margin-bottom:18px;flex-wrap:wrap}
 .agent-header-actions{display:flex;align-items:center;justify-content:flex-end;gap:10px;flex-wrap:wrap;margin-top:4px}
-.agent-project-switcher{display:flex;align-items:stretch;gap:0;margin:0;border:1px solid #dce3ed;border-radius:9px;background:#fff;box-shadow:0 1px 3px rgba(27,45,78,.05);overflow:hidden}
-.agent-project-switcher label{display:flex;align-items:center;min-width:0;color:var(--muted);font-size:11px;font-weight:700}
 .agent-project-label{display:inline-flex;align-items:center;gap:5px;padding:0 9px;color:#69768a;white-space:nowrap}
 .agent-project-label svg{color:var(--blue)}
-.agent-project-switcher select{min-width:178px;border:0;border-left:1px solid #e8ecf2;border-radius:0;background-color:#fff;padding:7px 30px 7px 10px;font-size:12px;font-weight:650;box-shadow:none}
-.agent-project-switcher select:focus{position:relative;outline:2px solid #9bbcf1;outline-offset:-2px}
-.agent-project-switcher .button{min-height:34px;border:0;border-left:1px solid #e1e7f0;border-radius:0;background:#f7f9fc;padding:6px 11px;color:var(--blue);font-size:12px}
-.agent-project-switcher .button:hover{background:#eef4ff}
 .agent-evolution-badge{min-height:28px;padding:5px 9px;white-space:nowrap}
 .agent-settings-layout{margin-top:0}
 .agent-profile-summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin-bottom:14px;border:1px solid var(--line);border-radius:8px;background:#fff;overflow:hidden}
@@ -738,9 +678,6 @@ main{padding:28px 20px}
 @media(max-width:700px){
 .page-header{flex-direction:column}
 .agent-header-actions{width:100%}
-.agent-project-switcher{max-width:100%}
-.agent-project-switcher label{flex:1}
-.agent-project-switcher select{width:100%;min-width:0}
 .agent-config-choice-row{grid-template-columns:1fr}
 .settings-layout{grid-template-columns:1fr}
 .settings-navigation{position:static;display:flex;overflow-x:auto}
@@ -766,8 +703,6 @@ main{padding:28px 20px}
 .pipeline-entry-route .pipeline-route-label{width:170px}
 .pipeline-stage{width:132px}
 .settings-panel-toolbar{align-items:flex-start;flex-direction:column}
-.migration-head{grid-template-columns:auto minmax(0,1fr)}
-.migration-head .button{grid-column:1/-1;justify-self:start}
 }
 
 .task-header{margin-bottom:18px}
@@ -886,17 +821,12 @@ main{padding:28px 20px}
 .agent-runtime-parameters>header span{color:var(--muted);font-size:10px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}
 .agent-runtime-parameters>header strong{grid-row:1 / span 2;grid-column:2;align-self:center;font-size:14px}
 .agent-runtime-parameters>header small{margin:0}
-.agent-runtime-parameters .codex-settings,.agent-runtime-parameters .claude-settings,.agent-runtime-parameters .omp-settings{display:grid;margin:16px 0 0;padding:0;border:0;gap:14px}
 .agent-runtime-empty{display:flex;align-items:flex-start;gap:12px;margin-top:16px;padding:16px;border-radius:9px;background:#f7f9fc}
 .agent-runtime-empty strong{font-size:13px}
 .agent-runtime-empty p{margin:5px 0 0;color:var(--muted);font-size:12px;line-height:1.5}
 @media(max-width:700px){.agent-runtime-config-choice-row{grid-template-columns:1fr;flex-basis:100%}}
 .cursor-runtime-notice{display:none}
 .runtime-executor-name i{display:none;font-style:normal}
-.settings:has(input[name="agentExecutor"][value="cursor"]:checked) .cursor-runtime-notice{display:flex}
-.settings:has(input[name="agentExecutor"][value="cursor"]:checked) .runtime-executor-name .cursor,
-.settings:has(input[name="agentExecutor"][value="codex"]:checked) .runtime-executor-name .codex,
-.settings:has(input[name="agentExecutor"][value="claude"]:checked) .runtime-executor-name .claude,
 .settings:has(input[name="agentExecutor"][value="omp"]:checked) .runtime-executor-name .omp{display:inline}
 .agent-config-mode-tabs{display:flex;gap:4px;width:max-content;padding:4px;border:1px solid var(--line);border-radius:9px;background:#f5f7fa}
 .agent-config-mode-tabs button{display:flex;align-items:center;gap:6px;border:0;border-radius:6px;background:transparent;padding:7px 11px;color:var(--muted);cursor:pointer;font-weight:700}
@@ -1088,7 +1018,6 @@ main{padding:28px 20px}
 @media(max-width:1100px){.task-summary,.task-summary.delivery-summary,.task-action-column,.two-card-grid,.inline-create,.lane-grid{grid-template-columns:1fr}
 .executor-options{grid-template-columns:1fr}
 .agent-runtime-workbench{grid-template-columns:1fr}
-.workspace-switch{grid-template-columns:1fr}
 .task-original-input-head{display:block}
 .task-original-input-head small{display:block;margin-top:7px;text-align:left}
 .task-original-input-actions{align-items:flex-start;justify-content:space-between;margin-top:8px}
@@ -1115,7 +1044,6 @@ main{padding:28px 20px}
 .pagination-page-item{gap:4px}
 .pagination-pages a{min-width:32px}
 .section-title-with-tags{align-items:flex-start;flex-direction:column}
-.project-filter-tags{justify-content:flex-start}
 .attention-list .attention{grid-template-columns:36px minmax(0,1fr);align-items:start;padding:14px}
 .attention .button{grid-column:2;margin:8px 0 0;justify-self:start}
 .agent-command-progress-head,.agent-command-chain>header{align-items:flex-start;flex-direction:column}

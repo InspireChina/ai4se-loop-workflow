@@ -1,14 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { paths } from './database';
-import { buildTaskContextChatPrompt, renderTaskContextChatRecoveryTranscript, taskContextChatPermissionArgs, taskContextChatProgressEvents } from './task-context-chat-executor';
-
-test('configures non-interactive bypass permissions for every context chat executor', () => {
-  assert.deepEqual(taskContextChatPermissionArgs('cursor'), ['--force', '--trust']);
-  assert.deepEqual(taskContextChatPermissionArgs('claude'), ['--dangerously-skip-permissions']);
-  assert.deepEqual(taskContextChatPermissionArgs('codex'), ['--dangerously-bypass-approvals-and-sandbox']);
-  assert.deepEqual(taskContextChatPermissionArgs('omp'), ['--approval-mode', 'yolo']);
-});
+import { buildTaskContextChatPrompt, renderTaskContextChatRecoveryTranscript, taskContextChatProgressEvents } from './task-context-chat-executor';
 
 test('builds a task-bound contract with safe direct adjustments and forward feedback', () => {
   const prompt = buildTaskContextChatPrompt('TASK-chat-contract', 'Make the wording clearer', true);
@@ -70,9 +63,8 @@ test('rebuilds failed context Chat turns in bounded fresh-session recovery packe
 });
 
 test('projects provider reasoning summaries and redacted tool lifecycle events for live Chat progress', () => {
-  assert.deepEqual(taskContextChatProgressEvents('codex', JSON.stringify({
-    type: 'item.completed',
-    item: { type: 'reasoning', text: 'Inspecting the current delivery facts.' },
+  assert.deepEqual(taskContextChatProgressEvents('omp', JSON.stringify({
+    type: 'thinking', text: 'Inspecting the current delivery facts.',
   })), [{
     kind: 'thinking',
     label: '思考进展',
@@ -80,18 +72,16 @@ test('projects provider reasoning summaries and redacted tool lifecycle events f
     status: 'running',
   }]);
 
-  const started = taskContextChatProgressEvents('codex', JSON.stringify({
-    type: 'item.started',
-    item: { id: 'tool-1', type: 'command_execution', command: 'npm test token=private-value' },
+  const started = taskContextChatProgressEvents('omp', JSON.stringify({
+    type: 'tool_execution_start', toolCallId: 'tool-1', toolName: 'bash', args: { command: 'npm test token=private-value' },
   }));
   assert.equal(started[0]?.kind, 'tool');
   assert.equal(started[0]?.label, '终端命令');
   assert.match(started[0]?.detail || '', /token=\[REDACTED\]/);
   assert.doesNotMatch(started[0]?.detail || '', /private-value/);
 
-  assert.deepEqual(taskContextChatProgressEvents('codex', JSON.stringify({
-    type: 'item.completed',
-    item: { id: 'tool-1', type: 'command_execution', command: 'npm test', exit_code: 0, aggregated_output: 'passed' },
+  assert.deepEqual(taskContextChatProgressEvents('omp', JSON.stringify({
+    type: 'tool_execution_end', toolCallId: 'tool-1', toolName: 'bash', result: { exitCode: 0, stdout: 'passed' }, isError: false,
   })), [{
     kind: 'tool',
     label: '终端命令完成',
@@ -100,9 +90,9 @@ test('projects provider reasoning summaries and redacted tool lifecycle events f
   }]);
 });
 
-test('projects Claude emitted thinking without treating final answer text as hidden reasoning', () => {
-  assert.deepEqual(taskContextChatProgressEvents('claude', JSON.stringify({
-    type: 'assistant',
+test('projects OMP emitted thinking without treating final answer text as hidden reasoning', () => {
+  assert.deepEqual(taskContextChatProgressEvents('omp', JSON.stringify({
+    type: 'message_end',
     message: { content: [{ type: 'thinking', thinking: 'Checking the relevant files.' }] },
   })), [{
     kind: 'thinking',
@@ -110,8 +100,8 @@ test('projects Claude emitted thinking without treating final answer text as hid
     detail: 'Checking the relevant files.',
     status: 'running',
   }]);
-  assert.deepEqual(taskContextChatProgressEvents('claude', JSON.stringify({
-    type: 'assistant',
+  assert.deepEqual(taskContextChatProgressEvents('omp', JSON.stringify({
+    type: 'message_end',
     message: { content: [{ type: 'text', text: 'Final answer' }] },
   })), []);
 });

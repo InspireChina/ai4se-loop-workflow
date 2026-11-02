@@ -61,29 +61,17 @@ test('inherits the global flow runtime by default and preserves explicit agent c
   try {
     await setFlowAgentDefaultRuntimeSettings({
       executorId: 'omp',
-      codexModel: 'gpt-5.6-terra',
-      codexReasoningEffort: 'high',
-      codexWebSearch: true,
-      claudeModel: '',
       ompModel: '',
       ompThinking: 'default',
     });
     await inheritFlowRuntimeConfiguration('backlog-agent');
     await createOverride('dev-agent', '测试 OMP 默认 Runtime', {
       executorId: 'omp',
-      codexModel: 'gpt-5.6-sol',
-      codexReasoningEffort: 'default',
-      codexWebSearch: false,
-      claudeModel: 'claude-sonnet-4-6',
       ompModel: '',
       ompThinking: 'default',
     });
     await createOverride('requirement-spec-agent', '测试 OMP Runtime', {
       executorId: 'omp',
-      codexModel: 'gpt-5.6-sol',
-      codexReasoningEffort: 'xhigh',
-      codexWebSearch: true,
-      claudeModel: '',
       ompModel: 'ollama/qwen3.6:35b',
       ompThinking: 'high',
     });
@@ -102,10 +90,6 @@ test('inherits the global flow runtime by default and preserves explicit agent c
 
     await setFlowAgentDefaultRuntimeSettings({
       executorId: 'omp',
-      codexModel: 'gpt-5.6-luna',
-      codexReasoningEffort: 'low',
-      codexWebSearch: false,
-      claudeModel: '',
       ompModel: '',
       ompThinking: 'default',
     });
@@ -132,16 +116,11 @@ test('stores system Runtime outside project settings and maps it to execution op
   try {
     await setAgentExecutorSettings({
       executorId: 'omp',
-      codexModel: 'gpt-5.6-sol',
-      codexReasoningEffort: 'default',
-      codexWebSearch: true,
-      claudeModel: '',
       ompModel: 'provider/system-model',
       ompThinking: 'default',
     });
     const settings = await getAgentExecutorSettings();
     assert.equal(settings.ompModel, 'provider/system-model');
-    assert.equal(settings.codexWebSearch, true);
     assert.deepEqual(agentExecutionOptions(settings), { model: 'provider/system-model', reasoningEffort: undefined });
 
     db.prepare(`
@@ -186,10 +165,6 @@ test('saves, activates, switches, and deletes named Agent Runtime configurations
       configurationId: firstId,
       name: '快速配置 A',
       executorId: 'omp',
-      codexModel: 'gpt-5.6-sol',
-      codexReasoningEffort: 'default',
-      codexWebSearch: false,
-      claudeModel: '',
       ompModel: 'ollama/qwen3.6:35b',
       ompThinking: 'high',
     });

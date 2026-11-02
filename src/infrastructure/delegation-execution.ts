@@ -48,32 +48,6 @@ export type DelegationExecutionResult = {
   cancelled?: true;
 };
 
-type TemporaryPrompt = { directory: string; file: string; reference: string };
-
-export function createTemporaryPrompt(prompt: string): TemporaryPrompt {
-  const directory = mkdtempSync(join(tmpdir(), 'lwp-'));
-  const file = join(directory, 'prompt.md');
-  try {
-    try { chmodSync(directory, 0o700); } catch { /* Windows ACLs are managed by the user profile. */ }
-    writeFileSync(file, prompt, { encoding: 'utf8', mode: 0o600 });
-    const reference = [
-      '本次任务的完整指令保存在一个 UTF-8 文件中。',
-      '你必须先使用文件读取工具完整读取该文件，再严格执行文件中的全部指令。不要只总结文件，也不要修改或删除文件。',
-      `指令文件路径：${file}`,
-      `PROMPT_FILE=${JSON.stringify(file)}`,
-    ].join('\n');
-    return { directory, file, reference };
-  } catch (error) {
-    try { rmSync(directory, { recursive: true, force: true }); } catch { /* preserve the original write failure */ }
-    throw error;
-  }
-}
-
-export function removeTemporaryPrompt(prompt: TemporaryPrompt | null) {
-  if (!prompt) return;
-  try { rmSync(prompt.directory, { recursive: true, force: true }); } catch { /* best-effort cleanup after the CLI exits */ }
-}
-
 export function buildAgentProcessLaunch(executor: AgentExecutor, prompt: string, workspaceRoot: string, executionOptions: AgentExecutionOptions, baseEnv: AgentEnvironment = process.env) {
   const rpc = executor.transport === 'omp-rpc';
   const sessions = executionOptions.sessionDirectory || join(documentFilesRoot(), 'sessions', String(baseEnv.LOOP_EXECUTION_ID || randomUUID()));
@@ -90,7 +64,7 @@ export function buildAgentProcessLaunch(executor: AgentExecutor, prompt: string,
 
   return {
     command: rpc ? process.execPath : executor.command,
-    args: [...(rpc ? [join(process.env.LOOP_APP_ROOT || process.cwd(), 'scripts', 'omp-rpc.mjs'), executor.command] : executor.prefixArgs || []), ...executor.buildArgs(prompt, workspaceRoot, executionOptions)],
+    args: [...(rpc ? [join(process.env.LOOP_APP_ROOT || process.cwd(), 'scripts', 'omp-rpc.mjs'), executor.command] : []), ...executor.buildArgs(prompt, workspaceRoot, executionOptions)],
     env: { ...baseEnv, ...(executor.env || {}), ...(rpc ? { LOOP_NODE: process.execPath, LOOP_APP_ROOT: process.env.LOOP_APP_ROOT || process.cwd() } : {}), ...(rpc ? { LOOP_OMP_SESSION_DIR: sessions } : {}) },
   };
 }
@@ -138,7 +112,6 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   let submittedResult: string | null = null;
   let resultSubmissionError: string | null = null;
   let evidencePersistenceError: string | null = null;
-  let temporaryPrompt: TemporaryPrompt | null = null;
   let resultChannel: AgentResultChannel | null = null;
   let startupTimer: NodeJS.Timeout | undefined;
   let idleTimer: NodeJS.Timeout | undefined;
@@ -173,9 +146,8 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
   };
 
   try {
-    temporaryPrompt = executor.promptMode === 'file-reference' ? createTemporaryPrompt(prompt) : null;
     resultChannel = input.resultKind ? createAgentResultChannel(input.resultKind) : null;
-    const invocationPrompt = temporaryPrompt?.reference ?? prompt;
+    const invocationPrompt = prompt;
     const launch = buildAgentProcessLaunch(executor, invocationPrompt, workspaceRoot, executionOptions, {
       ...process.env,
       ...(input.environment || {}),
@@ -387,7 +359,6 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       await trace.end({ status: traceStatus, output: submittedResult || finalText, exitCode: terminalExitCode ?? null, timedOut, metrics: metricsAccumulator.value() });
       await telemetry.flush();
     } finally {
-      removeTemporaryPrompt(temporaryPrompt);
       removeAgentResultChannel(resultChannel);
     }
   }

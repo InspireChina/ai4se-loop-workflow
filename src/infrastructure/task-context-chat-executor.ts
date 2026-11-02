@@ -45,12 +45,6 @@ export type TaskContextChatProgressEvent = {
 
 type ProcessResult = { exitCode: number; stdout: string; stderr: string; terminationReason?: string };
 
-export function taskContextChatPermissionArgs(executor: AgentExecutorId) {
-  if (executor === 'cursor') return ['--force', '--trust'];
-  if (executor === 'claude') return ['--dangerously-skip-permissions'];
-  if (executor === 'omp') return ['--approval-mode', 'yolo'];
-  return ['--dangerously-bypass-approvals-and-sandbox'];
-}
 
 function runProcess(
   command: string,
@@ -142,10 +136,6 @@ function progressText(value: unknown) {
 function providerThinking(executor: AgentExecutorId, line: string) {
   try {
     const event = JSON.parse(line) as Record<string, unknown>;
-    const item = event.item as Record<string, unknown> | undefined;
-    if (executor === 'codex' && event.type === 'item.completed' && item?.type === 'reasoning') {
-      return progressText(item.text || item.summary);
-    }
     const message = event.message as Record<string, unknown> | undefined;
     const blocks = Array.isArray(message?.content) ? message.content as Record<string, unknown>[] : [];
     const emittedThinking = blocks

@@ -2432,7 +2432,7 @@ export async function endRun(runId: string, force = false, options: { stopRunner
     if (force) return;
     throw new Error('运行 ID 不匹配');
   }
-  // Clear the durable intent before stopping the process so the desktop
+  // Clear the durable intent before stopping the process so the Web host
   // supervisor cannot race a deliberate user stop and start a replacement.
   if (!options.preserveRunIntent) db.prepare("DELETE FROM loop_meta WHERE key = 'loop_run_intent'").run();
   if (current?.runId && options.stopRunner !== false) {
@@ -2498,10 +2498,9 @@ function getRunStatusFromDb(
     let generationActive = true;
     const runnerToken = expectedSupervisionToken;
     if (runnerToken > 0) {
-      const lifecycle = db.prepare(`SELECT desired_intent, mode FROM loop_lifecycle_state WHERE singleton = 1`).get() as { desired_intent: string; mode: string } | undefined;
+      const lifecycle = db.prepare(`SELECT desired_intent FROM loop_lifecycle_state WHERE singleton = 1`).get() as { desired_intent: string } | undefined;
       const lease = db.prepare(`SELECT fencing_token, expires_at FROM loop_supervisor_lease WHERE singleton = 1`).get() as { fencing_token: number; expires_at: string } | undefined;
       generationActive = lifecycle?.desired_intent === 'running'
-        && lifecycle.mode === 'normal'
         && persisted?.supervision_token === runnerToken
         && lease?.fencing_token === runnerToken
         && databaseTimestampMs(lease.expires_at) + 15_000 > Date.now();
@@ -2533,9 +2532,9 @@ export async function registerRunProcess(runId: string, processKind: 'agent-runn
   const db = await databaseConnection();
   db.transaction(() => {
     const lease = db.prepare(`SELECT fencing_token, expires_at FROM loop_supervisor_lease WHERE singleton = 1`).get() as { fencing_token: number; expires_at: string } | undefined;
-    const lifecycle = db.prepare(`SELECT desired_intent, mode FROM loop_lifecycle_state WHERE singleton = 1`).get() as { desired_intent: string; mode: string } | undefined;
+    const lifecycle = db.prepare(`SELECT desired_intent FROM loop_lifecycle_state WHERE singleton = 1`).get() as { desired_intent: string } | undefined;
     if (!lease || lease.fencing_token !== supervisionToken || databaseTimestampMs(lease.expires_at) <= Date.now()
-      || lifecycle?.desired_intent !== 'running' || lifecycle.mode !== 'normal') {
+      || lifecycle?.desired_intent !== 'running') {
       throw new Error('Runner 登记被拒绝：监督代次已经失效');
     }
     const updated = db.prepare(`

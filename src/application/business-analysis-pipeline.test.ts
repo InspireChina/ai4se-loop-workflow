@@ -3,6 +3,7 @@ import test from 'node:test';
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
 import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import type { DelegationEnvelope } from './tasks';
+import type { TestDelegation } from '../test/execution-fixtures';
 
 const put = (artifact: string, block: string, content: string, key?: string) => [
   'artifact', 'put', '--artifact', artifact, '--block', block,
@@ -11,7 +12,7 @@ const put = (artifact: string, block: string, content: string, key?: string) => 
 
 const yaml = (value: Record<string, unknown>) => JSON.stringify(value);
 
-async function startAgent(delegation: DelegationEnvelope, suffix: string) {
+async function startAgent(delegation: TestDelegation, suffix: string) {
   const { issueAgentCommandToken, runAgentCommand } = await import('./agent-command-drafts');
   const started = await beginTestExecutionAttempt({
     runId: `RUN-ba-yaml-${suffix}`,
@@ -29,7 +30,7 @@ async function startAgent(delegation: DelegationEnvelope, suffix: string) {
   return { started, run };
 }
 
-async function executeAgent(delegation: DelegationEnvelope, commands: string[][], suffix: string) {
+async function executeAgent(delegation: TestDelegation, commands: string[][], suffix: string) {
   const { completeExecution } = await import('./executions');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { applyAgentResult } = await import('./agent-results');
@@ -37,7 +38,7 @@ async function executeAgent(delegation: DelegationEnvelope, commands: string[][]
   for (const command of commands) await run(command);
   const result = await readAgentCommandSubmission(started.attempt.execution_id);
   assert.ok(result, `${delegation.agent} did not submit an Agent Result`);
-  await applyAgentResult(`RUN-ba-yaml-${suffix}`, delegation, result, {
+  await applyAgentResult(`RUN-ba-yaml-${suffix}`, delegation as DelegationEnvelope, result, {
     executionId: started.attempt.execution_id,
   });
   await completeExecution(started.attempt.execution_id);
@@ -208,7 +209,7 @@ test('rejects undeclared fields before an Artifact Block can enter the rendered 
   ]) await run(command);
   const result = await readAgentCommandSubmission(started.attempt.execution_id);
   assert.ok(result);
-  await applyAgentResult(`RUN-ba-yaml-${taskId}-strict-artifact`, delegation, result, {
+  await applyAgentResult(`RUN-ba-yaml-${taskId}-strict-artifact`, delegation as DelegationEnvelope, result, {
     executionId: started.attempt.execution_id,
   });
   await completeExecution(started.attempt.execution_id);
@@ -294,7 +295,7 @@ test('uses generic Decision commands for Business Analysis HUMAN clarification a
   const waiting = await readAgentCommandSubmission(first.started.attempt.execution_id);
   assert.equal(waiting?.outcome, 'needs_input');
   assert.equal(waiting?.questions[0]?.decisionKey, 'primary-actor');
-  await applyAgentResult(`RUN-ba-yaml-${taskId}-question-1`, delegation, waiting!, {
+  await applyAgentResult(`RUN-ba-yaml-${taskId}-question-1`, delegation as DelegationEnvelope, waiting!, {
     executionId: first.started.attempt.execution_id,
   });
   await completeExecution(first.started.attempt.execution_id);
@@ -318,7 +319,7 @@ test('uses generic Decision commands for Business Analysis HUMAN clarification a
   for (const command of intentSynthesisCommands('帮助全体项目成员共同识别并处理项目健康风险。')) await resumed.run(command);
   const completed = await readAgentCommandSubmission(resumed.started.attempt.execution_id);
   assert.equal(completed?.businessAnalysis?.disposition, 'advance');
-  await applyAgentResult(`RUN-ba-yaml-${taskId}-question-2`, delegation, completed!, {
+  await applyAgentResult(`RUN-ba-yaml-${taskId}-question-2`, delegation as DelegationEnvelope, completed!, {
     executionId: resumed.started.attempt.execution_id,
   });
   await completeExecution(resumed.started.attempt.execution_id);

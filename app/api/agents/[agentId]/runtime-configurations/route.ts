@@ -43,10 +43,6 @@ export async function POST(request: Request, context: { params: Promise<{ agentI
         configurationId: body.configurationId,
         name: body.name,
         executorId: body.executorId,
-        codexModel: body.codexModel,
-        codexReasoningEffort: body.codexReasoningEffort,
-        codexWebSearch: body.codexWebSearch,
-        claudeModel: body.claudeModel,
         ompModel: body.ompModel,
         ompThinking: body.ompThinking,
       });

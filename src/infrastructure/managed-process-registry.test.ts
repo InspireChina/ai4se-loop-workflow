@@ -44,3 +44,27 @@ test('registers the same managed process idempotently without changing its owner
     runId: 'RUN-other',
   }), /已属于其他运行/);
 });
+
+test('registers an Agent under a live Web supervision lease and rejects a stopped intent', async () => {
+  const { registerManagedAgentProcess, markManagedAgentProcessExited } = await import('./managed-process-registry');
+  const db = await databaseConnection();
+  const previous = process.env.LOOP_SUPERVISION_TOKEN;
+  const token = 100_001;
+  process.env.LOOP_SUPERVISION_TOKEN = String(token);
+  try {
+    db.prepare('INSERT OR REPLACE INTO loop_supervisor_lease(singleton,owner_id,fencing_token,expires_at) VALUES(1,?,?,?)')
+      .run(`web-${process.pid}-fixture`, token, new Date(Date.now() + 60_000).toISOString());
+    db.prepare("UPDATE loop_lifecycle_state SET desired_intent='running' WHERE singleton=1").run();
+    const marker = await registerManagedAgentProcess('RUN-web-registration', process.pid);
+    assert.ok(marker);
+    assert.equal(db.prepare('SELECT process_kind FROM loop_managed_processes WHERE run_id=?').pluck().get('RUN-web-registration'),'agent-cli');
+    db.prepare("UPDATE loop_lifecycle_state SET desired_intent='stopped' WHERE singleton=1").run();
+    await assert.rejects(registerManagedAgentProcess('RUN-stopped-registration', process.pid), /监督代次已经失效/);
+    await markManagedAgentProcessExited('RUN-web-registration', process.pid, marker);
+  } finally {
+    if (previous === undefined) delete process.env.LOOP_SUPERVISION_TOKEN;
+    else process.env.LOOP_SUPERVISION_TOKEN = previous;
+    db.prepare('DELETE FROM loop_supervisor_lease WHERE fencing_token=?').run(token);
+    db.prepare("UPDATE loop_lifecycle_state SET desired_intent='stopped' WHERE singleton=1").run();
+  }
+});

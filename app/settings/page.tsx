@@ -1,22 +1,15 @@
 import { documentFilesRoot } from '../../src/infrastructure/document-files';
 import Link from 'next/link';
 import { Activity, ArrowRight, Bot, Check, FolderKanban, Gauge } from 'lucide-react';
-import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, MAX_AGENT_CONCURRENCY, OMP_THINKING_LEVELS, getAgentConcurrency, getAgentExecutorSettings, getFlowAgentDefaultRuntimeSettings, getLangfuseSettings } from '../../src/application/project-settings';
+import { AGENT_EXECUTOR_OPTIONS, MAX_AGENT_CONCURRENCY, OMP_THINKING_LEVELS, getAgentConcurrency, getAgentExecutorSettings, getFlowAgentDefaultRuntimeSettings, getLangfuseSettings } from '../../src/application/project-settings';
 import { saveDocumentStorageAction, saveAgentConcurrencyAction, saveAgentExecutorAction, saveFlowAgentDefaultRuntimeAction, saveLangfuseSettingsAction, } from '../actions';
 import { SettingsNavigator, type SettingsNavigationItem } from './settings-navigator';
 import { getConfiguredWorkspaceRoot } from '../../src/infrastructure/database';
 
 export const dynamic = 'force-dynamic';
 
-function runtimeSummary(settings: { executorId: string; codexModel: string; claudeModel: string; ompModel: string }) {
-  const executor = AGENT_EXECUTOR_OPTIONS.find((option) => option.id === settings.executorId)?.label || settings.executorId;
-  if (settings.executorId === 'codex') {
-    const model = CODEX_MODEL_OPTIONS.find((option) => option.id === settings.codexModel)?.label || settings.codexModel;
-    return `${executor} · ${model}`;
-  }
-  if (settings.executorId === 'claude') return `${executor}${settings.claudeModel ? ` · ${settings.claudeModel}` : ''}`;
-  if (settings.executorId === 'omp') return `${executor}${settings.ompModel ? ` · ${settings.ompModel}` : ''}`;
-  return executor;
+function runtimeSummary(settings: { ompModel: string }) {
+  return `Oh My Pi${settings.ompModel ? ` · ${settings.ompModel}` : ''}`;
 }
 
 function RuntimeParameterHeader() {

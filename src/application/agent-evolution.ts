@@ -299,7 +299,7 @@ export async function applyEvolutionResult(evolutionId: string, evidence: Evolut
   try {
     const run = db.prepare('SELECT evidence_json FROM agent_evolution_runs WHERE evolution_id = ?').get(evolutionId) as { evidence_json: string | null } | undefined;
     let persistedEvidence = evidence;
-    try { if (run?.evidence_json) persistedEvidence = JSON.parse(run.evidence_json) as EvolutionEvidence; } catch { /* Legacy runs use caller evidence. */ }
+    try { if (run?.evidence_json) persistedEvidence = JSON.parse(run.evidence_json) as EvolutionEvidence; } catch { /* Use supplied evidence when no frozen snapshot is available. */ }
     for (const observation of result.observations) await storeObservation(persistedEvidence, observation);
     const commentIds = (persistedEvidence.comments || []).map((comment) => comment.commentId);
     if (commentIds.length) {

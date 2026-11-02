@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import test from 'node:test';
 import { createLangfuseTelemetry, type LangfuseClient } from './langfuse';
-import { buildAgentProcessLaunch, createTemporaryPrompt, executeDelegation, removeTemporaryPrompt } from './delegation-execution';
+import { buildAgentProcessLaunch, executeDelegation } from './delegation-execution';
 import { getAgentExecutor, type AgentExecutor } from './agent-executor';
 
 const credentials = { LANGFUSE_ENABLED: 'true', LANGFUSE_PUBLIC_KEY: 'pk-test', LANGFUSE_SECRET_KEY: 'sk-test', LANGFUSE_BASE_URL: 'https://langfuse.invalid', LANGFUSE_CAPTURE_PROMPTS: 'true' };
@@ -16,43 +16,14 @@ function fixtureExecutor(id: AgentExecutor['id'], program: string): AgentExecuto
   };
 }
 
-test('prepends executor launch arguments and merges executor environment', () => {
-  const executor: AgentExecutor = {
-    id: 'cursor', label: 'Cursor fixture', command: 'node.exe', promptMode: 'argument',
-    prefixArgs: ['index.js'],
-    env: { CURSOR_INVOKED_AS: 'cursor-agent', NODE_COMPILE_CACHE: 'C:\\cache' },
-    buildArgs: (prompt) => ['--print', prompt],
-    formatCommand: () => 'cursor-agent via=node',
-    parseStdout: () => null,
-    parseStderr: () => null,
-  };
-  const launch = buildAgentProcessLaunch(executor, 'a'.repeat(15_000), 'C:\\workspace', {}, { PATH: 'fixture-path' });
 
-  assert.equal(launch.command, 'node.exe');
-  assert.equal(launch.args[0], 'index.js');
-  assert.equal(launch.args.at(-1)?.length, 15_000);
-  assert.deepEqual(launch.env, { PATH: 'fixture-path', CURSOR_INVOKED_AS: 'cursor-agent', NODE_COMPILE_CACHE: 'C:\\cache' });
-});
 
-test('stores long prompts in a private temporary file and passes only a short reference', () => {
-  const original = '完整任务上下文\n'.repeat(4_000);
-  const temporary = createTemporaryPrompt(original);
-  try {
-    assert.equal(readFileSync(temporary.file, 'utf8'), original);
-    assert.match(temporary.reference, /必须先使用文件读取工具完整读取/);
-    assert.match(temporary.reference, /PROMPT_FILE=/);
-    assert.ok(temporary.reference.length < 1_000, `reference length=${temporary.reference.length}`);
-    assert.equal(temporary.reference.includes(original.slice(0, 100)), false);
-  } finally {
-    removeTemporaryPrompt(temporary);
-  }
-  assert.equal(existsSync(temporary.directory), false);
-});
 
-test('streams the complete Claude prompt through stdin without placing it in process arguments', async () => {
-  const original = 'Claude must receive this complete prompt through stdin.\n'.repeat(4_000);
-  const installedExecutor = getAgentExecutor('claude');
-  const launch = buildAgentProcessLaunch(installedExecutor, original, '/workspace', { model: 'claude-sonnet-4-6' }, {});
+
+test('streams the complete OMP prompt through stdin without placing it in process arguments', async () => {
+  const original = 'OMP must receive this complete prompt through stdin.\n'.repeat(4_000);
+  const installedExecutor = getAgentExecutor('omp');
+  const launch = buildAgentProcessLaunch(installedExecutor, original, '/workspace', { model: 'omp-sonnet-4-6' }, {});
   assert.equal(installedExecutor.promptMode, 'stdin');
   assert.equal(launch.args.some((argument) => argument.includes(original.slice(0, 200))), false);
   assert.ok(launch.args.join(' ').length < 2_000);
@@ -61,12 +32,12 @@ test('streams the complete Claude prompt through stdin without placing it in pro
     'let input = "";',
     'process.stdin.setEncoding("utf8");',
     'process.stdin.on("data", chunk => input += chunk);',
-    'process.stdin.on("end", () => console.log(JSON.stringify({type:"result",result:input})));',
+    "process.stdin.on(\"end\", () => console.log(JSON.stringify({type:\"message_end\",message:{role:\"assistant\",content:[{type:\"text\",text:input}]}})));",
   ].join('');
   const executor: AgentExecutor = {
-    id: 'claude', label: 'Claude stdin fixture', command: process.execPath, promptMode: 'stdin',
+    id: 'omp', label: 'OMP stdin fixture', command: process.execPath, promptMode: 'stdin',
     buildArgs: () => ['-e', program],
-    formatCommand: () => 'node claude stdin fixture',
+    formatCommand: () => 'node omp stdin fixture',
     parseStdout: () => null,
     parseStderr: () => null,
   };
@@ -75,7 +46,7 @@ test('streams the complete Claude prompt through stdin without placing it in pro
 });
 
 test('injects execution-scoped context environment into the Agent process', async () => {
-  const executor = fixtureExecutor('codex', 'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:process.env.LOOP_EXECUTION_ID || "missing"}}))');
+  const executor = fixtureExecutor('omp', "console.log(JSON.stringify({type:\"message_end\",message:{role:\"assistant\",content:[{type:\"text\",text:process.env.LOOP_EXECUTION_ID || \"missing\"}]}}))");
   const { result } = await run(executor, recordedTelemetry().telemetry, {
     environment: { LOOP_EXECUTION_ID: 'EXEC-context-fixture' },
   });
@@ -124,33 +95,7 @@ async function run(executor: AgentExecutor, telemetry = recordedTelemetry().tele
   return { result, logs };
 }
 
-test('uses and cleans a prompt file during file-reference execution', async () => {
-  let referencedFile = '';
-  const program = [
-    'const fs = require("node:fs");',
-    'const match = process.argv[1].match(/^PROMPT_FILE=(.+)$/m);',
-    'const file = JSON.parse(match[1]);',
-    'const text = fs.readFileSync(file, "utf8");',
-    'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text}}));',
-  ].join('');
-  const executor: AgentExecutor = {
-    id: 'codex', label: 'File prompt fixture', command: process.execPath, promptMode: 'file-reference',
-    buildArgs: (reference) => {
-      referencedFile = JSON.parse(reference.match(/^PROMPT_FILE=(.+)$/m)![1]);
-      return ['-e', program, reference];
-    },
-    formatCommand: () => 'node file fixture',
-    parseStdout: () => null,
-    parseStderr: () => null,
-  };
-  const original = '需要从临时文件读取的完整 Prompt '.repeat(1_000);
 
-  const { result } = await run(executor, recordedTelemetry().telemetry, { prompt: original });
-
-  assert.equal(result.finalText, original);
-  assert.ok(referencedFile);
-  assert.equal(existsSync(referencedFile), false);
-});
 
 test('captures a CLI-submitted result independently from the Agent final message and cleans the channel', async () => {
   const program = [
@@ -159,10 +104,10 @@ test('captures a CLI-submitted result independently from the Agent final message
     'const protocol = process.env.LOOP_AGENT_RESULT_PROTOCOL;',
     'const kind = process.env.LOOP_AGENT_RESULT_KIND;',
     'fs.writeFileSync(resultPath, JSON.stringify({protocol,kind,result:{outcome:"completed",summary:"tool receipt"}}));',
-    'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:resultPath}}));',
+    "console.log(JSON.stringify({type:\"message_end\",message:{role:\"assistant\",content:[{type:\"text\",text:resultPath}]}}));",
   ].join('');
 
-  const { result } = await run(fixtureExecutor('codex', program), recordedTelemetry().telemetry, { resultKind: 'flow' });
+  const { result } = await run(fixtureExecutor('omp', program), recordedTelemetry().telemetry, { resultKind: 'flow' });
 
   assert.equal(result.exitCode, 0);
   assert.equal(result.submittedResult, JSON.stringify({ outcome: 'completed', summary: 'tool receipt' }));
@@ -170,11 +115,9 @@ test('captures a CLI-submitted result independently from the Agent final message
   assert.equal(existsSync(result.finalText), false);
 });
 
-test('records one safe delegation trace and normalized Cursor, Codex, and Claude events while preserving local logs', async () => {
+test('records one safe delegation trace and normalized OMP events while preserving local logs', async () => {
   const fixtures: Array<[AgentExecutor['id'], string]> = [
-    ['cursor', 'console.log(JSON.stringify({type:"tool_call",subtype:"started",call_id:"c1",tool_call:{ShellToolCall:{args:{command:"echo cursor"}}}})); console.log(JSON.stringify({type:"tool_call",subtype:"completed",call_id:"c1",tool_call:{ShellToolCall:{result:{success:{exitCode:0,stdout:"ok"}}}}})); console.log(JSON.stringify({type:"assistant",message:{content:[{type:"text",text:"done"}]}})); console.log(JSON.stringify({type:"result",result:"earlier done"}));'],
-    ['codex', 'console.log(JSON.stringify({type:"item.started",item:{id:"c1",type:"command_execution",command:"echo codex"}})); console.log(JSON.stringify({type:"item.completed",item:{id:"c1",type:"command_execution",command:"echo codex",exit_code:0,aggregated_output:"ok"}})); console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}));'],
-    ['claude', 'console.log(JSON.stringify({type:"assistant",message:{content:[{type:"tool_use",id:"c1",name:"Bash",input:{command:"echo claude"}}]}})); console.log(JSON.stringify({type:"user",message:{content:[{type:"tool_result",tool_use_id:"c1",content:"ok"}]}})); console.log(JSON.stringify({type:"result",result:"done"}));'],
+    ['omp', 'console.log(JSON.stringify({type:"tool_execution_start",toolCallId:"c1",toolName:"bash",args:{command:"echo omp"}})); console.log(JSON.stringify({type:"tool_execution_end",toolCallId:"c1",toolName:"bash",result:{exitCode:0,stdout:"ok"},isError:false})); console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:"done"}]}}));'],
   ];
   for (const [id, program] of fixtures) {
     const record = recordedTelemetry();
@@ -199,13 +142,13 @@ test('reports durable evidence failures without suppressing later telemetry or C
   const record = recordedTelemetry();
   const persisted: Array<Record<string, unknown>> = [];
   const program = [
-    'console.log(JSON.stringify({type:"item.started",item:{id:"call-1",type:"command_execution",command:"npm test"}}));',
+    "console.log(JSON.stringify({type:\"tool_execution_start\",toolName:\"bash\",toolCallId:\"call-1\",args:{command:\"npm test\"},}));",
     'console.log("provider diagnostic fixture");',
-    'console.log(JSON.stringify({type:"item.completed",item:{id:"call-1",type:"command_execution",command:"npm test",exit_code:0,aggregated_output:"passed"}}));',
-    'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}));',
+    "console.log(JSON.stringify({type:\"tool_execution_end\",toolName:\"bash\",toolCallId:\"call-1\",args:{command:\"npm test\"},result:{exitCode:0,stdout:\"passed\"},isError:(0)!==0}));",
+    "console.log(JSON.stringify({type:\"message_end\",message:{role:\"assistant\",content:[{type:\"text\",text:\"done\"}]}}));",
   ].join('');
 
-  const { result, logs } = await run(fixtureExecutor('codex', program), record.telemetry, {
+  const { result, logs } = await run(fixtureExecutor('omp', program), record.telemetry, {
     recordTelemetryEvent: async (event) => {
       persisted.push(event);
       if (event.sequence === 1) throw new Error('injected receipt failure');
@@ -227,10 +170,10 @@ test('reports durable evidence failures without suppressing later telemetry or C
 
 test('maps non-zero, spawn error, timeout, and signal exits without telemetry affecting local execution', async () => {
   const cases: Array<{ name: string; executor: AgentExecutor; expected: string }> = [
-    { name: 'non-zero', executor: fixtureExecutor('codex', 'process.exit(7)'), expected: 'failed' },
-    { name: 'spawn error', executor: { ...fixtureExecutor('codex', ''), command: '/definitely/missing-loop-fixture' }, expected: 'execution_error' },
-    { name: 'timeout', executor: fixtureExecutor('codex', 'setInterval(() => {}, 1000)'), expected: 'timed_out' },
-    { name: 'signal', executor: fixtureExecutor('codex', 'process.kill(process.pid, "SIGTERM")'), expected: 'cancelled' },
+    { name: 'non-zero', executor: fixtureExecutor('omp', 'process.exit(7)'), expected: 'failed' },
+    { name: 'spawn error', executor: { ...fixtureExecutor('omp', ''), command: '/definitely/missing-loop-fixture' }, expected: 'execution_error' },
+    { name: 'timeout', executor: fixtureExecutor('omp', 'setInterval(() => {}, 1000)'), expected: 'timed_out' },
+    { name: 'signal', executor: fixtureExecutor('omp', 'process.kill(process.pid, "SIGTERM")'), expected: 'cancelled' },
   ];
   for (const item of cases) {
     const record = recordedTelemetry();
@@ -244,7 +187,7 @@ test('maps non-zero, spawn error, timeout, and signal exits without telemetry af
 test('returns a bounded redacted stderr tail for exact failure activity', async () => {
   const secret = 'definitely-private-bearer-value';
   const { result } = await run(fixtureExecutor(
-    'claude',
+    'omp',
     `console.error("Authorization: Bearer ${secret}"); console.error("provider unavailable"); process.exit(7)`,
   ));
 
@@ -256,18 +199,19 @@ test('returns a bounded redacted stderr tail for exact failure activity', async 
   assert.doesNotMatch(result.failureDetail || '', new RegExp(secret));
 });
 
-test('captures a Claude stream-json error from stdout for exact failure activity', async () => {
-  const secret = 'private-claude-token';
-  const installed = getAgentExecutor('claude');
+test('captures a OMP stream-json error from stdout for exact failure activity', async () => {
+  const secret = 'private-omp-token';
+  const installed = getAgentExecutor('omp');
   const executor: AgentExecutor = {
     ...installed,
+    transport: undefined,
     command: process.execPath,
     promptMode: 'argument',
     buildArgs: () => ['-e', [
-      `console.log(JSON.stringify({type:"result",is_error:true,result:"model overloaded token=${secret}"}));`,
+      `console.log(JSON.stringify({type:"error",message:"model overloaded token=${secret}"}));`,
       'process.exit(1);',
     ].join('')],
-    formatCommand: () => 'claude fixture',
+    formatCommand: () => 'omp fixture',
   };
   const { result } = await run(executor);
 
@@ -279,7 +223,7 @@ test('captures a Claude stream-json error from stdout for exact failure activity
 
 test('terminates a CLI that produces no startup output and preserves the exact timeout reason', async () => {
   const { result, logs } = await run(
-    fixtureExecutor('claude', 'setInterval(() => {}, 1000)'),
+    fixtureExecutor('omp', 'setInterval(() => {}, 1000)'),
     recordedTelemetry().telemetry,
     { maxRuntimeMs: 1_000, startupTimeoutMs: 25, idleTimeoutMs: 500 },
   );
@@ -291,7 +235,7 @@ test('terminates a CLI that produces no startup output and preserves the exact t
 
 test('switches from startup timeout to idle timeout after the first process output', async () => {
   const { result, logs } = await run(
-    fixtureExecutor('claude', 'console.log("started"); setInterval(() => {}, 1000)'),
+    fixtureExecutor('omp', 'console.log("started"); setInterval(() => {}, 1000)'),
     recordedTelemetry().telemetry,
     { maxRuntimeMs: 1_000, startupTimeoutMs: 500, idleTimeoutMs: 50 },
   );
@@ -305,7 +249,7 @@ test('switches from startup timeout to idle timeout after the first process outp
 test('terminates the CLI when its requirement is cancelled', async () => {
   let checks = 0;
   const { result, logs } = await run(
-    fixtureExecutor('codex', 'setInterval(() => {}, 1000)'),
+    fixtureExecutor('omp', 'setInterval(() => {}, 1000)'),
     recordedTelemetry().telemetry,
     {
       maxRuntimeMs: 5_000,
@@ -327,7 +271,7 @@ test('terminates the CLI immediately when the Runner cancellation signal is abor
   const cancellation = new AbortController();
   const startedAt = Date.now();
   const execution = run(
-    fixtureExecutor('codex', 'setInterval(() => {}, 1000)'),
+    fixtureExecutor('omp', 'setInterval(() => {}, 1000)'),
     recordedTelemetry().telemetry,
     {
       maxRuntimeMs: 5_000,
@@ -354,25 +298,25 @@ test('telemetry initialization, event/update, network, and bounded flush failure
     diagnostic: (code) => diagnostics.push(code),
     createClient: () => ({ trace: () => ({ event: () => { throw new Error('network failed'); }, update: () => { throw new Error('update failed'); } }), flushAsync: async () => new Promise(() => {}) }),
   });
-  const { result, logs } = await run(fixtureExecutor('codex', 'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}))'), telemetry);
+  const { result, logs } = await run(fixtureExecutor('omp', "console.log(JSON.stringify({type:\"message_end\",message:{role:\"assistant\",content:[{type:\"text\",text:\"done\"}]}}))"), telemetry);
   assert.deepEqual(result, { exitCode: 0, finalText: 'done' });
   assert.ok(logs.some((line) => line.includes('处理完成')));
   assert.ok(diagnostics.includes('client-operation-failed'));
   assert.ok(diagnostics.includes('client-timeout'));
 
   const record = recordedTelemetry();
-  await run(fixtureExecutor('codex', 'console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:"done"}}))'), record.telemetry);
+  await run(fixtureExecutor('omp', "console.log(JSON.stringify({type:\"message_end\",message:{role:\"assistant\",content:[{type:\"text\",text:\"done\"}]}}))"), record.telemetry);
   assert.doesNotMatch(JSON.stringify({ traces: record.traces, events: record.events, agentSpans: record.agentSpans, toolSpans: record.toolSpans, agentEnds: record.agentEnds, toolEnds: record.toolEnds, updates: record.updates }), /definitely-not-a-real-secret/);
 
   const disabled = createLangfuseTelemetry({ env: {} });
-  const disabledResult = await run(fixtureExecutor('codex', 'process.exit(0)'), disabled);
+  const disabledResult = await run(fixtureExecutor('omp', 'process.exit(0)'), disabled);
   assert.equal(disabledResult.result.exitCode, 0);
   const unsampled = createLangfuseTelemetry({ env: { ...credentials, LANGFUSE_SAMPLE_RATE: '0' } });
-  const unsampledResult = await run(fixtureExecutor('codex', 'process.exit(0)'), unsampled);
+  const unsampledResult = await run(fixtureExecutor('omp', 'process.exit(0)'), unsampled);
   assert.equal(unsampledResult.result.exitCode, 0);
 
   const initFailure = createLangfuseTelemetry({ env: credentials, createClient: () => { throw new Error('bad credentials'); } });
-  assert.equal((await run(fixtureExecutor('codex', 'process.exit(0)'), initFailure)).result.exitCode, 0);
+  assert.equal((await run(fixtureExecutor('omp', 'process.exit(0)'), initFailure)).result.exitCode, 0);
   const traceFailure = createLangfuseTelemetry({ env: credentials, createClient: () => ({ trace: () => { throw new Error('network unavailable'); } }) });
-  assert.equal((await run(fixtureExecutor('codex', 'process.exit(0)'), traceFailure)).result.exitCode, 0);
+  assert.equal((await run(fixtureExecutor('omp', 'process.exit(0)'), traceFailure)).result.exitCode, 0);
 });

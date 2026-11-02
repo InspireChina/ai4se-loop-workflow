@@ -10,7 +10,6 @@ export async function POST(request: NextRequest) {
     let safeAction: LifecycleAction;
     if (action?.kind === 'start') safeAction = { kind: 'start' };
     else if (action?.kind === 'stop') safeAction = { kind: 'stop', reason: 'user-stop' };
-    else if (action?.kind === 'resume-after-update') safeAction = { kind: 'resume-after-update' };
     else return NextResponse.json({ error: 'unsupported lifecycle action' }, { status: 400 });
     const lifecycle = await webLoopRunLifecycle();
     const receipt = await lifecycle.command({

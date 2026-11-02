@@ -1,8 +1,6 @@
 # dependencies and build output
 node_modules/
 .next/
-desktop-runtime/
-dist-desktop/
 *.tsbuildinfo
 
 # local runtime data

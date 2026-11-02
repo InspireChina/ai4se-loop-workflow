@@ -1,31 +1,25 @@
 import { randomUUID } from 'node:crypto';
-import { readFile, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { appendLoopRunLog, beginRun, endRun, getRunStatus } from './tasks';
 import { databaseConnection, paths } from '../infrastructure/database';
 import { startAgentRun } from '../infrastructure/agent-runner';
 import {
-  inspectProcessCommand,
   inspectProcessIdentity,
   processIdentityMatches,
   terminateProcessTree,
-  waitForProcessIdentity,
 } from '../infrastructure/process-tree';
 import { isProcessAlive } from '../infrastructure/run-process';
 import { RuntimeEventHub } from '../infrastructure/runtime-event-hub';
-import { registerManagedProcessInDb } from '../infrastructure/managed-process-registry';
 
 export type LifecycleSource = {
-  adapter: 'ui' | 'electron' | 'cli';
+  adapter: 'ui' | 'web' | 'cli';
   instanceId: string;
   actor: 'human' | 'host';
 };
 
 export type LifecycleAction =
   | { kind: 'start' }
-  | { kind: 'stop'; reason: 'user-stop' | 'application-exit' }
-  | { kind: 'prepare-update'; attemptId: string; targetVersion: string }
-  | { kind: 'resume-after-update' };
+  | { kind: 'stop'; reason: 'user-stop' | 'application-exit' };
 
 export type LifecycleCommand = { requestId: string; source: LifecycleSource; action: LifecycleAction };
 export type ReconcileTrigger = {
@@ -35,7 +29,7 @@ export type ReconcileTrigger = {
 
 export type LifecycleReceipt = {
   requestId?: string;
-  outcome: 'started' | 'stopped' | 'ready-for-update' | 'resumed' | 'healthy' | 'backoff' | 'observer' | 'update-in-progress' | 'blocked' | 'failed';
+  outcome: 'started' | 'stopped' | 'healthy' | 'backoff' | 'observer' | 'blocked' | 'failed';
   snapshot: LifecycleSnapshot;
   warning?: string;
   error?: string;
@@ -44,7 +38,6 @@ export type LifecycleReceipt = {
 
 export type LifecycleSnapshot = {
   intent: { desired: 'running' | 'stopped'; revision: number };
-  mode: { kind: 'normal' } | { kind: 'update-silence'; attemptId: string | null; targetVersion: string | null; readiness: string | null };
   run: {
     phase: 'starting' | 'running' | 'stopping' | 'stopped' | 'crashed';
     runId: string | null;
@@ -59,10 +52,6 @@ export type LifecycleSnapshot = {
 type LifecycleStateRow = {
   desired_intent: 'running' | 'stopped';
   intent_revision: number;
-  mode: 'normal' | 'update-silence';
-  update_attempt_id: string | null;
-  update_target_version: string | null;
-  update_readiness: string | null;
   actual_phase: LifecycleSnapshot['run']['phase'];
   active_run_id: string | null;
   restart_count: number;
@@ -92,22 +81,9 @@ export function lifecycleRestartDelayMs(restartCount: number) {
   return 5 * 60_000;
 }
 
-function releaseVersion(input: string) {
-  const match = input.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?$/);
-  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] as const : null;
-}
 
-export function installedVersionReachedTarget(installedVersion: string, targetVersion: string | null) {
-  if (!targetVersion) return false;
-  if (installedVersion === targetVersion || `v${installedVersion}` === targetVersion) return true;
-  const installed = releaseVersion(installedVersion);
-  const target = releaseVersion(targetVersion);
-  if (!installed || !target) return false;
-  for (let index = 0; index < installed.length; index += 1) {
-    if (installed[index] !== target[index]) return installed[index] > target[index];
-  }
-  return true;
-}
+
+
 
 type ObservedRun = NonNullable<Awaited<ReturnType<typeof getRunStatus>>>;
 
@@ -152,7 +128,7 @@ function leaseRow(db: Awaited<ReturnType<typeof databaseConnection>>) {
 }
 
 function supervisorOwnerPid(ownerId: string) {
-  const match = ownerId.match(/^(?:electron|web)-(\d+)-/);
+  const match = ownerId.match(/^(?:web|cli)-(\d+)-/);
   const pid = Number(match?.[1]);
   return Number.isInteger(pid) && pid > 0 ? pid : null;
 }
@@ -166,9 +142,7 @@ export function canReclaimSupervisorLease(previousOwnerId: string, currentOwnerI
 
 export type LoopRunLifecycleOptions = {
   ownerId: string;
-  adapter: 'electron' | 'cli';
-  installedVersion?: string;
-  setLoginStartup?: (enabled: boolean) => Promise<boolean> | boolean;
+  adapter: 'web' | 'cli';
 };
 
 export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
@@ -232,9 +206,6 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     const run = await getRunStatus(currentToken ?? undefined);
     return {
       intent: { desired: state.desired_intent, revision: state.intent_revision },
-      mode: state.mode === 'normal'
-        ? { kind: 'normal' }
-        : { kind: 'update-silence', attemptId: state.update_attempt_id, targetVersion: state.update_target_version, readiness: state.update_readiness },
       run: {
         phase: state.actual_phase,
         runId: run?.runId || state.active_run_id,
@@ -270,29 +241,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     `).run(preserveIntent ? 1 : 0);
   }
 
-  async function activeResidualProcesses(includeUiServer = true) {
-    const db = await databaseConnection();
-    const rows = db.prepare(`
-      SELECT process_id, supervision_token, process_kind, pid, process_start_marker
-      FROM loop_managed_processes WHERE status = 'running'
-    `).all() as ManagedProcessRow[];
-    const residual: Array<{ kind: string; pid: number }> = [];
-    for (const row of rows) {
-      if (!includeUiServer && row.process_kind === 'ui-server') continue;
-      const identity = await inspectProcessIdentity(row.pid);
-      if (!identity && isProcessAlive(row.pid)) {
-        residual.push({ kind: row.process_kind, pid: row.pid });
-        continue;
-      }
-      if (!identity || !processIdentityMatches(identity, row.process_start_marker)) {
-        db.prepare(`UPDATE loop_managed_processes SET status = 'exited', exited_at = CURRENT_TIMESTAMP WHERE pid = ? AND process_start_marker = ?`)
-          .run(row.pid, row.process_start_marker);
-        continue;
-      }
-      residual.push({ kind: row.process_kind, pid: row.pid });
-    }
-    return residual;
-  }
+
 
   async function cleanupSupersededProcesses(token: number) {
     const db = await databaseConnection();
@@ -324,80 +273,13 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
     return residual;
   }
 
-  async function cleanupLegacyMaintenanceProcess() {
-    const pidPath = join(paths.dataDir, 'software-maintenance', 'runner.pid');
-    let pid = 0;
-    try {
-      pid = Number((await readFile(pidPath, 'utf8')).trim());
-    } catch {
-      return null;
-    }
-    if (!Number.isInteger(pid) || pid <= 0) {
-      await unlink(pidPath).catch(() => undefined);
-      return null;
-    }
-    if (process.platform === 'win32') {
-      if (isProcessAlive(pid) && !await terminateProcessTree(pid, 10_000)) return { kind: 'legacy-maintenance', pid };
-      await unlink(pidPath).catch(() => undefined);
-      return null;
-    }
-    const identity = await inspectProcessIdentity(pid);
-    if (!identity) {
-      if (isProcessAlive(pid)) return { kind: 'legacy-maintenance-unverified', pid };
-      await unlink(pidPath).catch(() => undefined);
-      return null;
-    }
-    const command = await inspectProcessCommand(pid);
-    if (!command.includes('maintenance-runner')) {
-      return { kind: 'legacy-maintenance-unverified', pid };
-    }
-    if (!await terminateProcessTree(pid, 10_000, identity.startMarker)) {
-      return { kind: 'legacy-maintenance', pid };
-    }
-    await unlink(pidPath).catch(() => undefined);
-    return null;
-  }
 
-  async function registerHostProcess(processKind: 'ui-server', pid: number) {
-    const token = await acquireLease();
-    if (token === null) throw new Error('当前宿主没有监督租约');
-    const residual = await cleanupSupersededProcesses(token);
-    if (residual.length) throw new Error(`无法清理上一监督代次进程：${residual.map((item) => `${item.kind} pid=${item.pid}`).join(', ')}`);
-    const identity = await waitForProcessIdentity(pid);
-    if (!identity) throw new Error(`无法验证 ${processKind} 进程身份 pid=${pid}`);
-    const db = await databaseConnection();
-    const processId = registerManagedProcessInDb(db, {
-      processId: randomUUID(),
-      supervisionToken: token,
-      processKind,
-      pid,
-      processStartMarker: identity.startMarker,
-    });
-    return { processId, processStartMarker: identity.startMarker };
-  }
 
-  async function markHostProcessExited(processId: string) {
-    const db = await databaseConnection();
-    db.prepare(`
-      UPDATE loop_managed_processes
-      SET status = 'exited', exited_at = CURRENT_TIMESTAMP
-      WHERE process_id = ?
-    `).run(processId);
-  }
 
-  async function verifyUpdateReadiness(): Promise<LifecycleReceipt> {
-    const db = await databaseConnection();
-    const state = stateRow(db);
-    if (state.mode !== 'update-silence') {
-      return { outcome: 'failed', error: '当前不在更新静默', snapshot: await snapshot() };
-    }
-    const residual = await activeResidualProcesses(true);
-    db.prepare(`UPDATE loop_lifecycle_state SET update_readiness = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1`)
-      .run(residual.length ? 'blocked' : 'ready', residual.length ? '受管后台进程尚未退出' : null);
-    return residual.length
-      ? { outcome: 'blocked', residualProcesses: residual, snapshot: await snapshot() }
-      : { outcome: 'ready-for-update', snapshot: await snapshot() };
-  }
+
+
+
+
 
   async function reconcileOwned(): Promise<LifecycleReceipt> {
     const token = await acquireLease();
@@ -414,17 +296,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
         .run(message);
       return { outcome: 'blocked', error: message, residualProcesses: supersededResidual, snapshot: await snapshot() };
     }
-    const legacyResidual = await cleanupLegacyMaintenanceProcess();
-    if (legacyResidual) {
-      db.prepare(`UPDATE loop_lifecycle_state SET actual_phase = 'crashed', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1`)
-        .run(`blocked-by-legacy-process: ${legacyResidual.kind} pid=${legacyResidual.pid}`);
-      return { outcome: 'blocked', residualProcesses: [legacyResidual], snapshot: await snapshot() };
-    }
     let state = stateRow(db);
-    if (state.mode === 'update-silence') {
-      await stopCurrent('应用更新静默', true);
-      return { outcome: 'stopped', snapshot: await snapshot() };
-    }
     if (state.desired_intent === 'stopped') {
       await stopCurrent('持续运行意图已停止', false);
       return { outcome: 'stopped', snapshot: await snapshot() };
@@ -440,7 +312,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           db.prepare(`UPDATE loop_lifecycle_state SET actual_phase = 'crashed', last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1`)
-            .run(`blocked-by-legacy-process: ${message}`);
+            .run(`blocked-by-superseded-runner: ${message}`);
           return { outcome: 'blocked', error: message, snapshot: await snapshot() };
         }
       }
@@ -510,89 +382,23 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
   }
 
   async function executeCommand(input: LifecycleCommand): Promise<LifecycleReceipt> {
-    const db = await databaseConnection();
-    const existing = db.prepare('SELECT receipt_json FROM loop_lifecycle_commands WHERE request_id = ?').get(input.requestId) as { receipt_json: string } | undefined;
-    if (existing) return JSON.parse(existing.receipt_json) as LifecycleReceipt;
-    const current = stateRow(db);
-    if (current.mode === 'update-silence' && !['resume-after-update', 'prepare-update'].includes(input.action.kind)) {
-      const receipt: LifecycleReceipt = { requestId: input.requestId, outcome: 'update-in-progress', snapshot: await snapshot() };
-      db.prepare(`INSERT INTO loop_lifecycle_commands(request_id, source_adapter, action_kind, receipt_json) VALUES(?, ?, ?, ?)`)
-        .run(input.requestId, input.source.adapter, input.action.kind, JSON.stringify(receipt));
-      return receipt;
-    }
-
+    const db=await databaseConnection();
+    const existing=db.prepare('SELECT receipt_json FROM loop_lifecycle_commands WHERE request_id = ?').get(input.requestId) as {receipt_json:string}|undefined;
+    if(existing)return JSON.parse(existing.receipt_json) as LifecycleReceipt;
     let receipt: LifecycleReceipt;
-    if (input.action.kind === 'start') {
-      db.prepare(`UPDATE loop_lifecycle_state SET desired_intent = 'running', intent_revision = intent_revision + 1, retry_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1`).run();
-      let warning: string | undefined;
-      if (options.setLoginStartup) {
-        try {
-          if (!await options.setLoginStartup(true)) warning = '无法注册开机自启；系统重启后可能需要手动打开 LoopWork';
-        } catch {
-          warning = '无法注册开机自启；系统重启后可能需要手动打开 LoopWork';
-        }
-      }
-      receipt = { ...(await reconcileOwned()), requestId: input.requestId, ...(warning ? { warning } : {}) };
-    } else if (input.action.kind === 'stop') {
-      db.prepare(`UPDATE loop_lifecycle_state SET desired_intent = 'stopped', intent_revision = intent_revision + 1, retry_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1`).run();
-      await stopCurrent(input.action.reason === 'application-exit' ? '退出 LoopWork' : '用户停止', false);
-      let warning: string | undefined;
-      if (options.setLoginStartup) {
-        try {
-          if (!await options.setLoginStartup(false)) warning = '无法取消开机自启';
-        } catch {
-          warning = '无法取消开机自启';
-        }
-      }
-      receipt = { requestId: input.requestId, outcome: 'stopped', snapshot: await snapshot(), ...(warning ? { warning } : {}) };
-    } else if (input.action.kind === 'prepare-update') {
-      db.prepare(`
-        UPDATE loop_lifecycle_state
-        SET mode = 'update-silence', update_attempt_id = ?, update_target_version = ?,
-            update_readiness = 'stopping', updated_at = CURRENT_TIMESTAMP
-        WHERE singleton = 1
-      `).run(input.action.attemptId, input.action.targetVersion);
-      await stopCurrent('桌面应用更新', true);
-      const legacyResidual = await cleanupLegacyMaintenanceProcess();
-      const residual = [
-        ...(legacyResidual ? [legacyResidual] : []),
-        ...await activeResidualProcesses(false),
-      ];
-      db.prepare(`UPDATE loop_lifecycle_state SET update_readiness = ?, last_error = ?, updated_at = CURRENT_TIMESTAMP WHERE singleton = 1`)
-        .run(residual.length ? 'blocked' : 'stopping', residual.length ? '受管后台进程尚未退出' : null);
-      receipt = residual.length
-        ? { requestId: input.requestId, outcome: 'blocked', residualProcesses: residual, snapshot: await snapshot() }
-        : { requestId: input.requestId, outcome: 'ready-for-update', snapshot: await snapshot() };
-    } else {
-      db.prepare(`
-        UPDATE loop_lifecycle_state
-        SET mode = 'normal', update_attempt_id = NULL, update_target_version = NULL,
-            update_readiness = NULL, last_error = NULL, updated_at = CURRENT_TIMESTAMP
-        WHERE singleton = 1
-      `).run();
-      receipt = { ...(await reconcileOwned()), requestId: input.requestId, outcome: 'resumed' };
-    }
-    db.prepare(`INSERT INTO loop_lifecycle_commands(request_id, source_adapter, action_kind, receipt_json) VALUES(?, ?, ?, ?)`)
-      .run(input.requestId, input.source.adapter, input.action.kind, JSON.stringify(receipt));
+    if(input.action.kind==='start') {
+      db.prepare("UPDATE loop_lifecycle_state SET desired_intent='running', intent_revision=intent_revision+1, retry_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE singleton=1").run();
+      receipt={...await reconcileOwned(),requestId:input.requestId};
+    } else if(input.action.kind==='stop') {
+      db.prepare("UPDATE loop_lifecycle_state SET desired_intent='stopped', intent_revision=intent_revision+1, retry_at=NULL, updated_at=CURRENT_TIMESTAMP WHERE singleton=1").run();
+      await stopCurrent(input.action.reason==='application-exit'?'退出 Web 服务':'用户停止',false);
+      receipt={requestId:input.requestId,outcome:'stopped',snapshot:await snapshot()};
+    } else throw new Error('不支持的运行命令');
+    db.prepare('INSERT INTO loop_lifecycle_commands(request_id,source_adapter,action_kind,receipt_json) VALUES(?,?,?,?)').run(input.requestId,input.source.adapter,input.action.kind,JSON.stringify(receipt));
     return receipt;
   }
 
-  async function recoverUpdateSilenceAfterRestart() {
-    if (!options.installedVersion) return;
-    const db = await databaseConnection();
-    const state = stateRow(db);
-    if (state.mode !== 'update-silence') return;
-    const reachedTarget = installedVersionReachedTarget(options.installedVersion, state.update_target_version);
-    const recoveryError = reachedTarget
-      ? null
-      : `应用已重新启动，但更新未完成：当前版本 ${options.installedVersion}，目标版本 ${state.update_target_version || '未知'}；已自动恢复运行控制`;
-    db.prepare(`
-      UPDATE loop_lifecycle_state
-      SET mode = 'normal', update_attempt_id = NULL, update_target_version = NULL,
-          update_readiness = NULL, last_error = ?, updated_at = CURRENT_TIMESTAMP
-      WHERE singleton = 1
-    `).run(recoveryError);
-  }
+
 
   return {
     command: (input: LifecycleCommand) => serialize(() => executeCommand(input)),
@@ -601,18 +407,7 @@ export function createLoopRunLifecycle(options: LoopRunLifecycleOptions) {
       return reconcileOwned();
     }),
     status: snapshot,
-    registerHostProcess: (processKind: 'ui-server', pid: number) => serialize(() => registerHostProcess(processKind, pid)),
-    markHostProcessExited: (processId: string) => serialize(() => markHostProcessExited(processId)),
-    verifyUpdateReadiness: () => serialize(() => verifyUpdateReadiness()),
     async start() {
-      // update-silence is only valid while the old desktop host is shutting
-      // down. Reaching a new host process means installation either completed
-      // or failed; both outcomes must restore lifecycle controls.
-      await recoverUpdateSilenceAfterRestart();
-      if (options.setLoginStartup) {
-        const db = await databaseConnection();
-        try { await options.setLoginStartup(stateRow(db).desired_intent === 'running'); } catch { /* surfaced on the next user command */ }
-      }
       await serialize(() => reconcileOwned());
       renewalTimer = setInterval(() => {
         void serialize(() => reconcileOwned()).catch(() => undefined);
@@ -646,7 +441,7 @@ const loopWorkGlobal = globalThis as LoopWorkGlobal;
 export async function webLoopRunLifecycle() {
   if (!loopWorkGlobal.__loopworkWebHost) {
     loopWorkGlobal.__loopworkWebHost = (async () => {
-      const host = createLoopRunLifecycle({ ownerId: `web-${process.pid}-${randomUUID()}`, adapter: 'cli' });
+      const host = createLoopRunLifecycle({ ownerId: `web-${process.pid}-${randomUUID()}`, adapter: 'web' });
       await host.start();
       return host;
     })();

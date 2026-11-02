@@ -10,9 +10,8 @@ function isLoopbackHostname(hostname: string) {
 }
 
 /**
- * Desktop builds can expose the same loopback server as localhost or 127.0.0.1,
- * and Next.js may reconstruct request.url with a different loopback alias/port.
- * Treat those representations as local while continuing to reject web origins.
+ * The Web server may be addressed by different loopback aliases at the same
+ * port. Other ports and external origins are distinct applications.
  */
 export function isAllowedLocalRequestOrigin(request: Request) {
   const origin = request.headers.get('origin');
@@ -23,6 +22,7 @@ export function isAllowedLocalRequestOrigin(request: Request) {
     if (source.origin === target.origin) return true;
     return source.protocol === 'http:'
       && target.protocol === 'http:'
+      && source.port === target.port
       && isLoopbackHostname(source.hostname)
       && isLoopbackHostname(target.hostname);
   } catch {

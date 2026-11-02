@@ -3,7 +3,7 @@ import { notFound } from 'next/navigation';
 import { Activity, BookOpenText, BrainCircuit, CalendarDays, Check, CircleAlert, CircleDot, FolderCog, Gauge, MemoryStick, PencilLine, Sparkles } from 'lucide-react';
 import { getAgentProfile } from '../../../src/application/agent-profiles';
 import { listAgentConfigurations } from '../../../src/application/agent-configurations';
-import { AGENT_EXECUTOR_OPTIONS, CODEX_MODEL_OPTIONS, CODEX_REASONING_EFFORTS, OMP_THINKING_LEVELS, getAgentRuntimeSettings, getFlowAgentDefaultRuntimeSettings, listAgentRuntimeConfigurations } from '../../../src/application/project-settings';
+import { AGENT_EXECUTOR_OPTIONS, OMP_THINKING_LEVELS, getAgentRuntimeSettings, getFlowAgentDefaultRuntimeSettings, listAgentRuntimeConfigurations } from '../../../src/application/project-settings';
 import { isFlowAgentId } from '../../../src/domain/agent-profile';
 import { MarkdownContent } from '../../../src/ui/markdown-content';
 import { agentCommandChains, agentPipelineLabel } from '../../../src/domain/agent-command-profile';
@@ -111,8 +111,6 @@ export default async function AgentDetailPage({ params, searchParams }: { params
         initialEffective={runtimeSettings}
         flowDefault={flowDefaults}
         executorOptions={AGENT_EXECUTOR_OPTIONS}
-        codexModelOptions={CODEX_MODEL_OPTIONS}
-        reasoningEfforts={CODEX_REASONING_EFFORTS}
         ompThinkingLevels={OMP_THINKING_LEVELS}
       />}
 
