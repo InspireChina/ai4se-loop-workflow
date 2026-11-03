@@ -175,7 +175,16 @@ test('feedback triage progressively covers the frozen batch and appends forward 
   const initial = await command(started.executionId, started.token!, ['status']);
   assert.match(initial, /FROZEN FEEDBACK BATCH/);
   assert.match(initial, new RegExp(commentId));
+  assert.match(initial, /空数据时需要显示明确提示。/);
+  assert.match(initial, /Existing Delivery Units: 1/);
+  assert.match(initial, /Read-only inputs, already initialized/);
   await advanceFeedbackTriageToGrouping(started.executionId, started.token!);
+  await assert.rejects(command(started.executionId,started.token!,['artifact','put','--artifact','feedback','--block','groups','--key','invalid-object-items','--content',stringify({
+    workType:'behavior_change',title:'不能丢失验收正文',reason:'结构化值不应被转成 object Object',commentIds:[commentId],affectedDeliveryUnits:[1],acceptance:[{statement:'原始完整验收正文'}],
+  })]),/acceptance\[0\].*数组项必须是 string/s);
+  const {databaseConnection}=await import('../infrastructure/database');
+  const count=(await databaseConnection()).prepare("SELECT COUNT(*) FROM command_chain_artifact_blocks WHERE block_id='groups' AND item_key='invalid-object-items'").pluck().get();
+  assert.equal(count,0);
   await recordBehaviorChange(started.executionId, started.token!, commentId);
   await finishFeedbackTriage(started.executionId, started.token!);
 
@@ -308,6 +317,8 @@ test('feedback verify progressively records independent evidence and resolves on
   const status = await command(verify.executionId, verify.token!, ['status']);
   assert.match(status, /FROZEN FEEDBACK TARGET/);
   assert.match(status, new RegExp(commentId));
+  assert.match(status, /空数据时需要显示明确提示。/);
+  assert.match(status, /Acceptance:.*空数据时页面展示清晰且可识别的提示/);
   await command(verify.executionId, verify.token!, ['phase', 'complete']);
   await command(verify.executionId, verify.token!, ['artifact', 'put', '--artifact', 'feedback', '--block', 'summary', '--content',
     '新增空状态提示已经实现，并由交付单元独立测试证明']);

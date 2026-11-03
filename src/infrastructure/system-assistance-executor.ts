@@ -1,4 +1,4 @@
-import { loadExternalAgent, mergeExternalAgentOptions } from './external-agents';
+import { loadExternalCommandPrompt, mergeExternalCommandOptions } from './external-command-prompts';
 import { getConfiguredWorkspaceRoot } from './database';
 import { assertSupportedAgentExecutor } from '../domain/agent-executor';
 import crossSpawn from 'cross-spawn';
@@ -18,8 +18,8 @@ export async function runSystemAssistancePrompt(input: {
   assertSupportedAgentExecutor(input.executorId);
   const executor = getAgentExecutor(input.executorId);
   const invocationPrompt = input.prompt;
-  const role = loadExternalAgent(getConfiguredWorkspaceRoot(), 'agent-configuration-assistant');
-  const options = mergeExternalAgentOptions(role, input.executionOptions);
+  const role = loadExternalCommandPrompt(getConfiguredWorkspaceRoot(), 'agent-configuration-assistant');
+  const options = mergeExternalCommandOptions(role, input.executionOptions);
   const launch = buildAgentProcessLaunch(executor, invocationPrompt, getConfiguredWorkspaceRoot(), options);
   const limits = resolveAgentExecutionLimits(process.env);
   const accumulator = createAgentFinalTextAccumulator(executor.id);
@@ -48,7 +48,7 @@ export async function runSystemAssistancePrompt(input: {
       }
     });
     child.stderr?.on('data', (chunk: Buffer) => { stderr = `${stderr}${chunk.toString('utf8')}`.slice(-12_000); });
-    if (executor.promptMode === 'stdin') child.stdin?.end(input.prompt);
+    if (executor.promptMode === 'stdin') child.stdin?.end(launch.input);
     const timer = setTimeout(() => {
       terminationReason = '系统辅助 Agent 执行超时';
       if (child.pid) void terminateProcessTree(child.pid, 5_000).then((stopped) => { if (!stopped) child.kill('SIGKILL'); });

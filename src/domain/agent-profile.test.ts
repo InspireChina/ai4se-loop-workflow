@@ -1,11 +1,11 @@
-import { loadExternalAgent } from '../infrastructure/external-agents';
+import { loadExternalCommandPrompt } from '../infrastructure/external-command-prompts';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AGENT_PROFILE_DEFINITIONS as PROFILE_METADATA, AGENT_PROMPT_SEED_REVISION, FLOW_AGENT_IDS } from './agent-profile';
 
-const AGENT_PROFILE_DEFINITIONS = Object.fromEntries(Object.entries(PROFILE_METADATA).map(([id, definition]) => [id, { ...definition, prompt: loadExternalAgent(process.cwd(), id).prompt }]));
+const AGENT_PROFILE_DEFINITIONS = Object.fromEntries(Object.entries(PROFILE_METADATA).map(([id, definition]) => [id, { ...definition, prompt: loadExternalCommandPrompt(process.cwd(), id).prompt }]));
 
-test('preserves the complete original V15 role contracts in external OMP Agent files', () => {
+test('preserves the complete original V15 role contracts in external OMP Command files', () => {
   assert.equal(AGENT_PROMPT_SEED_REVISION, 15);
   for (const agentId of FLOW_AGENT_IDS) {
     const prompt = AGENT_PROFILE_DEFINITIONS[agentId].prompt;
@@ -33,7 +33,7 @@ test('preserves the complete original V15 role contracts in external OMP Agent f
   assert.match(AGENT_PROFILE_DEFINITIONS['requirement-spec-agent'].prompt, /AS IS、TO BE、ACTORS、SCENARIOS/);
   assert.match(AGENT_PROFILE_DEFINITIONS['spec-review-agent'].prompt, /intent、business_design 或 specification|唯一职责目标/);
   assert.match(AGENT_PROFILE_DEFINITIONS['dev-agent'].prompt, /现有实现已经满足承诺/);
-  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /阶段顺序和当前工作包以生效中的 YAML 命令链及 status 输出为准/);
+  assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /阶段顺序和当前工作包以生效中的脚本命令链及 status 输出为准/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /PROPOSE 与 RESOLVE 必须分开/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /自动决策强度处理 Agent 节点/);
   assert.match(AGENT_PROFILE_DEFINITIONS['backlog-agent'].prompt, /每轮 HUMAN 或 Agent 答案全部关闭后必须进入 ANSWER REVIEW/);

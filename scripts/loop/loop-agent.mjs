@@ -37,7 +37,7 @@ function assertAgentTemporaryFile(path, argument) {
   const resolvedPath = resolve(path);
   const relation = relative(resolvedDirectory, resolvedPath);
   if (!relation || relation.startsWith('..') || resolve(resolvedDirectory, relation) !== resolvedPath) {
-    throw new Error(`${argument} 必须读取 $LOOP_AGENT_TMP_DIR 内的文件：${resolvedDirectory}`);
+    throw new Error(`${argument} 必须读取 $LOOP_AGENT_TMP_DIR 内的文件：${resolvedDirectory}\nReceived: ${resolvedPath}\nUse loopwork with a -file argument set to @input and supply the body in input; do not retype the execution UUID. For CLI use the $LOOP_AGENT_TMP_DIR environment variable.`);
   }
 }
 

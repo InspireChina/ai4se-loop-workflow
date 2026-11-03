@@ -17,6 +17,32 @@ export type AgentCommandRejection = {
   templateCommand?: string;
 };
 
+/** Read protocol scalars from native tool content and legacy escaped receipts. */
+export function commandResultMetadata(output: unknown, summary?: string): {
+  commandOutcome?: string;
+  commandErrorCode?: string;
+  commandErrorPath?: string;
+  commandRejectionOccurrence?: number;
+} {
+  const content = output && typeof output === 'object' ? (output as {content?: unknown}).content : null;
+  const text = [
+    typeof output === 'string' ? output : '',
+    Array.isArray(content) ? content.filter(item => item?.type === 'text' && typeof item.text === 'string').map(item => item.text).join('\n') : '',
+    output && typeof output === 'object' ? JSON.stringify(output) : '',
+    summary || '',
+  ].filter(Boolean).join('\n');
+  const value = (label: string) => text.match(new RegExp('(?:^|\\n|\\\\n)- ' + label + ':\\s*([^\\n\\r"}]+)', 'i'))?.[1]?.split('\\n')[0].trim();
+  const outcome = value('Outcome');
+  if (!outcome) return {};
+  const occurrence = Number(value('Occurrence'));
+  return {
+    commandOutcome: outcome,
+    ...(value('Error-Code') ? {commandErrorCode:value('Error-Code')} : {}),
+    ...(value('Error-Path') ? {commandErrorPath:value('Error-Path')} : {}),
+    ...(Number.isFinite(occurrence) && occurrence > 0 ? {commandRejectionOccurrence:occurrence} : {}),
+  };
+}
+
 export class AgentCommandValidationError extends Error {
   readonly issues: AgentCommandValidationIssue[];
   readonly schemaCommand?: string;
@@ -51,7 +77,7 @@ function inferredCode(message: string) {
   if (/必填|不能为空/.test(message)) return 'schema_required';
   if (/必须是/.test(message)) return 'schema_type_or_enum';
   if (/建议决定权无效|决策权限无效/.test(message)) return 'decision_authority_invalid';
-  if (/不属于当前.+工作包|不允许命令|只允许 YAML 命令链协议/.test(message)) return 'command_not_allowed';
+  if (/不属于当前.+工作包|不允许命令|只允许命令脚本协议/.test(message)) return 'command_not_allowed';
   if (/必须读取 \$LOOP_AGENT_TMP_DIR/.test(message)) return 'temporary_file_outside_execution';
   if (/缺少文件路径|必须提供值/.test(message)) return 'command_argument_missing';
   return 'command_rejected';

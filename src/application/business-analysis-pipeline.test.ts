@@ -17,7 +17,7 @@ async function startAgent(delegation: TestDelegation, suffix: string) {
   const started = await beginTestExecutionAttempt({
     runId: `RUN-ba-yaml-${suffix}`,
     delegation,
-    prompt: 'YAML command chain Business Analysis test',
+    prompt: 'workspace command script Business Analysis test',
   });
   const token = await issueAgentCommandToken(started.attempt.execution_id);
   assert.ok(token);
@@ -139,7 +139,7 @@ const specification = [
   '# ASSUMPTIONS', '', '用户可以访问目标项目。',
 ].join('\n');
 
-test('declares every End-to-End Agent command chain in YAML', async () => {
+test('declares every End-to-End Agent command chain through executable scripts', async () => {
   const { REQUIREMENT_PIPELINES } = await import('../domain/pipeline-catalog');
   const { agentCommandChains, agentCommandProfiles } = await import('../domain/agent-command-profile');
   const { commandChainCatalogItem } = await import('../domain/command-chain-catalog');
@@ -154,14 +154,14 @@ test('declares every End-to-End Agent command chain in YAML', async () => {
   for (const agent of agents) {
     const profiles = agentCommandProfiles().filter((profile) => profile.agent === agent);
     assert.equal(profiles.length, 1, `${agent} must have exactly one End-to-End command profile`);
-    assert.ok(profiles[0].commandChainId, `${agent} profile is not bound to YAML`);
+    assert.ok(profiles[0].commandChainId, `${agent} profile is not bound to a command script`);
     const catalog = commandChainCatalogItem(profiles[0].commandChainId!);
     assert.ok(catalog, `${agent} command chain is missing from the catalog`);
     assert.equal(catalog.agentId, agent);
-    assert.match(catalog.fileName, new RegExp(`^${agent}\\.yaml$`));
+    assert.match(catalog.fileName, new RegExp(`^${agent}\\.cjs$`));
     assert.equal(loadCommandChainDefinition(catalog.id).agent, agent);
     const chains = agentCommandChains(agent);
-    assert.equal(chains.length, 1, `${agent} must expose one YAML command chain`);
+    assert.equal(chains.length, 1, `${agent} must expose one workspace command script`);
     for (const chain of chains) {
       assert.equal(chain.entryCommand, 'status');
       assert.ok(chain.phases.length > 0);
@@ -215,7 +215,7 @@ test('rejects undeclared fields before an Artifact Block can enter the rendered 
   await completeExecution(started.attempt.execution_id);
 });
 
-test('runs the End-to-End Business Analysis front half through YAML command chains', async () => {
+test('runs the End-to-End Business Analysis front half through workspace command scripts', async () => {
   const { createTask, getTask } = await import('./tasks');
   const taskId = await createTask({
     title: '从想法自动交付项目体检能力',

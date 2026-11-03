@@ -2,8 +2,11 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import test from 'node:test';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import {
   inspectProcessIdentity,
+  terminateProcessTree,
   processIdentityCommand,
   processIdentityMatches,
   waitForProcessIdentity,
@@ -80,4 +83,21 @@ test('reads a stable identity for the current process', async () => {
 
   assert.ok(first);
   assert.deepEqual(second, first);
+});
+
+
+test('stopping a POSIX bridge waits for its slower CLI child after the bridge exits', { skip: process.platform === 'win32' }, async () => {
+  const childProgram = `process.on('SIGTERM',()=>setTimeout(()=>process.exit(0),300));console.log('ready');setInterval(()=>{},1000);`;
+  const parentProgram = `const {spawn}=require('node:child_process');const child=spawn(process.execPath,['-e',${JSON.stringify(childProgram)}],{stdio:['ignore','pipe','ignore']});child.stdout.once('data',()=>console.log(child.pid));process.on('SIGTERM',()=>process.exit(0));setInterval(()=>{},1000);`;
+  const parent = spawn(process.execPath, ['-e', parentProgram], { stdio: ['ignore', 'pipe', 'ignore'] });
+  const [output] = await once(parent.stdout!, 'data');
+  const childPid = Number(String(output).trim());
+  try {
+    assert.ok(childPid > 0);
+    assert.equal(await terminateProcessTree(parent.pid!, 5_000), true);
+    assert.equal(await inspectProcessIdentity(parent.pid!), null);
+    assert.equal(await inspectProcessIdentity(childPid), null);
+  } finally {
+    for (const pid of [childPid, parent.pid!]) { try { process.kill(pid, 'SIGKILL'); } catch { /* fixture already stopped */ } }
+  }
 });

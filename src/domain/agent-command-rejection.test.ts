@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   AgentCommandRejectedError,
   renderAgentCommandRejection,
+  commandResultMetadata,
 } from './agent-command-rejection';
 
 test('renders every generic command rejection as a structured and actionable receipt', () => {
@@ -29,4 +30,13 @@ test('renders every generic command rejection as a structured and actionable rec
   assert.match(output, /- Action: refresh_schema_and_retry/);
   assert.match(output, /passed \| failed \| blocked/);
   assert.match(output, /不要继续猜测字段/);
+});
+
+test('native tool results and escaped legacy summaries retain exact rejection identifiers', () => {
+  const body='# COMMAND RESULT\n\n- Outcome: rejected\n- Error-Code: schema_enum\n- Error-Path: verification/results/smoke.status\n- Occurrence: 2\n\n# NEXT\n';
+  const output={content:[{type:'text',text:body}]};
+  const expected={commandOutcome:'rejected',commandErrorCode:'schema_enum',commandErrorPath:'verification/results/smoke.status',commandRejectionOccurrence:2};
+  assert.deepEqual(commandResultMetadata(output),expected);
+  assert.deepEqual(commandResultMetadata(undefined,JSON.stringify(output)),expected);
+  assert.deepEqual(commandResultMetadata(body),expected);
 });

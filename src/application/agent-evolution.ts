@@ -1,4 +1,4 @@
-import { loadExternalAgent } from '../infrastructure/external-agents';
+import { loadExternalCommandPrompt } from '../infrastructure/external-command-prompts';
 import { randomUUID } from 'node:crypto';
 import { retryRecoveryPlanForFailure, retryNotBeforeForFailure } from './execution-retry-policy';
 import { mkdirSync, readFileSync } from 'node:fs';
@@ -63,7 +63,7 @@ function projectIdForEvidence(db: Awaited<ReturnType<typeof databaseConnection>>
 export function buildEvolutionPrompt(evidence: EvolutionEvidence, workspaceRoot = getConfiguredWorkspaceRoot()) {
   const command = loopAgentCommand();
   return [
-    loadExternalAgent(workspaceRoot, 'evolution-evaluator').prompt,
+    loadExternalCommandPrompt(workspaceRoot, 'evolution-evaluator').prompt,
     `每次启动必须先执行：${command} evolution status`,
     '之后逐项设置摘要、以稳定 observation key 增删观察；命令失败时根据完整错误自行修正并重试。',
     `完成时执行：${command} evolution complete`,

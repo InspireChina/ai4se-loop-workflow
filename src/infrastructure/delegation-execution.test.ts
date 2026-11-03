@@ -290,6 +290,29 @@ test('terminates the CLI immediately when the Runner cancellation signal is abor
   assert.ok(logs.some((line) => line.includes('需求已取消')));
 });
 
+test('reclaims a lingering CLI after durable Workflow submission without classifying it as cancellation or failure', async () => {
+  let reads = 0;
+  const { result, logs } = await run(
+    fixtureExecutor('omp', 'console.log(JSON.stringify({type:"message_end",message:{role:"assistant",content:[{type:"text",text:"I am finished"}]}}));setInterval(() => {}, 1000)'),
+    recordedTelemetry().telemetry,
+    {
+      maxRuntimeMs: 5_000,
+      idleTimeoutMs: 5_000,
+      completionRequested: () => {
+        reads += 1;
+        if (reads === 1) throw new Error('Transient read failure is not a submission');
+        return true;
+      },
+    },
+  );
+  assert.equal(reads, 2);
+  assert.equal(result.completionDetected, true);
+  assert.equal(result.cancelled, undefined);
+  assert.equal(result.finalText, 'I am finished');
+  assert.ok(logs.some(line => line.includes('领域终止结果已持久化')));
+  assert.ok(!logs.some(line => line.includes('执行失败') || line.includes('已取消 lane=')));
+});
+
 test('telemetry initialization, event/update, network, and bounded flush failures cannot block the CLI or leak secrets', async () => {
   const diagnostics: string[] = [];
   const telemetry = createLangfuseTelemetry({

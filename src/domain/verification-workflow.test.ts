@@ -8,7 +8,7 @@ import {
   verificationNormalCommandPath,
 } from './verification-workflow';
 
-test('defines Verification entirely from the YAML command chain', () => {
+test('defines Verification entirely from the workspace command script', () => {
   assert.equal(VERIFICATION_COMMAND_CHAIN.agent, 'test-agent');
   assert.deepEqual(VERIFICATION_PHASE_ORDER, ['inputs', 'plan', 'execute', 'evidence_review', 'finalize']);
   assert.equal(

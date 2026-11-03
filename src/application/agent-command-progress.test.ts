@@ -143,3 +143,26 @@ test('keeps every Agent domain command as one lifecycle record in execution audi
   ]);
   assert.equal(records[1].detail, '命令校验未通过（第 2 次）：verification/results/smoke.status');
 });
+
+test('native workflow tools appear in execution audit including receipts recorded before command normalization', async () => {
+ const { databaseConnection } = await import('../infrastructure/database');
+ const { createTask } = await import('./tasks');
+ const { agentCommandAuditInDb } = await import('./agent-command-progress');
+ const db=await databaseConnection();const taskId=await createTask({title:'Native command audit',itemType:'direct'});const executionId=randomUUID();
+ db.prepare(`INSERT INTO execution_attempts(execution_id,run_id,task_id,agent,pipeline,delegation_key,attempt,status,input_hash,input_json) VALUES(?,'RUN-native-audit',?,'direct-agent','direct',?,1,'applied','hash','{}')`).run(executionId,taskId,`direct:${taskId}`);
+ const insert=db.prepare("INSERT INTO execution_receipts(receipt_id,execution_id,kind,receipt_key,payload_json) VALUES(?,?,'tool_event',?,?)");
+ for(const [index,payload] of [
+  {tool:'loopwork',toolClass:'other',toolCallId:'first',phase:'started',summary:'{"args":["direct","run"]}'},
+  {tool:'loopwork',toolClass:'other',toolCallId:'first',phase:'completed',success:true,summary:'# DIRECT\n\n- Outcome: ready'},
+  {tool:'loopwork',toolClass:'other',toolCallId:'second',phase:'started',summary:'loopwork direct submit',input:{command:'loopwork direct submit'}},
+  {tool:'loopwork',toolClass:'other',toolCallId:'second',phase:'completed',success:true,input:{command:'loopwork direct submit'}},
+  {tool:'write',toolClass:'other',toolCallId:'device',phase:'started',summary:JSON.stringify({path:'xd://loopwork',content:JSON.stringify({args:['phase','complete']})})},
+  {tool:'write',toolClass:'other',toolCallId:'device',phase:'completed',success:true,summary:'# COMMAND RESULT\n\n- Outcome: phase_completed'},
+  {tool:'loopwork',toolCallId:'rejected-native',phase:'started',input:{command:'loopwork artifact put'}},
+  {tool:'loopwork',toolCallId:'rejected-native',phase:'completed',success:false,commandOutcome:'rejected\\n\\n- Error-Code: schema_enum',commandErrorCode:'schema_enum\\n- Error-Path: feedback/groups/x',commandErrorPath:'feedback/groups/x\\n- Occurrence: 2',summary:JSON.stringify({content:[{type:'text',text:'# COMMAND RESULT\n\n- Outcome: rejected\n- Error-Code: schema_enum\n- Error-Path: feedback/groups/x\n- Occurrence: 2\n'}]})},
+ ].entries())insert.run(randomUUID(),executionId,String(index).padStart(8,'0'),JSON.stringify(payload));
+ const audit=agentCommandAuditInDb(db,taskId);
+ assert.equal(audit.length,4);
+ assert.deepEqual(audit.map(record=>[record.label,record.status]),[['loopwork direct run','success'],['loopwork direct submit','success'],['loopwork phase complete','success'],['loopwork artifact put','rejected']]);
+ assert.equal(audit[3].detail,'命令校验未通过（第 2 次）：feedback/groups/x');
+});

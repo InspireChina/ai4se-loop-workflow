@@ -8,7 +8,7 @@ import {
   reproductionNormalCommandPath,
 } from './reproduction-workflow';
 
-test('defines Reproduction entirely from the YAML command chain', () => {
+test('defines Reproduction entirely from the workspace command script', () => {
   assert.equal(REPRODUCTION_COMMAND_CHAIN.agent, 'repro-agent');
   assert.deepEqual(REPRODUCTION_PHASE_ORDER, [
     'investigation', 'alignment_proposal', 'alignment_resolution', 'answer_review', 'finalize',

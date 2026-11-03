@@ -7,7 +7,7 @@ import {
   FEEDBACK_VERIFY_PHASE_ORDER,
 } from './feedback-workflow';
 
-test('Feedback triage and verification are separate YAML command chains', () => {
+test('Feedback triage and verification are separate workspace command scripts', () => {
   assert.equal(FEEDBACK_TRIAGE_COMMAND_CHAIN.agent, 'feedback-agent');
   assert.deepEqual(FEEDBACK_TRIAGE_PHASE_ORDER, [
     'inputs', 'clarification_proposal', 'clarification_resolution',

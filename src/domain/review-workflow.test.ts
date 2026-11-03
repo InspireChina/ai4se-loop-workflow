@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { REVIEW_PHASE_ORDER, REVIEW_WORKFLOW } from './review-workflow';
 
-test('Review workflow is loaded from the generic YAML command chain', () => {
+test('Review workflow is loaded from the generic workspace command script', () => {
   assert.deepEqual(REVIEW_PHASE_ORDER, [
     'inputs',
     'fact_reconciliation',

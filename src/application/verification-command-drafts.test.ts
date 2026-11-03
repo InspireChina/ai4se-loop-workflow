@@ -168,7 +168,7 @@ async function finish(executionId: string, token: string, risk?: string) {
   return command(executionId, token, ['phase', 'complete']);
 }
 
-test('Test Agent uses only the YAML command chain and compiles a passing independent verification result', async () => {
+test('Test Agent uses only the workspace command script and compiles a passing independent verification result', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const { completeExecution } = await import('./executions');
@@ -178,14 +178,19 @@ test('Test Agent uses only the YAML command chain and compiles a passing indepen
   const active = await begin(delegation, `${taskId}-pass`);
 
   assert.match(await command(active.executionId, active.token!, ['help']), /通用命令链/);
-  await assert.rejects(command(active.executionId, active.token!, ['verification', 'status']), /只允许 YAML 命令链协议/);
+  await assert.rejects(command(active.executionId, active.token!, ['verification', 'status']), /只允许命令脚本协议/);
   const status = await command(active.executionId, active.token!, ['status']);
   assert.match(status, /Phase: inputs/);
   assert.match(status, /acceptance:unit:fixture-unit.*missing/s);
   assert.match(status, /focus:AC-status/);
   assert.match(status, /guardrail:pending-visible/);
   assert.match(await reachExecute(active.executionId, active.token!), /EXECUTE · builtin/);
-  await assert.rejects(putScenario(active.executionId, active.token!), /验证计划已经冻结/);
+  assert.match(await putScenario(active.executionId, active.token!), /Outcome: unchanged/);
+  await assert.rejects(putResult(active.executionId,active.token!,{
+    key:'result:result-page',status:'passed',evidence:'不能生成不对应任何场景的孤立结果',
+  }),/--key 必须与原场景完全相同/);
+  const orphan=(await databaseConnection()).prepare("SELECT COUNT(*) AS count FROM command_chain_artifact_blocks WHERE block_id='results' AND item_key='result:result-page'").get() as {count:number};
+  assert.equal(orphan.count,0);
   await putResult(active.executionId, active.token!, {
     status: 'passed', evidence: '浏览器截图明确显示完成和未完成两种状态',
     actualBehavior: '完成结果展示完成状态，未完成结果保持可识别',
@@ -233,8 +238,47 @@ test('Test final gate derives specification and implementation rewinds from fail
   const result = await readAgentCommandSubmission(active.executionId);
   assert.equal(result?.verdict, 'failed');
   assert.equal(result?.failureKind, 'specification');
+  assert.equal(result?.summary, '独立验证失败：1 个场景存在规格矛盾');
   assert.equal(result?.rewindTo, 'analysis');
   assert.equal(result?.rewindDeliveryUnit, 1);
+});
+
+test('frozen verification rejects invalid appended references before storage and stays frozen after a phase rewind', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { taskId, delegation } = await verificationDelegation('验证计划引用与回流保护');
+  const active = await begin(delegation, `${taskId}-freeze`);
+  await command(active.executionId, active.token!, ['status']);
+  await reachExecute(active.executionId, active.token!);
+  const invalid = 'channel: frontend\ntitle: 新边界\nsetup: 页面已打开\nsteps: 点击按钮\nexpected: 原预期\ncoverageRefs: [unknown-source]';
+  await assert.rejects(put(active.executionId, active.token!, 'scenarios', invalid, 'new-risk'), /不存在的验证输入.*unknown-source/);
+  const db = await databaseConnection();
+  assert.equal(db.prepare('SELECT 1 FROM command_chain_artifact_blocks WHERE draft_id = (SELECT draft_id FROM agent_work_drafts WHERE last_execution_id = ?) AND item_key = ?').get(active.executionId, 'new-risk'), undefined);
+  await putScenario(active.executionId, active.token!, 'valid-new-risk');
+  await command(active.executionId, active.token!, ['phase', 'rewind', '--to', 'plan', '--reason', '补充计划覆盖，保持原有预期']);
+  assert.match(await putScenario(active.executionId, active.token!), /Outcome: unchanged/);
+  const original = db.prepare('SELECT b.content FROM agent_work_drafts a JOIN command_chain_artifact_blocks b USING(draft_id) WHERE a.last_execution_id = ? AND b.block_id = ? AND b.item_key = ?').get(active.executionId, 'scenarios', 'result-page') as {content:string};
+  await assert.rejects(put(active.executionId, active.token!, 'scenarios', original.content.replace('完成结果展示完成状态', '任意结果均可'), 'result-page'), /验证计划已经冻结.*expected/);
+  await assert.rejects(command(active.executionId, active.token!, ['artifact', 'remove', '--artifact', 'verification', '--block', 'scenarios', '--key', 'result-page']), /验证计划已经冻结/);
+});
+
+test('an old invalid reference can be repaired without changing the frozen Oracle or losing observations', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { taskId, delegation } = await verificationDelegation('验证引用元数据修正');
+  const active = await begin(delegation, `${taskId}-reference-repair`);
+  await command(active.executionId, active.token!, ['status']);
+  await reachExecute(active.executionId, active.token!);
+  const db = await databaseConnection();
+  const row = db.prepare('SELECT a.draft_id, b.content FROM agent_work_drafts a JOIN command_chain_artifact_blocks b USING(draft_id) WHERE a.last_execution_id = ? AND b.block_id = ? AND b.item_key = ?').get(active.executionId, 'scenarios', 'result-page') as {draft_id:string;content:string};
+  // Simulate a draft produced before pre-write reference validation existed.
+  const invalid = row.content.replace('acceptance:unit:fixture-unit', 'unknown-source');
+  db.prepare('UPDATE command_chain_artifact_blocks SET content = ? WHERE draft_id = ? AND block_id = ? AND item_key = ?').run(invalid, row.draft_id, 'scenarios', 'result-page');
+  await putResult(active.executionId, active.token!, {status:'passed',evidence:'独立浏览器观察保留'});
+  const weakened = row.content.replace('完成结果展示完成状态', '任意结果均可');
+  await assert.rejects(put(active.executionId, active.token!, 'scenarios', weakened, 'result-page'), /验证计划已经冻结/);
+  await put(active.executionId, active.token!, 'scenarios', row.content, 'result-page');
+  const result = db.prepare('SELECT content FROM command_chain_artifact_blocks WHERE draft_id = ? AND block_id = ? AND item_key = ?').get(row.draft_id, 'results', 'result-page') as {content:string};
+  assert.match(result.content, /独立浏览器观察保留/);
+  assert.match(await finish(active.executionId, active.token!), /Outcome: completed/);
 });
 
 for (const failureKind of ['implementation', 'specification'] as const) {
@@ -266,6 +310,10 @@ for (const failureKind of ['implementation', 'specification'] as const) {
     assert.equal(detail?.task.dev_index, 0);
     assert.equal(detail?.task.test_index, 0);
     assert.equal(detail?.task.analysis_index, failureKind === 'implementation' ? 1 : 0);
+    assert.equal(detail?.task.retry_cycle, 2);
+    assert.equal(detail?.lanes.find(lane => lane.lane === 'delivery')?.retry_cycle, 2);
+    assert.equal(detail?.lanes.find(lane => lane.lane === 'analysis')?.retry_cycle,
+      failureKind === 'specification' ? 2 : 1);
     assert.match(detail?.recoveryItems[0]?.details_json || '', /独立浏览器验证/);
     const dispatch = await inspectTaskDispatch(taskId);
     assert.ok(dispatch.some((item) => item.agent === expectedAgent && item.storyIndex === 1));

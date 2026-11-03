@@ -405,10 +405,29 @@ export async function cancelExecution(executionId: string, reason = '需求已�
   db.prepare(`
     UPDATE execution_attempts
     SET status = 'cancelled', last_error = ?, finished_at = CURRENT_TIMESTAMP,
+        dispatch_retry_consumed = 0, failure_kind = NULL, retry_not_before = NULL,
         heartbeat_at = CURRENT_TIMESTAMP
     WHERE execution_id = ? AND status != 'applied'
   `).run(reason, executionId);
   releaseExecutionResourceClaimsInDb(db, executionId);
+}
+
+/** Stopping the Runner does not revoke an already committed role submission. */
+export async function preserveSubmittedExecutionOnRunStop(executionId: string) {
+  const db = await databaseConnection();
+  const result = db.prepare(`
+    UPDATE execution_attempts
+    SET status = 'output_received', last_error = 'Loop 已停止，保留正式结果等待恢复应用',
+        finished_at = NULL, heartbeat_at = CURRENT_TIMESTAMP
+    WHERE execution_id = ? AND result_json IS NOT NULL
+      AND status NOT IN ('cancelled', 'applied')
+      AND EXISTS (SELECT 1 FROM loop_runs WHERE loop_runs.run_id = execution_attempts.run_id
+        AND loop_runs.status IN ('stopping', 'stopped'))
+      AND EXISTS (SELECT 1 FROM tasks WHERE tasks.task_id = execution_attempts.task_id
+        AND tasks.agile_status != 'cancelled' AND tasks.is_paused = 0)
+  `).run(executionId);
+  if (result.changes) releaseExecutionResourceClaimsInDb(db, executionId);
+  return result.changes > 0;
 }
 
 export async function deferExecutionResult(executionId: string, reason: string) {
@@ -449,6 +468,13 @@ export async function failExecutionWithRetryPolicy(
     if (!current || ['cancelled', 'applied'].includes(current.status)) {
       return { ignored: true as const, willRetry: false, failureAttempt: 0, maxRetries: policy.maxRetries };
     }
+    // A user stop terminates the CLI before the Runner can observe cancellation.
+    // Do not turn that expected exit into a failed attempt or retry backoff;
+    // endRun reconciles the interrupted execution without consuming its budget.
+    const stopping = db.prepare(`SELECT 1 FROM loop_runs
+      JOIN execution_attempts ON execution_attempts.run_id = loop_runs.run_id
+      WHERE execution_attempts.execution_id = ? AND loop_runs.status IN ('stopping', 'stopped')`).get(executionId);
+    if (stopping) return { ignored: true as const, willRetry: false, failureAttempt: 0, maxRetries: policy.maxRetries };
     const failureAttempt = current.attempt;
     const willRetry = failureAttempt <= policy.maxRetries;
     const retryNotBefore = willRetry ? retryNotBeforeForFailure(failureAttempt) : null;

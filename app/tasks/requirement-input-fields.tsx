@@ -106,7 +106,7 @@ export function RequirementInputFields({ dependencyCandidates, excludedTaskId, l
     </div>
     <fieldset className="dependency-picker">
       <legend>前置需求（可选）</legend>
-      <small>只有所选需求全部完成后，这个需求才会首次进入调度。</small>
+      <small>所选前置需求全部进入等待阅读或已完成后，这个需求才会首次进入调度。</small>
       {selectedDependencyIds.map((taskId) => <input type="hidden" name="dependsOnTaskId" value={taskId} key={taskId}/>)}
       {candidates.length > 0 && <input
         className="dependency-search"

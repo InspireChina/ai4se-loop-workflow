@@ -4,11 +4,16 @@ import { spawn } from 'node:child_process';
 import { mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 
 const [binary, ...forward] = process.argv.slice(2);
 if (!binary) throw new Error('Missing OMP executable');
+// A pipe can split a Chinese character or emoji between Buffer chunks.
+// Let Node retain incomplete UTF-8 sequences until the next chunk arrives.
+process.stdin.setEncoding('utf8');
 let input=''; for await (const chunk of process.stdin) input+=chunk;
 const args=[];
 for(let i=0;i<forward.length;i++) {
@@ -32,7 +37,22 @@ child.on('close',(code,signal)=>{clearTimeout(timer);if(!finishing&&!failed)emit
 createInterface({input:child.stdout}).on('line',(line)=>{
   let event;try{event=JSON.parse(line);}catch{process.stderr.write(line+'\n');return;}
   if (!['response','extension_ui_request','available_commands_update'].includes(event.type)) emit(event);
-  if(event.type==='ready'&&!sent){sent=true;write({id:'session-state',type:'get_state'});write({id,type:'prompt',message:input});}
+  if(event.type==='ready'&&!sent){
+    sent=true;write({id:'session-state',type:'get_state'});
+    // 先确认 OMP 确实发现文件命令，避免未知 /command 被当成普通消息送给模型。
+    if(process.env.LOOP_OMP_COMMAND)write({id:'workflow-command',type:'get_available_commands'});
+    else write({id,type:'prompt',message:input});
+  }
+  if(event.type==='response'&&event.id==='workflow-command'){
+    const name=process.env.LOOP_OMP_COMMAND;
+    const command=event.data?.commands?.find(command=>command.name===name&&command.source==='file');
+    try{
+      if(!event.success||!command)throw new Error(`OMP 未发现原生文件命令 /${name}`);
+      const source=readFileSync(process.env.LOOP_OMP_COMMAND_PATH,'utf8');
+      if(createHash('sha256').update(source).digest('hex')!==process.env.LOOP_OMP_COMMAND_HASH)throw new Error('Command Prompt 在 OMP 启动期间发生变化，请重新派发');
+      write({id,type:'prompt',message:input});
+    }catch(error){fail(error.message);}
+  }
   if(event.type==='extension_ui_request')write({type:'extension_ui_response',id:event.id,cancelled:true});
   if(event.type==='response'&&event.id==='session-state'&&event.success&&event.data?.sessionId)emit({type:'session',id:event.data.sessionId});
   if(event.type==='response'&&event.id===id){if(event.success===false)fail(typeof event.error==='string'?event.error:JSON.stringify(event.error));else if(event.data?.agentInvoked===false)finish();}

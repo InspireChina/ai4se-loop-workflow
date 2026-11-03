@@ -1,4 +1,6 @@
 import Link from 'next/link';
+import { databaseConnection } from '../../src/infrastructure/database';
+import { listDecisionTreeFiles } from '../../src/infrastructure/decision-tree-files';
 import { notFound } from 'next/navigation';
 import {
   ArrowLeft,
@@ -219,6 +221,7 @@ export default async function DecisionsPage({
   const embedded = params.embedded === 'task';
   const detail = await getTask(taskId);
   if (!detail) notFound();
+  const decisionFiles = listDecisionTreeFiles(await databaseConnection(), taskId);
 
   const requestedView = typeof params.view === 'string' ? params.view : 'all';
   const view: DecisionView = ['mine', 'agent', 'answered', 'audit'].includes(requestedView)
@@ -340,6 +343,19 @@ export default async function DecisionsPage({
       </main>
 
       <aside className="decision-demo-side">
+        {decisionFiles.length > 0 && <section className="card decision-file-sources">
+          <strong>决策树 JSON 文件</strong>
+          <p className="muted">节点、选项、依赖与答案保存在文件中；每次修改保留独立版本。</p>
+          {decisionFiles.map(file => {
+            const href = `/api/tasks/${encodeURIComponent(taskId)}/decision-tree?kind=${file.kind}&scope=${encodeURIComponent(file.scopeId)}`;
+            return <details key={`${file.kind}:${file.scopeId}`}>
+              <summary>{file.kind === 'questions' ? '任务决策树' : '命令链决策草稿'} · v{file.revision}</summary>
+              <p className="path-line">{file.path}</p>
+              <div className="decision-file-actions"><a href={href} target="_blank" rel="noreferrer">查看 JSON</a><a href={`${href}&download=1`}>下载 JSON</a></div>
+            </details>;
+          })}
+        </section>}
+
         <section className="card decision-demo-path">
           <div className="decision-demo-side-head"><GitBranch size={16}/><div><strong>当前决策路径</strong><small>按依赖关系生成</small></div></div>
           {current.length === 0 ? <div className="empty">尚无决策节点。</div> : current.map((question, index) => <div key={question.question_id}>

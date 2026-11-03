@@ -31,17 +31,21 @@ let appMigrationLastCheckedAt = 0;
 const businessDatabases = new Map<string, Database.Database>();
 const businessMigrations = new Map<string, Promise<Database.Database>>();
 function migrateAppDatabase(database: Database.Database) {
-  database.pragma('busy_timeout = 15000');
-  database.exec('CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, executed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)');
-  const directory = join(/* turbopackIgnore: true */ appRoot, 'app-migrations');
-  for (const name of readdirSync(directory).filter((item) => item.endsWith('.sql')).sort()) {
-    database.transaction(() => {
-      const applied = database.prepare('SELECT 1 FROM schema_migrations WHERE name = ?').get(name);
-      if (applied) return;
-      database.exec(readFileSync(join(directory, name), 'utf8'));
-      database.prepare('INSERT OR IGNORE INTO schema_migrations(name) VALUES (?)').run(name);
-    }).immediate();
-  }
+  // Seed/configuration content must be externalized before its first commit.
+  database.transaction(() => {
+    database.pragma('busy_timeout = 15000');
+    database.exec('CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, executed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)');
+    const directory = join(/* turbopackIgnore: true */ appRoot, 'app-migrations');
+    for (const name of readdirSync(directory).filter((item) => item.endsWith('.sql')).sort()) {
+      database.transaction(() => {
+        const applied = database.prepare('SELECT 1 FROM schema_migrations WHERE name = ?').get(name);
+        if (applied) return;
+        database.exec(readFileSync(join(directory, name), 'utf8'));
+        database.prepare('INSERT OR IGNORE INTO schema_migrations(name) VALUES (?)').run(name);
+      }).immediate();
+    }
+    installFilePayloadColumns(database);
+  }).immediate();
 }
 
 export function appDatabaseConnection() {
@@ -53,14 +57,12 @@ export function appDatabaseConnection() {
     appDb.pragma('journal_mode = WAL');
     appDb.pragma('synchronous = NORMAL');
     migrateAppDatabase(appDb);
-    installFilePayloadColumns(appDb);
     appMigrationLastCheckedAt = Date.now();
   } else if (process.env.NODE_ENV === 'development' && Date.now() - appMigrationLastCheckedAt >= 1_000) {
     // Turbopack can hot-reload callers while retaining this open SQLite connection.
     // Re-scan migrations in development so newly added app migrations do not require
     // business code to query a stale schema before the developer restarts the server.
     migrateAppDatabase(appDb);
-    installFilePayloadColumns(appDb);
     appMigrationLastCheckedAt = Date.now();
   }
   return appDb;
@@ -193,6 +195,7 @@ async function migrateBusinessSchema(database: Database.Database, workspaceRoot:
     const projectId = ensureDefaultProject(database, workspaceRoot);
     await migrator.up();
     ensureDefaultProject(database, workspaceRoot);
+    installFilePayloadColumns(database);
     database.exec('COMMIT');
     return projectId;
   } catch (error) {
@@ -255,7 +258,6 @@ export async function migrateDatabase() {
     // DJI starts directly from its state database. Never scan, copy or merge historical projects.
     const database = getBusinessDatabase(globalDbPath);
     await migrateBusinessSchema(database, workspaceRoot);
-    installFilePayloadColumns(database);
     return database;
   })();
   businessMigrations.set(globalDbPath, migration);

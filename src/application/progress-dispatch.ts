@@ -301,13 +301,19 @@ async function inspect(input: { requirementId: string }): Promise<DispatchExplan
     return { requirementId: input.requirementId, decisions: [{ lane: 'control', state: 'waiting', reason: 'dependencies-pending' }] };
   }
   let selected: DelegationEnvelope[] = [];
-  db.exec('SAVEPOINT dispatch_inspect');
-  try {
-    selected = planDispatchInDb(db).filter((work) => work.taskId === input.requirementId);
-  } finally {
-    db.exec('ROLLBACK TO dispatch_inspect');
-    db.exec('RELEASE dispatch_inspect');
-  }
+  const preview = () => {
+    db.exec('SAVEPOINT dispatch_inspect');
+    try {
+      return planDispatchInDb(db).filter((work) => work.taskId === input.requirementId);
+    } finally {
+      db.exec('ROLLBACK TO dispatch_inspect');
+      db.exec('RELEASE dispatch_inspect');
+    }
+  };
+  // The planner may provision or refresh Lane state before rolling it back.
+  // Reserve the writer before its first read: a deferred SAVEPOINT can otherwise
+  // become a stale WAL snapshot while a Runner commits, then fail on promotion.
+  selected = db.inTransaction ? preview() : db.transaction(preview).immediate();
   const occupiedLanes = new Set(decisions.map((decision) => decision.lane));
   for (const work of selected) {
     if (!occupiedLanes.has(work.lane)) decisions.push({ lane: work.lane, state: 'selected', work });

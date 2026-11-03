@@ -196,7 +196,7 @@ function commandChainPhases(profile: AgentCommandProfile, pipeline: string): Age
     }];
   }
   if (!profile.commandChainId) {
-    throw new Error(`${profile.agent}/${pipeline} 未绑定 YAML 命令链`);
+    throw new Error(`${profile.agent}/${pipeline} 未绑定命令链脚本`);
   }
   const definition = loadCommandChainDefinition(profile.commandChainId);
   return Object.entries(definition.phases).map(([id, phase]) => ({
@@ -247,7 +247,8 @@ export function agentCommandWorkKey(
   if (profile.draftType === 'requirement_context') return `requirement-context:${taskId}`;
   if (profile.draftType === 'business_analysis') return `business-analysis:${taskId}:${agent}`;
   if (profile.draftType === 'delivery_plan') {
-    return `delivery-plan:${taskId}:${pipeline}:${delegationKey || storyIndex || 'task'}`;
+    if (pipeline === 'feedback-split' && !scopeKey) throw new Error('反馈交付规划缺少稳定工作组 ID');
+    return `delivery-plan:${taskId}:${pipeline}:${scopeKey || 'task'}`;
   }
   if (profile.draftType === 'reproduction') {
     return pipeline === 'feedback-repro'
@@ -283,6 +284,10 @@ export function agentContextCommandPrefix(appRoot: string) {
 export function agentContextHelpLines(appRoot: string) {
   const command = agentContextCommandPrefix(appRoot);
   return [
+    '优先使用原生 loopwork 工具读取冻结上下文，例如 `{args:["agent-context","get","DOC:实际文档ID"]}` 或 `{args:["agent-context","list","--kind","document"]}`。',
+    'Context ref 是命令参数，不是文件路径或 MCP URI；不要使用 read、agent-context:// 或猜测磁盘目录读取 DOC:/DELIVERY_SPEC: 等 ref。',
+    '以下 CLI 语法用于维护参考；原生工具只传 agent-context 及其后续参数。',
+    '',
     `- \`${command} overview\``,
     '  重新查看当前工作、权威事实、活动义务和当前角色可见的最近执行摘要。',
     '',
@@ -311,6 +316,7 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
     return [
       '# Agent Tool Contract',
       '当前 execution 只有 RUN → SUBMIT 两步，不创建渐进式草稿。',
+      '提供 loopwork 工具时，领域命令必须直接调用该工具，例如 {"args":["direct","run"]}；下方 Node 前缀只表示 CLI 等价写法，不要再通过 Bash 执行它。真正的项目检查仍通过 Shell 工具取得回执。',
       '',
       '**第一步：**',
       '```bash',
@@ -332,11 +338,12 @@ export function agentCommandPrompt(appRoot: string, agent: string, pipeline: str
     ].join('\n');
   }
   if (!profile.commandChainId) {
-    throw new Error(`${profile.agent}/${pipeline} 未绑定 YAML 命令链`);
+    throw new Error(`${profile.agent}/${pipeline} 未绑定命令链脚本`);
   }
   return [
     '# Agent Tool Contract',
-    '当前 execution 使用 YAML 声明的通用命令链。命令不绑定 Agent namespace；Artifact、Decision 和 Phase 是共享协议。',
+    '当前 execution 使用工作目录脚本提供的通用命令链。命令不绑定 Agent namespace；Artifact、Decision 和 Phase 是共享协议。',
+    '提供 loopwork 工具时，所有领域命令必须直接调用该工具，例如 {"args":["status"]}、{"args":["phase","complete"]}；下方 Node 前缀只表示 CLI 等价写法，不要再通过 Bash 执行它。真正的项目检查仍通过 Shell 工具取得回执。',
     '',
     '**首次必须执行：**',
     '```bash',

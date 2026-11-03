@@ -52,19 +52,23 @@ flowchart LR
 
 一个实例只运行一个工作目录，不支持项目注册、增删、切换或按项目筛选。默认使用启动目录，也可通过 `./start.sh --workspace /path/to/repository` 指定。工作目录在实例运行期间固定；环境变量 `LOOP_WORKSPACE_ROOT` 可在启动前显式指定，`.env` / `.env.local` 中的旧目录选择不再生效。
 
-Agent 仍是原有 Workflow 中固定的角色；`.omp/agents` 仅提供对应角色的外部定义，不会自动创建新角色、改变流程或增加节点。多余定义可以供 OMP 子任务使用，但不加入 LoopWork Workflow。
+Agent 仍是原有 Workflow 中固定的角色；同名 `.omp/commands/*.md` 提供原生 Command Prompt，不会自动创建新角色、改变流程或增加节点。真正的 OMP 子 Agent 定义留在 `.omp/agents`。
 
 状态数据库内部保留一个固定命名空间用于 Workflow 外键、锁和证据关联，不再构成多项目功能。已有任务的数据目录不能切换到其他工作目录；运行其他目录请使用独立 `--data-dir`。
 
 ## DJI 文件与 Agent 定义
 
-原有 Workflow、角色分工、阶段流转及完整 Web UI 保留。系统自动扫描当前工作目录 `.omp/agents/**/*.md`。有 frontmatter `name` 时以它作为角色 ID，否则以文件名（去掉 `.md`）作为角色 ID。文件可以任意命名或分目录组织；重复 ID 或无效定义会明确报错。
+原有 Workflow、角色分工、阶段流转及完整 Web UI 保留。系统按 OMP 原生规则扫描当前工作目录直属 `.omp/commands/*.md`，以文件名绑定固定角色，例如 `/backlog-agent`。frontmatter 的 name 若存在须与文件名一致；不扫描子目录或 `.omp/agents`，无效定义会明确报错。
 
-Agent Prompt 只使用检测到的 Markdown 正文，可引用 `.omp` Skill 和 Markdown 模板。新增、修改、删除文件会在下次页面加载或执行时直接反映，无需导入。缺失定义会在页面标明并阻止该角色执行，不回退到服务目录、环境配置或内部 Prompt。
+主流程通过原生 slash command 展开检测到的 Markdown 正文，可引用 `.omp` Skill 和 Markdown 模板。新增、修改、删除文件会在下次页面加载或执行时直接反映，无需导入。缺失定义会在页面标明并阻止该角色执行，不回退到服务目录、环境配置或内部 Prompt。
 
-LoopWork 内部只保留 Workflow 角色身份和执行协议，不向工作目录初始化或复制角色定义，也不编辑或演化覆盖 Agent Prompt。Prompt 页面用于展示检测结果、文件来源和正文。一次执行会在原生会话目录冻结 Markdown 正文快照，用于保证执行输入稳定；它不是可编辑的角色配置。Runtime 目录不再生成 `PROMPT.md` 副本；Agent frontmatter 可声明 `model`、`thinking`（兼容 `thinking-level` / `thinkingLevel`）、`tools` 和 `skills`；模型与思考强度仍可在每个 Agent 的 Runtime 页面自定义并优先于外部定义；留空字段继续继承外部定义、流程默认与 OMP 默认。`tools: []` 禁用内置工具，`skills` 对应 OMP 原生 Skill 名称过滤，Skill 的发现和加载由 OMP 自身完成。主流程角色使用一个模型，OMP 子 Agent 的专属配置仍由 OMP 管理。原角色 Prompt 文件位于本仓库 `.omp/agents/`，系统不会把它们自动复制到其他工作目录。
+LoopWork 内部只保留 Workflow 角色身份和执行协议，不向工作目录初始化或复制角色定义，也不编辑或演化覆盖 Agent Prompt。Prompt 页面用于展示检测结果、文件来源和正文。每次执行保留源文件审计快照，启动前核对源文件哈希和原生命令注册；流程协议作为工作包追加，专业正文不重复追加到 system prompt。Runtime 目录不再生成 `PROMPT.md` 副本；Agent frontmatter 可声明 `model`、`thinking`（兼容 `thinking-level` / `thinkingLevel`）、`tools` 和 `skills`；模型与思考强度仍可在每个 Agent 的 Runtime 页面自定义并优先于外部定义；留空字段继续继承外部定义、流程默认与 OMP 默认。`tools: []` 禁用内置工具，`skills` 对应 OMP 原生 Skill 名称过滤，Skill 的发现和加载由 OMP 自身完成。主流程角色使用一个模型，OMP 子 Agent 的专属配置仍由 OMP 管理。原角色 Prompt 文件位于本仓库 `.omp/commands/`，系统不会把它们自动复制到其他工作目录。
 
 新版本默认使用 `data/dji/` 独立数据根目录，不导入之前运行的数据。文档、对话、日志、内容与 JSON 快照以独立文件保存，数据库保存状态、索引和文件引用；可在设置的“工作目录 → 文件存放目录”指定目录，也可用 `LOOP_FILES_ROOT` 固定目录。不同文档版本使用独立文件，事务回滚不覆盖已发布版本。 应同时备份完整数据根目录（包括状态数据库和 payload-key）及所选文件目录，切换存放目录不会搬迁旧文件。内容文件按哈希保存，未被提交或引用的文件可能作为孤立文件保留，当前不自动清理。
+
+同名 Markdown 和 CJS 配对维护；每份 Prompt 明确对应脚本，每次工作包注入准确的角色、Pipeline、链 ID 和首个工具调用。脚本包含维护注释，详见 [命令脚本接口与维护指南](./docs/command-script-api.md)。
+
+决策树按完整 JSON 文件保存：`<文件目录>/<taskId>/decisions/<kind>/<scopeId>/<hash>.json`。每份草稿和任务树集中保存节点、选项、依赖、推荐及答案；数据库仅保留节点身份、状态和文件引用。决策页面可查看、下载当前 JSON；修改仍经过原有命令与人工回答入口。每次修改保留独立文件，事务回滚不会覆盖旧版本。
 
 ## 人机边界
 
@@ -82,7 +86,7 @@ LoopWork 只在以下情况请求人介入：
 
 ## Workflow Infra
 
-不同项目的 Prompt 和业务知识不同，但底层 Workflow 基本相同。LoopWork 统一提供：
+不同工作目录的 Prompt 和业务知识不同，每个实例固定一个工作目录，底层 Workflow 保持一致。LoopWork 统一提供：
 
 - Agent 调度、角色化上下文投影与认知隔离。
 - execution 级 Context Snapshot、精简 Working Pack 和按需只读上下文检索。
@@ -92,10 +96,10 @@ LoopWork 只在以下情况请求人介入：
 - execution attempt、Receipt、中断恢复、重试和 rewind。
 - Feedback Agent 的批次分组、前向追加工作和独立处理验证。
 - 每个需求一个持久化 Chat 会话；Agent 每轮重新读取交付文档、活动和代码。Runner 空闲、相关文件归属清楚且调整不改变业务语义、范围、可观察结果或验收标准时，可直接完成局部 UI、排版和 wording 小改动，验证后只提交自己的代码且不创建交付单元；其他变化统一进入 Feedback 闭环，始终不由 Chat 修改 Loop 状态。
-- 权限边界、人工介入和可插拔执行器。
-- 执行证据、Memory 与运行诊断界面保留；不生成内部 Prompt 候选，不自动改写外部 Agent。独立 Evaluator 默认停用，显式设置 `LOOP_ENABLE_EVALUATOR=1` 才会运行，其角色同样来自 `.omp/agents/evolution-evaluator.md`。
+- 权限边界、人工介入和 OMP 执行驱动。
+- 执行证据、Memory 与运行诊断界面保留；不生成内部 Prompt 候选，不自动改写外部 Agent。独立 Evaluator 默认停用，显式设置 `LOOP_ENABLE_EVALUATOR=1` 才会运行，其角色同样来自 `.omp/commands/evolution-evaluator.md`。
 
-项目只需要注入自己的 Agent Profile、领域知识、AC、工具、权限和验证规则；后续可以进一步通过 Skill 和 Workflow Profile 复用这些配置。统一的是“如何可靠运行一个 Loop”，而不是“每个项目应该做什么”。
+工作目录通过原生 Command、Skill 和 Markdown 模板维护专业指令、领域知识与规则；LoopWork 负责调度、状态和证据关系。
 
 ## 当前范围
 
@@ -110,14 +114,17 @@ LoopWork 只在以下情况请求人介入：
 ## DJI 运行边界
 
 - 原有 Workflow、角色权限、执行凭证、幂等、Dev / Test 隔离和结果应用仍由 LoopWork 管理。
-- `.omp/agents` 维护专业指令，包括流程角色、任务 Chat、配置辅助和验证协助；Skill、规则及 Markdown 模板使用 OMP 自身的发现机制。
+- `.omp/commands` 维护原生 Command 专业指令，包括流程角色、任务 Chat、配置辅助和验证协助；Skill、规则及 Markdown 模板使用 OMP 自身的发现机制。
 - 原生 `loopwork` 工具只暴露当前执行授权的领域命令，不执行 Shell。即使角色没有 Bash，也可查询状态、提交产物；服务端仍校验凭证与阶段。
+- 命令链直接加载 `.omp/commands/<agent-id>.cjs` 原始源码。阶段描述、执行、校验、结果组装及恢复使用 API v1；共享实现也公开在 `.omp/commands/workflow/*.cjs`。页面可直接查看、修改、检查语法和保存源文件，保留阶段图与 Chat 辅助。详见 [命令脚本接口](./docs/command-script-api.md)。
 - Web 日志通过运行事件推送，连接和丢失事件由定期校准恢复。任务执行、对话的模型事件继续呈现在原 UI。
 - DJI 仅提供 Web 入口，不包含桌面端、历史数据库导入及其他执行器适配。
 
 ## 快速开始
 
 DJI 分支保留完整 Workflow 和 Web UI，仅支持 OMP。`./start.sh` 启动 Web/API 和 Runner 监督服务；也可用 `./start.sh --port 8000 --data-dir /path/to/data` 指定端口和数据根目录。首次缺少依赖时自动安装。生产模式先 `npm run build`，再 `./start.sh --production`。
+
+使用本地 Ollama 时，OMP 的上下文预算应与服务实际窗口一致。例如服务使用 65536 tokens，可用 `OLLAMA_CONTEXT_LENGTH=65536 ./start.sh --production` 启动。这是 [OMP 原生环境变量](https://github.com/can1357/oh-my-pi/blob/v17.2.15/docs/environment-variables.md)，只调整 OMP 的预算，不改变模型服务的运行窗口；LoopWork 直接继承，不维护另一套压缩逻辑。
 
 要求 Node.js 20.9+ 环境，并预先安装并配置 Oh My Pi（OMP）CLI。LoopWork 通过本机 `omp --mode rpc` 驱动原生会话、工具、Skill 与上下文压缩。每次 Workflow 执行隔离会话，任务 Chat 使用可恢复会话，均保存在所选文件目录的 `sessions/` 下。模型和思考强度按字段继承：Agent 页面已启用配置中的自定义值 → 外部定义 → 流程全局默认 → OMP 默认。模型留空或思考强度选择默认时继续继承。专业 Prompt 始终来自外部文件。可通过 `OMP_CLI` 覆盖可执行文件路径。
 
@@ -126,7 +133,7 @@ npm install
 ./start.sh
 ```
 
-打开 `http://localhost:3000`，确认页面显示的当前工作目录，再到 Agent 配置页为各流程 Agent 配置 OMP 模型和思考强度，然后在运行页面启动 Loop。目标工作目录需要准备对应 `.omp/agents` 定义；系统不会自动复制本仓库角色文件。
+打开 `http://localhost:3000`，确认页面显示的当前工作目录，再到 Agent 配置页为各流程 Agent 配置 OMP 模型和思考强度，然后在运行页面启动 Loop。目标工作目录需要准备对应 `.omp/commands/<agent-id>.md` 原生命令及 `.omp/commands/<agent-id>.cjs` 和对应共享实现源码；系统不会自动复制本仓库定义。
 
 常用命令：
 

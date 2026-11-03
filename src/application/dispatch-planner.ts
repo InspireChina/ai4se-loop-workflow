@@ -298,7 +298,24 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
   const lines: DelegationEnvelope[] = [];
   const analysisCandidates: { task: Task; lane: TaskLane }[] = [];
 
+  const dispatchAnalysisCandidates = () => {
+    for (const candidate of analysisCandidates.sort(compareAnalysisCandidates)) {
+      if (!agentSlots) break;
+      const work = laneLine(candidate.task, candidate.lane, true);
+      if (!work || !resourcesAvailable(db, work, resourceClaims, reservedResources)) continue;
+      reserveResources(db, work, reservedResources);
+      lines.push(toEnvelope(candidate.task, work, candidate.lane.retry_cycle));
+      agentSlots -= 1;
+    }
+    analysisCandidates.length = 0;
+  };
+  let priorityRank: number | undefined;
   for (const task of tasks) {
+    const nextPriorityRank = requirementPriorityRank(task.priority);
+    // Keep control/delivery precedence within one priority, but do not let a
+    // lower priority consume slots before the higher priority Analysis queue.
+    if (priorityRank !== undefined && priorityRank !== nextPriorityRank) dispatchAnalysisCandidates();
+    priorityRank = nextPriorityRank;
     if (!requirementDependencyGateOpenInDb(db, task.task_id)) continue;
     refreshTaskLaneStatesInDb(db, task);
     const lanes = taskLanesInDb(db, task);
@@ -347,14 +364,7 @@ export function planDispatchInDb(db: Db): DelegationEnvelope[] {
     agentSlots -= 1;
   }
 
-  for (const candidate of analysisCandidates.sort(compareAnalysisCandidates)) {
-    if (!agentSlots) break;
-    const work = laneLine(candidate.task, candidate.lane, true);
-    if (!work || !resourcesAvailable(db, work, resourceClaims, reservedResources)) continue;
-    reserveResources(db, work, reservedResources);
-    lines.push(toEnvelope(candidate.task, work, candidate.lane.retry_cycle));
-    agentSlots -= 1;
-  }
+  dispatchAnalysisCandidates();
   return lines;
 }
 

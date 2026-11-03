@@ -1,4 +1,4 @@
-import { loadExternalAgent } from '../infrastructure/external-agents';
+import { loadExternalCommandPrompt } from '../infrastructure/external-command-prompts';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { AgentExecutionOptions } from '../infrastructure/agent-executor';
@@ -234,7 +234,7 @@ export function buildVerificationAssistancePrompt(job: ClaimedVerificationAssist
     '# 先前尝试',
     previous,
     '',
-    loadExternalAgent(workspaceRoot, 'system-assistance-agent').prompt,
+    loadExternalCommandPrompt(workspaceRoot, 'system-assistance-agent').prompt,
     '# 可用领域命令',
     `查看状态：${command} verification-assistance status`,
     `成功解决：${command} verification-assistance resolve --answer-file <UTF-8 答复文件>`,

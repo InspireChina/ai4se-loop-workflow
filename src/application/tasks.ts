@@ -2186,6 +2186,7 @@ export async function rewindTask(input: unknown) {
           blocked_reason = NULL, resume_status = NULL, resume_pending = 0,
           run_state = 'runnable', closure_status = 'none', review_document_id = NULL,
           closure_acknowledged_at = NULL,
+          retry_cycle = retry_cycle + 1,
           last_actor = ?, completed_at = NULL, updated_at = CURRENT_TIMESTAMP
       WHERE task_id = ?
     `).run(nextStatus, targetAgent, analysisIndex, devIndex, testIndex, totalStories, resolvedSpecIndex, value.reason || `回退 ${storyLabel} 到 ${value.to}`, value.actor, value.taskId);
@@ -2202,6 +2203,11 @@ export async function rewindTask(input: unknown) {
       const nextTask = fetchTask(db, value.taskId);
       if (nextTask) refreshTaskLaneStatesInDb(db, nextTask);
     }
+    // Business correction is new work, not an executor failure retry. Give the
+    // affected lanes fresh dispatch generations while retaining their history.
+    db.prepare(`UPDATE task_lanes SET retry_cycle = retry_cycle + 1
+      WHERE task_id = ? AND (? = 1 OR lane = 'delivery')`)
+      .run(value.taskId, taskLevelRewind || value.to === 'analysis' ? 1 : 0);
     addEvent(db, value.taskId, value.actor, 'TaskRewound', `回退 ${storyLabel} 到 ${value.to}`);
     db.exec('COMMIT');
     await syncTaskFiles(db, value.taskId, { createClearedBlock: true });

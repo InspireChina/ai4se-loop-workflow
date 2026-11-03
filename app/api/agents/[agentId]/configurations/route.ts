@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
-import { activateAgentConfiguration, createAgentConfiguration, deleteAgentConfiguration, listAgentConfigurations, renameAgentConfiguration, saveAgentConfigurationDocument } from '../../../../../src/application/agent-configurations';
+import { getAgentCommandFile, saveAgentCommandScript, validateAgentCommandFile } from '../../../../../src/application/agent-configurations';
+import { isAllowedLocalRequestOrigin } from '../../../../../src/infrastructure/local-request-origin';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -11,21 +12,21 @@ function errorResponse(error: unknown) {
 export async function GET(_request: Request, context: { params: Promise<{ agentId: string }> }) {
   try {
     const { agentId } = await context.params;
-    return NextResponse.json({ configurations: listAgentConfigurations(agentId) });
+    return NextResponse.json({ source: getAgentCommandFile(agentId) });
   } catch (error) { return errorResponse(error); }
 }
 
 export async function POST(request: Request, context: { params: Promise<{ agentId: string }> }) {
+  if (!isAllowedLocalRequestOrigin(request)) return NextResponse.json({ error: '不允许跨来源修改命令脚本' }, { status: 403 });
+  if (!request.headers.get('content-type')?.toLowerCase().startsWith('application/json')) return NextResponse.json({ error: '请使用 application/json' }, { status: 415 });
   try {
     const { agentId } = await context.params;
     const body = await request.json() as Record<string, unknown>;
-    const action = String(body.action || '');
-    if (action === 'create') createAgentConfiguration({ agentId, name: body.name, fromConfigurationId: body.fromConfigurationId });
-    else if (action === 'rename') renameAgentConfiguration({ agentId, configurationId: body.configurationId, name: body.name });
-    else if (action === 'activate') activateAgentConfiguration({ agentId, configurationId: body.configurationId });
-    else if (action === 'delete') deleteAgentConfiguration({ agentId, configurationId: body.configurationId });
-    else if (action === 'save') saveAgentConfigurationDocument({ agentId, configurationId: body.configurationId, commandChainId: body.commandChainId, yaml: body.yaml });
-    else throw new Error('未知 Agent 配置操作');
-    return NextResponse.json({ configurations: listAgentConfigurations(agentId) });
+    if (body.action === 'save') return NextResponse.json({ source: saveAgentCommandScript(agentId, {
+      relativePath: body.relativePath, content: body.content, expectedHash: body.expectedHash,
+    }) });
+    if (body.action !== 'validate') return NextResponse.json({ error: '仅支持脚本语法校验和保存外部源文件' }, { status: 405 });
+    validateAgentCommandFile(agentId, body.content);
+    return NextResponse.json({ valid: true, scope: 'syntax' });
   } catch (error) { return errorResponse(error); }
 }

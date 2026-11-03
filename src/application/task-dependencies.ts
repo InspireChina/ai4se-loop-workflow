@@ -27,7 +27,7 @@ export function requirementDependenciesInDb(db: Database.Database, taskId: strin
     FROM task_dependencies dependency
     JOIN tasks upstream ON upstream.task_id = dependency.depends_on_task_id
     WHERE dependency.task_id = ?
-    ORDER BY dependency.created_at, upstream.title, upstream.task_id
+    ORDER BY dependency.created_at, loopwork_read_payload(upstream.title), upstream.task_id
   `).all(taskId) as RequirementDependency[];
 }
 

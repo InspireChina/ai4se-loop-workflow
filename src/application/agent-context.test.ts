@@ -1,6 +1,6 @@
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
 import assert from 'node:assert/strict';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 import { deliverySpecFixture } from '../test/delivery-spec-fixture';
@@ -92,8 +92,8 @@ test('renders only the hot Backlog context in the launch Prompt while retaining 
   assert.doesNotMatch(minimalRecovery, /Remind readers before a loan expires/);
 });
 
-test('exposes active OpenSpec changes when the current Agent uses an OpenSpec configuration', async () => {
-  const { activateAgentConfiguration, listAgentConfigurations } = await import('./agent-configurations');
+test('exposes active OpenSpec changes when the external command file declares the repository adapter', async () => {
+  const { getAgentCommandFile } = await import('./agent-configurations');
   const { createTask, getTaskContext } = await import('./tasks');
   const { buildAgentContextSnapshot, renderAgentContextList, renderAgentContextResource } = await import('./agent-context');
   const { paths } = await import('../infrastructure/database');
@@ -102,33 +102,34 @@ test('exposes active OpenSpec changes when the current Agent uses an OpenSpec co
   writeFileSync(join(changeRoot, 'proposal.md'), '# Proposal\n\nRead repository documents.\n');
   writeFileSync(join(changeRoot, 'specs', 'context', 'spec.md'), '# Context\n\n### Requirement: Context is readable\n');
 
-  const configurations = listAgentConfigurations('backlog-agent');
-  const original = configurations.find((configuration) => configuration.active)!;
-  const openSpec = configurations.find((configuration) => configuration.builtinKey === 'openspec')!;
-  activateAgentConfiguration({ agentId: 'backlog-agent', configurationId: openSpec.configurationId });
-  const taskId = await createTask({ title: 'OpenSpec context', itemType: 'feature' });
-  const full = await getTaskContext(taskId);
-  const snapshot = buildAgentContextSnapshot({
-    delegation: delegation(taskId, {
-      agent: 'backlog-agent',
-      lane: 'control',
-      pipeline: 'backlog',
-      storyIndex: null,
-      itemType: 'feature',
-      title: 'OpenSpec context',
-      taskDescription: null,
-    }),
-    full,
-    activeFeedback: [],
-    activeRecovery: [],
-  });
+  const source = getAgentCommandFile('backlog-agent');
+  const original = readFileSync(source.path!, 'utf8');
+  const code = original.replace('"artifacts": {', '"artifacts": { "repository-docs": {"type": "repository", "adapter": "openspec", "title": "OpenSpec", "blocks": {} },');
+  writeFileSync(source.path!, code);
+  try {
+    const taskId = await createTask({ title: 'OpenSpec context', itemType: 'feature' });
+    const full = await getTaskContext(taskId);
+    const snapshot = buildAgentContextSnapshot({
+      delegation: delegation(taskId, {
+        agent: 'backlog-agent',
+        lane: 'control',
+        pipeline: 'backlog',
+        storyIndex: null,
+        itemType: 'feature',
+        title: 'OpenSpec context',
+        taskDescription: null,
+      }),
+      full,
+      activeFeedback: [],
+      activeRecovery: [],
+    });
 
-  const proposal = snapshot.resources.find((resource) => resource.ref.endsWith('/proposal.md'))!;
-  assert.equal(proposal.storage, 'repository');
-  assert.match(renderAgentContextList(snapshot), /repository/);
-  assert.match(renderAgentContextResource(snapshot, proposal.ref), /contentHash=/);
-  assert.match(renderAgentContextResource(snapshot, proposal.ref), /Read repository documents/);
-  activateAgentConfiguration({ agentId: 'backlog-agent', configurationId: original.configurationId });
+    const proposal = snapshot.resources.find((resource) => resource.ref.endsWith('/proposal.md'))!;
+    assert.equal(proposal.storage, 'repository');
+    assert.match(renderAgentContextList(snapshot), /repository/);
+    assert.match(renderAgentContextResource(snapshot, proposal.ref), /contentHash=/);
+    assert.match(renderAgentContextResource(snapshot, proposal.ref), /Read repository documents/);
+  } finally { writeFileSync(source.path!, original); }
 });
 
 test('builds a compact execution snapshot while preserving full context for just-in-time reads', async () => {

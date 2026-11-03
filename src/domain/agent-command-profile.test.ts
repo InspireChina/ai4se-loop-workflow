@@ -6,12 +6,23 @@ import {
   agentCommandPrompt,
   agentCommandProfiles,
   agentContextHelpLines,
+  agentCommandWorkKey,
 } from './agent-command-profile';
-import { loadCommandChainDefinition, parseCommandChainDefinition } from './command-chain-definition';
-import { bundledCommandChainYaml } from '../infrastructure/agent-configuration-store';
+import { loadCommandChainDefinition } from './command-chain-definition';
 import { COMMAND_CHAIN_CATALOG } from './command-chain-catalog';
 
-test('projects YAML command chains as real phases with their available commands', () => {
+test('planning drafts use stable requirement or feedback-group identity across physical dispatch attempts', () => {
+  const first='dispatch:generation:execution-a';
+  const retry='dispatch:generation:execution-b';
+  assert.equal(agentCommandWorkKey('story-splitter-agent','split','REQ-work',null,first),'delivery-plan:REQ-work:split:task');
+  assert.equal(agentCommandWorkKey('story-splitter-agent','split','REQ-work',null,retry),'delivery-plan:REQ-work:split:task');
+  const feedback=(dispatch:string,group:string)=>agentCommandWorkKey('story-splitter-agent','feedback-split','REQ-work',null,dispatch,group);
+  assert.equal(feedback(first,'group-a'),feedback(retry,'group-a'));
+  assert.notEqual(feedback(first,'group-a'),feedback(first,'group-b'));
+  assert.throws(()=>agentCommandWorkKey('story-splitter-agent','feedback-split','REQ-work',null,first),/稳定工作组/);
+});
+
+test('projects workspace command scripts as real phases with their available commands', () => {
   const [chain] = agentCommandChains('backlog-agent');
   assert.equal(chain.pipeline, 'backlog');
   assert.equal(chain.entryCommand, 'status');
@@ -35,37 +46,13 @@ test('projects YAML command chains as real phases with their available commands'
   assert.deepEqual(chain.terminalActions, ['phase complete']);
 });
 
-test('keeps one Pipeline while predefined configurations provide different YAML', () => {
+test('keeps fixed Pipeline identities while all definitions come from workspace Agent scripts', () => {
   const profile = agentCommandProfile('backlog-agent', 'backlog');
   assert.equal(profile?.commandChainId, 'requirement-context');
-  const ordinary = parseCommandChainDefinition('requirement-context', bundledCommandChainYaml('requirement-context', 'default'));
-  const openSpec = parseCommandChainDefinition('requirement-context', bundledCommandChainYaml('requirement-context', 'openspec'));
-  assert.deepEqual(
-    Object.keys(ordinary.phases),
-    Object.keys(openSpec.phases),
-  );
-  assert.deepEqual(openSpec.inputs, {});
-});
-
-test('loads the ordinary bundled YAML from the default configuration directory', () => {
-  const yaml = bundledCommandChainYaml('requirement-context');
-  assert.match(yaml, /agent: backlog-agent/);
-  assert.equal(parseCommandChainDefinition('requirement-context', yaml).agent, 'backlog-agent');
-});
-
-test('loads every predefined OpenSpec chain from its sibling directory', () => {
-  const openSpecAgents = new Set([
-    'backlog-agent',
-    'story-splitter-agent',
-    'analyst-agent',
-    'dev-agent',
-    'test-agent',
-    'review-agent',
-  ]);
-  for (const item of COMMAND_CHAIN_CATALOG.filter((entry) => openSpecAgents.has(entry.agentId))) {
-    const definition = parseCommandChainDefinition(item.id, bundledCommandChainYaml(item.id, 'openspec'));
+  for (const item of COMMAND_CHAIN_CATALOG) {
+    const definition = loadCommandChainDefinition(item.id);
     assert.equal(definition.agent, item.agentId);
-    assert.equal(definition.inputs['openspec-change'], undefined);
+    assert.deepEqual(Object.keys(loadCommandChainDefinition(item.id).phases), Object.keys(definition.phases));
   }
 });
 

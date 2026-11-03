@@ -9,6 +9,8 @@ export type AgentExecutionContext = {
 };
 
 export type AgentExecutionOptions = {
+  /** 项目级 OMP slash command；工作包作为一个完整参数交给原生解析器。 */
+  nativeCommand?: { name: string; path: string; sourceHash: string };
   model?: string;
   reasoningEffort?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'auto';
   systemPromptFile?: string;
@@ -149,8 +151,18 @@ function stringifyValue(value: unknown) {
 export function extractAgentFailureDetail(_executor: AgentExecutorId, line: string) {
   try {
     const event=JSON.parse(line) as Record<string, unknown>;
-    if(event.type==='error' || event.is_error===true || event.isError===true || event.type==='agent_end' && (event.error || event.message)) {
-      return stringifyValue(event.error || event.message || event.result || line);
+    // A rejected tool call is recoverable work, not a provider/process failure.
+    // Never use an aggregate assistant message or transcript as a fatal error.
+    if (event.type === 'tool_execution_end') return null;
+    if(event.type==='error' || event.is_error===true || event.isError===true || event.type==='agent_end' && event.error) {
+      const error = event.error ?? (typeof event.message === 'string' ? event.message : undefined);
+      if (typeof error === 'string') return error;
+      if (error && typeof error === 'object') {
+        const detail = error as Record<string, unknown>;
+        const fields = Object.fromEntries(['code', 'type', 'status', 'message'].flatMap(key =>
+          typeof detail[key] === 'string' || typeof detail[key] === 'number' ? [[key, detail[key]]] : []));
+        return Object.keys(fields).length ? JSON.stringify(fields) : null;
+      }
     }
     return null;
   } catch { return null; }
@@ -260,6 +272,19 @@ function telemetryDiagnostic(executor: AgentExecutorId, summary: string, level: 
   return { name: 'loop.agent.diagnostic', executor, summary: compact(summary, 500), level };
 }
 
+/** OMP can dispatch a registered tool through its native xd:// device as well. */
+export function nativeWorkflowCommand(tool: unknown, input: unknown): string | null {
+  if (!input || typeof input !== 'object') return null;
+  let parameters = input as Record<string, unknown>;
+  if (tool === 'write' && parameters.path === 'xd://loopwork' && typeof parameters.content === 'string') {
+    try { parameters = JSON.parse(parameters.content); } catch { return null; }
+  } else if (tool !== 'loopwork') return null;
+  let args = parameters?.args;
+  if (typeof args === 'string') { try { args = JSON.parse(args); } catch { return null; } }
+  if (!Array.isArray(args) || !args.length || !args.every(arg => typeof arg === 'string')) return null;
+  return `loopwork ${args.map(arg => /\s/.test(arg) ? JSON.stringify(arg) : arg).join(' ')}`;
+}
+
 export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: string): AgentTelemetryEvent | null {
   try {
     const event=JSON.parse(line) as Record<string, unknown>;
@@ -269,6 +294,15 @@ export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: strin
         const completed = type === 'tool_execution_end';
         const tool = stringifyValue(event.toolName || event.tool || 'unknown');
         const args = event.args as Record<string, unknown> | undefined;
+        // Native Workflow calls are domain commands, while retaining toolClass=other:
+        // they must appear in audit without becoming successful Shell test receipts.
+        const workflowCommand = nativeWorkflowCommand(tool, args);
+        // Native browser runs are real validation operations, with their own
+        // identity. Keep them distinct from Shell and Workflow submissions.
+        const browserCommand = tool === 'browser' && args?.action === 'run'
+          && typeof args.code === 'string' && args.code.trim()
+          ? `browser run ${JSON.stringify(args)}` : null;
+        const auditedCommand = workflowCommand || browserCommand;
         const result = event.result ?? event.output;
         const isError = event.isError === true || Boolean(event.error);
         const exitCode = completed
@@ -280,10 +314,10 @@ export function parseAgentTelemetryStdout(executor: AgentExecutorId, line: strin
           phase: completed ? 'completed' : 'started',
           summary: completed
             ? compact(stringifyValue(result || event.error), 500)
-            : summarizeCommand(stringifyValue(args?.command)) || compact(stringifyValue(event.args), 500),
+            : auditedCommand ? compact(auditedCommand, 500) : summarizeCommand(stringifyValue(args?.command)) || compact(stringifyValue(event.args), 500),
           level: isError ? 'ERROR' : 'DEFAULT',
           ...(completed ? { success: !isError && (exitCode === null || exitCode === 0), exitCode } : {}),
-          ...(completed ? { output: result ?? event.error } : { input: event.args }),
+          ...(completed ? { output: result ?? event.error } : { input: auditedCommand ? { ...args, command: auditedCommand } : event.args }),
         };
       }
       if (type === 'error') return telemetryDiagnostic(executor, stringifyValue(event.error || event.message || line));
@@ -329,6 +363,7 @@ const ompExecutor: AgentExecutor = {
       'omp --mode rpc --approval-mode yolo',
       options?.model ? `--model ${options.model}` : '',
       options?.reasoningEffort ? `--thinking ${options.reasoningEffort}` : '',
+      options?.nativeCommand ? `command=/${options.nativeCommand.name}` : '',
       `(stdin cwd=${workspace})`,
     ].filter(Boolean).join(' '),
     parseStdout: parseOmpStdout,

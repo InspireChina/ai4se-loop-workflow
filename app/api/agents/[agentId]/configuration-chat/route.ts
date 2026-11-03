@@ -2,11 +2,13 @@ import { buildAgentConfigurationChatPrompt, validateAgentConfigurationChatOutput
 import { agentExecutionOptions, getAgentExecutorSettings } from '../../../../../src/application/project-settings';
 import { sanitizeDiagnosticText } from '../../../../../src/infrastructure/diagnostic-text';
 import { runSystemAssistancePrompt } from '../../../../../src/infrastructure/system-assistance-executor';
+import { isAllowedLocalRequestOrigin } from '../../../../../src/infrastructure/local-request-origin';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function POST(request: Request, context: { params: Promise<{ agentId: string }> }) {
+  if (!isAllowedLocalRequestOrigin(request)) return new Response('不允许跨来源调用脚本编辑辅助', { status: 403 });
   const { agentId } = await context.params;
   const encoder = new TextEncoder();
   let closed = false;
@@ -24,32 +26,32 @@ export async function POST(request: Request, context: { params: Promise<{ agentI
       };
       void (async () => {
         try {
-          const body = await request.json() as { commandChainId?: unknown; yaml?: unknown; message?: unknown; history?: unknown };
-          const commandChainId = String(body.commandChainId || '');
-          const yaml = String(body.yaml || '');
+          const body = await request.json() as { relativePath?: unknown; content?: unknown; message?: unknown; history?: unknown };
+          const relativePath = String(body.relativePath || '');
+          const content = String(body.content || '');
           const settings = await getAgentExecutorSettings();
           send({ type: 'accepted' });
-          send({ type: 'progress', event: { kind: 'status', label: '分析配置变更', detail: '正在结合当前 YAML 与编辑要求生成最小修改。', status: 'running' } });
+          send({ type: 'progress', event: { kind: 'status', label: '分析配置变更', detail: '正在结合当前脚本源码与编辑要求生成修改。', status: 'running' } });
           const run = (prompt: string) => runSystemAssistancePrompt({
             executorId: settings.executorId,
             executionOptions: agentExecutionOptions(settings),
             prompt,
             onProgress: (event) => send({ type: 'progress', event }),
           });
-          let output = await run(buildAgentConfigurationChatPrompt({ agentId, commandChainId, yaml, message: body.message, history: body.history }));
-          send({ type: 'progress', event: { kind: 'status', label: 'Harness 校验', detail: '正在校验完整 YAML、内置阶段和命令链约束。', status: 'running' } });
+          let output = await run(buildAgentConfigurationChatPrompt({ agentId, relativePath, content, message: body.message, history: body.history }));
+          send({ type: 'progress', event: { kind: 'status', label: '脚本语法检查', detail: '正在检查完整 JavaScript 源码语法；不会执行草稿。', status: 'running' } });
           let result;
-          try { result = validateAgentConfigurationChatOutput(commandChainId, output); }
+          try { result = validateAgentConfigurationChatOutput(agentId, output); }
           catch (error) {
             const repairError = error instanceof Error ? error.message : String(error);
             send({ type: 'progress', event: { kind: 'status', label: '自动修正草稿', detail: sanitizeDiagnosticText(repairError, 760), status: 'running' } });
             output = await run(buildAgentConfigurationChatPrompt({
-              agentId, commandChainId, yaml, message: body.message, history: body.history,
+              agentId, relativePath, content, message: body.message, history: body.history,
               repairError, invalidOutput: output,
             }));
-            result = validateAgentConfigurationChatOutput(commandChainId, output);
+            result = validateAgentConfigurationChatOutput(agentId, output);
           }
-          send({ type: 'progress', event: { kind: 'status', label: 'Harness 校验完成', detail: '草稿可以进入人工检查与保存。', status: 'completed' } });
+          send({ type: 'progress', event: { kind: 'status', label: '脚本语法检查完成', detail: '源码草稿可以检查并保存到外部文件。', status: 'completed' } });
           send({ type: 'result', ...result });
         } catch (error) {
           send({ type: 'error', error: sanitizeDiagnosticText(error instanceof Error ? error.message : String(error), 4_000) });

@@ -211,18 +211,28 @@ export async function terminateProcessTree(pid: number, timeoutMs = 5_000, expec
   if (expectedStartMarker && !processIdentityMatches(identity, expectedStartMarker)) return true;
   const tree = await processTreePids(pid);
   if (!tree) return false;
-  for (const processId of tree) {
-    try { process.kill(processId, 'SIGTERM'); } catch { /* process already stopped */ }
+  const deadline = Date.now() + Math.max(0, timeoutMs);
+  const members = (await Promise.all(tree.map(inspectProcessIdentity))).filter((value): value is ProcessIdentity => value !== null);
+  const remaining = () => Math.max(0, deadline - Date.now());
+  const waitForTree = async (budget: number) => {
+    const until = Date.now() + budget;
+    while (true) {
+      const current = await Promise.all(members.map(member => inspectProcessIdentity(member.pid)));
+      if (current.every((identity, index) => !identity || !processIdentityMatches(identity, members[index].startMarker))) return true;
+      if (Date.now() >= until) return false;
+      await new Promise(resolve => setTimeout(resolve, Math.min(50, Math.max(1, until - Date.now()))));
+    }
+  };
+  for (const member of members) {
+    try { process.kill(member.pid, 'SIGTERM'); } catch { /* process already stopped */ }
   }
-  if (await waitForProcessExit(pid, Math.min(timeoutMs, 3_000))) {
-    const identities = await Promise.all(tree.map((processId) => inspectProcessIdentity(processId)));
-    return identities.every((candidate) => candidate === null);
+  // The bridge can exit before its CLI child finishes cleanup. Wait for every
+  // captured member instead of declaring failure as soon as the parent exits.
+  if (await waitForTree(Math.min(remaining(), 3_000))) return true;
+  for (const member of members) {
+    const current = await inspectProcessIdentity(member.pid);
+    if (!current || !processIdentityMatches(current, member.startMarker)) continue;
+    try { process.kill(member.pid, 'SIGKILL'); } catch { /* process already stopped */ }
   }
-  for (const processId of tree) {
-    try { process.kill(processId, 'SIGKILL'); } catch { /* process already stopped */ }
-  }
-  const exited = await waitForProcessExit(pid, Math.max(0, timeoutMs - 3_000));
-  if (!exited) return false;
-  const identities = await Promise.all(tree.map((processId) => inspectProcessIdentity(processId)));
-  return identities.every((candidate) => candidate === null);
+  return waitForTree(remaining());
 }

@@ -15,8 +15,12 @@ npm run loopctl -- --help
 npm run db:migrate
 ```
 
-OMP 通过原生 RPC 和 `loopwork` 工具调用授权的领域命令。Agent 的专业 Prompt 从唯一工作目录 `.omp/agents` 读取，不在服务内部维护；每个 Agent 的模型和思考强度仍可在 Web 中独立配置。
+OMP 通过原生 RPC 和 `loopwork` 工具调用授权的领域命令。Agent 的专业 Prompt 从唯一工作目录 `.omp/commands` 读取，不在服务内部维护；每个 Agent 的模型和思考强度仍可在 Web 中独立配置。
+
+命令链由同一工作目录 `.omp/commands/<agent-id>.cjs` 的 API v1 接口驱动；各角色的实际校验与结果组装也在对应入口内。原始阶段、命令和状态操作源码公开在 `.omp/commands/workflow/*.cjs`。页面可编辑和保存这些文件；定义不写入数据库。详见 [脚本接口](../../docs/command-script-api.md)。
 
 原有 Analysis / Delivery Lane、Dev/Test 隔离、独立证据、反馈和人工信息补充机制保持不变。普通 Agent 最终文本不会推进状态，必须提交并通过对应的领域门禁。
 
 详见 [运行架构](../../docs/dji-architecture.md) 和 [启动说明](../../README.md)。
+
+配套业务脚本放在工作目录 `scripts/`，由 `.omp` Skill 引用。检查结果留存示例见 [`../workflow/run-check.mjs`](../workflow/run-check.mjs)；现有命令链的阶段和完成门禁继续由本目录的领域命令管理。

@@ -8,7 +8,7 @@ import {
   developmentNormalCommandPath,
 } from './development-workflow';
 
-test('defines Development entirely from the YAML command chain', () => {
+test('defines Development entirely from the workspace command script', () => {
   assert.equal(DEVELOPMENT_COMMAND_CHAIN.agent, 'dev-agent');
   assert.deepEqual(DEVELOPMENT_PHASE_ORDER, [
     'delivery_spec', 'implement', 'review', 'developer_verify', 'commit', 'finalize',

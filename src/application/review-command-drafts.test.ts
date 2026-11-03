@@ -213,9 +213,18 @@ test('Review generic chain requires independent Test evidence and publishes a re
   assert.match(status, /REQUIREMENT_CONTEXT:/);
   await command(started.executionId, started.token, ['phase', 'complete']);
   const [first, second] = await reviewSubjects(started.executionId);
+  await assert.rejects(putArtifact(started.executionId,started.token,'reconciliations',{
+    subjectRef:first,result:'引用不能附加解释',evidenceRefs:[fixture.passedRef+' (passed)'],
+  },'decorated-ref'),/evidenceRefs 必须逐字复制冻结 ref/);
+  const {databaseConnection}=await import('../infrastructure/database');
+  const orphan=(await databaseConnection()).prepare("SELECT COUNT(*) AS count FROM command_chain_artifact_blocks WHERE block_id='reconciliations' AND item_key='decorated-ref'").get() as {count:number};
+  assert.equal(orphan.count,0);
   await putArtifact(started.executionId, started.token, 'reconciliations', {
     subjectRef: first, result: '只有规格证据。', evidenceRefs: [fixture.specRef],
   }, 'stable');
+  await assert.rejects(putArtifact(started.executionId,started.token,'reconciliations',{
+    subjectRef:first,result:'不能换 key 重复登记',evidenceRefs:[fixture.passedRef],
+  },'duplicate'),/修订时复用该原 key/);
   await assert.rejects(putArtifact(started.executionId, started.token, 'reconciliations', {
     subjectRef: second, result: '错误改绑。', evidenceRefs: [fixture.passedRef],
   }, 'stable'), /不能改绑/);
@@ -248,6 +257,35 @@ test('Review generic chain rejects changed frozen evidence', async () => {
   input.contextSnapshot.resources.find((item: { ref: string }) => item.ref === fixture.passedRef).revision = 2;
   db.prepare('UPDATE execution_attempts SET input_json = ? WHERE execution_id = ?').run(JSON.stringify(input), started.executionId);
   await assert.rejects(command(started.executionId, started.token, ['phase', 'complete']), /冻结证据版本或内容已变化/);
+});
+
+test('Review resumes the same frozen business evidence across changed control execution identities',async()=>{
+  const {databaseConnection}=await import('../infrastructure/database');
+  const {cancelExecution}=await import('./executions');
+  const fixture=await reviewFixture('Review 停止恢复不冻结自身身份');
+  const first=await begin(fixture.delegation,`${fixture.taskId}-first`,fixture.resources);
+  const db=await databaseConnection();
+  const setResources=(id:string,resources:unknown[])=>{
+    const row=db.prepare('SELECT input_json FROM execution_attempts WHERE execution_id=?').get(id) as {input_json:string};
+    const input=JSON.parse(row.input_json);input.contextSnapshot.resources=resources;
+    db.prepare('UPDATE execution_attempts SET input_json=? WHERE execution_id=?').run(JSON.stringify(input),id);
+  };
+  const control=(id:string,status:string)=>({ref:`EXEC:${id}`,kind:'execution',status,revision:1,content:{agent:'review-agent',status}});
+  setResources(first.executionId,[...fixture.resources,control(first.executionId,'running')]);
+  await command(first.executionId,first.token,['status']);
+  await command(first.executionId,first.token,['phase','complete']);
+  await reconcileAll(first.executionId,first.token,fixture.passedRef,fixture.specRef);
+  const draft=db.prepare('SELECT draft_id FROM agent_work_drafts WHERE last_execution_id=?').pluck().get(first.executionId) as string;
+  assert.equal(db.prepare("SELECT COUNT(*) FROM command_chain_artifact_blocks WHERE draft_id=? AND block_id='evidence-sources' AND item_key=?").pluck().get(draft,`EXEC:${first.executionId}`),0);
+  // A pre-fix editing draft can retain the old control record; its history is
+  // harmless and must not invalidate unchanged, independently tested facts.
+  db.prepare("INSERT INTO command_chain_artifact_blocks(draft_id,artifact_id,block_id,item_key,content_format,content,ordinal) VALUES(?,'review','evidence-sources',?,'yaml',?,999)").run(draft,`EXEC:${first.executionId}`,stringify({ref:`EXEC:${first.executionId}`,kind:'execution',status:'running',revision:'1',fingerprint:'old-control-snapshot',independentTest:'no'}));
+  await cancelExecution(first.executionId,'验证停止恢复');
+  const resumed=await begin(fixture.delegation,`${fixture.taskId}-resumed`,fixture.resources);
+  setResources(resumed.executionId,[...fixture.resources,control(first.executionId,'cancelled'),control(resumed.executionId,'running')]);
+  assert.match(await command(resumed.executionId,resumed.token,['status']),/Phase: fact_reconciliation/);
+  assert.equal(db.prepare('SELECT draft_id FROM agent_work_drafts WHERE last_execution_id=?').pluck().get(resumed.executionId),draft);
+  assert.match(await command(resumed.executionId,resumed.token,['phase','complete']),/To: closure_assessment/);
 });
 
 

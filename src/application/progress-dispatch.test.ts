@@ -180,9 +180,10 @@ test('cancels an unactivated reservation from a dead runner without consuming a 
   }
 });
 
-test('manual Loop stop defers active work without consuming a retry', async () => {
+for (const cancellationWins of [false, true]) test(`manual Loop stop preserves retries when ${cancellationWins ? 'the cancellation callback wins the race' : 'run reconciliation wins the race'}`, async () => {
   const { createTask, beginRun, cancelTask, endRun } = await import('./tasks');
   const { progressDispatcher } = await import('./progress-dispatch');
+  const { cancelExecution } = await import('./executions');
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const taskId = await createTask({ title: 'Manual Loop stop preserves retry budget' });
@@ -209,6 +210,7 @@ test('manual Loop stop defers active work without consuming a retry', async () =
     });
     assert.equal(activated.kind, 'running');
 
+    if (cancellationWins) await cancelExecution(firstReservation.executionId, 'Loop 已停止');
     await endRun(firstRunId, false, { stopRunner: false });
     cleanupRunId = null;
 
@@ -235,9 +237,7 @@ test('manual Loop stop defers active work without consuming a retry', async () =
         AND event_type IN ('AgentExecutionDeferredByLoopStop', 'AgentExecutionRetryScheduled')
       ORDER BY rowid
     `).all(taskId) as Array<{ event_type: string }>;
-    assert.deepEqual(stopEvents.map((event) => event.event_type), [
-      'AgentExecutionDeferredByLoopStop',
-    ]);
+    assert.deepEqual(stopEvents.map((event) => event.event_type), cancellationWins ? [] : ['AgentExecutionDeferredByLoopStop']);
 
     const secondRunId = await beginRun('manual-loop-stop-second-run');
     cleanupRunId = secondRunId;
@@ -299,4 +299,32 @@ test('waits for the universal retry backoff deadline before redispatching', asyn
     await cancelTask({ taskId, reason: 'test cleanup' });
     await endRun(runId, true, { stopRunner: false });
   }
+});
+
+test('UI dispatch preview reserves the WAL writer before planner reads and never commits inferred Lane state', async () => {
+  const { default: Database } = await import('better-sqlite3');
+  const { databaseConnection, paths } = await import('../infrastructure/database');
+  const { createTask } = await import('./tasks');
+  const { progressDispatchInspector } = await import('./progress-dispatch');
+  const taskId = await createTask({ title: 'Concurrent preview boundary' });
+  const db = await databaseConnection();
+  const other = new Database(paths.dbPath);
+  other.pragma('busy_timeout = 1');
+  const prepare = db.prepare;
+  let checked = false;
+  try {
+    db.prepare = ((sql: string) => {
+      if (!checked && db.inTransaction && /FROM tasks/.test(sql)) {
+        checked = true;
+        assert.throws(() => other.prepare("INSERT OR REPLACE INTO loop_meta(key,value) VALUES('preview-lock-probe','1')").run(),
+          (error: unknown) => (error as {code?: string}).code === 'SQLITE_BUSY');
+      }
+      return prepare.call(db, sql);
+    }) as typeof db.prepare;
+    const before = db.prepare('SELECT * FROM task_lanes WHERE task_id=?').all(taskId);
+    const inspection = await progressDispatchInspector.inspect({ requirementId: taskId });
+    assert.equal(checked, true);
+    assert.equal(inspection.requirementId, taskId);
+    assert.deepEqual(db.prepare('SELECT * FROM task_lanes WHERE task_id=?').all(taskId), before);
+  } finally { db.prepare = prepare; other.close(); }
 });

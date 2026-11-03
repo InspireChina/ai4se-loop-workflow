@@ -1755,6 +1755,34 @@ test('orders concurrently dispatchable requirements by numeric priority', async 
   assert.equal(contenders[0].priority, '9');
 });
 
+test('higher priority Analysis runs before lower priority control work with one available slot', async () => {
+  const { databaseConnection } = await import('../infrastructure/database');
+  const { createTask } = await import('./tasks');
+  const { getAgentConcurrency, setAgentConcurrency } = await import('./project-settings');
+  const db = await databaseConnection();
+  db.prepare("UPDATE tasks SET agile_status = 'done', closure_status = 'acknowledged', run_state = 'idle'").run();
+  db.prepare("UPDATE execution_attempts SET status = 'applied' WHERE status != 'applied'").run();
+  db.prepare("UPDATE agent_results SET application_status = 'applied' WHERE application_status = 'pending'").run();
+  db.prepare('DELETE FROM resource_claims').run();
+  const previousConcurrency = await getAgentConcurrency();
+  try {
+    await setAgentConcurrency(1);
+    const lowId = await createTask({ title: 'Lower priority control', priority: '4' });
+    const highId = await createTask({ title: 'Higher priority analysis', priority: '5' });
+    db.prepare(`UPDATE tasks SET agile_status = 'ready for dev', current_subagent = 'analyst-agent',
+      total_stories = 1 WHERE task_id = ?`).run(highId);
+    db.prepare('INSERT INTO stories(task_id, story_index, title, directory) VALUES(?, 1, ?, ?)')
+      .run(highId, 'Analysis unit', 'priority-analysis-unit');
+    const work = await inspectAllDispatch();
+    assert.deepEqual(work.map(item => [item.taskId, item.agent]), [[highId, 'analyst-agent']]);
+    db.prepare("UPDATE tasks SET priority = '5' WHERE task_id = ?").run(lowId);
+    // Equal priority retains the existing control/delivery-before-analysis policy.
+    assert.deepEqual((await inspectAllDispatch()).map(item => item.taskId), [lowId]);
+  } finally {
+    await setAgentConcurrency(previousConcurrency);
+  }
+});
+
 test('applies the configured global Agent concurrency to Analysis and preserves existing task cursors', async () => {
   const { databaseConnection } = await import('../infrastructure/database');
   const { getTask } = await import('./tasks');

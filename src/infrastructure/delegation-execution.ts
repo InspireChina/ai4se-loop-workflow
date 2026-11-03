@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdirSync, existsSync } from 'node:fs';
 import { documentFilesRoot } from './document-files';
 import type { ChildProcess } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { StringDecoder } from 'node:string_decoder';
@@ -32,6 +32,8 @@ export type DelegationExecutionInput = {
   environment?: AgentEnvironment;
   cancellationRequested?: () => boolean | Promise<boolean>;
   cancellationSignal?: AbortSignal;
+  /** Authoritative domain submission, never an assistant's completion claim. */
+  completionRequested?: () => boolean | Promise<boolean>;
   spawn?: typeof crossSpawn;
 };
 
@@ -46,11 +48,29 @@ export type DelegationExecutionResult = {
   evidencePersistenceError?: string | null;
   terminationReason?: string;
   cancelled?: true;
+  completionDetected?: true;
 };
 
 export function buildAgentProcessLaunch(executor: AgentExecutor, prompt: string, workspaceRoot: string, executionOptions: AgentExecutionOptions, baseEnv: AgentEnvironment = process.env) {
   const rpc = executor.transport === 'omp-rpc';
   const sessions = executionOptions.sessionDirectory || join(documentFilesRoot(), 'sessions', String(baseEnv.LOOP_EXECUTION_ID || randomUUID()));
+  let input = prompt;
+  // 辅助会话不能继承父执行的 slash command；仅显式绑定的主流程才设置它。
+  let commandEnvironment: AgentEnvironment = { LOOP_OMP_COMMAND: undefined, LOOP_OMP_COMMAND_PATH: undefined, LOOP_OMP_COMMAND_HASH: undefined };
+  if (rpc && executionOptions.nativeCommand) {
+    const command = executionOptions.nativeCommand;
+    const source = readFileSync(command.path, 'utf8');
+    if (createHash('sha256').update(source).digest('hex') !== command.sourceHash) throw new Error('Command Prompt 在执行准备期间发生变化，请重新派发以读取一致版本');
+    mkdirSync(sessions, { recursive: true });
+    // 只作审计，不把专业正文重复追加到 system prompt；由 OMP 原生 slash 展开。
+    writeFileSync(join(sessions, `command-${command.name}-${command.sourceHash}.md`), source, { mode: 0o600 });
+    // OMP 参数解析会移除引号。把工作包编码为一个完整参数，保留 JSON 引号、
+    // 换行和空格；这段字符串不经过 Shell。无占位符的命令会在模板渲染后原样追加它。
+    input = `/${command.name} '${prompt.replaceAll("'", "'\"'\"'")}'`;
+    commandEnvironment = { LOOP_OMP_COMMAND: command.name, LOOP_OMP_COMMAND_PATH: command.path, LOOP_OMP_COMMAND_HASH: command.sourceHash };
+    executionOptions = { ...executionOptions, systemPromptFile: undefined,
+      systemPromptText: '# LoopWork Harness boundary\n仅在当前 execution 的授权角色和范围内工作。使用 loopwork 工具读取当前阶段及提交结果；普通回复不能推进任务。专业指令由本轮原生 Command 提供。' };
+  }
   if (rpc && executionOptions.systemPromptText) {
     mkdirSync(sessions, { recursive: true });
     const core = baseEnv.LOOP_EXECUTION_TOKEN || baseEnv.LOOP_VERIFICATION_ASSISTANCE_COMMAND_TOKEN
@@ -63,9 +83,10 @@ export function buildAgentProcessLaunch(executor: AgentExecutor, prompt: string,
   }
 
   return {
+    input,
     command: rpc ? process.execPath : executor.command,
-    args: [...(rpc ? [join(process.env.LOOP_APP_ROOT || process.cwd(), 'scripts', 'omp-rpc.mjs'), executor.command] : []), ...executor.buildArgs(prompt, workspaceRoot, executionOptions)],
-    env: { ...baseEnv, ...(executor.env || {}), ...(rpc ? { LOOP_NODE: process.execPath, LOOP_APP_ROOT: process.env.LOOP_APP_ROOT || process.cwd() } : {}), ...(rpc ? { LOOP_OMP_SESSION_DIR: sessions } : {}) },
+    args: [...(rpc ? [join(process.env.LOOP_APP_ROOT || process.cwd(), 'scripts', 'omp-rpc.mjs'), executor.command] : []), ...executor.buildArgs(input, workspaceRoot, executionOptions)],
+    env: { ...baseEnv, ...(executor.env || {}), ...(rpc ? { LOOP_NODE: process.execPath, LOOP_APP_ROOT: process.env.LOOP_APP_ROOT || process.cwd() } : {}), ...(rpc ? { LOOP_OMP_SESSION_DIR: sessions } : {}), ...commandEnvironment } as AgentEnvironment,
   };
 }
 
@@ -190,7 +211,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     }
     let childExited = child.exitCode !== null;
     child.once('exit', () => { childExited = true; });
-    if (executor.promptMode === 'stdin') child.stdin?.end(prompt);
+    if (executor.promptMode === 'stdin') child.stdin?.end(launch.input);
 
     let stdoutBuffer = '';
     let stderrBuffer = '';
@@ -227,12 +248,14 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       }
     });
 
-    const terminate = async (reason: string, kind: 'timeout' | 'cancelled') => {
+    let completionDetected = false;
+    const terminate = async (reason: string, kind: 'timeout' | 'cancelled' | 'completed') => {
       if (terminationRequested) return;
       terminationRequested = true;
       terminationReason = reason;
       timedOut = kind === 'timeout';
       cancelled = kind === 'cancelled';
+      completionDetected = kind === 'completed';
       await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - ${reason}，正在终止`);
       if (child.pid) {
         const expectedStartMarker = processStartMarker?.startsWith('test-') ? undefined : processStartMarker || undefined;
@@ -275,6 +298,17 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       : null;
     if (cancellationTimer) void checkCancellation();
     const onCancellationSignal = () => void terminate('需求已取消', 'cancelled');
+    // OMP may continue native todo/maintenance turns after the Workflow result
+    // has committed. Reclaim only after the caller verifies that durable result.
+    let checkingCompletion = false;
+    const completionTimer = input.completionRequested ? setInterval(async () => {
+      if (checkingCompletion || terminationRequested || childExited) return;
+      checkingCompletion = true;
+      try {
+        if (await input.completionRequested!()) await terminate('领域结果已提交，回收执行资源', 'completed');
+      } catch { /* A failed read cannot establish completion; existing limits still apply. */ }
+      finally { checkingCompletion = false; }
+    }, 500) : null;
     input.cancellationSignal?.addEventListener('abort', onCancellationSignal, { once: true });
     if (input.cancellationSignal?.aborted) onCancellationSignal();
     try {
@@ -299,6 +333,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       if (startupTimer) clearTimeout(startupTimer);
       if (idleTimer) clearTimeout(idleTimer);
       if (cancellationTimer) clearInterval(cancellationTimer);
+      if (completionTimer) clearInterval(completionTimer);
       input.cancellationSignal?.removeEventListener('abort', onCancellationSignal);
       if (child.pid && processStartMarker) {
         await markManagedAgentProcessExited(runId, child.pid, processStartMarker).catch(() => undefined);
@@ -333,9 +368,10 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
     }
     await appendLog(`[执行器] executor=${executor.id} agent=${context.agent} - ${executor.label} CLI 已退出 code=${terminalExitCode ?? 'signal'}`);
     if (cancelled) await appendLog(`[Agent] 已取消 lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId}`);
+    else if (completionDetected) await appendLog(`[Agent] 领域终止结果已持久化，执行资源已回收 agent=${context.agent} requirement=${context.taskId}`);
     else if (terminalExitCode && terminalExitCode !== 0) await appendLog(`[错误] ${context.agent} 执行失败 code=${terminalExitCode}`);
     else await appendLog(`[Agent] 完成 lane=${context.lane || 'control'} agent=${context.agent} requirement=${context.taskId} unit=${context.storyIndex ?? '-'} flow=${context.pipeline} - 处理完成`);
-    traceStatus = timedOut ? 'timed_out' : executionFailed ? 'execution_error' : terminalExitCode === 0 ? 'completed' : terminalExitCode === null ? 'cancelled' : 'failed';
+    traceStatus = timedOut ? 'timed_out' : executionFailed ? 'execution_error' : completionDetected || terminalExitCode === 0 ? 'completed' : terminalExitCode === null ? 'cancelled' : 'failed';
     if (evidencePersistenceError) traceStatus = 'execution_error';
     const failureDetail = [
       structuredErrorTail.trim(),
@@ -351,6 +387,7 @@ export async function executeDelegation(input: DelegationExecutionInput): Promis
       ...(evidencePersistenceError ? { evidencePersistenceError } : {}),
       ...(terminationReason ? { terminationReason } : {}),
       ...(cancelled ? { cancelled: true as const } : {}),
+      ...(completionDetected ? { completionDetected: true as const } : {}),
     };
   } finally {
     try {

@@ -2,7 +2,7 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { Activity, BookOpenText, BrainCircuit, CalendarDays, Check, CircleAlert, CircleDot, FolderCog, Gauge, MemoryStick, PencilLine, Sparkles } from 'lucide-react';
 import { getAgentProfile } from '../../../src/application/agent-profiles';
-import { listAgentConfigurations } from '../../../src/application/agent-configurations';
+import { getAgentCommandFile } from '../../../src/application/agent-configurations';
 import { AGENT_EXECUTOR_OPTIONS, OMP_THINKING_LEVELS, getAgentRuntimeSettings, getFlowAgentDefaultRuntimeSettings, listAgentRuntimeConfigurations } from '../../../src/application/project-settings';
 import { isFlowAgentId } from '../../../src/domain/agent-profile';
 import { MarkdownContent } from '../../../src/ui/markdown-content';
@@ -16,7 +16,7 @@ export const dynamic = 'force-dynamic';
 const agentSections = [
   { id: 'runtime', label: '运行参数', description: '独立 OMP 模型、思考强度与配置', icon: Gauge },
   { id: 'commands', label: '命令链', description: '阶段顺序与终止动作', icon: CircleDot },
-  { id: 'prompt', label: 'Prompt', description: '外部 .omp/agents 定义', icon: BrainCircuit },
+  { id: 'prompt', label: 'Command Prompt', description: '原生 .omp/commands 指令', icon: BrainCircuit },
   { id: 'memory', label: 'Memory', description: '当前工作目录长期经验与观察', icon: MemoryStick },
   { id: 'evolution', label: '观察', description: '执行经验与证据', icon: Sparkles },
   { id: 'diagnostics', label: '诊断', description: '生效输入与 Runtime 文件', icon: Activity },
@@ -49,12 +49,12 @@ function dailyMemoryBody(content: string) {
 export default async function AgentDetailPage({ params, searchParams }: { params: Promise<{ agentId: string }>; searchParams: Promise<{ section?: string | string[]; memoryMode?: string | string[]; memoryError?: string | string[]; memoryPromoted?: string | string[] }> }) {
   const [{ agentId }, query] = await Promise.all([params, searchParams]);
   if (!isFlowAgentId(agentId)) notFound();
-  const [detail, runtimeSettings, flowDefaults, runtimeConfigurations, agentConfigurations] = await Promise.all([
+  const [detail, runtimeSettings, flowDefaults, runtimeConfigurations, commandFile] = await Promise.all([
     getAgentProfile(agentId, true),
     getAgentRuntimeSettings(agentId),
     getFlowAgentDefaultRuntimeSettings(),
     Promise.resolve(listAgentRuntimeConfigurations(agentId)),
-    Promise.resolve(listAgentConfigurations(agentId)),
+    Promise.resolve(getAgentCommandFile(agentId)),
   ]);
   const currentProject = detail.project;
   const section = selectedSection(query.section);
@@ -70,8 +70,8 @@ export default async function AgentDetailPage({ params, searchParams }: { params
     '# Harness Core Contract（只读）',
     '流程调度、权限、状态机和最小结果协议由 Harness 执行，专业语义由对应 Agent 判断，Agent Prompt 无权扩大权限。',
     '',
-    `# ${currentProject.name} · 外部 Agent 定义`,
-    `# 来源：${detail.externalAgentPath}`,
+    `# ${currentProject.name} · OMP Command /${agentId}`,
+    `# 来源：${detail.externalCommandPromptPath}`,
     detail.currentPrompt.content,
     '',
     `# Durable Memory · r${detail.currentMemory.revision}`,
@@ -80,7 +80,7 @@ export default async function AgentDetailPage({ params, searchParams }: { params
   const commandChains = agentCommandChains(agentId);
 
   return <>
-    <header className="page-header agent-page-header"><div><Link className="crumb" href="/agents">Agent 配置</Link><p className="eyebrow">{agentId}</p><h1>{detail.definition.label}</h1><p className="muted">{detail.definition.description}</p></div><div className="agent-header-actions"><span className="badge blue">外部 Agent · OMP</span></div></header>
+    <header className="page-header agent-page-header"><div><Link className="crumb" href="/agents">Agent 配置</Link><p className="eyebrow">{agentId}</p><h1>{detail.definition.label}</h1><p className="muted">{detail.definition.description}</p></div><div className="agent-header-actions"><span className="badge blue">Command · OMP</span></div></header>
 
     <div className="settings-layout agent-settings-layout">
       <nav className="card settings-navigation agent-section-nav" aria-label="Agent 配置目录">
@@ -101,7 +101,7 @@ export default async function AgentDetailPage({ params, searchParams }: { params
       <div className="agent-workspace">
         <section className="agent-profile-summary" aria-label="Agent 配置摘要">
           <div><span>Runtime</span><strong>{runtimeSettings.executorId}</strong><small>{runtimeSettings.source === 'global_default' ? '跟随流程默认' : runtimeSettings.configurationName}</small></div>
-          <div><span>Agent 定义</span><strong>外部 Markdown</strong><small>{currentProject.name} · 文件来源</small></div>
+          <div><span>OMP Command</span><strong>/{agentId}</strong><small>{currentProject.name} · 项目级命令</small></div>
           <div><span>Workspace Memory</span><strong>r{detail.currentMemory.revision}</strong><small>{detail.dailyFiles.length} 个 daily 文件</small></div>
           <div><span>演化证据</span><strong>{detail.observations.length}</strong><small>条可复用观察</small></div>
         </section>
@@ -115,10 +115,10 @@ export default async function AgentDetailPage({ params, searchParams }: { params
       />}
 
       {section === 'commands' && <div className="agent-command-layout">
-        <div className="agent-command-main"><AgentConfigurationEditor agentId={agentId} initialConfigurations={agentConfigurations}/></div>
+        <div className="agent-command-main"><AgentConfigurationEditor key={agentId} agentId={agentId} source={commandFile}/></div>
         <aside className="agent-section-aside agent-command-aside">
           <section className="card settings agent-section-card">
-          <div className="settings-section-head"><span className="executor-icon"><CircleDot size={18}/></span><div><strong>当前生效调用链</strong><p className="muted settings-description">根据当前启用配置编译，只展示 Agent 实际经历的阶段。</p></div><span className="badge">生效中</span></div>
+          <div className="settings-section-head"><span className="executor-icon"><CircleDot size={18}/></span><div><strong>当前生效调用链</strong><p className="muted settings-description">由同名 Agent 脚本的 describe 接口提供，展示实际阶段及加载问题。</p></div><span className="badge">脚本来源</span></div>
           <div className="command-chain-list">{commandChains.map((chain) => <article className="command-chain" key={chain.pipeline}>
             <div className="command-chain-head"><div><span className="badge">{agentPipelineLabel(chain.pipeline)}</span></div><small>{chain.phases.length} 个阶段</small></div>
             {chain.configurationError ? <div className="agent-command-configuration-error"><CircleAlert size={16}/><div><strong>当前命令链配置无效</strong><p>{chain.configurationError}</p></div></div> : <><div className="command-chain-phases" aria-label={`${agentPipelineLabel(chain.pipeline)} 阶段顺序`}>
@@ -134,13 +134,15 @@ export default async function AgentDetailPage({ params, searchParams }: { params
         </aside>
       </div>}
 
-      {section === 'prompt' && <div className="agent-section-layout">
+      {section === 'prompt' && <div className="agent-section-layout agent-prompt-layout">
         <section className="card settings agent-editor agent-section-card">
-          <div className="settings-section-head"><span className="executor-icon"><BrainCircuit size={18}/></span><div><strong>{currentProject.name} · 外部 Agent 定义</strong><p className="muted settings-description">自动检测当前工作目录的 .omp/agents，实际文件路径见下方。修改文件后，下一次执行直接读取；原有 Workflow、角色职责和状态流转保持。</p></div><span className="badge">文件管理</span></div>
-          <p className="path-value"><code>{detail.externalAgentPath}</code></p>
-          {detail.externalAgentError ? <p className="memory-operation-message error">{detail.externalAgentError}</p> : <MarkdownContent content={detail.currentPrompt.content}/>}
+          <div className="settings-section-head"><span className="executor-icon"><BrainCircuit size={18}/></span><div><strong>OMP Command /{agentId}</strong><p className="muted settings-description">OMP 从当前工作目录 .omp/commands 展开指令；与同名脚本配对。原有 Workflow 角色、职责和状态流转保持，.omp/agents 留给真正的子 Agent。</p></div><span className="badge">原生命令</span></div>
+          <p className="path-value"><code>{detail.externalCommandPromptPath}</code></p>
+          <p className="path-value">命令链脚本：<code>{commandFile.path}</code></p>
+          <p className="muted settings-description">API v1 · 链 ID：{commandFile.documents.map(document => document.commandChainId).join(' / ') || 'direct'}。每次派发的工作包会注入准确绑定；先读取 status（Direct 为 direct run）获取当前阶段。</p>
+          {detail.externalCommandPromptError ? <p className="memory-operation-message error">{detail.externalCommandPromptError}</p> : <MarkdownContent content={detail.currentPrompt.content}/>}
         </section>
-        <aside className="agent-section-aside"><section className="card settings agent-context-note"><strong>编辑方式</strong><p className="muted settings-description">在文件系统编辑此 Agent Markdown 正文，可引用 Skill 和 Markdown 模板。LoopWork 不在数据库维护另一套 Prompt，也不覆盖外部文件。</p><p className="muted settings-description">Agent frontmatter 可声明 model、thinking、tools 和 skills；OMP Runtime 页面可单独覆盖模型和思考强度；Harness 的流程边界和执行契约继续生效。</p></section></aside>
+        <aside className="agent-section-aside"><section className="card settings agent-context-note"><strong>编辑方式</strong><p className="muted settings-description">在文件系统编辑此 Command Markdown 正文，可引用 Skill 和 Markdown 模板。LoopWork 不在数据库维护另一套 Prompt，也不覆盖外部文件。</p><p className="muted settings-description">Command frontmatter 可声明 model、thinking、tools 和 skills；OMP Runtime 页面可单独覆盖模型和思考强度；Harness 的流程边界和执行契约继续生效。</p></section></aside>
       </div>}
 
       {section === 'memory' && <div className="memory-section-stack">
@@ -187,7 +189,7 @@ export default async function AgentDetailPage({ params, searchParams }: { params
         </section>
       </div>}
 
-      {section === 'evolution' && <div className="agent-section-layout"><section className="card settings"><strong>外部 Agent Prompt</strong><p className="muted">Prompt 由工作目录 .omp/agents 维护。内部学习不会生成、提升或覆盖 Prompt 候选。</p></section>
+      {section === 'evolution' && <div className="agent-section-layout"><section className="card settings"><strong>外部 Agent Prompt</strong><p className="muted">Prompt 由工作目录 .omp/commands 维护。内部学习不会生成、提升或覆盖 Prompt 候选。</p></section>
         <section className="card settings agent-section-card">
           <div className="settings-section-head"><span className="executor-icon"><Sparkles size={18}/></span><div><strong>{currentProject.name} · 演化观察</strong><p className="muted settings-description">保留执行经验和证据查看。DJI 默认不启动独立 Evaluator；专业知识和角色行为由 .omp Agent / Skill 维护。</p></div><span className="badge">{detail.observations.length} 条</span></div>
           <div className="observation-list">{detail.observations.length ? detail.observations.map((observation) => <div key={observation.observation_id}>
@@ -196,7 +198,7 @@ export default async function AgentDetailPage({ params, searchParams }: { params
           </div>) : <p className="muted">尚未产生可复用观察。</p>}</div>
         </section>
         <aside className="agent-section-aside">
-          <section className="card settings"><strong>知识维护</strong><p className="muted settings-description">在 .omp/agents 和 Skill 中维护专业知识、规则及模板引用。LoopWork 不自动改写外部 Prompt。</p></section>
+          <section className="card settings"><strong>知识维护</strong><p className="muted settings-description">在 .omp/commands 和 Skill 中维护专业知识、规则及模板引用。LoopWork 不自动改写外部 Prompt。</p></section>
           <section className="card settings"><strong>独立 Evaluator</strong><p className="muted settings-description">默认停用，任务完成后不额外调用模型。需要诊断性经验提取时，可显式设置 LOOP_ENABLE_EVALUATOR=1。</p></section>
         </aside>
       </div>}
@@ -207,8 +209,8 @@ export default async function AgentDetailPage({ params, searchParams }: { params
           <pre className="effective-prompt">{effectivePrompt}</pre>
         </section>
         <aside className="agent-section-aside">
-          <section className="card settings"><div className="settings-section-head"><span className="executor-icon"><FolderCog size={18}/></span><div><strong>Runtime Workspace</strong><p className="muted settings-description">当前实例的运行时文件目录。</p></div></div><p className="path-line">{detail.runtimeDirectory}</p><small>{detail.dailyFiles.length} 个 daily memory 文件。Agent Prompt 直接读取工作目录的 .omp/agents，不在 Runtime 目录生成副本。</small></section>
-          <section className="card settings"><strong>输入版本</strong><div className="diagnostic-facts"><span>定义 Hash</span><b>{detail.currentPrompt.content_hash.slice(0, 12)}</b><span>来源</span><b>.omp/agents</b><span>Memory</span><b>r{detail.currentMemory.revision}</b></div></section>
+          <section className="card settings"><div className="settings-section-head"><span className="executor-icon"><FolderCog size={18}/></span><div><strong>Runtime Workspace</strong><p className="muted settings-description">当前实例的运行时文件目录。</p></div></div><p className="path-line">{detail.runtimeDirectory}</p><small>{detail.dailyFiles.length} 个 daily memory 文件。Agent Prompt 直接读取工作目录的 .omp/commands，不在 Runtime 目录生成副本。</small></section>
+          <section className="card settings"><strong>输入版本</strong><div className="diagnostic-facts"><span>定义 Hash</span><b>{detail.currentPrompt.content_hash.slice(0, 12)}</b><span>来源</span><b>.omp/commands</b><span>Memory</span><b>r{detail.currentMemory.revision}</b></div></section>
         </aside>
       </div>}
       </div>

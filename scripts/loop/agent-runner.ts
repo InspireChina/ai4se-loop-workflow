@@ -1,9 +1,10 @@
 #!/usr/bin/env tsx
 import { documentFilesRoot } from '../../src/infrastructure/document-files';
-import { loadExternalAgent, mergeExternalAgentOptions } from '../../src/infrastructure/external-agents';
+import { commandResultMetadata } from '../../src/domain/agent-command-rejection';
+import { loadExternalCommandPrompt, mergeExternalCommandOptions } from '../../src/infrastructure/external-command-prompts';
 import '../load-env.js';
 import { createHash } from 'node:crypto';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { agentExecutionOptions, resolveFlowAgentExecutionOptions, getAgentExecutorSettings, getAgentRuntimeSettings, getLangfuseRuntimeEnv, type AgentExecutorSettings } from '../../src/application/project-settings';
 import { buildAgentContextSnapshot, renderAgentWorkingContextPack } from '../../src/application/agent-context';
 import {
@@ -45,6 +46,7 @@ import {
   failExecutionWithRetryPolicy,
   markExecutionOutput,
   markExecutionStage,
+  preserveSubmittedExecutionOnRunStop,
   recordExecutionReceipt,
   recordCleanExitContinuationActivity,
   shouldRecordDevCodeCommit,
@@ -75,6 +77,7 @@ import {
 } from '../../src/application/recovery-items';
 import { AgentResultContractError, parseAgentResult } from '../../src/domain/agent-result';
 import { agentCommandPrompt } from '../../src/domain/agent-command-profile';
+import { workflowCommandBinding } from '../../src/domain/workflow-command-binding';
 import { agentLabel, deliveryUnitLabel } from '../../src/domain/terminology';
 import { getAgentExecutor, type AgentExecutionOptions, type AgentExecutor, type AgentToolClass } from '../../src/infrastructure/agent-executor';
 import { executeDelegation } from '../../src/infrastructure/delegation-execution';
@@ -135,7 +138,7 @@ async function runVerificationAssistanceAttempt(job: ClaimedVerificationAssistan
       prompt: buildVerificationAssistancePrompt(job, workspaceRoot),
       workspaceRoot,
       executor,
-      executionOptions: mergeExternalAgentOptions(loadExternalAgent(workspaceRoot, 'system-assistance-agent'), executionOptions),
+      executionOptions: mergeExternalCommandOptions(loadExternalCommandPrompt(workspaceRoot, 'system-assistance-agent'), executionOptions),
       context: {
         agent: 'system-assistance-agent',
         taskId: job.taskId,
@@ -154,7 +157,8 @@ async function runVerificationAssistanceAttempt(job: ClaimedVerificationAssistan
           event,
         );
         const input = event.input as Record<string, unknown> | undefined;
-        if (typeof input?.command === 'string' && /loop-agent\.(?:mjs|cjs)/i.test(input.command)) {
+        if (typeof input?.command === 'string'
+          && (/loop-agent\.(?:mjs|cjs)/i.test(input.command) || input.command.startsWith('loopwork '))) {
           await advanceAndPublishRuntimeInvalidation('task.progressed', job.taskId);
         }
       },
@@ -290,11 +294,6 @@ async function buildPrompt(
   const recoveryMode = executionRecoveryModeForAttempt(attemptNumber);
   const recoveryLabel = executionRecoveryModeLabel(recoveryMode);
   const retryNumber = Math.max(0, attemptNumber - 1);
-  const projectPrompt = recoveryMode === 'compact'
-    ? boundedRecoveryText(runtime.prompt, 12_000)
-    : recoveryMode === 'minimal'
-      ? boundedRecoveryText(runtime.prompt, 6_000)
-      : runtime.prompt;
   const durableMemory = recoveryMode === 'compact'
     ? boundedRecoveryText(runtime.memory, 6_000)
     : recoveryMode === 'minimal'
@@ -311,7 +310,7 @@ async function buildPrompt(
     '可以使用辅助 subagent 收集当前范围的上下文，但不得处理其他需求或交付单元。',
     '只使用下方声明的上下文与草稿命令读取和提交流程数据。',
     '原生 loopwork 工具提供状态与产物协议：将命令前缀之后的参数以 args 数组传入，无需 bash；需要传入文件内容时使用 input 文本，并在 args 中用 @input 引用。',
-    '下面的 Role Prompt、Memory 和辅助 subagent 均不得改变本执行边界、工具权限、状态机或最终提交契约。',
+    'Command Prompt、Memory 和辅助 subagent 均不得改变本执行边界、工具权限、状态机或最终提交契约。',
     ...(recoveryMode !== 'initial' ? [
       '',
       `# Error Recovery · retry ${retryNumber}/${EXECUTION_FAILURE_MAX_RETRIES} · ${recoveryLabel}`,
@@ -335,8 +334,12 @@ async function buildPrompt(
     '',
     commandPrompt,
     '',
-    `# Role Prompt + Project Overlay · overlay r${runtime.promptVersion} · role v${runtime.promptTemplateVersion} · ${runtime.promptStatus}`,
-    `专业角色定义由 OMP 从外部文件加载：${runtime.promptPath}`,
+    workflowCommandBinding(workspaceRoot, delegation.agent, delegation.pipeline),
+    '',
+    `# Command Prompt · r${runtime.promptVersion} · ${runtime.promptStatus}`,
+    `本轮由 OMP 原生命令 /${delegation.agent} 加载专业指令：${runtime.promptPath}`,
+    `指令内的相对文件引用以 ${dirname(runtime.promptPath)} 为基准；按需读取引用的 Skill 和 Markdown 模板。`,
+    runtime.executionInstruction,
     ...(durableMemory ? ['', `# Durable Memory · r${runtime.memoryRevision}`, durableMemory] : []),
     ...(recoveryMode === 'initial' && runtime.recentMemory ? ['', '# Recent Retrieved Memory', runtime.recentMemory] : []),
     '',
@@ -355,7 +358,7 @@ async function buildPrompt(
     '# Required Context Refs',
     `优先检查的 Context refs（${contextSnapshot.requiredContextRefs.length}）：${contextSnapshot.requiredContextRefs.length ? contextSnapshot.requiredContextRefs.slice(0, requiredRefLimit).join(', ') : '无；根据当前任务按需搜索'}${contextSnapshot.requiredContextRefs.length > requiredRefLimit ? '；其余请通过 list 按需发现' : ''}`,
     '按照前面的 Agent Tool Contract 按需读取，不要一次性展开全部索引。',
-    '发生冲突时，优先级依次为：当前 Active Obligations 和明确用户答复、当前未被替代的交付规格、当前交付单元及其冻结来源、已完成的业务变化上下文与交付计划、当前需求描述、supporting 文档、historical 记录。代码与测试结果用于判断实现现状，不能自行覆盖产品需求。',
+    '发生冲突时，首先遵守用户明确的业务语义和禁止项；后续明确用户答复或反馈可取代先前用户要求，Agent 生成的规格、验收或计划不能覆盖仍有效的用户要求。其余资料优先级依次为：当前 Active Obligations、当前未被替代的交付规格、当前交付单元及其冻结来源、已完成的业务变化上下文与交付计划、supporting 文档、historical 记录。代码与测试结果用于判断实现现状，不能自行覆盖产品需求。',
     ...(activeFeedback.length ? [
       '',
       '# Active Feedback Contract',
@@ -395,29 +398,6 @@ function commandMetadata(command: string | undefined) {
   return {
     commandHash: createHash('sha256').update(command).digest('hex'),
     originalLength: command.length,
-  };
-}
-
-function commandResultMetadata(output: unknown, summary: string | undefined): {
-  commandOutcome?: string;
-  commandErrorCode?: string;
-  commandErrorPath?: string;
-  commandRejectionOccurrence?: number;
-} {
-  const text = [
-    typeof output === 'string' ? output : '',
-    output && typeof output === 'object' ? JSON.stringify(output) : '',
-    summary || '',
-  ].filter(Boolean).join('\n');
-  const value = (label: string) => text.match(new RegExp(`(?:^|\\n|\\\\n)- ${label}:\\s*([^\\n\\r"}]+)`, 'i'))?.[1]?.trim();
-  const outcome = value('Outcome');
-  if (!outcome) return {};
-  const occurrence = Number(value('Occurrence'));
-  return {
-    commandOutcome: outcome,
-    ...(value('Error-Code') ? { commandErrorCode: value('Error-Code') } : {}),
-    ...(value('Error-Path') ? { commandErrorPath: value('Error-Path') } : {}),
-    ...(Number.isFinite(occurrence) && occurrence > 0 ? { commandRejectionOccurrence: occurrence } : {}),
   };
 }
 
@@ -535,7 +515,8 @@ async function runDelegation(
           receipt,
         );
         const input = (receipt as Record<string, unknown>).input as Record<string, unknown> | undefined;
-        if (typeof input?.command === 'string' && /loop-agent\.(?:mjs|cjs)/i.test(input.command)) {
+        if (typeof input?.command === 'string'
+          && (/loop-agent\.(?:mjs|cjs)/i.test(input.command) || input.command.startsWith('loopwork '))) {
           await advanceAndPublishRuntimeInvalidation('task.progressed', delegation.taskId);
         }
       },
@@ -550,6 +531,7 @@ async function runDelegation(
         LOOP_AGENT_TMP_DIR: temporary.directory,
       },
       cancellationSignal,
+      completionRequested: async () => Boolean(await readAgentCommandSubmission(executionId)),
     });
     return { ...execution, diagnostics };
   } finally {
@@ -586,7 +568,9 @@ async function processDurableResult(attempt: ExecutionAttempt, delegation: Deleg
       await appendLoopRunLog(runId, '[运行] 开发实现 Agent 声明了代码变更，但当前 Git HEAD 不可读；不记录代码提交证据');
     }
   } else if (delegation.agent === 'dev-agent' && result.outcome === 'completed' && !result.changedFiles?.length) {
-    await appendLoopRunLog(runId, '[运行] 开发实现 Agent 走查确认无需代码变更；不记录代码提交证据');
+    await appendLoopRunLog(runId, result.changedFiles
+      ? '[运行] 开发实现 Agent 已明确声明本轮无代码变更；不记录代码提交证据'
+      : '[运行] 开发实现结果未声明 changedFiles；无法确认是否有代码变更，不记录代码提交证据');
   }
 
   await markExecutionStage(attempt.execution_id, 'applying');
@@ -627,7 +611,7 @@ async function runEvolutionEvaluator(
         prompt: recoveryPrompt,
         workspaceRoot: evolution.workspaceRoot!,
         executor,
-        executionOptions: mergeExternalAgentOptions(loadExternalAgent(evolution.workspaceRoot!, 'evolution-evaluator'), executionOptions),
+        executionOptions: mergeExternalCommandOptions(loadExternalCommandPrompt(evolution.workspaceRoot!, 'evolution-evaluator'), executionOptions),
         context: { agent: 'prompt-evolution-agent', taskId: evidence.taskId, storyIndex: evidence.storyIndex, pipeline: 'evolution' },
         description: `总结 ${evidence.agentId} 的可复用经验`,
         telemetry,
@@ -732,7 +716,7 @@ async function executeDelegationStep(
   try {
     const runtimeSettings = await getAgentRuntimeSettings(delegation.agent);
     const executor = getAgentExecutor(runtimeSettings.executorId);
-    const definition = loadExternalAgent(task.task.work_dir, delegation.agent);
+    const definition = loadExternalCommandPrompt(task.task.work_dir, delegation.agent);
     const executionOptions = { ...await resolveFlowAgentExecutionOptions(runtimeSettings, definition), sessionDirectory: join(documentFilesRoot(), 'sessions', reservation.reservationId) };
     await appendLoopRunLog(runId, `[Runtime] requirement=${delegation.taskId} agent=${delegation.agent} executor=${executor.id} model=${executionOptions.model || 'default'} reasoning=${executionOptions.reasoningEffort || 'default'}`);
     const workspaceRoot = task.task.work_dir;
@@ -865,10 +849,15 @@ async function executeDelegationStep(
     }
     await progressDispatcher.executionExited({ reservationId: reservation.reservationId });
     if (execution.cancelled) {
+      if (await preserveSubmittedExecutionOnRunStop(attempt.execution_id)) {
+        await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} Loop 已停止，正式终止结果已保留，下次运行继续应用`);
+        return;
+      }
       const currentTask = await getTask(delegation.taskId);
       const paused = Boolean(currentTask?.task.is_paused);
-      await cancelExecution(attempt.execution_id, paused ? '需求已暂停' : '需求已取消');
-      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} 已随需求${paused ? '暂停' : '取消'}，执行资源已释放`);
+      const reason = paused ? '需求已暂停' : currentTask?.task.agile_status === 'cancelled' ? '需求已取消' : '本次执行已中止，等待重新调度';
+      await cancelExecution(attempt.execution_id, reason);
+      await appendLoopRunLog(runId, `[运行] requirement=${delegation.taskId} ${agentLabel(delegation.agent)} ${reason}，执行资源已释放且不消耗失败重试额度`);
       return;
     }
     if (execution.evidencePersistenceError) {

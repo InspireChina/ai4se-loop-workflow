@@ -1,4 +1,4 @@
-import { discoverExternalAgents, externalAgentPath, loadExternalAgent } from '../infrastructure/external-agents';
+import { discoverExternalCommandPrompts, externalCommandPromptPath, loadExternalCommandPrompt } from '../infrastructure/external-command-prompts';
 import { randomUUID } from 'node:crypto';
 import type Database from 'better-sqlite3';
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
@@ -65,6 +65,7 @@ export type MemoryVersion = {
 };
 
 export type AgentRuntimeContext = {
+  executionInstruction: string;
   agentId: FlowAgentId;
   projectId: string;
   prompt: string;
@@ -303,12 +304,12 @@ export async function listAgentProfiles(projectIdInput?: string) {
     promoted_count: number;
     execution_count: number;
   })[];
-  const detected = discoverExternalAgents(project.workspace_root);
+  const detected = discoverExternalCommandPrompts(project.workspace_root);
   return profiles.map((profile) => ({
     ...profile,
-    current_prompt_version: (() => { try { return loadExternalAgent(project.workspace_root, profile.agent_id).revision; } catch { return 0; } })(),
-    externalAgentPath: detected.find((agent) => agent.id === profile.agent_id)?.path || null,
-    externalAgentError: (() => { try { loadExternalAgent(project.workspace_root, profile.agent_id); return null; } catch (error) { return error instanceof Error ? error.message : String(error); } })(),
+    current_prompt_version: (() => { try { return loadExternalCommandPrompt(project.workspace_root, profile.agent_id).revision; } catch { return 0; } })(),
+    externalCommandPromptPath: detected.find((agent) => agent.id === profile.agent_id)?.path || null,
+    externalCommandPromptError: (() => { try { loadExternalCommandPrompt(project.workspace_root, profile.agent_id); return null; } catch (error) { return error instanceof Error ? error.message : String(error); } })(),
     current_memory_revision: profile.project_memory_revision,
     auto_evolve: profile.project_auto_evolve,
     candidate_prompt_version: null,
@@ -336,13 +337,13 @@ export async function getAgentProfile(agentIdInput: string, ensure = true, proje
     canary_remaining: 0,
   } : undefined;
   if (!profile || !state) throw new Error(`项目 Agent Profile 不存在：${project.name} / ${agentId}`);
-  let externalAgent: ReturnType<typeof loadExternalAgent> | null = null;
-  let externalAgentError: string | null = null;
-  try { externalAgent = loadExternalAgent(project.workspace_root, agentId); }
-  catch (error) { externalAgentError = error instanceof Error ? error.message : String(error); }
+  let externalAgent: ReturnType<typeof loadExternalCommandPrompt> | null = null;
+  let externalCommandPromptError: string | null = null;
+  try { externalAgent = loadExternalCommandPrompt(project.workspace_root, agentId); }
+  catch (error) { externalCommandPromptError = error instanceof Error ? error.message : String(error); }
   const currentPrompt: CurrentPrompt = { agent_id: agentId, template_version: 0, source: 'file', status: 'active', content: externalAgent?.prompt || '',
     content_hash: externalAgent?.hash || hash(''), version: externalAgent?.revision || 0,
-    updated_at: externalAgent?.updatedAt || '', reason: externalAgentPath(project.workspace_root, agentId) };
+    updated_at: externalAgent?.updatedAt || '', reason: externalCommandPromptPath(project.workspace_root, agentId) };
 
   const currentMemory = db.prepare(`
     SELECT * FROM project_agent_memory_versions
@@ -371,8 +372,8 @@ export async function getAgentProfile(agentIdInput: string, ensure = true, proje
     project,
     profile,
     currentPrompt,
-    externalAgentPath: externalAgentPath(project.workspace_root, agentId),
-    externalAgentError,
+    externalCommandPromptPath: externalCommandPromptPath(project.workspace_root, agentId),
+    externalCommandPromptError,
     projectOverlay: { agent_id: agentId, project_id: project.project_id, revision: currentPrompt.version, content: currentPrompt.content, content_hash: currentPrompt.content_hash, source: 'seed' as const, reason: currentPrompt.reason, updated_at: currentPrompt.updated_at },
     candidatePrompt: null as PromptCandidate | null,
     currentMemory,
@@ -407,11 +408,11 @@ async function createMemoryVersion(projectId: string, agentId: FlowAgentId, cont
 }
 
 export async function saveAgentPrompt(input: { projectId?: string; agentId: string; content: unknown; reason?: unknown }) {
-  throw new Error('Agent Prompt 由外部 .omp/agents 文件管理，请直接编辑对应 Markdown 文件');
+  throw new Error('Agent Prompt 由外部 .omp/commands 文件管理，请直接编辑对应 Markdown 文件');
 }
 
 export async function resetAgentPromptToSystemTemplate(input: { projectId?: string; agentId: string }) {
-  throw new Error('Agent Prompt 由外部 .omp/agents 文件管理，请直接编辑对应 Markdown 文件');
+  throw new Error('Agent Prompt 由外部 .omp/commands 文件管理，请直接编辑对应 Markdown 文件');
 }
 
 export async function saveAgentMemory(input: { projectId?: string; agentId: string; content: unknown; reason?: unknown }) {
@@ -506,8 +507,8 @@ export async function loadAgentRuntime(agentIdInput: string, pipeline?: string, 
   if (!isFlowAgentId(agentIdInput)) throw new Error(`未知 Agent：${agentIdInput}`);
   await ensureAgentRuntimeWorkspace();
   const detail = await getAgentProfile(agentIdInput, false, projectIdInput);
-  const externalAgent = loadExternalAgent(workspaceRoot || detail.project.workspace_root, agentIdInput);
-  const composedPrompt = `# Agent Definition: ${externalAgent.path}\n相对文件引用以 ${externalAgent.directory} 为基准；按需读取其中引用的 Skill 和 Markdown 模板。\n\n${externalAgent.prompt}`;
+  const externalAgent = loadExternalCommandPrompt(workspaceRoot || detail.project.workspace_root, agentIdInput);
+  const composedPrompt = `# Command Definition: ${externalAgent.path}\n相对文件引用以 ${externalAgent.directory} 为基准；按需读取其中引用的 Skill 和 Markdown 模板。\n\n${externalAgent.prompt}`;
   const modeInstruction = pipeline === 'resume'
     ? agentIdInput === 'backlog-agent'
       ? '根据上下文中已回答的需求级产品问题更新需求目标、范围、路由和交付边界；不要重复询问已经回答的问题。'
@@ -521,6 +522,7 @@ export async function loadAgentRuntime(agentIdInput: string, pipeline?: string, 
       ? `# 当前恢复要求\n${modeInstruction}\n\n${composedPrompt}`
       : composedPrompt;
   return {
+    executionInstruction: modeInstruction,
     agentId: agentIdInput,
     projectId: detail.project.project_id,
     prompt,

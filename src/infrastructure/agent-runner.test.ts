@@ -53,6 +53,7 @@ test('core contract constrains flow writes without prohibiting target database o
   assert.match(source, /只使用下方声明的上下文与草稿命令读取和提交流程数据。/);
   assert.doesNotMatch(source, /不要直接写数据库/);
   assert.doesNotMatch(source, /`Loop App Root:/);
+  assert.match(source, /Agent 生成的规格、验收或计划不能覆盖仍有效的用户要求/);
 });
 
 test('records a Dev code commit only for a completed result that declares changed files', () => {

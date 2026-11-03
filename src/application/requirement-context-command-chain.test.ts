@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
+import { listDecisionTreeFiles } from '../infrastructure/decision-tree-files';
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
 import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
 import type { DelegationEnvelope } from './tasks';
@@ -132,7 +134,7 @@ async function reachFinalize(executionId: string, token: string, includeExpected
   return command(executionId, token, ['phase', 'complete']);
 }
 
-test('Backlog Agent uses only the YAML command chain and compiles downstream context', async () => {
+test('Backlog Agent uses only the workspace command script and compiles downstream context', async () => {
   const { createTask } = await import('./tasks');
   const taskId = await createTask({ title: '导出筛选结果', description: '管理员可以导出当前筛选结果。' });
   const active = await begin(taskId);
@@ -140,11 +142,17 @@ test('Backlog Agent uses only the YAML command chain and compiles downstream con
   assert.match(await command(active.executionId, active.token!, ['help']), /通用命令链/);
   await assert.rejects(
     command(active.executionId, active.token!, ['requirement-context', 'status']),
-    /只允许 YAML 命令链协议/,
+    /只允许命令脚本协议/,
   );
   const status = await command(active.executionId, active.token!, ['status']);
   assert.match(status, /Phase: as_is/);
   assert.match(status, /requirement-context\.intent/);
+  assert.match(status, /"input": \{/);
+  const templateOutput=await command(active.executionId,active.token!,['artifact','template','--artifact','requirement-context','--block','assertions']);
+  const template=templateOutput.match(/```yaml\n([\s\S]*?)\n```/)?.[1];
+  assert.ok(template);
+  await put(active.executionId,active.token!,'assertions',template,'generated-template');
+  await command(active.executionId,active.token!,['artifact','remove','--artifact','requirement-context','--block','assertions','--key','generated-template']);
 
   const finalize = await reachFinalize(active.executionId, active.token!);
   assert.match(finalize, /FINALIZE · builtin/);
@@ -187,6 +195,47 @@ test('Backlog Agent uses only the YAML command chain and compiles downstream con
   assert.deepEqual(legacyTables, []);
 });
 
+test('draft bodies are read on demand across phases without changing state or leaking another execution', async () => {
+  const { createTask } = await import('./tasks');
+  const { databaseConnection } = await import('../infrastructure/database');
+  const ownId=await createTask({title:'Own draft retrieval'});
+  const own=await begin(ownId);
+  await command(own.executionId,own.token!,['status']);
+  const body='FULL-DRAFT-BODY-'.repeat(900);
+  await put(own.executionId,own.token!,'intent',body);
+  const status=await command(own.executionId,own.token!,['status']);
+  assert.equal(status.includes(body),false);
+  assert.match(status,/artifact get/);
+  assert.match(await command(own.executionId,own.token!,['artifact','get','--artifact','requirement-context','--block','intent']),new RegExp(body));
+  const foreignId=await createTask({title:'Foreign draft retrieval'});
+  const foreign=await begin(foreignId);
+  await command(foreign.executionId,foreign.token!,['status']);
+  await put(foreign.executionId,foreign.token!,'intent','FOREIGN-DRAFT-PRIVATE-BODY');
+  await assert.rejects(command(own.executionId,foreign.token!,['artifact','get','--artifact','requirement-context']),/token|凭证/i);
+  await reachFinalize(own.executionId,own.token!);
+  const db=await databaseConnection();
+  const before=db.prepare('SELECT draft_id, change_seq FROM agent_work_drafts WHERE last_execution_id = ?').get(own.executionId);
+  const phase=db.prepare('SELECT workflow_phase FROM command_chain_drafts WHERE draft_id = ?').get((before as {draft_id:string}).draft_id);
+  const restored=await command(own.executionId,own.token!,['artifact','get','--artifact','requirement-context','--block','assertions','--key','actual-export']);
+  assert.match(restored,/actual-export/);
+  assert.equal(restored.includes('FOREIGN-DRAFT-PRIVATE-BODY'),false);
+  assert.match(await command(own.executionId,own.token!,['acceptance','get','--key','download-matches-filter']),/download-matches-filter/);
+  assert.deepEqual(db.prepare('SELECT draft_id, change_seq FROM agent_work_drafts WHERE last_execution_id = ?').get(own.executionId),before);
+  assert.deepEqual(db.prepare('SELECT workflow_phase FROM command_chain_drafts WHERE draft_id = ?').get((before as {draft_id:string}).draft_id),phase);
+  await command(own.executionId,own.token!,['phase','rewind','--to','decision_proposal','--reason','Inspect saved choice IDs']);
+  await command(own.executionId,own.token!,['decision','put','--tree','decisions','--key','own-choice','--content',JSON.stringify({
+    type:'technical',title:'Equivalent representation',question:'Choose one?',impact:'Internal format only',
+    options:[{id:'option-one',label:'One',consequence:'Equivalent result'},{id:'option-two',label:'Two',consequence:'Equivalent result'}],
+    recommendation:{option:'option-one',reason:'Simple',authority:'agent_authority'},dependencies:[],
+  })]);
+  await command(own.executionId,own.token!,['phase','complete']);
+  const decisionState=db.prepare('SELECT draft_id, change_seq FROM agent_work_drafts WHERE last_execution_id = ?').get(own.executionId);
+  const choices=await command(own.executionId,own.token!,['decision','get','--tree','decisions','--key','own-choice']);
+  assert.match(choices,/option-one/);
+  assert.match(choices,/own-choice/);
+  assert.deepEqual(db.prepare('SELECT draft_id, change_seq FROM agent_work_drafts WHERE last_execution_id = ?').get(own.executionId),decisionState);
+});
+
 test('the final builtin gate requires Existing Expected for bug requirements', async () => {
   const { createTask } = await import('./tasks');
   const { databaseConnection } = await import('../infrastructure/database');
@@ -202,7 +251,7 @@ test('the final builtin gate requires Existing Expected for bug requirements', a
   );
 });
 
-test('a HUMAN decision pauses and resumes the same YAML command-chain draft', async () => {
+test('a HUMAN decision pauses and resumes the same workspace command-script draft', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { readAgentCommandSubmission, issueAgentCommandToken } = await import('./agent-command-drafts');
   const { completeExecution } = await import('./executions');
@@ -243,6 +292,12 @@ test('a HUMAN decision pauses and resumes the same YAML command-chain draft', as
       'dependencies: []',
     ].join('\n'),
   ]);
+  const { databaseConnection } = await import('../infrastructure/database');
+  const decisionFile = listDecisionTreeFiles(await databaseConnection(), taskId).find(file => file.kind === 'command_chain_decisions')!;
+  const tree = JSON.parse(readFileSync(decisionFile.path, 'utf8'));
+  assert.equal(tree.nodes[0].definition.title, '导出能力面向哪些用户');
+  assert.equal(tree.nodes[0].definition.options[0].id, 'admin');
+  assert.deepEqual(tree.nodes[0].definition.dependencies, []);
   await command(first.executionId, first.token!, ['phase', 'complete']);
   await command(first.executionId, first.token!, [
     'decision', 'ask', '--tree', 'decisions', '--key', 'export-audience',

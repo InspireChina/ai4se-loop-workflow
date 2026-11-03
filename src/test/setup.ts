@@ -11,7 +11,7 @@ if (process.env.LOOP_TEST_SETUP_PID !== String(process.pid)) {
   const workspaceRoot = join(testRoot, 'workspace');
   const dataRoot = join(testRoot, 'data');
   mkdirSync(workspaceRoot, { recursive: true });
-  cpSync(join(sourceRoot, '.omp', 'agents'), join(workspaceRoot, '.omp', 'agents'), { recursive: true });
+  cpSync(join(sourceRoot, '.omp', 'commands'), join(workspaceRoot, '.omp', 'commands'), { recursive: true });
 
   process.env.LOOP_TEST = '1';
   process.env.LOOP_TEST_SETUP_PID = String(process.pid);

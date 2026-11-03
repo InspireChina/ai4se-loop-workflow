@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import test from 'node:test';
 import { COMMAND_CHAIN_CATALOG } from './command-chain-catalog';
-import { parseCommandChainDefinition } from './command-chain-definition';
+import { loadCommandChainDefinition, parseCommandChainDefinition } from './command-chain-definition';
 
 let currentDefinitionYaml = '';
+
+test('external array item contracts survive the host boundary',()=>{
+  const definition=loadCommandChainDefinition('feedback-triage');
+  assert.equal(definition.artifacts.feedback.blocks.groups.fields.acceptance.itemType,'string');
+  assert.equal(definition.artifacts.feedback.blocks.groups.fields.commentIds.itemType,'string');
+});
 
 function loadTestDefinition() {
   return parseCommandChainDefinition('delivery-analysis', currentDefinitionYaml);
@@ -358,11 +362,9 @@ test('distinguishes repository-backed Artifacts from builtin database Artifacts'
   });
 });
 
-test('gives every bundled Artifact YAML field a human-readable label', () => {
-  const appRoot = process.env.LOOP_APP_ROOT || process.cwd();
+test('gives every discovered Artifact YAML field a human-readable label', () => {
   for (const item of COMMAND_CHAIN_CATALOG) {
-    const yaml = readFileSync(join(appRoot, 'command-chains', 'default', item.fileName), 'utf8');
-    const definition = parseCommandChainDefinition(item.id, yaml);
+    const definition = loadCommandChainDefinition(item.id);
     for (const [artifactId, artifact] of Object.entries(definition.artifacts)) {
       for (const [blockId, block] of Object.entries(artifact.blocks)) {
         for (const [fieldName, field] of Object.entries(block.fields)) {

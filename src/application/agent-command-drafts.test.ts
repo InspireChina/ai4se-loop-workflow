@@ -95,7 +95,7 @@ async function put(executionId: string, token: string, block: string, content: s
   ]);
 }
 
-test('Story Splitter uses only the YAML command chain and compiles delivery units', async () => {
+test('Story Splitter uses only the workspace command script and compiles delivery units', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { completeExecution } = await import('./executions');
   const { getTask } = await import('./tasks');
@@ -105,7 +105,7 @@ test('Story Splitter uses only the YAML command chain and compiles delivery unit
   const active = await begin(delegation, taskId);
 
   assert.match(await command(active.executionId, active.token!, ['help']), /通用命令链/);
-  await assert.rejects(command(active.executionId, active.token!, ['delivery-plan', 'status']), /只允许 YAML 命令链协议/);
+  await assert.rejects(command(active.executionId, active.token!, ['delivery-plan', 'status']), /只允许命令脚本协议/);
   const status = await command(active.executionId, active.token!, ['status']);
   assert.match(status, /Phase: inputs/);
   assert.match(status, /impact:filtered-export/);

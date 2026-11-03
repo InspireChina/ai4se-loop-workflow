@@ -802,6 +802,7 @@ main{padding:28px 20px}
 .agent-command-chain>header small{margin:0}
 .agent-command-main{display:grid;gap:16px;min-width:0}
 .agent-configuration-editor{min-width:0}
+.agent-configuration-editor .path-value{overflow-wrap:anywhere}
 .agent-config-toolbar{display:flex;align-items:end;gap:12px;flex-wrap:wrap}
 .agent-config-toolbar>label{min-width:190px;flex:0 1 240px}
 .agent-config-toolbar .compact{margin-left:auto}
@@ -831,7 +832,7 @@ main{padding:28px 20px}
 .agent-config-mode-tabs{display:flex;gap:4px;width:max-content;padding:4px;border:1px solid var(--line);border-radius:9px;background:#f5f7fa}
 .agent-config-mode-tabs button{display:flex;align-items:center;gap:6px;border:0;border-radius:6px;background:transparent;padding:7px 11px;color:var(--muted);cursor:pointer;font-weight:700}
 .agent-config-mode-tabs button.active{background:#fff;color:var(--blue);box-shadow:0 1px 4px #22334d1a}
-.agent-config-yaml{min-height:560px;font-size:12px;line-height:1.55}
+.agent-config-source{min-height:560px;font-size:12px;line-height:1.55}
 .agent-config-chat{display:grid;min-height:560px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:#fbfcfe}
 .agent-config-chat-messages{min-height:420px;max-height:620px;overflow:auto;padding:16px;display:grid;align-content:start;gap:12px}
 .agent-config-chat .context-chat-form{border-top:1px solid var(--line);padding:12px;background:#fff}
@@ -845,7 +846,7 @@ main{padding:28px 20px}
 .agent-command-configuration-error{margin:12px 0 0}
 .agent-command-configuration-error strong{display:block}
 .agent-command-configuration-error p{margin:3px 0 0;color:#805149;overflow-wrap:anywhere}
-.agent-config-savebar{position:sticky;bottom:10px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 12px;border:1px solid #d8e1ee;border-radius:9px;background:#fffffff2;box-shadow:0 6px 22px #20304a1a;backdrop-filter:blur(8px)}
+.agent-config-savebar{position:sticky;bottom:10px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px;padding:10px 12px;border:1px solid #d8e1ee;border-radius:9px;background:#fffffff2;box-shadow:0 6px 22px #20304a1a;backdrop-filter:blur(8px)}
 .agent-config-savebar span{font-size:11px;color:var(--muted)}
 .danger-ghost{color:#a33!important;border-color:#e8caca!important;background:#fffafa!important}
 .spin{animation:spin 1s linear infinite}
@@ -1261,3 +1262,18 @@ main{padding:28px 20px}
 .schedule-error{margin:0 22px 14px;font-size:12px;overflow-wrap:anywhere}
 @media(max-width:1200px){.schedule-card-head{grid-template-columns:36px minmax(0,1fr) auto;gap:12px;padding:18px}.schedule-plan-icon{width:36px;height:36px}.schedule-next{grid-column:2;grid-row:2;border:0;padding:0;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px}.schedule-actions{grid-column:3;grid-row:1 / 3}.schedule-card-footer{padding:0 18px}}
 @media(max-width:650px){.schedule-card-head{grid-template-columns:minmax(0,1fr) auto}.schedule-plan-icon{display:none}.schedule-plan-main{grid-column:1 / -1}.schedule-next{grid-column:1;grid-row:2}.schedule-actions{grid-column:2;grid-row:2;align-self:center}.schedule-next small:last-child{display:none}.schedule-card-footer{gap:8px}.schedule-history-label{display:none}.schedule-history>div{grid-template-columns:auto 1fr}.schedule-history a{grid-column:2}.schedule-title-line h3{font-size:15px}}
+
+/* Command paths and source references must remain readable inside the prompt card. */
+.agent-prompt-layout .agent-editor{grid-template-columns:minmax(0,1fr);overflow-wrap:anywhere}
+.agent-prompt-layout .agent-editor>*{min-width:0}
+@media(max-width:1400px){
+.agent-prompt-layout,.agent-command-layout{grid-template-columns:minmax(0,1fr)}
+.agent-command-aside{position:static}
+}
+
+.decision-file-sources{display:grid;gap:12px;min-width:0}
+.decision-file-sources>p{margin:0;font-size:12px;line-height:1.6}
+.decision-file-sources details{min-width:0;border-top:1px solid var(--line);padding-top:10px}
+.decision-file-sources summary{cursor:pointer;font-size:12px;font-weight:650}
+.decision-file-sources .path-line{margin-top:10px;font-size:11px}
+.decision-file-actions{display:flex;gap:16px;margin-top:10px;font-size:12px}

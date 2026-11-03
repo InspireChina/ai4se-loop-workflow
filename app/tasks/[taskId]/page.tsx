@@ -256,7 +256,9 @@ export default async function TaskDetail({
   const waitingForControlAnswers = task.run_state === 'waiting_for_answers'
     && ['idea-context-agent', 'business-design-agent', 'backlog-agent', 'repro-agent', 'feedback-agent'].includes(task.current_subagent || '');
   const waitingForAnswers = waitingForControlAnswers || analysisLane.status === 'waiting_for_answers';
-  const nextStepText = task.is_paused
+  const nextStepText = isDirect && task.agile_status === 'done'
+    ? '本次 Direct 执行已完成，正式报告见交付产物。'
+    : task.is_paused
     ? `暂停期间不会派发 Agent；恢复后继续：${terminologyText(task.next_step) || '等待重新调度'}`
     : waitingForDependencies
     ? `等待前置需求进入等待阅读：${pendingDependencies.map((dependency) => dependency.title).join('、')}`
@@ -324,11 +326,12 @@ export default async function TaskDetail({
     ? documentComments.filter((comment) => comment.document_id === reviewDocument.document_id && comment.feedback_status !== 'resolved').length
     : 0;
   const closureNeedsAttention = task.agile_status === 'ready_to_close' || closureFeedbackCount > 0;
+  const displayedStatus = task.is_paused ? '已暂停' : waitingForDependencies ? '等待前置需求' : systemVerificationAssistance ? '系统辅助验证中' : waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : isDirect && task.agile_status !== 'done' ? '直接执行' : inBusinessAnalysisStage ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status);
   const navigationItems: TaskDetailNavigationItem[] = [
-    { id: 'overview', label: '概览', description: '输入、进度与当前状态', value: statusLabel(task.agile_status) },
+    { id: 'overview', label: '概览', description: '输入、进度与当前状态', value: displayedStatus },
     ...(showDecisionAlignment ? [{ id: 'decisions' as const, label: '决策对齐', description: '任务级决策与处理记录', value: pendingDecisions.length ? `${pendingDecisions.length} 项待处理` : `${alignedDecisions.length} 项`, attention: pendingDecisions.length > 0 }] : []),
     { id: 'deliverables', label: '交付产物', description: '单元、验收契约、文档与规格', value: deliveryFeedbackCount ? `${deliveryFeedbackCount} 条反馈待处理` : `${deliveryDocuments.length + currentSpecs.length + acceptances.length} 项`, attention: deliveryFeedbackCount > 0 },
-    { id: 'closure', label: isBusinessAnalysis ? '最终规格' : '结卡报告', description: isBusinessAnalysis ? '审查结果与阅读确认' : '最终报告与阅读确认', value: reviewDocument ? `版本 ${task.review_revision}` : '尚未生成', attention: closureNeedsAttention },
+    ...(!isDirect ? [{ id: 'closure' as const, label: isBusinessAnalysis ? '最终规格' : '结卡报告', description: isBusinessAnalysis ? '审查结果与阅读确认' : '最终报告与阅读确认', value: reviewDocument ? `版本 ${task.review_revision}` : '尚未生成', attention: closureNeedsAttention }] : []),
     { id: 'activity', label: '活动记录', description: '运行协助与推进时间线', value: activeRuntimeInputCount ? `${activeRuntimeInputCount} 项协助中` : `${events.length} 条活动`, attention: unansweredRuntimeInputs.length > 0 },
     { id: 'actions', label: '推进控制', description: '对话、调度与运行状态', value: pipeline.length ? `${pipeline.length} 个待派发` : '当前状态' },
     { id: 'audit', label: '执行审计', description: 'Agent 命令、输入与验证追溯', value: `${executionAttempts.length} 次 · ${commandAudit.length} 条命令` },
@@ -343,7 +346,7 @@ export default async function TaskDetail({
           <p className="eyebrow">{task.task_id}</p>
           <h1>{task.title}</h1>
         </div>
-        <span className={`badge ${task.is_paused || waitingForDependencies || task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{task.is_paused ? '已暂停' : waitingForDependencies ? '等待前置需求' : systemVerificationAssistance ? '系统辅助验证中' : waitingForVerificationAssistance ? '等待验证协助' : waitingForRuntimeInput ? '等待运行信息' : waitingForAnswers ? '等待关键决策' : blockedLanes.length ? '通道阻塞' : isDirect && task.agile_status !== 'done' ? '直接执行' : inBusinessAnalysisStage ? businessAnalysisSteps[currentStep]?.label : statusLabel(task.agile_status)}</span>
+        <span className={`badge ${task.is_paused || waitingForDependencies || task.agile_status === 'blocked' || waitingForAnswers || waitingForRuntimeInput || blockedLanes.length ? 'amber' : task.agile_status === 'done' ? 'green' : 'blue'}`}>{displayedStatus}</span>
       </div>
       <div className="chips" aria-label="需求运行上下文">
         <TaskAutoRefresh taskId={task.task_id}/>
@@ -639,7 +642,7 @@ export default async function TaskDetail({
         </section>}
     </div>
 
-    <div className="task-detail-panel-stack">
+    {!isDirect && <div className="task-detail-panel-stack">
         {reviewDocument && <section className="task-section">
           <div className="section-head"><h2>{isBusinessAnalysis ? '通过审查的需求规格说明书' : '结卡报告'}</h2><small>版本 {task.review_revision}</small></div>
           <div className="card document-list">
@@ -671,7 +674,7 @@ export default async function TaskDetail({
             <p>{isBusinessAnalysis ? '需求规格通过独立审查后，会在这里提供最终版本和阅读确认。' : '所有交付单元完成并通过整体验收后，会在这里生成最终结卡报告。'}</p>
           </div>
         </section>}
-    </div>
+    </div>}
 
     <div className="task-detail-panel-stack">
         {showDeliveryWorkflow && <section className="task-section">

@@ -1,4 +1,4 @@
-import { mergeExternalAgentOptions, type ExternalAgent } from '../infrastructure/external-agents';
+import { mergeExternalCommandOptions, type ExternalCommandPrompt } from '../infrastructure/external-command-prompts';
 import { revalidatePath } from 'next/cache';
 import { randomUUID } from 'node:crypto';
 import { realpathSync, statSync } from 'node:fs';
@@ -234,7 +234,7 @@ function runtimeConfigurations(scope: GlobalRuntimeConfiguration['scope'], agent
   const rows = appDatabaseConnection().prepare(`
     SELECT * FROM global_runtime_configurations
     WHERE scope = ? AND agent_id IS ?
-    ORDER BY is_active DESC, updated_at DESC, name
+    ORDER BY is_active DESC, updated_at DESC, loopwork_read_payload(name)
   `).all(scope, agentId) as GlobalRuntimeConfigurationRow[];
   return rows.map(runtimeConfigurationFromRow);
 }
@@ -266,6 +266,9 @@ export async function createAgentRuntimeConfiguration(input: {
 }) {
   if (!isFlowAgentId(input.agentId)) throw new Error(`未知 Agent：${input.agentId}`);
   const name = runtimeConfigurationNameSchema.parse(input.name);
+  // Names are file content, so SQL pointer equality is not semantic equality
+  // after the user switches storage directories. Compare hydrated names.
+  if (listAgentRuntimeConfigurations(input.agentId).some(configuration => configuration.name === name)) throw new Error('Runtime 配置名称已存在');
   const sourceId = String(input.fromConfigurationId || '');
   const source = sourceId
     ? listAgentRuntimeConfigurations(input.agentId).find((configuration) => configuration.configurationId === sourceId)
@@ -291,6 +294,7 @@ export async function saveAgentRuntimeConfiguration(input: RuntimeSettingsInput 
 }) {
   if (!isFlowAgentId(input.agentId)) throw new Error(`未知 Agent：${input.agentId}`);
   const name = runtimeConfigurationNameSchema.parse(input.name);
+  if (listAgentRuntimeConfigurations(input.agentId).some(configuration => configuration.name === name && configuration.configurationId !== String(input.configurationId))) throw new Error('Runtime 配置名称已存在');
   const settings = parseExecutorSettingsInput(input);
   const result = appDatabaseConnection().prepare(`
     UPDATE global_runtime_configurations
@@ -374,9 +378,9 @@ export async function getAgentRuntimeSettings(agentIdInput: string): Promise<Age
   };
 }
 
-export async function resolveFlowAgentExecutionOptions(settings: AgentRuntimeSettings, definition: ExternalAgent) {
+export async function resolveFlowAgentExecutionOptions(settings: AgentRuntimeSettings, definition: ExternalCommandPrompt) {
   const defaults = settings.source === 'global_default' ? settings : await getFlowAgentDefaultRuntimeSettings();
-  return mergeExternalAgentOptions(
+  return mergeExternalCommandOptions(
     definition,
     agentExecutionOptions(defaults),
     settings.source === 'agent_configuration' ? agentExecutionOptions(settings) : {},

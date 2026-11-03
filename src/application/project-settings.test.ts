@@ -246,8 +246,8 @@ test('saves Langfuse settings without exposing the secret and builds runner env'
 
 test('manual Agent OMP parameters override external defaults while blank fields inherit per field', async () => {
   const settings = await import('./project-settings');
-  const { loadExternalAgent, mergeExternalAgentOptions } = await import('../infrastructure/external-agents');
-  const role = loadExternalAgent(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE!, 'dev-agent');
+  const { loadExternalCommandPrompt, mergeExternalCommandOptions } = await import('../infrastructure/external-command-prompts');
+  const role = loadExternalCommandPrompt(process.env.LOOP_WORKSPACE_ROOT_OVERRIDE!, 'dev-agent');
   role.metadata = { model: 'external/model', thinking: 'high', tools: [], skills: ['delivery'] };
   const defaultsBefore = await settings.getFlowAgentDefaultRuntimeSettings();
   const previous = await settings.getAgentRuntimeSettings('dev-agent');
@@ -269,7 +269,8 @@ test('manual Agent OMP parameters override external defaults while blank fields 
     assert.equal(args[args.indexOf('--model') + 1], 'manual/model');
     assert.equal(args[args.indexOf('--thinking') + 1], 'off');
     assert.equal(args.filter(arg => arg === '--model').length, 1);
-    assert.equal(custom.systemPromptText, role.prompt);
+    assert.equal(custom.nativeCommand?.path, role.path);
+    assert.equal(custom.systemPromptText, undefined);
     assert.deepEqual(custom.tools, []);
     assert.deepEqual(custom.skills, ['delivery']);
     await settings.saveAgentRuntimeConfiguration({ ...defaultsBefore, agentId: 'dev-agent', configurationId, name: 'Manual OMP override', ompModel: '', ompThinking: 'default' });
@@ -280,7 +281,7 @@ test('manual Agent OMP parameters override external defaults while blank fields 
     const fallback = await settings.resolveFlowAgentExecutionOptions(await settings.getAgentRuntimeSettings('dev-agent'), role);
     assert.equal(fallback.model, 'flow/model');
     assert.equal(fallback.reasoningEffort, 'low');
-    const native = mergeExternalAgentOptions(role);
+    const native = mergeExternalCommandOptions(role);
     assert.equal(native.model, undefined);
     assert.equal(native.reasoningEffort, undefined);
   } finally {
@@ -289,4 +290,15 @@ test('manual Agent OMP parameters override external defaults while blank fields 
     await settings.setFlowAgentDefaultRuntimeSettings(defaultsBefore);
     if (previous.source === 'agent_configuration') await settings.activateAgentRuntimeConfiguration({ agentId: 'dev-agent', configurationId: previous.configurationId });
   }
+});
+
+test('runtime configuration names stay unique after switching the external file directory', async () => {
+ const { documentFilesRoot,setDocumentFilesRoot }=await import('../infrastructure/document-files');
+ const { mkdtempSync }=await import('node:fs');const { join }=await import('node:path');
+ const settings=await import('./project-settings');const root=documentFilesRoot();
+ const configurationId=await settings.createAgentRuntimeConfiguration({agentId:'direct-agent',name:'Stable name across directories'});
+ try {
+  setDocumentFilesRoot(mkdtempSync(join(process.env.LOOP_DATA_ROOT!,'config-files-')));
+  await assert.rejects(settings.createAgentRuntimeConfiguration({agentId:'direct-agent',name:'Stable name across directories'}),/名称已存在/);
+ } finally {await settings.deleteAgentRuntimeConfiguration({agentId:'direct-agent',configurationId});setDocumentFilesRoot(root);}
 });

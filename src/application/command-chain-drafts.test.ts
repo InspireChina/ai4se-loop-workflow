@@ -14,7 +14,7 @@ async function begin(delegation: DelegationEnvelope, suffix: string) {
   const started = await beginTestExecutionAttempt({
     runId: `RUN-command-chain-${suffix}`,
     delegation,
-    prompt: 'YAML command chain prompt',
+    prompt: 'workspace command script prompt',
   });
   const token = await issueAgentCommandToken(started.attempt.execution_id);
   assert.ok(token);
@@ -94,7 +94,7 @@ test('delivery analysis work keys isolate units while resume keeps one command-c
   );
 });
 
-test('analyst drafts have only the YAML command-chain protocol', async () => {
+test('analyst drafts have only the workspace command-script protocol', async () => {
   const { taskId, delegation } = await deliveryAnalysisDelegation('单轨通用命令链交付分析');
   const active = await begin(delegation, taskId);
 
@@ -102,7 +102,7 @@ test('analyst drafts have only the YAML command-chain protocol', async () => {
   assert.match(help, /通用命令链不绑定 Agent namespace/);
   await assert.rejects(
     command(active.executionId, active.token!, ['delivery-analysis', 'status']),
-    /只允许 YAML 命令链协议/,
+    /只允许命令脚本协议/,
   );
 
   const status = await command(active.executionId, active.token!, ['status']);
@@ -205,7 +205,7 @@ test('analyst drafts have only the YAML command-chain protocol', async () => {
   const db = await databaseConnection();
   const rejectionRows = db.prepare(`
     SELECT occurrence, error_code, error_path FROM agent_command_rejections
-    WHERE execution_id = ? AND command LIKE 'artifact put%' AND error_code = 'schema_undeclared_field'
+    WHERE execution_id = ? AND loopwork_read_payload(command) LIKE 'artifact put%' AND error_code = 'schema_undeclared_field'
     ORDER BY rejection_id
   `).all(active.executionId) as { occurrence: number; error_code: string; error_path: string }[];
   assert.deepEqual(rejectionRows, [
@@ -222,6 +222,20 @@ test('analyst drafts have only the YAML command-chain protocol', async () => {
       .get(draft.draft_id) as { count: number }).count,
     1,
   );
+  const originalArtifacts = db.prepare(`SELECT artifact_id, block_id, item_key, content
+    FROM command_chain_artifact_blocks WHERE draft_id = ? ORDER BY ordinal`).all(draft.draft_id);
+  const { completeExecution } = await import('./executions');
+  await completeExecution(active.executionId);
+  const revision = await begin({ ...delegation, retryCycle: 2 }, `${taskId}-new-analysis-cycle`);
+  const revisionStatus = await command(revision.executionId, revision.token!, ['status']);
+  assert.match(revisionStatus, /Phase: delivery_unit/);
+  const revisedDraft = db.prepare('SELECT draft_id FROM agent_work_drafts WHERE last_execution_id = ?')
+    .get(revision.executionId) as { draft_id: string };
+  assert.notEqual(revisedDraft.draft_id, draft.draft_id);
+  assert.deepEqual(db.prepare(`SELECT artifact_id, block_id, item_key, content
+    FROM command_chain_artifact_blocks WHERE draft_id = ? ORDER BY ordinal`).all(revisedDraft.draft_id), originalArtifacts);
+  assert.deepEqual(db.prepare(`SELECT artifact_id, block_id, item_key, content
+    FROM command_chain_artifact_blocks WHERE draft_id = ? ORDER BY ordinal`).all(draft.draft_id), originalArtifacts);
 });
 
 test('the command-chain migration removes the Analyst domain draft model', async () => {

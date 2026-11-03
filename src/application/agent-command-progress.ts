@@ -2,6 +2,8 @@ import type Database from 'better-sqlite3';
 import { agentCommandProfile } from '../domain/agent-command-profile';
 import { loadCommandChainDefinition } from '../domain/command-chain-definition';
 import { databaseConnection } from '../infrastructure/database';
+import { nativeWorkflowCommand } from '../infrastructure/agent-executor';
+import { commandResultMetadata } from '../domain/agent-command-rejection';
 
 export type AgentCommandProgressStage = {
   id: string;
@@ -167,15 +169,33 @@ function verificationAssistanceProgress(db: Database.Database, row: ActiveExecut
 }
 
 function domainCommandEvents(rows: ToolReceiptRow[], fallbackExecutionId = '') {
+  const nativeCalls = new Map<string, string>();
   return rows.flatMap((row): DomainCommandEvent[] => {
     try {
       const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
       const input = payload.input as Record<string, unknown> | undefined;
-      const command = typeof input?.command === 'string' ? input.command : '';
-      if (!/loop-agent\.(?:mjs|cjs)/i.test(command)) return [];
-      const summary = typeof payload.summary === 'string' ? payload.summary : '';
-      const summaryValue = (label: string) => summary.match(new RegExp(`(?:^|\\n)- ${label}:\\s*([^\\n\\r]+)`, 'i'))?.[1]?.trim() || '';
-      const occurrence = Number(summaryValue('Occurrence'));
+      const callKey = `${row.execution_id || fallbackExecutionId}:${payload.toolCallId || ''}`;
+      let command = typeof input?.command === 'string' ? input.command : '';
+      if (!command && payload.tool === 'write' && payload.phase === 'started') {
+        let captured: unknown = input;
+        if (!captured && typeof payload.summary === 'string') {
+          try { captured = JSON.parse(payload.summary); } catch { /* Truncated summaries cannot establish native identity. */ }
+        }
+        command = nativeWorkflowCommand(payload.tool, captured) || '';
+      }
+      if (command.startsWith('loopwork ') && payload.toolCallId) nativeCalls.set(callKey, command);
+      command ||= nativeCalls.get(callKey) || '';
+      const nativeWorkflow = payload.tool === 'loopwork' || command.startsWith('loopwork ');
+      if (!/loop-agent\.(?:mjs|cjs)/i.test(command) && !nativeWorkflow) return [];
+      let summary = typeof payload.summary === 'string' ? payload.summary : '';
+      // Earlier native receipts already have a tool identity and call ID, even
+      // when their argument array was only captured in the start summary.
+      if (nativeWorkflow && payload.phase === 'started') {
+        const legacyArgs = summary.match(/"args":\s*\["([^"]+)",\s*"([^"]+)"/);
+        summary = command || (legacyArgs ? `loopwork ${legacyArgs[1]} ${legacyArgs[2]}` : summary);
+      }
+      const recovered = commandResultMetadata(undefined, summary);
+      const scalar = (value: unknown, fallback: string) => typeof value === 'string' ? value.split('\\n')[0].trim() : fallback;
       return [{
         executionId: row.execution_id || fallbackExecutionId,
         receiptKey: row.receipt_key,
@@ -184,12 +204,12 @@ function domainCommandEvents(rows: ToolReceiptRow[], fallbackExecutionId = '') {
         phase: typeof payload.phase === 'string' ? payload.phase : '',
         summary,
         success: typeof payload.success === 'boolean' ? payload.success : null,
-        commandOutcome: typeof payload.commandOutcome === 'string' ? payload.commandOutcome : summaryValue('Outcome'),
-        commandErrorCode: typeof payload.commandErrorCode === 'string' ? payload.commandErrorCode : summaryValue('Error-Code'),
-        commandErrorPath: typeof payload.commandErrorPath === 'string' ? payload.commandErrorPath : summaryValue('Error-Path'),
+        commandOutcome: scalar(payload.commandOutcome, recovered.commandOutcome || ''),
+        commandErrorCode: scalar(payload.commandErrorCode, recovered.commandErrorCode || ''),
+        commandErrorPath: scalar(payload.commandErrorPath, recovered.commandErrorPath || ''),
         commandRejectionOccurrence: typeof payload.commandRejectionOccurrence === 'number'
           ? payload.commandRejectionOccurrence
-          : Number.isFinite(occurrence) && occurrence > 0 ? occurrence : null,
+          : recovered.commandRejectionOccurrence || null,
         createdAt: row.created_at,
       }];
     } catch {

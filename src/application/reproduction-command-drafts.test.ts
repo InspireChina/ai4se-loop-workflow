@@ -80,7 +80,7 @@ async function recordInvestigation(
   ].join('\n'), 'environment-specific');
 }
 
-test('Repro Agent pauses for missing facts and resumes the same YAML command chain to a reproduced result', async () => {
+test('Repro Agent pauses for missing facts and resumes the same workspace command script to a reproduced result', async () => {
   const { applyAgentResult } = await import('./agent-results');
   const { readAgentCommandSubmission, issueAgentCommandToken } = await import('./agent-command-drafts');
   const { completeExecution } = await import('./executions');
@@ -90,7 +90,7 @@ test('Repro Agent pauses for missing facts and resumes the same YAML command cha
   const first = await begin(delegation, `${taskId}-first`);
 
   assert.match(await command(first.executionId, first.token!, ['help']), /通用命令链/);
-  await assert.rejects(command(first.executionId, first.token!, ['reproduction', 'status']), /只允许 YAML 命令链协议/);
+  await assert.rejects(command(first.executionId, first.token!, ['reproduction', 'status']), /只允许命令脚本协议/);
   const status = await command(first.executionId, first.token!, ['status']);
   assert.match(status, /Phase: investigation/);
   assert.match(status, /reproduction\.verdict/);

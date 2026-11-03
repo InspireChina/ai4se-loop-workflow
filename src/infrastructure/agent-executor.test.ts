@@ -43,3 +43,40 @@ test('projects native assistant output and handles malformed diagnostic lines',(
  assert.match(getAgentExecutor('omp').parseStdout(JSON.stringify({type:'message_end',message:{role:'assistant',content:[{type:'text',text:'done'}]}}),context)||'',/executor=omp.*done/);
  assert.equal(parseAgentTelemetryStdout('omp','native diagnostic')?.name,'loop.agent.diagnostic');
 });
+
+test('native loopwork arguments retain a domain command identity without granting a Shell receipt', () => {
+ const event=parseAgentTelemetryStdout('omp',JSON.stringify({type:'tool_execution_start',toolName:'loopwork',toolCallId:'native-run',args:{args:['direct','run']}}));
+ assert.equal(event?.toolClass,'other');
+ assert.equal(event?.summary,'loopwork direct run');
+ assert.equal((event?.input as {command:string}).command,'loopwork direct run');
+});
+
+test('native browser runs retain exact validation input without becoming Shell commands', () => {
+ const args={action:'run',name:'main',code:'if (await page.title() !== "文本工具") throw new Error("wrong title");'};
+ const event=parseAgentTelemetryStdout('omp',JSON.stringify({type:'tool_execution_start',toolName:'browser',toolCallId:'browser-check',args}));
+ assert.equal(event?.toolClass,'other');
+ assert.equal((event?.input as {command:string}).command,`browser run ${JSON.stringify(args)}`);
+ for(const args of [{action:'open',url:'http://localhost/'},{action:'run',code:''}]) {
+  const navigation=parseAgentTelemetryStdout('omp',JSON.stringify({type:'tool_execution_start',toolName:'browser',args}));
+  assert.equal((navigation?.input as {command?:string}).command,undefined);
+ }
+ const failed=parseAgentTelemetryStdout('omp',JSON.stringify({type:'tool_execution_end',toolName:'browser',toolCallId:'browser-check',isError:true,result:{error:'wrong title'}}));
+ assert.equal(failed?.success,false);
+});
+
+test('native xd device dispatch retains Workflow identity without treating an ordinary file write as a command', () => {
+ const event=parseAgentTelemetryStdout('omp',JSON.stringify({type:'tool_execution_start',toolName:'write',toolCallId:'device-call',args:{path:'xd://loopwork',content:JSON.stringify({args:['phase','complete']})}}));
+ assert.equal(event?.tool,'write');
+ assert.equal(event?.toolClass,'other');
+ assert.equal((event?.input as {command:string}).command,'loopwork phase complete');
+ const ordinary=parseAgentTelemetryStdout('omp',JSON.stringify({type:'tool_execution_start',toolName:'write',args:{path:'/tmp/loopwork.json',content:JSON.stringify({args:['phase','complete']})}}));
+ assert.equal((ordinary?.input as {command?:string}).command,undefined);
+});
+
+test('recoverable tool errors and aggregate assistant messages never become fatal execution diagnostics', () => {
+ const transcript={role:'assistant',content:[{type:'thinking',thinking:'private model reasoning'},{type:'text',text:'Interim work'}]};
+ assert.equal(extractAgentFailureDetail('omp',JSON.stringify({type:'tool_execution_end',isError:true,result:{content:[{type:'text',text:'Outcome: rejected'}]}})),null);
+ assert.equal(extractAgentFailureDetail('omp',JSON.stringify({type:'agent_end',message:transcript})),null);
+ const error=extractAgentFailureDetail('omp',JSON.stringify({type:'error',error:{code:'PROVIDER_UNAVAILABLE',message:'Connection closed',transcript}}));
+ assert.match(error||'',/PROVIDER_UNAVAILABLE/);assert.ok(!error?.includes('private model reasoning'));
+});

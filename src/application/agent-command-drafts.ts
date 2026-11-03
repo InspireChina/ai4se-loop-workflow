@@ -143,7 +143,7 @@ function createDraft(
 ) {
   return db.transaction(() => {
     if (!profile.commandChainId) {
-      throw new Error(`${profile.agent}/${execution.pipeline} 未绑定 YAML 命令链`);
+      throw new Error(`${profile.agent}/${execution.pipeline} 未绑定命令链脚本`);
     }
     const draftId = randomUUID();
     const version = (source?.draft_version || 0) + 1;
@@ -328,7 +328,7 @@ export async function runAgentCommand(input: {
   if (parsed.kind === 'help') {
     if (positionals.length > 2) throw new Error('help 最多接受一个主题');
     if (profile.draftType === 'direct') return helpText(execution, profile, positionals[1] || null);
-    if (!positionals[1]) return commandChainHelp();
+    if (!positionals[1]) return commandChainHelp(execution.agent);
     if (positionals[1] !== 'context') {
       throw new Error('通用命令链 help 只支持 context 主题；当前阶段的具体命令请执行 status');
     }
@@ -348,11 +348,11 @@ export async function runAgentCommand(input: {
     return runDirectCommand({ db, execution, command, flags });
   }
   if (!genericCommand) {
-    throw new Error(`当前 execution 只允许 YAML 命令链协议：${command || '(empty)'}。请先执行 status`);
+    throw new Error(`当前 execution 只允许命令脚本协议：${command || '(empty)'}。请先执行 status`);
   }
 
   if (!profile.commandChainId) {
-    throw new Error(`${profile.agent}/${execution.pipeline} 未绑定 YAML 命令链`);
+    throw new Error(`${profile.agent}/${execution.pipeline} 未绑定命令链`);
   }
   const draft = ensureDraft(db, execution, profile, workKey);
   try {

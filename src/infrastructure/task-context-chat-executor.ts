@@ -1,5 +1,5 @@
 import { documentFilesRoot } from './document-files';
-import { loadExternalAgent, mergeExternalAgentOptions } from './external-agents';
+import { loadExternalCommandPrompt, mergeExternalCommandOptions } from './external-command-prompts';
 import { buildAgentProcessLaunch } from './delegation-execution';
 import { getAgentExecutor } from './agent-executor';
 import { join } from 'node:path';
@@ -213,7 +213,7 @@ export function buildTaskContextChatPrompt(
     `读取文档：npm --prefix ${commandPath(paths.appRoot)} run loopctl -- document-get --task-id ${taskId} --kind <kind> [--story <n>]`,
   ].join('\n');
   const changeCommand = `npm --prefix ${commandPath(paths.appRoot)} run loopctl -- context-chat-change --key <稳定请求-key> --title <标题> --request <完整变更意图> [--acceptance <验收关注>]`;
-  const commonContract = loadExternalAgent(workspaceRoot, 'context-chat-agent').prompt.replaceAll('{{change_command}}', changeCommand).replaceAll('{{task_id}}', taskId).replaceAll('{{workspace_root}}', workspaceRoot).replaceAll('{{app_root}}', paths.appRoot).split('\n');
+  const commonContract = loadExternalCommandPrompt(workspaceRoot, 'context-chat-agent').prompt.replaceAll('{{change_command}}', changeCommand).replaceAll('{{task_id}}', taskId).replaceAll('{{workspace_root}}', workspaceRoot).replaceAll('{{app_root}}', paths.appRoot).split('\n');
   const contract = [
     ...(firstTurn ? [] : ['本轮双路径能力契约覆盖旧轮次中“Chat 只能只读或所有修改都必须进入 Feedback”的过时说明；以本轮安全边界为准。']),
     ...commonContract,
@@ -307,13 +307,13 @@ export async function runTaskContextChatTurn(input: ContextChatRun) {
     LOOP_AGENT_TMP_DIR: join(documentFilesRoot(), 'sessions', 'chat', input.sessionId, 'tmp'),
   };
   let providerSessionId = input.providerSessionId || '';
-  const role = loadExternalAgent(input.workspaceRoot || paths.root, 'context-chat-agent');
+  const role = loadExternalCommandPrompt(input.workspaceRoot || paths.root, 'context-chat-agent');
   const launch = buildAgentProcessLaunch(getAgentExecutor('omp'), prompt, input.workspaceRoot || paths.root, {
-    ...mergeExternalAgentOptions(role, input.executionOptions),
+    ...mergeExternalCommandOptions(role, input.executionOptions),
     systemPromptText: role.prompt.replaceAll('{{change_command}}', `npm --prefix ${commandPath(paths.appRoot)} run loopctl -- context-chat-change --key <稳定请求-key> --title <标题> --request <完整变更意图> [--acceptance <验收关注>]`).replaceAll('{{task_id}}', input.taskId).replaceAll('{{workspace_root}}', input.workspaceRoot || paths.root).replaceAll('{{app_root}}', paths.appRoot),
     sessionDirectory: join(documentFilesRoot(), 'sessions', 'chat', input.sessionId),
   });
-  const result = await runChatProcess(launch.command, [...launch.args, ...(!newProviderSession && providerSessionId ? ['--resume', providerSessionId] : [])], prompt, { ...chatCommandEnv, ...launch.env }, true);
+  const result = await runChatProcess(launch.command, [...launch.args, ...(!newProviderSession && providerSessionId ? ['--resume', providerSessionId] : [])], launch.input, { ...chatCommandEnv, ...launch.env }, true);
   if (newProviderSession) providerSessionId = ompSessionId(result.stdout);
 
   if (result.exitCode !== 0) {

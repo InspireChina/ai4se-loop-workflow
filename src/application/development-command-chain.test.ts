@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { getAgentCommandFile } from './agent-configurations';
 import { deliverySpecFixture } from '../test/delivery-spec-fixture';
 import { beginTestExecutionAttempt } from '../test/execution-fixtures';
 import { inspectTaskDispatch } from '../test/dispatch-inspection-fixtures';
@@ -89,7 +91,7 @@ async function begin(delegation: DelegationEnvelope, suffix: string) {
   return { executionId: started.attempt.execution_id, token };
 }
 
-async function recordCapturedCommand(executionId: string, actualCommand: string, passed = true) {
+async function recordCapturedCommand(executionId: string, actualCommand: string, passed = true, tool = 'bash') {
   const { databaseConnection } = await import('../infrastructure/database');
   const db = await databaseConnection();
   const current = db.prepare(`
@@ -105,7 +107,8 @@ async function recordCapturedCommand(executionId: string, actualCommand: string,
   `).run(randomUUID(), executionId, receiptKey, JSON.stringify({
     name: 'loop.agent.tool',
     phase: 'completed',
-    toolClass: 'shell',
+    tool,
+    toolClass: tool === 'bash' ? 'shell' : 'other',
     summary: passed ? '检查通过' : '检查失败',
     level: passed ? 'DEFAULT' : 'ERROR',
     success: passed,
@@ -115,10 +118,35 @@ async function recordCapturedCommand(executionId: string, actualCommand: string,
   return receiptKey;
 }
 
+test('developer checks bind native browser execution receipts without accepting Workflow or navigation receipts', async () => {
+  const {taskId,delegation}=await developmentDelegation('浏览器检查证据归属');
+  const active=await begin(delegation,taskId);
+  await enterImplement(active.executionId,active.token!);
+  await recordCriteria(active.executionId,active.token!);
+  await command(active.executionId,active.token!,['phase','complete']);
+  await command(active.executionId,active.token!,['artifact','put','--artifact','development','--block','code-review','--content',JSON.stringify({summary:'审查完成',evidence:'结果状态组件',changedFiles:[]})]);
+  await command(active.executionId,active.token!,['phase','complete']);
+  for(const [tool,operation,passed] of [['loopwork','loopwork phase complete',true],['browser','browser open {}',true],['browser','browser run {"code":"throw Error()"}',false]] as const) {
+    const receipt=await recordCapturedCommand(active.executionId,operation,passed,tool);
+    await assert.rejects(command(active.executionId,active.token!,['check','record','--key','browser','--receipt',receipt,'--summary','不能作为成功检查']),/不属于当前 execution|没有明确成功/);
+  }
+  const packet=await command(active.executionId,active.token!,['status']);
+  assert.equal(packet.includes(' · loopwork phase complete · '),false);
+  assert.equal(packet.includes(' · browser open {} · '),false);
+  const operation='browser run {"action":"run","code":"assert.equal(await page.title(), expected)"}';
+  const receipt=await recordCapturedCommand(active.executionId,operation,true,'browser');
+  await command(active.executionId,active.token!,['check','record','--key','browser','--receipt',receipt,'--summary','浏览器断言通过']);
+  const {databaseConnection}=await import('../infrastructure/database');
+  const row=(await databaseConnection()).prepare('SELECT command, source_receipt_key FROM command_chain_checks WHERE source_execution_id=?').get(active.executionId) as {command:string;source_receipt_key:string};
+  assert.equal(row.command,operation);assert.equal(row.source_receipt_key,receipt);
+});
+
 async function enterImplement(executionId: string, token: string) {
   const status = await command(executionId, token, ['status']);
   assert.match(status, /Phase: delivery_spec/);
   assert.match(status, /delivery-spec current/);
+  assert.ok(status.includes('Native loopwork tool: `{"args":["delivery-spec","current"]}`'));
+  assert.ok(status.includes('Native loopwork tool: `{"args":["phase","complete"]}`'));
   const spec = await command(executionId, token, ['delivery-spec', 'current']);
   assert.match(spec, /AC-status/);
   const packet = await command(executionId, token, ['phase', 'complete']);
@@ -132,14 +160,14 @@ async function recordCriteria(executionId: string, token: string) {
   ]);
 }
 
-test('Dev Agent runs only through the YAML command chain and trusted command receipts', async () => {
+for (const changedFiles of [['src/result-status.ts'], []]) test('Dev Agent retains trusted receipts and explicit ' + (changedFiles.length ? 'changed files' : 'no-change declaration'), async () => {
   const { taskId, delegation } = await developmentDelegation('通用命令链开发实现', 'CARD-DEV-001');
   const active = await begin(delegation, taskId);
 
   assert.match(await command(active.executionId, active.token!, ['help']), /通用命令链/);
   await assert.rejects(
     command(active.executionId, active.token!, ['implementation', 'status']),
-    /只允许 YAML 命令链协议/,
+    /只允许命令脚本协议/,
   );
   await enterImplement(active.executionId, active.token!);
   await assert.rejects(
@@ -154,9 +182,13 @@ test('Dev Agent runs only through the YAML command chain and trusted command rec
 
   const review = await command(active.executionId, active.token!, ['phase', 'complete']);
   assert.match(review, /REVIEW · artifact/);
-  await command(active.executionId, active.token!, [
+  await assert.rejects(command(active.executionId, active.token!, [
     'artifact', 'put', '--artifact', 'development', '--block', 'code-review',
     '--content', 'summary: 实现符合组件边界和仓库规范。\nevidence: 结果状态组件、相邻模式和当前 diff。',
+  ]), /changedFiles/);
+  await command(active.executionId, active.token!, [
+    'artifact', 'put', '--artifact', 'development', '--block', 'code-review',
+    '--content', JSON.stringify({summary:'实现符合组件边界和仓库规范。',evidence:'结果状态组件、相邻模式和当前 diff。',changedFiles}),
   ]);
   const verification = await command(active.executionId, active.token!, ['phase', 'complete']);
   assert.match(verification, /DEVELOPER VERIFY · builtin/);
@@ -187,6 +219,7 @@ test('Dev Agent runs only through the YAML command chain and trusted command rec
   const { readAgentCommandSubmission } = await import('./agent-command-drafts');
   const result = await readAgentCommandSubmission(active.executionId);
   assert.equal(result?.outcome, 'completed');
+  assert.deepEqual(result?.changedFiles, changedFiles);
   assert.equal(result?.tests?.[0]?.command, 'npm test -- result-status');
   assert.equal(result?.tests?.[0]?.passed, true);
   assert.match(result?.artifact?.content || '', /代码审查/);
@@ -241,35 +274,18 @@ test('Dev runtime input pauses phase complete and resumes the same generic entit
 });
 
 test('Metadata Phase only writes declared Metadata and enforces required inputs', async () => {
-  const {
-    activateAgentConfiguration,
-    createAgentConfiguration,
-    listAgentConfigurations,
-    saveAgentConfigurationDocument,
-  } = await import('./agent-configurations');
-  const original = listAgentConfigurations('dev-agent').find((configuration) => configuration.active)!;
-  const originalDocument = original.documents.find((document) => document.commandChainId === 'development')!;
-  const configurationId = createAgentConfiguration({
-    agentId: 'dev-agent',
-    name: 'Metadata Phase test',
-    fromConfigurationId: original.configurationId,
-  });
-  const yaml = originalDocument.yaml
+  const source = getAgentCommandFile('dev-agent');
+  const original = readFileSync(source.path!, 'utf8');
+  const yaml = original
     .replace(
-      '    metadata: tracking.requirement_card_id',
-      '    metadata: tracking.requirement_card_id\n    required: true',
+      '"metadata": "tracking.requirement_card_id"',
+      '"metadata": "tracking.requirement_card_id", "required": true',
     )
     .replace(
-      'phases:\n',
-      'phases:\n  metadata_setup:\n    type: metadata\n    inputs: [requirement-card]\n    instructions: 登记提交追溯所需的需求卡号。\n\n',
+      '"phases": {',
+      '"phases": { "metadata_setup": { "type": "metadata", "inputs": ["requirement-card"], "instructions": "登记提交追溯所需的需求卡号。" },',
     );
-  saveAgentConfigurationDocument({
-    agentId: 'dev-agent',
-    configurationId,
-    commandChainId: 'development',
-    yaml,
-  });
-  activateAgentConfiguration({ agentId: 'dev-agent', configurationId });
+  writeFileSync(source.path!, yaml);
 
   try {
     const { taskId, delegation } = await developmentDelegation('Metadata Phase 写入');
@@ -300,8 +316,22 @@ test('Metadata Phase only writes declared Metadata and enforces required inputs'
     const next = await command(active.executionId, active.token!, ['phase', 'complete']);
     assert.match(next, /DELIVERY SPEC · builtin/);
   } finally {
-    activateAgentConfiguration({ agentId: 'dev-agent', configurationId: original.configurationId });
+    writeFileSync(source.path!, original);
   }
+});
+
+test('editing an external validator changes actual phase completion while preserving the same draft', async () => {
+  const source = getAgentCommandFile('dev-agent');
+  const original = readFileSync(source.path, 'utf8');
+  const { taskId, delegation } = await developmentDelegation('外部校验脚本');
+  const active = await begin(delegation, taskId);
+  await command(active.executionId, active.token!, ['status']);
+  try {
+    writeFileSync(source.path, original.replace('const errors = [];', "return ['EXTERNAL_VALIDATOR_BLOCK'];\n    const errors = [];"));
+    await assert.rejects(command(active.executionId, active.token!, ['phase', 'complete']), /EXTERNAL_VALIDATOR_BLOCK/);
+  } finally { writeFileSync(source.path, original); }
+  assert.match(await command(active.executionId, active.token!, ['status']), /Phase: delivery_spec/);
+  assert.match(await command(active.executionId, active.token!, ['phase', 'complete']), /IMPLEMENT/);
 });
 
 test('the command-chain migration removes the old Development draft model', async () => {
